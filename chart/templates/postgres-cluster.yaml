@@ -1,0 +1,27 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "palaceoftruth.postgresClusterName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  instances: {{ include "palaceoftruth.postgresInstances" . }}
+  imageName: {{ .Values.postgres.image }}
+
+  storage:
+    size: {{ .Values.postgres.storage.size }}
+
+  postgresql:
+    parameters:
+      shared_buffers: {{ .Values.postgres.parameters.shared_buffers | quote }}
+
+  bootstrap:
+    initdb:
+      database: palaceoftruth
+      owner: palaceoftruth
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS "vector"
+{{- end }}

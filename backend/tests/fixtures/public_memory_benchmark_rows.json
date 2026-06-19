@@ -1,0 +1,26 @@
+[
+  {
+    "question_id": "lme-001",
+    "question_type": "single-session",
+    "question": "Which session mentioned the board update approval policy?",
+    "answer_session_ids": ["session-board-approval"],
+    "results": [
+      {"session_id": "session-board-approval", "score": 0.98, "session_date": "2026-04-01"},
+      {"session_id": "session-distractor", "score": 0.41, "session_date": "2026-03-27"}
+    ],
+    "ingest_time_ms": 123.4,
+    "index_time_ms": 45.6,
+    "latency_ms": 7.8
+  },
+  {
+    "id": "lme-002",
+    "category": "temporal",
+    "query": "Which session contains the changed deployment date?",
+    "expected_item_ids": ["session-deploy-change"],
+    "results": [
+      {"item_id": "session-deploy-change", "score": 0.87},
+      {"item_id": "session-old-date", "score": 0.77}
+    ],
+    "relevance": {"session-deploy-change": 2.0}
+  }
+]

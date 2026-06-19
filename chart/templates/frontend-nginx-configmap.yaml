@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-frontend-nginx
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    server {
+        listen 80;
+        root /usr/share/nginx/html;
+        index index.html;
+        client_max_body_size 100m;
+
+        location /api/ {
+            proxy_pass http://{{ include "palaceoftruth.fullname" . }}-backend:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-API-Key {{`${API_KEY}`}};
+            proxy_read_timeout 120s;
+        }
+
+        # Keep the deployed docs surface aligned with frontend/nginx.conf.
+        # The API docs page embeds /docs directly, so these routes must proxy
+        # through the frontend pod in staging and production.
+        location /docs {
+            proxy_pass http://{{ include "palaceoftruth.fullname" . }}-backend:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 120s;
+        }
+
+        location /redoc {
+            proxy_pass http://{{ include "palaceoftruth.fullname" . }}-backend:8000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 120s;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }

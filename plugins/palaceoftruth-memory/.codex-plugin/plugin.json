@@ -1,0 +1,42 @@
+{
+  "name": "palaceoftruth-memory",
+  "version": "0.1.0",
+  "description": "Install Palace of Truth as a scoped MCP memory adapter for Codex agents.",
+  "author": {
+    "name": "Palace of Truth contributors",
+    "url": "https://github.com/palaceoftruth"
+  },
+  "homepage": "https://github.com/palaceoftruth/palaceoftruth/blob/main/docs/mcp-server.md",
+  "repository": "https://github.com/palaceoftruth/palaceoftruth",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "palaceoftruth",
+    "memory",
+    "mcp",
+    "codex",
+    "agent-memory"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Palace Memory",
+    "shortDescription": "Scoped Palace MCP memory for Codex agents",
+    "longDescription": "Use Palace of Truth as a local stdio MCP memory adapter for Codex. The package exposes the existing Palace memory tools, scope conventions, and non-destructive smoke workflow without adding admin, retry, delete, cleanup, transcript mining, or retrieval-ranking behavior.",
+    "developerName": "Palace of Truth contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/palaceoftruth/palaceoftruth",
+    "defaultPrompt": [
+      "Use Palace-first Codex memory routing",
+      "Use Palace memory for this workspace",
+      "Run the Palace MCP dry-run smoke",
+      "Recall my Palace memory setup"
+    ],
+    "brandColor": "#244C5A",
+    "screenshots": []
+  }
+}

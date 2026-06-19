@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.backendReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-backend
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-backend
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      initContainers:
+        - name: migrate
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            - name: REDIS_URL
+              value: {{ include "palaceoftruth.redisUrl" . | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+      containers:
+        - name: backend
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          volumeMounts:
+            {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
+            {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

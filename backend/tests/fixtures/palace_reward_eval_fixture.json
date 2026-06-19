@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "fixture_id": "synthetic-palace-reward-eval-v1",
+  "description": "Synthetic, source-id-only trajectories for report-only Palace retrieval and answer scoring.",
+  "artifact_metadata": {
+    "offline_report_only": true,
+    "raw_sensitive_bodies_allowed": false,
+    "runtime_defaults_changed": false
+  },
+  "cases": [
+    {
+      "id": "fresh-scoped-answer-with-trace",
+      "query": "Which source explains the current tenant_shared fallback contract?",
+      "expected_scope": {"type": "workspace", "key": "palaceoftruth"},
+      "required_source_ids": ["source-memory-contract", "source-fallback-trace"],
+      "fresh_source_ids": ["source-memory-contract", "source-fallback-trace"],
+      "stale_source_ids": ["source-old-contract"],
+      "support_required": true,
+      "forbidden_output_terms": ["private transcript"],
+      "candidate": {
+        "scope": {"type": "workspace", "key": "palaceoftruth"},
+        "retrieved_source_ids": [
+          "source-memory-contract",
+          "source-fallback-trace",
+          "source-old-contract"
+        ],
+        "cited_source_ids": ["source-memory-contract", "source-fallback-trace"],
+        "answer_excerpt": "Use the workspace-scoped contract and fallback trace source ids before tenant_shared fallback.",
+        "abstained": false,
+        "cached_judge": {
+          "cache_key": "judge:synthetic-palace-reward-eval-v1:fresh-scoped-answer-with-trace",
+          "score": 0.92,
+          "source_ids": ["source-memory-contract", "source-fallback-trace"]
+        }
+      }
+    },
+    {
+      "id": "weak-support-abstention",
+      "query": "What is the exact production deletion policy for this private item?",
+      "expected_scope": {"type": "agent", "key": "codex"},
+      "required_source_ids": [],
+      "fresh_source_ids": [],
+      "stale_source_ids": ["source-stale-policy-note"],
+      "support_required": false,
+      "forbidden_output_terms": ["customer secret"],
+      "candidate": {
+        "scope": {"type": "agent", "key": "codex"},
+        "retrieved_source_ids": ["source-stale-policy-note"],
+        "cited_source_ids": [],
+        "answer_excerpt": "I do not have enough current support to answer that safely.",
+        "abstained": true
+      }
+    }
+  ]
+}

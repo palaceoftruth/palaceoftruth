@@ -1,0 +1,72 @@
+{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.valkeySentinelName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.valkeySentinelCount" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.valkeySentinelName" . }}
+  template:
+    metadata:
+      annotations:
+        checksum/valkey-sentinel-config: {{ include (print $.Template.BasePath "/valkey-sentinel-configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.valkeySentinelName" . }}
+        {{- include "palaceoftruth.labels" . | nindent 8 }}
+    spec:
+      # Spread sentinel pods across nodes to prevent a single node failure
+      # from taking out quorum.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: {{ include "palaceoftruth.valkeySentinelName" . }}
+      initContainers:
+        # Sentinel rewrites its config file at runtime (to record the current
+        # primary after failover). Copy the ConfigMap template to a writable
+        # emptyDir so those writes don't hit a read-only mount.
+        - name: init-sentinel-config
+          image: {{ .Values.valkey.image }}
+          command: ["/bin/sh", "-c", "cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf"]
+          volumeMounts:
+            - name: sentinel-config-template
+              mountPath: /etc/sentinel-template
+            - name: sentinel-data
+              mountPath: /data
+      containers:
+        - name: sentinel
+          image: {{ .Values.valkey.image }}
+          command: ["valkey-sentinel", "/data/sentinel.conf"]
+          ports:
+            - name: sentinel
+              containerPort: 26379
+          resources:
+            {{- toYaml .Values.valkey.sentinel.resources | nindent 12 }}
+          volumeMounts:
+            - name: sentinel-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "-p", "26379", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["valkey-cli", "-p", "26379", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: sentinel-config-template
+          configMap:
+            name: {{ include "palaceoftruth.valkeySentinelName" . }}-config
+        - name: sentinel-data
+          emptyDir: {}
+{{- end }}

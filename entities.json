@@ -1,0 +1,15 @@
+{
+  "people": [],
+  "projects": [
+    "Python",
+    "Application",
+    "Frontend",
+    "Chart",
+    "Pydantic",
+    "Auth",
+    "Async",
+    "Deployment",
+    "Docker",
+    "Compose"
+  ]
+}

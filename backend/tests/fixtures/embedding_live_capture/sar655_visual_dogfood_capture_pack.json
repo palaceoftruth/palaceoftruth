@@ -1,0 +1,2654 @@
+{
+  "capture_set": "sar655-expanded-visual-dogfood",
+  "corpus_id": "sar655-visual-dogfood-v1",
+  "pause_conditions": [
+    "provider credential required",
+    "production corpus mutation",
+    "default profile switch",
+    "native image index migration"
+  ],
+  "profiles": [
+    {
+      "ablation_label": "current-text-description",
+      "metadata": {
+        "default_change": false,
+        "model": "text-description-existing-embedding",
+        "provider": "current",
+        "rollout": "baseline",
+        "source": "captured image descriptions with ordinary text embeddings"
+      },
+      "name": "text-description",
+      "run_id": "text-description-sar655-dogfood-capture"
+    },
+    {
+      "ablation_label": "ocr-caption-candidate",
+      "metadata": {
+        "default_change": false,
+        "model": "ocr-caption-weighted-text",
+        "provider": "candidate-fixture",
+        "rollout": "report_only"
+      },
+      "name": "ocr-caption-candidate",
+      "run_id": "ocr-caption-sar655-dogfood-capture"
+    },
+    {
+      "ablation_label": "native-image-vector-candidate",
+      "metadata": {
+        "default_change": false,
+        "model": "native-image-vector-plus-text-fallback",
+        "provider": "candidate-fixture",
+        "rollout": "report_only"
+      },
+      "name": "native-image-candidate",
+      "run_id": "native-image-sar655-dogfood-capture"
+    }
+  ],
+  "queries": [
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-diagram-egress-legend"
+        ],
+        "expected_top_rank": "visual-diagram-egress-legend",
+        "forbidden_item_ids": [
+          "visual-diagram-storage-legend"
+        ],
+        "query_type": "diagram"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 119.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-egress-legend",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Network egress allowlist diagram with right-side legend",
+                "ocr_text": "egress allowlist",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-context-1",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Network egress allowlist diagram with right-side legend",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-ocr-neighbor-1",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "egress allowlist",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 97.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-layout-1",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Network egress allowlist diagram with right-side legend",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 1,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-egress-legend",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "egress allowlist",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-storage-legend",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 83.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-caption-1",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Network egress allowlist diagram with right-side legend",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-egress-legend",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "egress allowlist",
+                "source_item_id": "diagram-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-storage-legend",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "diagram-network-egress-legend",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "diagram"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-diagram-pii-boundary"
+        ],
+        "expected_top_rank": "visual-diagram-pii-boundary",
+        "forbidden_item_ids": [
+          "visual-diagram-cache-boundary"
+        ],
+        "query_type": "diagram"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 120.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-pii-boundary",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Dataflow diagram with PII trust boundary",
+                "ocr_text": "PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-context-2",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dataflow diagram with PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-ocr-neighbor-2",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 98.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-layout-2",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Dataflow diagram with PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 1,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-pii-boundary",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-cache-boundary",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 84.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-caption-2",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dataflow diagram with PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-cache-boundary",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-diagram-pii-boundary",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "PII trust boundary",
+                "source_item_id": "diagram-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "diagram"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "diagram-dataflow-pii-boundary",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "diagram"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-screenshot-saml-toggle"
+        ],
+        "expected_top_rank": "visual-screenshot-saml-toggle",
+        "forbidden_item_ids": [
+          "visual-screenshot-billing-toggle"
+        ],
+        "query_type": "screenshot"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 121.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-saml-toggle",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Settings screenshot with SAML toggle",
+                "ocr_text": "SAML required",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-context-3",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Settings screenshot with SAML toggle",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-ocr-neighbor-3",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "SAML required",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 99.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-saml-toggle",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "SAML required",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-layout-3",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Settings screenshot with SAML toggle",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-billing-toggle",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 85.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-caption-3",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Settings screenshot with SAML toggle",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-saml-toggle",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "SAML required",
+                "source_item_id": "screenshot-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-billing-toggle",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "screenshot-settings-saml-toggle",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "screenshot"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-screenshot-webhook-toast"
+        ],
+        "expected_top_rank": "visual-screenshot-webhook-toast",
+        "forbidden_item_ids": [
+          "visual-screenshot-import-toast"
+        ],
+        "query_type": "screenshot"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": true,
+          "latency_ms": 122.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-webhook-toast",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "App screenshot with webhook error toast",
+                "ocr_text": "Webhook failed: 401",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-context-4",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "App screenshot with webhook error toast",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-ocr-neighbor-4",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Webhook failed: 401",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 100.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-webhook-toast",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Webhook failed: 401",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-layout-4",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "App screenshot with webhook error toast",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-import-toast",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 86.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-caption-4",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "App screenshot with webhook error toast",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-import-toast",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-screenshot-webhook-toast",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Webhook failed: 401",
+                "source_item_id": "screenshot-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "screenshot"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "screenshot-error-toast-webhook",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "screenshot"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-whiteboard-q3-risk"
+        ],
+        "expected_top_rank": "visual-whiteboard-q3-risk",
+        "forbidden_item_ids": [
+          "visual-whiteboard-roadmap"
+        ],
+        "query_type": "whiteboard"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 123.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-q3-risk",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Whiteboard risk matrix for Q3",
+                "ocr_text": "Q3 risk high impact",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-context-5",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Whiteboard risk matrix for Q3",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-ocr-neighbor-5",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Q3 risk high impact",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 101.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-layout-5",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Whiteboard risk matrix for Q3",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 1,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-q3-risk",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Q3 risk high impact",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-roadmap",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 87.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-caption-5",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Whiteboard risk matrix for Q3",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-q3-risk",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Q3 risk high impact",
+                "source_item_id": "whiteboard-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-roadmap",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "whiteboard-q3-risk-matrix",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "whiteboard"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-whiteboard-onboarding-funnel"
+        ],
+        "expected_top_rank": "visual-whiteboard-onboarding-funnel",
+        "forbidden_item_ids": [
+          "visual-whiteboard-retention-funnel"
+        ],
+        "query_type": "whiteboard"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 124.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-onboarding-funnel",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Handwritten onboarding funnel",
+                "ocr_text": "activate by day 3",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-context-6",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Handwritten onboarding funnel",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-ocr-neighbor-6",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "activate by day 3",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 102.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-layout-6",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Handwritten onboarding funnel",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 1,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-onboarding-funnel",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "activate by day 3",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-retention-funnel",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 88.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-caption-6",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Handwritten onboarding funnel",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-retention-funnel",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-whiteboard-onboarding-funnel",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "activate by day 3",
+                "source_item_id": "whiteboard-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "whiteboard"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "whiteboard-onboarding-funnel",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "whiteboard"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-receipt-coffee-tax-total"
+        ],
+        "expected_top_rank": "visual-receipt-coffee-tax-total",
+        "forbidden_item_ids": [
+          "visual-receipt-grocery-total"
+        ],
+        "query_type": "receipt"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 125.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-coffee-tax-total",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Coffee shop receipt with tax and total",
+                "ocr_text": "Tax 0.84 Total 9.24",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-context-7",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Coffee shop receipt with tax and total",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-ocr-neighbor-7",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Tax 0.84 Total 9.24",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 103.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-coffee-tax-total",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Tax 0.84 Total 9.24",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-layout-7",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Coffee shop receipt with tax and total",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-grocery-total",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 89.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-caption-7",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Coffee shop receipt with tax and total",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-coffee-tax-total",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Tax 0.84 Total 9.24",
+                "source_item_id": "receipt-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-grocery-total",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "receipt-coffee-tax-total",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "receipt"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-receipt-hotel-parking"
+        ],
+        "expected_top_rank": "visual-receipt-hotel-parking",
+        "forbidden_item_ids": [
+          "visual-receipt-airline-baggage"
+        ],
+        "query_type": "receipt"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 126.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-hotel-parking",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Hotel folio receipt with parking fee",
+                "ocr_text": "Parking 32.00",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-context-8",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Hotel folio receipt with parking fee",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-ocr-neighbor-8",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Parking 32.00",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 104.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-hotel-parking",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Parking 32.00",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-layout-8",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Hotel folio receipt with parking fee",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-airline-baggage",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 90.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-caption-8",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Hotel folio receipt with parking fee",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-airline-baggage",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-receipt-hotel-parking",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Parking 32.00",
+                "source_item_id": "receipt-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "receipt"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "receipt-hotel-folio-parking",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "receipt"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-dense-ocr-a1c-result"
+        ],
+        "expected_top_rank": "visual-dense-ocr-a1c-result",
+        "forbidden_item_ids": [
+          "visual-dense-ocr-lipid-result"
+        ],
+        "query_type": "dense_ocr"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 127.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-a1c-result",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Dense lab result image",
+                "ocr_text": "Hemoglobin A1c 5.6",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-context-9",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dense lab result image",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-ocr-neighbor-9",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Hemoglobin A1c 5.6",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 105.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-a1c-result",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Hemoglobin A1c 5.6",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-layout-9",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Dense lab result image",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-lipid-result",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 91.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-caption-9",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dense lab result image",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-a1c-result",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Hemoglobin A1c 5.6",
+                "source_item_id": "dense-ocr-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-lipid-result",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "dense-ocr-lab-result-a1c",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "dense-ocr"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-dense-ocr-renewal-date"
+        ],
+        "expected_top_rank": "visual-dense-ocr-renewal-date",
+        "forbidden_item_ids": [
+          "visual-dense-ocr-termination-date"
+        ],
+        "query_type": "dense_ocr"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": true,
+          "latency_ms": 128.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-renewal-date",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "Dense contract scan",
+                "ocr_text": "Renewal date 2026-09-30",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-context-10",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dense contract scan",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-ocr-neighbor-10",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Renewal date 2026-09-30",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 106.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-renewal-date",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Renewal date 2026-09-30",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-layout-10",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "Dense contract scan",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-termination-date",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 92.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense_ocr-caption-10",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "Dense contract scan",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-termination-date",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-dense-ocr-renewal-date",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "Renewal date 2026-09-30",
+                "source_item_id": "dense-ocr-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "dense-ocr"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "dense-ocr-contract-renewal-date",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "dense-ocr"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-xpost-launch-metric"
+        ],
+        "expected_top_rank": "visual-xpost-launch-metric",
+        "forbidden_item_ids": [
+          "visual-xpost-hiring-metric"
+        ],
+        "query_type": "x_post_image"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 129.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-launch-metric",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "X post image with launch chart",
+                "ocr_text": "launch week 42% activation",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-context-11",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "X post image with launch chart",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-ocr-neighbor-11",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "launch week 42% activation",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 107.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-launch-metric",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "launch week 42% activation",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-layout-11",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "X post image with launch chart",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-hiring-metric",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 93.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-caption-11",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "X post image with launch chart",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-launch-metric",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "launch week 42% activation",
+                "source_item_id": "xpost-upload-655-a",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 2,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-hiring-metric",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "x-post-image-launch-metric",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "x-post-image"
+      ]
+    },
+    {
+      "expectations": {
+        "expected_item_ids": [
+          "visual-xpost-outage-timeline"
+        ],
+        "expected_top_rank": "visual-xpost-outage-timeline",
+        "forbidden_item_ids": [
+          "visual-xpost-release-timeline"
+        ],
+        "query_type": "x_post_image"
+      },
+      "limit": 4,
+      "profiles": {
+        "native-image-candidate": {
+          "fallback_used": false,
+          "latency_ms": 130.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-outage-timeline",
+              "modality": "image_native",
+              "provenance": {
+                "caption": "X post image with outage timeline",
+                "ocr_text": "13:42 rollback complete",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target"
+                }
+              },
+              "rank": 1,
+              "score": 0.93,
+              "source_type": "image_native",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-context-12",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "X post image with outage timeline",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "context"
+                }
+              },
+              "rank": 2,
+              "score": 0.69,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-ocr-neighbor-12",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "13:42 rollback complete",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "neighbor"
+                }
+              },
+              "rank": 3,
+              "score": 0.61,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        },
+        "ocr-caption-candidate": {
+          "fallback_used": false,
+          "latency_ms": 108.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-outage-timeline",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "13:42 rollback complete",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 1,
+              "score": 0.88,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-layout-12",
+              "modality": "image_caption",
+              "provenance": {
+                "caption": "X post image with outage timeline",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "layout"
+                }
+              },
+              "rank": 2,
+              "score": 0.76,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-release-timeline",
+              "modality": "image_description",
+              "rank": 3,
+              "score": 0.34,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        },
+        "text-description": {
+          "fallback_used": false,
+          "latency_ms": 94.0,
+          "results": [
+            {
+              "chunk_index": 0,
+              "item_id": "visual-x_post_image-caption-12",
+              "modality": "image_description",
+              "provenance": {
+                "caption": "X post image with outage timeline",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "summary"
+                }
+              },
+              "rank": 1,
+              "score": 0.82,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-release-timeline",
+              "modality": "image_description",
+              "rank": 2,
+              "score": 0.52,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            },
+            {
+              "chunk_index": 0,
+              "item_id": "visual-xpost-outage-timeline",
+              "modality": "ocr_text",
+              "provenance": {
+                "ocr_text": "13:42 rollback complete",
+                "source_item_id": "xpost-upload-655-b",
+                "source_span": {
+                  "page": 1,
+                  "region": "target-text"
+                }
+              },
+              "rank": 3,
+              "score": 0.74,
+              "source_type": "image_description",
+              "tags": [
+                "sar655",
+                "visual",
+                "x-post-image"
+              ]
+            }
+          ]
+        }
+      },
+      "query_fingerprint": "x-post-image-outage-timeline",
+      "scope": {
+        "key": "eval",
+        "type": "workspace"
+      },
+      "tags": [
+        "sar655",
+        "visual",
+        "x-post-image"
+      ]
+    }
+  ],
+  "recommendation_prompt": "Compare current text-description retrieval, OCR/caption weighting, and native image-vector candidates for visual dogfood captures before changing production defaults.",
+  "schema_version": 1
+}

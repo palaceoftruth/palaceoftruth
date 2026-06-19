@@ -1,0 +1,17 @@
+{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.valkeySentinelName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "palaceoftruth.valkeySentinelName" . }}
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,90 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.mcpServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.mcpReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.mcpServiceName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.mcpServiceName" . }}
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: mcp
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - scripts/palaceoftruth_mcp.py
+            - --transport
+            - streamable-http
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ .Values.mcp.port | quote }}
+            - --path
+            - {{ .Values.mcp.path | quote }}
+          ports:
+            - containerPort: {{ .Values.mcp.port }}
+          env:
+            - name: PALACEOFTRUTH_API_BASE_URL
+              value: {{ include "palaceoftruth.mcpApiBaseUrl" . | quote }}
+            - name: PALACEOFTRUTH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: API_KEY
+                  optional: true
+            {{- if .Values.mcp.bearerTokenSecretKey }}
+            - name: PALACEOFTRUTH_MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: {{ .Values.mcp.bearerTokenSecretKey | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthClientSecretKey }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: {{ .Values.mcp.oauthClientSecretKey | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthTokenUrl }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL
+              value: {{ .Values.mcp.oauthTokenUrl | quote }}
+            {{- end }}
+            - name: PALACEOFTRUTH_MCP_CLIENT_KEY
+              value: {{ .Values.mcp.clientKey | quote }}
+            - name: PALACEOFTRUTH_MCP_CLIENT_NAME
+              value: {{ .Values.mcp.clientName | quote }}
+            - name: PALACEOFTRUTH_MCP_CLIENT_SCOPES
+              value: {{ .Values.mcp.clientScopes | quote }}
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                # The backend health request intentionally allows up to 5s, so the
+                # Kubernetes probe timeout must be longer than that.
+                - import os, urllib.request; urllib.request.urlopen(os.environ["PALACEOFTRUTH_API_BASE_URL"].rstrip("/") + "/api/v1/health", timeout=5).read()
+            initialDelaySeconds: {{ .Values.mcp.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.mcp.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.mcp.readinessProbe.timeoutSeconds }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.mcp.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+{{- end }}

@@ -1,0 +1,98 @@
+{{- if eq (include "palaceoftruth.pdbEnabled" .) "true" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.backend.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.frontend.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.worker.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-worker
+{{- if .Values.mediaWorker.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-media-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.mediaWorker.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-media-worker
+{{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-palace-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.palaceWorker.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-palace-worker
+{{- if .Values.mcp.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.mcpServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.mcp.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.mcpServiceName" . }}
+{{- end }}
+{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "palaceoftruth.valkeySentinelName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.valkeySentinel.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.valkeySentinelName" . }}
+{{- end }}
+{{- end }}

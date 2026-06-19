@@ -1,0 +1,341 @@
+{
+  "schema_version": 1,
+  "capture_set": "sar607-live-multimodal-multilingual",
+  "corpus_id": "sar607-live-capture-v1",
+  "recommendation_prompt": "Decide whether current text-description retrieval is enough, whether a native implementation task is justified, and whether defaults should remain unchanged.",
+  "pause_conditions": [
+    "provider credential required",
+    "paid provider assumption",
+    "production corpus mutation",
+    "default profile switch"
+  ],
+  "profiles": [
+    {
+      "name": "text-description",
+      "run_id": "text-description-live-capture",
+      "ablation_label": "current-text-description",
+      "metadata": {
+        "provider": "current",
+        "model": "text-description-existing-embedding",
+        "rollout": "baseline",
+        "source": "captured image descriptions, OCR text, and multilingual text rows"
+      }
+    },
+    {
+      "name": "native-candidate",
+      "run_id": "native-candidate-live-capture",
+      "ablation_label": "native-multimodal-multilingual-candidate",
+      "metadata": {
+        "provider": "candidate-fixture",
+        "model": "native-multimodal-plus-multilingual-text",
+        "rollout": "report_only",
+        "default_change": false
+      }
+    }
+  ],
+  "queries": [
+    {
+      "query_fingerprint": "photo-invoice-vat-total",
+      "limit": 4,
+      "scope": {"type": "workspace", "key": "eval"},
+      "tags": ["sar607", "visual", "invoice"],
+      "expectations": {
+        "query_type": "visual_native",
+        "expected_item_ids": ["visual-invoice-vat-total"],
+        "forbidden_item_ids": ["visual-receipt-restaurant-tip"],
+        "expected_top_rank": "visual-invoice-vat-total"
+      },
+      "profiles": {
+        "text-description": {
+          "latency_ms": 91.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "visual-invoice-summary",
+              "chunk_index": 0,
+              "score": 0.82,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "caption": "Invoice page with subtotal, VAT, and total due.",
+                "source_item_id": "invoice-upload-001",
+                "source_span": {"page": 1, "region": "summary"}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "visual-invoice-vat-total",
+              "chunk_index": 0,
+              "score": 0.76,
+              "source_type": "image_description",
+              "modality": "ocr_text",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "ocr_text": "VAT 21.00 EUR Total 121.00 EUR",
+                "source_item_id": "invoice-upload-001",
+                "source_span": {"page": 1, "line_start": 18, "line_end": 19}
+              }
+            },
+            {
+              "rank": 3,
+              "item_id": "visual-receipt-restaurant-tip",
+              "chunk_index": 0,
+              "score": 0.51,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"]
+            }
+          ]
+        },
+        "native-candidate": {
+          "latency_ms": 118.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "visual-invoice-vat-total",
+              "chunk_index": 0,
+              "score": 0.91,
+              "source_type": "image_native",
+              "modality": "image_native",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "ocr_text": "VAT 21.00 EUR Total 121.00 EUR",
+                "source_item_id": "invoice-upload-001",
+                "source_span": {"page": 1, "line_start": 18, "line_end": 19}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "visual-invoice-summary",
+              "chunk_index": 0,
+              "score": 0.68,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "query_fingerprint": "diagram-network-egress-label",
+      "limit": 4,
+      "scope": {"type": "workspace", "key": "eval"},
+      "tags": ["sar607", "visual", "diagram"],
+      "expectations": {
+        "query_type": "visual_native",
+        "expected_item_ids": ["visual-diagram-egress-policy"],
+        "forbidden_item_ids": ["visual-diagram-storage-lifecycle"],
+        "expected_top_rank": "visual-diagram-egress-policy"
+      },
+      "profiles": {
+        "text-description": {
+          "latency_ms": 84.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "visual-diagram-firewall",
+              "chunk_index": 0,
+              "score": 0.8,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "caption": "Network diagram with firewall and egress arrows.",
+                "source_item_id": "diagram-upload-002",
+                "source_span": {"page": 1, "region": "center"}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "visual-diagram-egress-policy",
+              "chunk_index": 0,
+              "score": 0.73,
+              "source_type": "image_description",
+              "modality": "ocr_text",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "ocr_text": "egress allowlist policy",
+                "source_item_id": "diagram-upload-002",
+                "source_span": {"page": 1, "region": "right-label"}
+              }
+            },
+            {
+              "rank": 3,
+              "item_id": "visual-diagram-storage-lifecycle",
+              "chunk_index": 0,
+              "score": 0.44,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"]
+            }
+          ]
+        },
+        "native-candidate": {
+          "latency_ms": 122.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "visual-diagram-egress-policy",
+              "chunk_index": 0,
+              "score": 0.9,
+              "source_type": "image_native",
+              "modality": "image_native",
+              "tags": ["sar607", "visual"],
+              "provenance": {
+                "ocr_text": "egress allowlist policy",
+                "source_item_id": "diagram-upload-002",
+                "source_span": {"page": 1, "region": "right-label"}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "visual-diagram-firewall",
+              "chunk_index": 0,
+              "score": 0.66,
+              "source_type": "image_description",
+              "modality": "image_description",
+              "tags": ["sar607", "visual"]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "query_fingerprint": "spanish-dpa-retention-window",
+      "limit": 4,
+      "scope": {"type": "workspace", "key": "eval"},
+      "tags": ["sar607", "multilingual", "policy"],
+      "expectations": {
+        "query_type": "multilingual",
+        "expected_item_ids": ["es-dpa-retencion-30-dias"],
+        "forbidden_item_ids": ["en-security-summary"],
+        "expected_top_rank": "es-dpa-retencion-30-dias"
+      },
+      "profiles": {
+        "text-description": {
+          "latency_ms": 68.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "en-security-summary",
+              "chunk_index": 0,
+              "score": 0.79,
+              "source_type": "note",
+              "modality": "text",
+              "tags": ["sar607", "multilingual"]
+            },
+            {
+              "rank": 2,
+              "item_id": "es-dpa-retencion-30-dias",
+              "chunk_index": 0,
+              "score": 0.71,
+              "source_type": "doc",
+              "modality": "text",
+              "tags": ["sar607", "multilingual"],
+              "provenance": {
+                "source_item_id": "dpa-es-upload-003",
+                "source_span": {"page": 2, "line_start": 4, "line_end": 7}
+              }
+            }
+          ]
+        },
+        "native-candidate": {
+          "latency_ms": 70.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "es-dpa-retencion-30-dias",
+              "chunk_index": 0,
+              "score": 0.88,
+              "source_type": "doc",
+              "modality": "multilingual_text",
+              "tags": ["sar607", "multilingual"],
+              "provenance": {
+                "source_item_id": "dpa-es-upload-003",
+                "source_span": {"page": 2, "line_start": 4, "line_end": 7}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "fr-dpa-retention-archive",
+              "chunk_index": 0,
+              "score": 0.56,
+              "source_type": "doc",
+              "modality": "multilingual_text",
+              "tags": ["sar607", "multilingual"]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "query_fingerprint": "french-contract-renewal-notice",
+      "limit": 4,
+      "scope": {"type": "workspace", "key": "eval"},
+      "tags": ["sar607", "multilingual", "contract"],
+      "expectations": {
+        "query_type": "multilingual",
+        "expected_item_ids": ["fr-contrat-preavis-renouvellement"],
+        "forbidden_item_ids": ["en-contract-summary"],
+        "expected_top_rank": "fr-contrat-preavis-renouvellement"
+      },
+      "profiles": {
+        "text-description": {
+          "latency_ms": 72.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "fr-contrat-preavis-renouvellement",
+              "chunk_index": 0,
+              "score": 0.77,
+              "source_type": "doc",
+              "modality": "text",
+              "tags": ["sar607", "multilingual"],
+              "provenance": {
+                "source_item_id": "contract-fr-upload-004",
+                "source_span": {"page": 5, "line_start": 12, "line_end": 15}
+              }
+            },
+            {
+              "rank": 2,
+              "item_id": "en-contract-summary",
+              "chunk_index": 0,
+              "score": 0.52,
+              "source_type": "note",
+              "modality": "text",
+              "tags": ["sar607", "multilingual"]
+            }
+          ]
+        },
+        "native-candidate": {
+          "latency_ms": 75.0,
+          "fallback_used": false,
+          "results": [
+            {
+              "rank": 1,
+              "item_id": "fr-contrat-preavis-renouvellement",
+              "chunk_index": 0,
+              "score": 0.9,
+              "source_type": "doc",
+              "modality": "multilingual_text",
+              "tags": ["sar607", "multilingual"],
+              "provenance": {
+                "source_item_id": "contract-fr-upload-004",
+                "source_span": {"page": 5, "line_start": 12, "line_end": 15}
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

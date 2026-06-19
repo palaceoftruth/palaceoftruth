@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.workerReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-worker
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-worker
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: worker
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.WorkerSettings"]
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          volumeMounts:
+            {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
+            {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
+{{- if .Values.mediaWorker.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-media-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.mediaWorkerReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-media-worker
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-media-worker
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: media-worker
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.mediaWorker.command | nindent 12 }}
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            - name: ARQ_QUEUE_NAME
+              value: {{ .Values.mediaWorker.queueName | quote }}
+            - name: ARQ_MAX_JOBS
+              value: {{ .Values.mediaWorker.maxJobs | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          volumeMounts:
+            {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
+            {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.mediaWorker.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-palace-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.palaceWorkerReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-palace-worker
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-palace-worker
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: palace-worker
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          volumeMounts:
+            {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
+            {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.palaceWorker.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

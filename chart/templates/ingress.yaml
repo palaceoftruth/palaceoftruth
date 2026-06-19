@@ -1,0 +1,90 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.ingress.externalDnsTarget }}
+    external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
+    {{- end }}
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ include "palaceoftruth.frontendHost" . | quote }}
+        - {{ include "palaceoftruth.apiHost" . | quote }}
+        {{- if .Values.mcp.enabled }}
+        - {{ include "palaceoftruth.mcpHost" . | quote }}
+        {{- end }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ include "palaceoftruth.frontendHost" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-frontend
+                port:
+                  number: 80
+    - host: {{ include "palaceoftruth.apiHost" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-backend
+                port:
+                  number: 8000
+    {{- if .Values.mcp.enabled }}
+    - host: {{ include "palaceoftruth.mcpHost" . | quote }}
+      http:
+        paths:
+          - path: {{ .Values.mcp.path | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.mcpServiceName" . }}
+                port:
+                  number: {{ .Values.mcp.port }}
+    {{- end }}
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.admin.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-admin
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin-ingress
+  {{- if or .Values.ingress.externalDnsTarget .Values.ingress.admin.annotations }}
+  annotations:
+    {{- if .Values.ingress.externalDnsTarget }}
+    external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
+    {{- end }}
+    {{- toYaml .Values.ingress.admin.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ default .Values.ingress.className .Values.ingress.admin.className }}
+  tls:
+    - hosts:
+        - {{ include "palaceoftruth.adminHost" . | quote }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ include "palaceoftruth.adminHost" . | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.admin.path | quote }}
+            pathType: {{ .Values.ingress.admin.pathType }}
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-backend
+                port:
+                  number: 8000
+{{- end }}

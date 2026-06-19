@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.cover
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker / devinfra (generated)
+docker-compose.devinfra.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+.claude/
+.codex/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temp files
+/tmp/
+.gstack/
+pixel-audit/

@@ -1,0 +1,113 @@
+{{- if and .Values.memoryRolloutSmoke.enabled (eq (include "palaceoftruth.valkeySentinelEnabled" .) "true") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.memoryRolloutSmoke.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.memoryRolloutSmoke.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: memory-rollout-smoke
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - scripts.check_memory_rollout_smoke
+          args:
+            - --target-name
+            - {{ default .Release.Namespace .Values.memoryRolloutSmoke.targetName | quote }}
+            - --api-base-url
+            - {{ printf "%s/api/v1" (include "palaceoftruth.mcpApiBaseUrl" .) | quote }}
+            {{- if .Values.mcp.enabled }}
+            - --mcp-url
+            - {{ printf "http://%s:%v%s" (include "palaceoftruth.mcpServiceName" .) .Values.mcp.port .Values.mcp.path | quote }}
+            {{- end }}
+            - --scope-key
+            - {{ .Values.memoryRolloutSmoke.scopeKey | quote }}
+            - --pod-label-selector
+            - {{ printf "app.kubernetes.io/instance=%s" .Release.Name | quote }}
+            - --restart-alert-threshold
+            - {{ .Values.memoryRolloutSmoke.restartAlertThreshold | quote }}
+            - --log-since-seconds
+            - {{ .Values.memoryRolloutSmoke.logSinceSeconds | quote }}
+            - --log-tail-lines
+            - {{ .Values.memoryRolloutSmoke.logTailLines | quote }}
+            - --job-timeout-seconds
+            - {{ .Values.memoryRolloutSmoke.jobTimeoutSeconds | quote }}
+            - --job-interval-seconds
+            - {{ .Values.memoryRolloutSmoke.jobIntervalSeconds | quote }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PALACEOFTRUTH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: API_KEY
+            - name: REDIS_SENTINEL_EXPECTED_REPLICAS
+              value: {{ include "palaceoftruth.valkeyReplicaCount" . | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+          resources:
+            {{- toYaml .Values.memoryRolloutSmoke.resources | nindent 12 }}
+{{- end }}

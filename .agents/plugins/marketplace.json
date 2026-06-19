@@ -1,0 +1,20 @@
+{
+  "name": "palaceoftruth",
+  "interface": {
+    "displayName": "Palace of Truth"
+  },
+  "plugins": [
+    {
+      "name": "palaceoftruth-memory",
+      "source": {
+        "source": "local",
+        "path": "./plugins/palaceoftruth-memory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

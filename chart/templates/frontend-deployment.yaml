@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.frontendReplicas" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.fullname" . }}-frontend
+  template:
+    metadata:
+      annotations:
+        checksum/nginx-config: {{ include (print $.Template.BasePath "/frontend-nginx-configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-frontend
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: frontend
+          image: {{ include "palaceoftruth.frontendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: API_KEY
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/templates/default.conf.template
+              subPath: default.conf
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ include "palaceoftruth.fullname" . }}-frontend-nginx

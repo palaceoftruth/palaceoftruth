@@ -1,0 +1,211 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: palaceoftruth
+      POSTGRES_USER: palaceoftruth
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palaceoftruth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
+      ASSEMBLYAI_BASE_URL: ${ASSEMBLYAI_BASE_URL:-https://api.assemblyai.com}
+      ASSEMBLYAI_SPEECH_MODEL: ${ASSEMBLYAI_SPEECH_MODEL:-universal-2}
+      ASSEMBLYAI_POLL_INTERVAL_SECONDS: ${ASSEMBLYAI_POLL_INTERVAL_SECONDS:-2.0}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
+      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      AWS_EC2_METADATA_DISABLED: "true"
+      API_KEY: ${API_KEY}
+      PALACEOFTRUTH_ADMIN_SECRET: ${PALACEOFTRUTH_ADMIN_SECRET}
+      PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY: ${PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY:-}
+      PALACE_SYNC_ALLOWED_ROOTS: ${PALACE_SYNC_ALLOWED_ROOTS:-/mnt/palace-sync,/app}
+      PALACE_REPO_CHECKOUT_ROOT: ${PALACE_REPO_CHECKOUT_ROOT:-/tmp/palaceoftruth/repo-checkouts}
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.palaceoftruth-backend.rule=Host(`api.palaceoftruth.test`)"
+      - "traefik.http.routers.palaceoftruth-backend.entrypoints=websecure"
+      - "traefik.http.routers.palaceoftruth-backend.tls=true"
+      - "traefik.http.services.palaceoftruth-backend.loadbalancer.server.port=8000"
+      - "traefik.docker.network=traefik"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - temp_files:/tmp/palaceoftruth
+      - type: bind
+        source: ${PALACE_SYNC_HOST_PATH:-./examples/palace-sync}
+        target: /mnt/palace-sync
+        read_only: true
+
+  mcp:
+    build: ./backend
+    command:
+      [
+        "python",
+        "scripts/palaceoftruth_mcp.py",
+        "--transport",
+        "streamable-http",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8765",
+        "--path",
+        "/mcp",
+      ]
+    environment:
+      PALACEOFTRUTH_API_BASE_URL: http://backend:8000
+      PALACEOFTRUTH_API_KEY: ${API_KEY}
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.palaceoftruth-mcp.rule=Host(`mcp.palaceoftruth.test`)"
+      - "traefik.http.routers.palaceoftruth-mcp.entrypoints=websecure"
+      - "traefik.http.routers.palaceoftruth-mcp.tls=true"
+      - "traefik.http.services.palaceoftruth-mcp.loadbalancer.server.port=8765"
+      - "traefik.docker.network=traefik"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: arq app.workers.worker.WorkerSettings
+    environment:
+      DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
+      ASSEMBLYAI_BASE_URL: ${ASSEMBLYAI_BASE_URL:-https://api.assemblyai.com}
+      ASSEMBLYAI_SPEECH_MODEL: ${ASSEMBLYAI_SPEECH_MODEL:-universal-2}
+      ASSEMBLYAI_POLL_INTERVAL_SECONDS: ${ASSEMBLYAI_POLL_INTERVAL_SECONDS:-2.0}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
+      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      AWS_EC2_METADATA_DISABLED: "true"
+      API_KEY: ${API_KEY}
+      PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY: ${PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY:-}
+      PALACE_SYNC_ALLOWED_ROOTS: ${PALACE_SYNC_ALLOWED_ROOTS:-/mnt/palace-sync,/app}
+      PALACE_REPO_CHECKOUT_ROOT: ${PALACE_REPO_CHECKOUT_ROOT:-/tmp/palaceoftruth/repo-checkouts}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - temp_files:/tmp/palaceoftruth
+      - type: bind
+        source: ${PALACE_SYNC_HOST_PATH:-./docs}
+        target: /mnt/palace-sync
+        read_only: true
+
+  palace-worker:
+    build: ./backend
+    command: arq app.workers.worker.PalaceWorkerSettings
+    environment:
+      DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
+      ASSEMBLYAI_BASE_URL: ${ASSEMBLYAI_BASE_URL:-https://api.assemblyai.com}
+      ASSEMBLYAI_SPEECH_MODEL: ${ASSEMBLYAI_SPEECH_MODEL:-universal-2}
+      ASSEMBLYAI_POLL_INTERVAL_SECONDS: ${ASSEMBLYAI_POLL_INTERVAL_SECONDS:-2.0}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
+      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      AWS_EC2_METADATA_DISABLED: "true"
+      API_KEY: ${API_KEY}
+      PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY: ${PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY:-}
+      PALACE_SYNC_ALLOWED_ROOTS: ${PALACE_SYNC_ALLOWED_ROOTS:-/mnt/palace-sync,/app}
+      PALACE_REPO_CHECKOUT_ROOT: ${PALACE_REPO_CHECKOUT_ROOT:-/tmp/palaceoftruth/repo-checkouts}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - temp_files:/tmp/palaceoftruth
+      - type: bind
+        source: ${PALACE_SYNC_HOST_PATH:-./docs}
+        target: /mnt/palace-sync
+        read_only: true
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      API_KEY: ${API_KEY}
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.palaceoftruth-frontend.rule=Host(`palaceoftruth.test`) || Host(`www.palaceoftruth.test`)"
+      - "traefik.http.routers.palaceoftruth-frontend.entrypoints=websecure"
+      - "traefik.http.routers.palaceoftruth-frontend.tls=true"
+      - "traefik.http.services.palaceoftruth-frontend.loadbalancer.server.port=80"
+      - "traefik.docker.network=traefik"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  temp_files:
+
+networks:
+  traefik:
+    external: true
+  default:
+    name: palaceoftruth

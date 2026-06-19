@@ -1,0 +1,324 @@
+{
+  "schema_version": 1,
+  "pack_id": "agent-memory-hermes-exampleos-v1",
+  "description": "Sanitized report-only scoped-memory retrieval pack for route-aware agent recall and Hermes context assembly.",
+  "cases": [
+    {
+      "id": "selected-workspace-hit",
+      "query": "ExampleOS rollout approval policy workspace memory",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-exampleos-approval"],
+      "expected_scope_labels": {
+        "workspace-exampleos-approval": "workspace/exampleos"
+      },
+      "expected_hermes_scope_labels": ["workspace/exampleos"],
+      "expected_hermes_titles": ["ExampleOS approval policy"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex, workspace/exampleos, tenant_shared.\n- [0.94] ExampleOS approval policy [note]\n  Workspace rollout approval policy notes.",
+      "results": [
+        {
+          "item_id": "workspace-exampleos-approval",
+          "title": "ExampleOS approval policy",
+          "score": 0.94,
+          "scope": {"type": "workspace", "key": "exampleos"}
+        },
+        {
+          "item_id": "tenant-shared-rollout",
+          "title": "Shared rollout note",
+          "score": 0.51,
+          "scope": {"type": "tenant_shared"}
+        }
+      ]
+    },
+    {
+      "id": "broad-same-tenant-hit",
+      "query": "Hermes sees metadata but misses ExampleOS workspace",
+      "display_limit": 5,
+      "expected_item_ids": ["general-exampleos-metadata"],
+      "expected_scope_labels": {
+        "general-exampleos-metadata": "broad_corpus"
+      },
+      "expected_hermes_scope_labels": ["broad non-private Palace corpus"],
+      "expected_hermes_titles": ["ExampleOS metadata handoff"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval also searched the broad non-private Palace corpus.\n- [0.90] ExampleOS metadata handoff [note]",
+      "results": [
+        {
+          "item_id": "general-exampleos-metadata",
+          "title": "ExampleOS metadata handoff",
+          "score": 0.9,
+          "scope_label": "broad_corpus"
+        },
+        {
+          "item_id": "workspace-hermes-related",
+          "title": "Hermes related memory",
+          "score": 0.6,
+          "scope": {"type": "workspace", "key": "hermes"}
+        }
+      ]
+    },
+    {
+      "id": "other-agent-isolation-negative",
+      "query": "private other agent memory must not leak",
+      "display_limit": 5,
+      "expected_item_ids": ["tenant-shared-safe"],
+      "forbidden_item_ids": ["agent-other-private"],
+      "expected_scope_labels": {
+        "tenant-shared-safe": "tenant_shared"
+      },
+      "expected_hermes_scope_labels": ["tenant_shared"],
+      "expected_hermes_titles": ["Safe shared context"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex, tenant_shared.\n- [0.77] Safe shared context [note]",
+      "results": [
+        {
+          "item_id": "tenant-shared-safe",
+          "title": "Safe shared context",
+          "score": 0.77,
+          "scope": {"type": "tenant_shared"}
+        }
+      ]
+    },
+    {
+      "id": "selected-broad-dedupe",
+      "query": "duplicate memory appears in selected and broad routes",
+      "display_limit": 5,
+      "expected_item_ids": ["deduped-workspace-memory"],
+      "expected_scope_labels": {
+        "deduped-workspace-memory": "workspace/exampleos"
+      },
+      "expected_hermes_scope_labels": ["workspace/exampleos"],
+      "expected_hermes_titles": ["Deduped workspace memory"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/exampleos.\n- [0.88] Deduped workspace memory [note]",
+      "results": [
+        {
+          "item_id": "deduped-workspace-memory",
+          "title": "Deduped workspace memory",
+          "score": 0.88,
+          "scope": {"type": "workspace", "key": "exampleos"}
+        },
+        {
+          "item_id": "tenant-shared-secondary",
+          "title": "Secondary shared note",
+          "score": 0.32,
+          "scope": {"type": "tenant_shared"}
+        }
+      ]
+    },
+    {
+      "id": "negative-self-recall-log-swamp",
+      "query": "Henry Intelligent Machines answer should prefer shared truth over old self-negation",
+      "display_limit": 5,
+      "expected_item_ids": ["tenant-shared-henry"],
+      "expected_scope_labels": {
+        "tenant-shared-henry": "tenant_shared"
+      },
+      "expected_hermes_scope_labels": ["tenant_shared"],
+      "expected_hermes_titles": ["Henry Intelligent Machines"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/orchestrator, tenant_shared.\n- [0.62] Henry Intelligent Machines [note]\n  Shared note about Henry Intelligent Machines.",
+      "results": [
+        {
+          "item_id": "tenant-shared-henry",
+          "title": "Henry Intelligent Machines",
+          "score": 0.62,
+          "scope": {"type": "tenant_shared"}
+        },
+        {
+          "item_id": "agent-old-negative",
+          "title": "default: old Henry confusion",
+          "score": 0.95,
+          "scope": {"type": "agent", "key": "orchestrator"}
+        }
+      ]
+    },
+    {
+      "id": "display-cap-hidden-candidate",
+      "query": "five item display cap can hide a relevant workspace candidate",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-exampleos-hidden"],
+      "expected_scope_labels": {
+        "workspace-exampleos-hidden": "workspace/exampleos"
+      },
+      "expected_hermes_scope_labels": ["selected candidates: 20", "display: 5"],
+      "expected_hermes_titles": [],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval budgets: selected candidates: 20, broad candidates: 20, display: 5, context chars: 4000.\n- Retrieval returned the highest-ranked memories within the configured budget.",
+      "results": [
+        {"item_id": "distractor-1", "title": "Distractor 1", "score": 0.99, "scope_label": "broad_corpus"},
+        {"item_id": "distractor-2", "title": "Distractor 2", "score": 0.98, "scope_label": "broad_corpus"},
+        {"item_id": "distractor-3", "title": "Distractor 3", "score": 0.97, "scope_label": "broad_corpus"},
+        {"item_id": "distractor-4", "title": "Distractor 4", "score": 0.96, "scope_label": "broad_corpus"},
+        {"item_id": "distractor-5", "title": "Distractor 5", "score": 0.95, "scope_label": "broad_corpus"},
+        {
+          "item_id": "workspace-exampleos-hidden",
+          "title": "Hidden ExampleOS workspace candidate",
+          "score": 0.94,
+          "scope": {"type": "workspace", "key": "exampleos"}
+        }
+      ]
+    },
+    {
+      "id": "raw-memory-preferred-over-dream-summary",
+      "query": "deployment checksum recall should prefer the source checkpoint memory",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-palace-checkpoint-raw"],
+      "expected_top_rank_item_id": "workspace-palace-checkpoint-raw",
+      "expected_scope_labels": {
+        "workspace-palace-checkpoint-raw": "workspace/palaceoftruth",
+        "workspace-palace-dream-summary": "workspace/palaceoftruth"
+      },
+      "expected_hermes_scope_labels": ["workspace/palaceoftruth"],
+      "expected_hermes_titles": ["Palace deploy checkpoint"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex, workspace/palaceoftruth, tenant_shared.\n- [0.93] Palace deploy checkpoint [note]\n  Source checkpoint metadata for the deployment checksum.",
+      "results": [
+        {
+          "item_id": "workspace-palace-checkpoint-raw",
+          "title": "Palace deploy checkpoint",
+          "score": 0.93,
+          "source_type": "note",
+          "source_url": "file:///home/example/.codex/memories/rollout_summaries/palace-deploy-checkpoint.md#L12",
+          "tags": ["dotodo", "checkpoint", "scope-workspace", "workspace-palaceoftruth"],
+          "categories": ["checkpoint"],
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        },
+        {
+          "item_id": "workspace-palace-dream-summary",
+          "title": "Memory Dream 2026-05-10 [workspace:palaceoftruth] palace-dream-summary",
+          "score": 0.89,
+          "source_type": "note",
+          "source_url": "memory://dream/palace-dream-summary/workspace/palaceoftruth/2026-05-10",
+          "tags": ["memory-dream", "palace-dream-summary", "scope-workspace", "workspace-palaceoftruth"],
+          "categories": ["memory-dream"],
+          "metadata": {
+            "memory_dream": {
+              "artifact_type": "palace-dream-summary",
+              "scope_type": "workspace",
+              "scope_key": "palaceoftruth",
+              "claims_need_source": true
+            }
+          },
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        }
+      ]
+    },
+    {
+      "id": "current-env-state-beats-stale-checkpoint",
+      "category": "experience-interference",
+      "query": "current Palace local MCP endpoint and fallback policy",
+      "display_limit": 5,
+      "context_budget_chars": 360,
+      "expected_item_ids": ["workspace-palace-current-mcp"],
+      "current_item_ids": ["workspace-palace-current-mcp"],
+      "stale_item_ids": ["workspace-palace-old-remote-mcp"],
+      "expected_scope_labels": {
+        "workspace-palace-current-mcp": "workspace/palaceoftruth",
+        "workspace-palace-old-remote-mcp": "workspace/palaceoftruth"
+      },
+      "expected_hermes_scope_labels": ["workspace/palaceoftruth"],
+      "expected_hermes_titles": ["Current local Palace MCP profile"],
+      "forbidden_context_terms": ["PALACEOFTRUTH_API_KEY", "Bearer"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex, workspace/palaceoftruth.\n- [0.96] Current local Palace MCP profile [note]\n  Use the repo-owned stdio adapter for local Codex; remote staging is only a temporary fallback.",
+      "results": [
+        {
+          "item_id": "workspace-palace-current-mcp",
+          "title": "Current local Palace MCP profile",
+          "score": 0.96,
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        },
+        {
+          "item_id": "workspace-palace-old-remote-mcp",
+          "title": "Older remote MCP default note",
+          "score": 0.81,
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        }
+      ]
+    },
+    {
+      "id": "workflow-gotcha-current-run-thread",
+      "category": "experience-interference",
+      "query": "DOTODO claim should use current Codex thread id",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-codex-current-thread"],
+      "current_item_ids": ["agent-codex-current-thread"],
+      "stale_item_ids": ["agent-codex-blank-thread"],
+      "expected_scope_labels": {
+        "agent-codex-current-thread": "agent/codex",
+        "agent-codex-blank-thread": "agent/codex"
+      },
+      "expected_hermes_scope_labels": ["agent/codex"],
+      "expected_hermes_titles": ["DOTODO current thread claim"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex, workspace/palaceoftruth.\n- [0.94] DOTODO current thread claim [note]\n  Use CODEX_THREAD_ID when recording claim state; blank thread comments should be treated as stale.",
+      "results": [
+        {
+          "item_id": "agent-codex-current-thread",
+          "title": "DOTODO current thread claim",
+          "score": 0.94,
+          "scope": {"type": "agent", "key": "codex"}
+        },
+        {
+          "item_id": "agent-codex-blank-thread",
+          "title": "Blank run-thread claim gotcha",
+          "score": 0.8,
+          "scope": {"type": "agent", "key": "codex"}
+        }
+      ]
+    },
+    {
+      "id": "ambiguous-target-prefers-correct-workspace",
+      "category": "experience-interference",
+      "query": "receipt shelf health smoke next task",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-receipt-shelf-health"],
+      "interfering_item_ids": ["workspace-receipt-catcher-rename"],
+      "expected_scope_labels": {
+        "workspace-receipt-shelf-health": "workspace/receipt-shelf",
+        "workspace-receipt-catcher-rename": "workspace/receipt-catcher"
+      },
+      "expected_hermes_scope_labels": ["workspace/receipt-shelf"],
+      "expected_hermes_titles": ["Receipt Shelf live-smoke task"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/receipt-shelf, tenant_shared.\n- [0.93] Receipt Shelf live-smoke task [note]\n  The next implementation task is the health/readiness smoke, not the old rename work.",
+      "results": [
+        {
+          "item_id": "workspace-receipt-shelf-health",
+          "title": "Receipt Shelf live-smoke task",
+          "score": 0.93,
+          "scope": {"type": "workspace", "key": "receipt-shelf"}
+        },
+        {
+          "item_id": "workspace-receipt-catcher-rename",
+          "title": "Receipt Catcher rename handoff",
+          "score": 0.77,
+          "scope": {"type": "workspace", "key": "receipt-catcher"}
+        }
+      ]
+    },
+    {
+      "id": "multi-source-aggregation-covers-queue-and-memory",
+      "category": "experience-interference",
+      "query": "what evidence explains the next Palace reliability task",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-palace-task-source", "workspace-palace-research-source"],
+      "expected_source_groups": {
+        "central_task": ["workspace-palace-task-source"],
+        "research_artifact": ["workspace-palace-research-source"]
+      },
+      "expected_scope_labels": {
+        "workspace-palace-task-source": "workspace/palaceoftruth",
+        "workspace-palace-research-source": "workspace/palaceoftruth"
+      },
+      "expected_hermes_scope_labels": ["workspace/palaceoftruth"],
+      "expected_hermes_titles": ["SAR-478 task contract", "Palace improvement research"],
+      "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/palaceoftruth.\n- [0.95] SAR-478 task contract [note]\n- [0.91] Palace improvement research [note]",
+      "results": [
+        {
+          "item_id": "workspace-palace-task-source",
+          "title": "SAR-478 task contract",
+          "score": 0.95,
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        },
+        {
+          "item_id": "workspace-palace-research-source",
+          "title": "Palace improvement research",
+          "score": 0.91,
+          "scope": {"type": "workspace", "key": "palaceoftruth"}
+        }
+      ]
+    }
+  ]
+}

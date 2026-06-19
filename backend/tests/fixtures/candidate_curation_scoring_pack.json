@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "pack_id": "candidate-curation-report-only-fixtures",
+  "artifacts": [
+    {
+      "artifact_id": "curation-ready-codex-routing",
+      "artifact_kind": "candidate_routing_manifest",
+      "target_runtime": "codex",
+      "target_surface": "AGENTS.md routing",
+      "status": "proposed",
+      "source_item_ids": ["SAR-509", "PR-337"],
+      "source_digests": {
+        "candidate_body": "sha256:ready-body",
+        "evidence": "sha256:ready-evidence"
+      },
+      "candidate_body": "Use the central project-manager helper for task writes and keep promotion human-approved.",
+      "privacy_review": {
+        "safe_for_review": true,
+        "raw_sensitive_content_excluded": true,
+        "contains_sensitive_content": false
+      },
+      "eval_summary": {
+        "compatibility": {
+          "passed": true,
+          "transport_results": {
+            "codex": "pass",
+            "hermes": "pass",
+            "rest": "pass",
+            "mcp": "pass"
+          }
+        },
+        "interference": {
+          "overrides_newer_guidance": false,
+          "overrides_more_specific_guidance": false
+        },
+        "regression_cases": [
+          {"case_id": "preserve-human-promotion-approval", "passed": true},
+          {"case_id": "no-runtime-mutation", "passed": true}
+        ]
+      },
+      "expected_promotion_ready": true
+    },
+    {
+      "artifact_id": "curation-privacy-blocked",
+      "artifact_kind": "candidate_skill",
+      "target_runtime": "hermes",
+      "target_surface": "plugins/memory/prompt",
+      "status": "proposed",
+      "source_item_ids": ["SAR-509"],
+      "source_digests": {"candidate_body": "sha256:privacy-failed"},
+      "candidate_body": "Summarize the operational lesson from redacted support evidence.",
+      "privacy_review": {
+        "safe_for_review": false,
+        "raw_sensitive_content_excluded": false,
+        "contains_sensitive_content": true
+      },
+      "eval_summary": {
+        "compatibility": {
+          "passed": true,
+          "transport_results": {
+            "codex": "pass",
+            "hermes": "pass",
+            "rest": "pass",
+            "mcp": "pass"
+          }
+        },
+        "interference": {
+          "overrides_newer_guidance": false,
+          "overrides_more_specific_guidance": false
+        },
+        "regression_cases": [
+          {"case_id": "block-sensitive-candidate", "passed": false}
+        ]
+      },
+      "failure_case_ids": ["block-sensitive-candidate"],
+      "expected_promotion_ready": false
+    },
+    {
+      "artifact_id": "curation-stale-compatibility-blocked",
+      "artifact_kind": "candidate_prompt_guardrail",
+      "target_runtime": "palace-worker",
+      "target_surface": "candidate generator",
+      "status": "superseded",
+      "source_item_ids": ["SAR-509", "SAR-513"],
+      "source_digests": {"candidate_body": "sha256:stale-body"},
+      "candidate_body": "Prefer newer scoped run memory over stale imported notes.",
+      "privacy_review": {
+        "safe_for_review": true,
+        "raw_sensitive_content_excluded": true,
+        "contains_sensitive_content": false
+      },
+      "metadata": {
+        "superseded_by_newer_guidance": true
+      },
+      "eval_summary": {
+        "compatibility": {
+          "passed": false,
+          "failed_transports": ["mcp"]
+        },
+        "interference": {
+          "overrides_newer_guidance": true,
+          "overrides_more_specific_guidance": false
+        },
+        "regression_cases": [
+          {"case_id": "mcp-rendering-stays-compatible", "passed": false}
+        ]
+      },
+      "failure_case_ids": ["mcp-rendering-stays-compatible", "stale-guidance-blocks-promotion"],
+      "expected_promotion_ready": false
+    }
+  ]
+}

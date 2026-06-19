@@ -1,0 +1,40 @@
+{{- if and .Values.valkey.enabled (ne (include "palaceoftruth.valkeySentinelEnabled" .) "true") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.valkeyServiceName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate is required for RWO volumes: RollingUpdate deadlocks because
+  # the new pod cannot mount the volume until the old pod releases it, and
+  # the old pod is not deleted until the new pod is Ready.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.valkeyServiceName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.valkeyServiceName" . }}
+        {{- include "palaceoftruth.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: valkey
+          image: {{ .Values.valkey.image }}
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "palaceoftruth.valkeyServiceName" . }}-data
+{{- end }}

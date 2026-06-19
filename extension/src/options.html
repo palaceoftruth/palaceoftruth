@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Palace Capture Settings</title>
+    <link rel="icon" href="assets/icon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell options-shell">
+      <header class="header">
+        <div>
+          <p class="eyebrow">Palace Capture</p>
+          <h1>Settings</h1>
+        </div>
+        <img src="assets/icon.svg" alt="" width="36" height="36" />
+      </header>
+
+      <form id="settingsForm" class="settings-form">
+        <label class="field-label" for="apiBaseUrl">Palace URL</label>
+        <input id="apiBaseUrl" class="text-field" type="url" placeholder="https://palaceoftruth.test" required />
+
+        <label class="field-label" for="pairingApiKey">Pairing API key</label>
+        <input id="pairingApiKey" class="text-field" type="password" placeholder="Used once to mint a scoped token" required />
+
+        <button class="primary-button" type="submit">Create Capture Token</button>
+        <button id="clearButton" class="ghost-button" type="button">Clear Token</button>
+      </form>
+
+      <p class="help-text">
+        The pairing key is exchanged for a revocable token limited to browser captures and job status.
+      </p>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

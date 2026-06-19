@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-config
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+data:
+  REDIS_URL: {{ include "palaceoftruth.redisUrl" . | quote }}
+  REDIS_SENTINEL_STARTUP_TIMEOUT_SECONDS: {{ .Values.config.redisSentinelStartupTimeoutSeconds | quote }}
+  REDIS_SENTINEL_STARTUP_INITIAL_BACKOFF_SECONDS: {{ .Values.config.redisSentinelStartupInitialBackoffSeconds | quote }}
+  REDIS_SENTINEL_STARTUP_MAX_BACKOFF_SECONDS: {{ .Values.config.redisSentinelStartupMaxBackoffSeconds | quote }}
+  AWS_EC2_METADATA_DISABLED: "true"
+  {{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+  REDIS_SENTINEL_HOSTS: {{ printf "%s:26379" (include "palaceoftruth.valkeySentinelName" .) | quote }}
+  REDIS_SENTINEL_MASTER: {{ .Values.valkey.sentinel.masterName | quote }}
+  {{- end }}
+  OPENROUTER_DEFAULT_MODEL: {{ .Values.config.openrouterDefaultModel | quote }}
+  OPENROUTER_FALLBACK_MODELS: {{ .Values.config.openrouterFallbackModels | quote }}
+  EMBEDDING_PROVIDER: {{ include "palaceoftruth.embeddingProvider" . | quote }}
+  EMBEDDING_MODEL: {{ include "palaceoftruth.embeddingModel" . | quote }}
+  EMBEDDING_DIMENSIONS: {{ include "palaceoftruth.embeddingDimensions" . | quote }}
+  EMBEDDING_PROFILE_NAME: {{ include "palaceoftruth.embeddingProfileName" . | quote }}
+  EMBEDDING_EXPERIMENTAL_PROFILES_ENABLED: {{ .Values.config.embeddingExperimentalProfilesEnabled | quote }}
+  EMBEDDING_LOCAL_HTTP_URL: {{ include "palaceoftruth.embeddingLocalHttpUrl" . | quote }}
+  EMBEDDING_LOCAL_HTTP_PATH: {{ .Values.config.embeddingLocalHttpPath | quote }}
+  EMBEDDING_LOCAL_HTTP_TIMEOUT_SECONDS: {{ .Values.config.embeddingLocalHttpTimeoutSeconds | quote }}
+  EMBEDDING_LOCAL_HTTP_NORMALIZE: {{ .Values.config.embeddingLocalHttpNormalize | quote }}
+  EMBEDDING_LOCAL_HTTP_TRUNCATE: {{ .Values.config.embeddingLocalHttpTruncate | quote }}
+  TRANSCRIPTION_PROVIDER: {{ .Values.config.transcriptionProvider | quote }}
+  WHISPER_MODEL: {{ .Values.config.whisperModel | quote }}
+  ASSEMBLYAI_BASE_URL: {{ .Values.config.assemblyaiBaseUrl | quote }}
+  ASSEMBLYAI_SPEECH_MODEL: {{ .Values.config.assemblyaiSpeechModel | quote }}
+  ASSEMBLYAI_POLL_INTERVAL_SECONDS: {{ .Values.config.assemblyaiPollIntervalSeconds | quote }}
+  MEDIA_DOWNLOAD_TIMEOUT_SECONDS: {{ .Values.config.mediaDownloadTimeoutSeconds | quote }}
+  MEDIA_FFMPEG_TIMEOUT_SECONDS: {{ .Values.config.mediaFfmpegTimeoutSeconds | quote }}
+  MEDIA_TENANT_FAIR_PER_TENANT_INFLIGHT_LIMIT: {{ .Values.config.mediaTenantFairPerTenantInflightLimit | quote }}
+  MEDIA_TENANT_FAIR_DISPATCH_BATCH_SIZE: {{ .Values.config.mediaTenantFairDispatchBatchSize | quote }}
+  MEDIA_TENANT_FAIR_CANDIDATE_LIMIT: {{ .Values.config.mediaTenantFairCandidateLimit | quote }}
+  TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS: {{ .Values.config.transcriptionRequestTimeoutSeconds | quote }}
+  TRANSCRIPTION_TRANSIENT_RETRIES: {{ .Values.config.transcriptionTransientRetries | quote }}
+  TRANSCRIPTION_RETRY_BACKOFF_SECONDS: {{ .Values.config.transcriptionRetryBackoffSeconds | quote }}
+  TRANSCRIPTION_MAX_PARALLEL_CHUNKS: {{ .Values.config.transcriptionMaxParallelChunks | quote }}
+  CHUNK_SIZE: {{ .Values.config.chunkSize | quote }}
+  CHUNK_OVERLAP: {{ .Values.config.chunkOverlap | quote }}
+  SEARCH_LIMIT: {{ .Values.config.searchLimit | quote }}
+  APP_VERSION: {{ .Chart.AppVersion | quote }}
+  RETRIEVAL_CAPTURE_ENABLED: {{ .Values.config.retrievalCaptureEnabled | quote }}
+  RETRIEVAL_CAPTURE_PATH: {{ .Values.config.retrievalCapturePath | quote }}
+  RETRIEVAL_CAPTURE_QUERY_MODE: {{ .Values.config.retrievalCaptureQueryMode | quote }}
+  RETRIEVAL_CAPTURE_MAX_QUERY_CHARS: {{ .Values.config.retrievalCaptureMaxQueryChars | quote }}
+  RETRIEVAL_SOURCE_RANKING_ENABLED: {{ .Values.config.retrievalSourceRankingEnabled | quote }}
+  RETRIEVAL_RELATIONSHIP_EXPANSION_ENABLED: {{ .Values.config.retrievalRelationshipExpansionEnabled | quote }}
+  RETRIEVAL_RELATIONSHIP_MIN_CONFIDENCE: {{ .Values.config.retrievalRelationshipMinConfidence | quote }}
+  RETRIEVAL_RELATIONSHIP_FANOUT_LIMIT: {{ .Values.config.retrievalRelationshipFanoutLimit | quote }}
+  RETRIEVAL_RELATIONSHIP_HOP_DECAY: {{ .Values.config.retrievalRelationshipHopDecay | quote }}
+  RETRIEVAL_RELATIONSHIP_MAX_BONUS: {{ .Values.config.retrievalRelationshipMaxBonus | quote }}
+  RETRIEVAL_HINT_RANKING_ENABLED: {{ .Values.config.retrievalHintRankingEnabled | quote }}
+  RETRIEVAL_HINT_RANKING_MAX_BONUS: {{ .Values.config.retrievalHintRankingMaxBonus | quote }}
+  RETRIEVAL_HINT_REPORT_ENABLED: {{ .Values.config.retrievalHintReportEnabled | quote }}
+  RETRIEVAL_HINT_REPORT_LIMIT: {{ .Values.config.retrievalHintReportLimit | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_ENABLED: {{ .Values.config.retrievalSecondStageRerankerEnabled | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_PROVIDER: {{ .Values.config.retrievalSecondStageRerankerProvider | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_CANDIDATE_LIMIT: {{ .Values.config.retrievalSecondStageRerankerCandidateLimit | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_TIMEOUT_MS: {{ .Values.config.retrievalSecondStageRerankerTimeoutMs | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_MAX_BONUS: {{ .Values.config.retrievalSecondStageRerankerMaxBonus | quote }}
+  PALACEOFTRUTH_DELEGATED_AGENT_MEMORY_READ_POLICIES: {{ default .Values.config.agentMemoryDelegatedReadPoliciesJson .Values.config.palaceoftruthDelegatedAgentMemoryReadPolicies | quote }}
+  FEED_POLL_MIN_INTERVAL: {{ .Values.config.feedPollMinInterval | quote }}
+  FEED_MAX_FAILURES: {{ .Values.config.feedMaxFailures | quote }}
+  FACEBOOK_GRAPH_API_VERSION: {{ .Values.config.facebookGraphApiVersion | quote }}
+  PALACE_SYNC_ALLOWED_ROOTS: {{ .Values.config.palaceSyncAllowedRoots | quote }}
+  PALACE_SYNC_MAX_FILE_BYTES: {{ .Values.config.palaceSyncMaxFileBytes | quote }}
+  PALACE_REPO_CHECKOUT_ROOT: {{ .Values.config.palaceRepoCheckoutRoot | quote }}
+  PALACE_DEFAULT_S3_SOURCE_NAME: {{ .Values.config.palaceDefaultS3SourceName | quote }}
+  PALACE_DEFAULT_S3_BUCKET: {{ .Values.config.palaceDefaultS3Bucket | quote }}
+  PALACE_DEFAULT_S3_PREFIX: {{ .Values.config.palaceDefaultS3Prefix | quote }}
+  PALACE_DEFAULT_S3_ENDPOINT_URL: {{ .Values.config.palaceDefaultS3EndpointUrl | quote }}
+  PALACE_DEFAULT_S3_REGION: {{ .Values.config.palaceDefaultS3Region | quote }}
+  PALACE_DEFAULT_S3_ALLOWED_EXTENSIONS: {{ .Values.config.palaceDefaultS3AllowedExtensions | quote }}
+  PALACE_DEFAULT_S3_SCAN_INTERVAL_SECONDS: {{ .Values.config.palaceDefaultS3ScanIntervalSeconds | quote }}
+  PALACE_DEFAULT_S3_FORCE_PATH_STYLE: {{ .Values.config.palaceDefaultS3ForcePathStyle | quote }}

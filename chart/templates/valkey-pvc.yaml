@@ -1,0 +1,13 @@
+{{- if and .Values.valkey.enabled (ne (include "palaceoftruth.valkeySentinelEnabled" .) "true") }}
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: {{ include "palaceoftruth.valkeyServiceName" . }}-data
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.valkey.storage.size }}
+{{- end }}

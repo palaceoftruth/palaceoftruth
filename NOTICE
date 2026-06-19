@@ -1,0 +1,25 @@
+Palace of Truth
+Copyright (C) 2026 Andrew Sarver
+
+Palace of Truth is licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). See LICENSE for the full license text.
+
+Third-party references and benchmark comparisons:
+
+- GBrain: https://github.com/garrytan/gbrain
+  License: MIT
+  Palace of Truth references public GBrain documentation and benchmark claims
+  for product direction, architecture comparison, and report-only benchmark
+  framing. Palace of Truth does not vendor or fork GBrain source code unless a
+  future notice explicitly says so.
+
+- MemPalace: https://github.com/MemPalace/mempalace
+  License: MIT
+  Palace of Truth references public MemPalace documentation and benchmark
+  claims for product direction, architecture comparison, and report-only
+  benchmark framing. Palace of Truth does not vendor or fork MemPalace source
+  code unless a future notice explicitly says so.
+
+If future changes copy source code, documentation text, schemas, fixtures, or
+assets from a third-party project, add the applicable copyright and license
+notice here before release.

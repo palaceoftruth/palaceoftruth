@@ -1,0 +1,235 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f8fafc;
+  color: #13201f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+.popup-shell {
+  width: 340px;
+}
+
+.options-shell {
+  width: min(440px, 100vw);
+  margin: 24px auto;
+}
+
+.header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eyebrow {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+
+h1 {
+  font-size: 24px;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d8e6e4;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.saved-panel {
+  gap: 10px;
+}
+
+.kind-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kind-pill {
+  background: #ccfbf1;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  color: #115e59;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 9px;
+}
+
+.state-text {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.saved-label {
+  color: #115e59;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.title-line {
+  color: #13201f;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+  margin: 12px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.reason-line,
+.help-text {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 8px 0 0;
+}
+
+.related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  list-style: none;
+  margin: 12px 0 0;
+  max-height: 150px;
+  overflow: auto;
+  padding: 0;
+}
+
+.related-item {
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 9px;
+}
+
+.related-title {
+  color: #13201f;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.related-meta,
+.related-empty {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field-label {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.text-field {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #13201f;
+  font: inherit;
+  min-height: 42px;
+  outline: none;
+  padding: 10px 11px;
+  width: 100%;
+}
+
+.text-field:focus-visible {
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.2);
+}
+
+.primary-button,
+.ghost-button {
+  align-items: center;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-weight: 750;
+  justify-content: center;
+  min-height: 42px;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.primary-button {
+  background: #0f766e;
+  border: 1px solid #0f766e;
+  color: #ffffff;
+}
+
+.primary-button:hover {
+  background: #115e59;
+}
+
+.primary-button:disabled {
+  background: #94a3b8;
+  border-color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.ghost-button {
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+}
+
+.ghost-button:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+.message {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+  min-height: 18px;
+}
+
+.message.error {
+  color: #b91c1c;
+}
+
+.message.success {
+  color: #0f766e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-button,
+  .ghost-button {
+    transition: none;
+  }
+}

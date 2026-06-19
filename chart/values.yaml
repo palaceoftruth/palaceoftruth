@@ -1,0 +1,432 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  backendRepository: palaceoftruth/palaceoftruth/backend
+  frontendRepository: palaceoftruth/palaceoftruth/frontend
+  # Leave blank to default both app images to Chart.appVersion.
+  # CI publishes a new chart with appVersion set to the immutable image SHA.
+  tag: ""
+  pullPolicy: Always
+
+# ConfigMap environment variables
+config:
+  # Derived automatically from Valkey service name when valkey.enabled=true.
+  # Set explicitly when valkey.enabled=false.
+  redisUrl: ""
+  redisSentinelStartupTimeoutSeconds: "180"
+  redisSentinelStartupInitialBackoffSeconds: "1"
+  redisSentinelStartupMaxBackoffSeconds: "10"
+  # Default OpenRouter model for all text-generation tasks (summarize, tag, chat, etc.).
+  openrouterDefaultModel: "minimax/minimax-m2.7"
+  # Ordered fallback models for OpenRouter when the default model is unavailable.
+  openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
+  embeddingProvider: openai
+  embeddingModel: text-embedding-3-small
+  embeddingDimensions: "1536"
+  embeddingProfileName: openai-text-embedding-3-small-1536
+  embeddingExperimentalProfilesEnabled: "false"
+  embeddingLocalHttpUrl: ""
+  embeddingLocalHttpPath: "/embed"
+  embeddingLocalHttpTimeoutSeconds: "30"
+  embeddingLocalHttpNormalize: "true"
+  embeddingLocalHttpTruncate: "true"
+  transcriptionProvider: openai
+  whisperModel: gpt-4o-transcribe-diarize
+  assemblyaiBaseUrl: "https://api.assemblyai.com"
+  assemblyaiSpeechModel: universal-2
+  assemblyaiPollIntervalSeconds: "2.0"
+  mediaDownloadTimeoutSeconds: "1500"
+  mediaFfmpegTimeoutSeconds: "300"
+  mediaTenantFairPerTenantInflightLimit: "3"
+  mediaTenantFairDispatchBatchSize: "6"
+  mediaTenantFairCandidateLimit: "100"
+  transcriptionRequestTimeoutSeconds: "300"
+  transcriptionTransientRetries: "2"
+  transcriptionRetryBackoffSeconds: "2.0"
+  transcriptionMaxParallelChunks: "2"
+  chunkSize: "500"
+  chunkOverlap: "50"
+  searchLimit: "10"
+  retrievalCaptureEnabled: "false"
+  retrievalCapturePath: "/tmp/palaceoftruth/retrieval-capture.ndjson"
+  retrievalCaptureQueryMode: "fingerprint"
+  retrievalCaptureMaxQueryChars: "500"
+  retrievalSourceRankingEnabled: "true"
+  retrievalRelationshipExpansionEnabled: "false"
+  retrievalRelationshipMinConfidence: "0.7"
+  retrievalRelationshipFanoutLimit: "3"
+  retrievalRelationshipHopDecay: "0.72"
+  retrievalRelationshipMaxBonus: "0.05"
+  retrievalHintRankingEnabled: "false"
+  retrievalHintRankingMaxBonus: "0.06"
+  retrievalHintReportEnabled: "false"
+  retrievalHintReportLimit: "5"
+  retrievalSecondStageRerankerEnabled: "false"
+  retrievalSecondStageRerankerProvider: ""
+  retrievalSecondStageRerankerCandidateLimit: "20"
+  retrievalSecondStageRerankerTimeoutMs: "150"
+  retrievalSecondStageRerankerMaxBonus: "0.08"
+  # JSON list of deployment-owned delegated agent memory read policies.
+  # Leave empty unless a tenant/caller pair should read explicitly allowlisted
+  # specialist agent scopes through /api/v1/memory/retrieve-agent.
+  palaceoftruthDelegatedAgentMemoryReadPolicies: ""
+  # Backward-compatible delegated policy alias for existing deployments.
+  agentMemoryDelegatedReadPoliciesJson: ""
+  feedPollMinInterval: "300"
+  feedMaxFailures: "5"
+  # X oEmbed capture needs no credentials. Facebook public post capture can use
+  # a Meta app token from the app secret plus this Graph API version.
+  facebookGraphApiVersion: "v25.0"
+  # Leave blank in cluster installs unless the backend can actually see a mounted corpus path.
+  palaceSyncAllowedRoots: ""
+  palaceSyncMaxFileBytes: "250000"
+  palaceRepoCheckoutRoot: /tmp/palaceoftruth/repo-checkouts
+  # Optional default Palace S3 sync source. When source name and bucket are set,
+  # the backend seeds the source on startup for the default tenant.
+  palaceDefaultS3SourceName: ""
+  palaceDefaultS3Bucket: ""
+  palaceDefaultS3Prefix: ""
+  palaceDefaultS3EndpointUrl: ""
+  palaceDefaultS3Region: ""
+  palaceDefaultS3AllowedExtensions: ".md"
+  palaceDefaultS3ScanIntervalSeconds: "900"
+  palaceDefaultS3ForcePathStyle: "false"
+
+# External Secrets Operator integration. Disabled by default so the public chart
+# can render without operator-specific secret-store IDs.
+externalSecrets:
+  enabled: false
+  secretStoreName: ""
+  secretStoreKind: ClusterSecretStore
+  # Secret-manager item IDs or keys. Override per deployment when
+  # externalSecrets.enabled=true.
+  appSecretItemId: ""
+  registrySecretItemId: ""
+  # Optional object-store credentials for Palace S3 sync sources.
+  # When set, these keys are added to the app secret as AWS_ACCESS_KEY_ID /
+  # AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN so boto3 can use them directly.
+  s3CredentialsItemId: ""
+  s3AccessKeyProperty: access-key-id
+  s3SecretKeyProperty: secret-access-key
+  s3SessionTokenProperty: ""
+  # Optional Palace repo-sync secrets. Leave blank in environments that do not
+  # use deployment-managed PAT auth or stored repo credentials.
+  githubPatProperty: ""
+  syncSourceCredentialKeyProperty: ""
+  # Optional Meta app token property for no-JavaScript Facebook post capture.
+  facebookOembedAccessTokenProperty: ""
+  # Optional local embedding proxy bearer token property.
+  embeddingLocalHttpApiKeyProperty: ""
+  # Optional AssemblyAI API key property for hosted diarized transcription.
+  assemblyaiApiKeyProperty: ""
+
+# Used when externalSecrets.enabled=false — caller must pre-create these secrets.
+# existingSecret must contain: OPENAI_API_KEY, OPENROUTER_API_KEY, API_KEY,
+#   and DATABASE_URL (when postgres.enabled=false). It may also contain
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN for Palace S3 sync,
+#   GITHUB_PAT / PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY for Palace repo sync,
+#   FACEBOOK_OEMBED_ACCESS_TOKEN for no-JavaScript Facebook post capture,
+#   EMBEDDING_LOCAL_HTTP_API_KEY for authenticated local embedding proxies, and
+#   ASSEMBLYAI_API_KEY when config.transcriptionProvider=assemblyai.
+existingSecret: ""
+# existingRegistrySecret must be a kubernetes.io/dockerconfigjson type secret
+existingRegistrySecret: ""
+
+# CloudNative-PG cluster (requires CNPG operator)
+postgres:
+  enabled: true
+  # clusterName defaults to <fullname>-postgres when empty
+  clusterName: ""
+  instances: 1
+  image: ghcr.io/cloudnative-pg/postgresql:16.4
+  storage:
+    size: 5Gi
+  parameters:
+    shared_buffers: "128MB"
+
+# Bundled Valkey (Redis-compatible) deployment
+valkey:
+  enabled: true
+  image: valkey/valkey:8-alpine
+  storage:
+    size: 1Gi
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+  # Sentinel high-availability mode.
+  # When enabled, replaces the single Deployment with a primary StatefulSet,
+  # a replica StatefulSet, and 3 Sentinel pods. The app connects via Sentinel,
+  # which transparently redirects clients to the current primary. A failing
+  # primary is automatically replaced by the replica (failover in ~5 s).
+  sentinel:
+    enabled: false
+    # Number of replica pods (1 is sufficient for HA; replicas also serve reads).
+    replicas: 1
+    # Number of sentinel pods. Keep this odd so quorum decisions remain stable.
+    sentinels: 3
+    masterName: mymaster
+    # Minimum sentinels that must agree a primary is unreachable before failover.
+    quorum: 2
+    # Milliseconds a primary may be unreachable before sentinels mark it down.
+    downAfterMilliseconds: 5000
+    # Maximum milliseconds allowed for a complete failover.
+    failoverTimeout: 10000
+    resources:
+      requests:
+        memory: "32Mi"
+        cpu: "25m"
+      limits:
+        memory: "64Mi"
+        cpu: "100m"
+
+# Used when valkey.enabled=false — provide a full Redis/Valkey URL
+externalRedisUrl: ""
+
+localEmbeddingService:
+  # Disabled by default so existing OpenAI-backed deployments stay unchanged.
+  enabled: false
+  image:
+    repository: ghcr.io/huggingface/text-embeddings-inference
+    tag: cpu-1.9
+    pullPolicy: IfNotPresent
+  modelId: Alibaba-NLP/gte-modernbert-base
+  embeddingDimensions: "768"
+  embeddingProfileName: local-http-gte-modernbert-base
+  port: 80
+  command: []
+  args: []
+  env:
+    HF_HOME: /data
+    HF_HUB_CACHE: /data/hub
+  hfToken:
+    existingSecret: ""
+    secretKey: HF_TOKEN
+  cache:
+    mountPath: /data
+    size: 10Gi
+    storageClassName: ""
+  readinessProbe:
+    path: /health
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 12
+  livenessProbe:
+    path: /health
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "500m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+sharedRuntimeStorage:
+  # Enabled by default because the chart runs API and worker pods separately.
+  # Disable only for explicitly single-pod/local deployments that do not process
+  # worker-backed uploads. The shared volume is mounted only at
+  # /tmp/palaceoftruth/upload-artifacts so media downloads and other scratch
+  # files still use pod-local temp storage.
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  size: 2Gi
+
+highAvailability:
+  # Leave disabled for lightweight local/staging installs. When enabled, the
+  # chart uses the replica counts below, enables Valkey Sentinel for bundled
+  # Redis, scales CNPG Postgres, and renders PodDisruptionBudgets.
+  enabled: false
+  replicas:
+    backend: 2
+    frontend: 2
+    worker: 2
+    mediaWorker: 3
+    palaceWorker: 2
+    mcp: 2
+    postgres: 3
+    valkeyReplicas: 1
+    valkeySentinels: 3
+
+podDisruptionBudgets:
+  # May be enabled independently, but is also enabled automatically by
+  # highAvailability.enabled.
+  enabled: false
+  backend:
+    minAvailable: 1
+  frontend:
+    minAvailable: 1
+  worker:
+    minAvailable: 1
+  mediaWorker:
+    minAvailable: 1
+  palaceWorker:
+    minAvailable: 1
+  mcp:
+    minAvailable: 1
+  valkeySentinel:
+    minAvailable: 2
+
+backend:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
+      cpu: "500m"
+
+mcp:
+  enabled: true
+  replicas: 1
+  port: 8765
+  path: /mcp
+  # Leave blank to route the adapter to the in-cluster backend Service.
+  apiBaseUrl: ""
+  clientKey: "helm-mcp"
+  clientName: "Palace Helm MCP"
+  clientScopes: "read,write,admin,local_only,destructive_prohibited"
+  # Optional keys in the app secret. When oauthClientSecretKey is set, the
+  # adapter mints short-lived bearer tokens with client_credentials. API_KEY
+  # remains mounted as a compatibility fallback.
+  oauthClientSecretKey: ""
+  bearerTokenSecretKey: ""
+  oauthTokenUrl: ""
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 6
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+memoryRolloutSmoke:
+  # Runs an ArgoCD PostSync Job for Sentinel-backed chart syncs. The job writes
+  # one non-sensitive scoped memory, waits for its background job, checks
+  # Sentinel/Valkey, API/MCP reachability, and emits target/tenant-tagged JSON alerts.
+  enabled: true
+  targetName: ""
+  scopeKey: rollout-smoke
+  restartAlertThreshold: 3
+  logSinceSeconds: 3600
+  logTailLines: 500
+  jobTimeoutSeconds: 180
+  jobIntervalSeconds: 5
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests:
+      memory: "96Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+worker:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+mediaWorker:
+  enabled: true
+  # Scale media ingestion safely by raising replicas and maxJobs together.
+  # Keep maxJobs low when transcription providers or CPU are constrained.
+  replicas: 1
+  queueName: "arq:queue:media"
+  maxJobs: 1
+  command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.MediaWorkerSettings"]
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "100m"
+      ephemeral-storage: "1Gi"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+      ephemeral-storage: "10Gi"
+
+palaceWorker:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+frontend:
+  replicas: 1
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+
+ingress:
+  enabled: true
+  className: nginx
+  # Preferred host input. Example:
+  #   palaceoftruth.example.com -> frontend host
+  #   api.palaceoftruth.example.com -> API host
+  baseDomain: palaceoftruth.example.com
+  apiSubdomain: api
+  mcpSubdomain: mcp
+  # Optional explicit overrides. Leave blank to derive from baseDomain.
+  frontendHost: ""
+  apiHost: ""
+  mcpHost: ""
+  # external-dns annotation target (for example, a load-balancer IP or hostname). Leave empty to omit.
+  externalDnsTarget: ""
+  tlsSecretName: palaceoftruth-tls
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+  admin:
+    # Optional split Ingress for control-plane endpoints under /api/v1/admin.
+    # Keep disabled to preserve the default API host behavior. Enable it when
+    # operators need path-specific controls such as source allowlists.
+    enabled: false
+    path: /api/v1/admin
+    pathType: Prefix
+    # Defaults to the normal API host when empty.
+    host: ""
+    # Defaults to ingress.className when empty.
+    className: ""
+    # Added only to the admin Ingress, so runtime /api/v1/memory, /api/v1/search,
+    # and other API traffic keeps the standard ingress annotations.
+    annotations: {}
+
+certificate:
+  enabled: true
+  clusterIssuer: letsencrypt-prod
+
+namespace:
+  create: true

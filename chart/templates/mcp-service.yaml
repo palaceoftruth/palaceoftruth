@@ -1,0 +1,16 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.mcpServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "palaceoftruth.mcpServiceName" . }}
+  ports:
+    - port: {{ .Values.mcp.port }}
+      targetPort: {{ .Values.mcp.port }}
+{{- end }}

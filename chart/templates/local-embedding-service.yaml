@@ -1,0 +1,113 @@
+{{- if .Values.localEmbeddingService.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "palaceoftruth.localEmbeddingServiceName" . }}-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-embedding
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.localEmbeddingService.cache.storageClassName }}
+  storageClassName: {{ .Values.localEmbeddingService.cache.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.localEmbeddingService.cache.size | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-embedding
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+        app.kubernetes.io/component: local-embedding
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: local-embedding
+          image: "{{ .Values.localEmbeddingService.image.repository }}:{{ .Values.localEmbeddingService.image.tag }}"
+          imagePullPolicy: {{ .Values.localEmbeddingService.image.pullPolicy }}
+          {{- if .Values.localEmbeddingService.command }}
+          command:
+            {{- toYaml .Values.localEmbeddingService.command | nindent 12 }}
+          {{- end }}
+          args:
+            {{- if .Values.localEmbeddingService.args }}
+            {{- toYaml .Values.localEmbeddingService.args | nindent 12 }}
+            {{- else }}
+            - --model-id
+            - {{ .Values.localEmbeddingService.modelId | quote }}
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.localEmbeddingService.port }}
+          env:
+            {{- range $name, $value := .Values.localEmbeddingService.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.localEmbeddingService.hfToken.existingSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.localEmbeddingService.hfToken.existingSecret | quote }}
+                  key: {{ .Values.localEmbeddingService.hfToken.secretKey | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ .Values.localEmbeddingService.cache.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.localEmbeddingService.readinessProbe.path | quote }}
+              port: {{ .Values.localEmbeddingService.port }}
+            initialDelaySeconds: {{ .Values.localEmbeddingService.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.localEmbeddingService.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.localEmbeddingService.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.localEmbeddingService.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.localEmbeddingService.livenessProbe.path | quote }}
+              port: {{ .Values.localEmbeddingService.port }}
+            initialDelaySeconds: {{ .Values.localEmbeddingService.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.localEmbeddingService.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.localEmbeddingService.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.localEmbeddingService.livenessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.localEmbeddingService.resources | nindent 12 }}
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ include "palaceoftruth.localEmbeddingServiceName" . }}-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: local-embedding
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+  ports:
+    - name: http
+      port: {{ .Values.localEmbeddingService.port }}
+      targetPort: {{ .Values.localEmbeddingService.port }}
+      protocol: TCP
+{{- end }}

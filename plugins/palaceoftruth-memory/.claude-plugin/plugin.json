@@ -1,0 +1,22 @@
+{
+  "name": "palaceoftruth-memory",
+  "description": "Scoped Palace of Truth MCP memory package for Claude-style agent clients.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Palace of Truth contributors",
+    "url": "https://github.com/palaceoftruth"
+  },
+  "repository": "https://github.com/palaceoftruth/palaceoftruth",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "palaceoftruth",
+    "memory",
+    "mcp",
+    "claude",
+    "agent-memory"
+  ],
+  "skills": [
+    "./skills/palaceoftruth-memory",
+    "./skills/palaceoftruth-codex-memory"
+  ]
+}

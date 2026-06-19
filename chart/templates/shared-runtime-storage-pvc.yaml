@@ -1,0 +1,18 @@
+{{- if and (eq (include "palaceoftruth.sharedRuntimeStorageEnabled" .) "true") (not .Values.sharedRuntimeStorage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "palaceoftruth.sharedRuntimeStorageClaimName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.sharedRuntimeStorage.accessModes | nindent 4 }}
+  {{- if .Values.sharedRuntimeStorage.storageClassName }}
+  storageClassName: {{ .Values.sharedRuntimeStorage.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.sharedRuntimeStorage.size | quote }}
+{{- end }}

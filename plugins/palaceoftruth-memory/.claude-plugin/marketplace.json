@@ -1,0 +1,16 @@
+{
+  "name": "palaceoftruth-memory",
+  "owner": {
+    "name": "Palace of Truth contributors",
+    "url": "https://github.com/palaceoftruth"
+  },
+  "metadata": {
+    "description": "Install Palace of Truth as a scoped MCP memory adapter for agent clients."
+  },
+  "plugins": [
+    {
+      "name": "palaceoftruth-memory",
+      "source": "."
+    }
+  ]
+}

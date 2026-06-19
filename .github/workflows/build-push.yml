@@ -1,0 +1,334 @@
+name: Build and Push Images
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: build-push-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY_HOST: ghcr.io
+  REGISTRY_NAMESPACE: palaceoftruth/palaceoftruth
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure self-hosted caches
+        run: |
+          TOOL_CACHE="${RUNNER_TEMP}/_tool"
+          UV_CACHE="${RUNNER_TEMP}/uv-cache"
+          UV_PYTHON_INSTALL_DIR="${RUNNER_TEMP}/uv-python"
+          mkdir -p "$TOOL_CACHE"
+          mkdir -p "$UV_CACHE"
+          mkdir -p "$UV_PYTHON_INSTALL_DIR"
+          # setup-python defaults to /Users/runner/hostedtoolcache on macOS.
+          # The hermes self-hosted runners use a different user, so use uv's
+          # managed Python path instead of actions/setup-python for validation.
+          echo "AGENT_TOOLSDIRECTORY=${TOOL_CACHE}" >> "$GITHUB_ENV"
+          echo "RUNNER_TOOL_CACHE=${TOOL_CACHE}" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=${UV_CACHE}" >> "$GITHUB_ENV"
+          echo "UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR}" >> "$GITHUB_ENV"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Run backend smoke tests
+        working-directory: backend
+        run: |
+          uv run --python 3.12 --with pytest --with pytest-asyncio python -m pytest \
+            tests/test_config.py \
+            tests/test_main_startup.py \
+            tests/test_database_health.py \
+            tests/test_bump_chart_release.py \
+            tests/test_detect_hermes_plugin_release.py \
+            tests/test_retrieval_replay.py \
+            -q
+          uv run --python 3.12 python ../scripts/check_database_health.py
+          uv run --python 3.12 python ../scripts/replay_retrieval_capture.py gate \
+            --baseline tests/fixtures/retrieval_replay/baseline.ndjson \
+            --current tests/fixtures/retrieval_replay/current.ndjson \
+            --top-k 2 \
+            --min-jaccard 1.0 \
+            --latency-delta-warn-ms 250
+
+      - name: Generate CI-safe agent memory reports
+        working-directory: backend
+        run: |
+          mkdir -p ../artifacts/agent-memory
+          uv run --python 3.12 --with pytest --with pytest-asyncio python -m pytest \
+            tests/test_agent_memory_compatibility_smoke.py \
+            -q
+          uv run --python 3.12 python ../scripts/smoke_agent_memory_compatibility.py \
+            codex-bridge \
+            --output ../artifacts/agent-memory/codex-bridge.json
+          uv run --python 3.12 python ../scripts/smoke_agent_memory_compatibility.py \
+            scorecard \
+            --dry-run \
+            --redact-memory-bodies \
+            --output ../artifacts/agent-memory/scorecard-dry-run.json
+
+      - name: Upload agent memory reports
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: agent-memory-ci-reports
+          path: artifacts/agent-memory/*.json
+          if-no-files-found: error
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.14.0
+
+      - name: Validate Helm chart
+        run: |
+          helm lint chart
+          helm template palaceoftruth chart
+          helm template palaceoftruth chart --set highAvailability.enabled=true
+          helm template palaceoftruth chart --set mcp.enabled=true --set ingress.mcpHost=mcp.palaceoftruth.example.com
+
+  build-push:
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, macOS]
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Detect Hermes plugin release inputs
+        id: hermes_plugin
+        run: |
+          VERSION=$(python3 scripts/package_hermes_memory_plugin.py --print-version)
+          TAG="hermes-memory-plugin-v${VERSION}"
+          ASSET_BASE="palaceoftruth-hermes-memory-plugin-v${VERSION}"
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            CHANGED=true
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" -- third_party_plugins/hermes/memory/palaceoftruth | grep -q .; then
+            CHANGED=$(python3 scripts/detect_hermes_plugin_release.py --before "$BEFORE" --after "$GITHUB_SHA")
+          else
+            CHANGED=false
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "asset_base=${ASSET_BASE}" >> "$GITHUB_OUTPUT"
+          echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: tag
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Read release coordinates
+        id: release
+        run: |
+          CHART_NAME=$(awk '$1 == "name:" { print $2; exit }' chart/Chart.yaml)
+          BACKEND_REPO=$(awk '$1 == "backendRepository:" { print $2; exit }' chart/values.yaml)
+          FRONTEND_REPO=$(awk '$1 == "frontendRepository:" { print $2; exit }' chart/values.yaml)
+          if [ -z "$CHART_NAME" ] || [ -z "$BACKEND_REPO" ] || [ -z "$FRONTEND_REPO" ]; then
+            echo "Failed to read release coordinates from chart metadata" >&2
+            exit 1
+          fi
+          echo "chart_name=${CHART_NAME}" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${{ env.REGISTRY_HOST }}/${BACKEND_REPO}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${{ env.REGISTRY_HOST }}/${FRONTEND_REPO}" >> "$GITHUB_OUTPUT"
+          echo "hermes_plugin_image=${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}/hermes-memory-plugin" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.release.outputs.backend_image }}:${{ steps.tag.outputs.sha }}
+            ${{ steps.release.outputs.backend_image }}:latest
+          cache-from: type=registry,ref=${{ steps.release.outputs.backend_image }}:latest
+          cache-to: type=inline
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.release.outputs.frontend_image }}:${{ steps.tag.outputs.sha }}
+            ${{ steps.release.outputs.frontend_image }}:latest
+          cache-from: type=registry,ref=${{ steps.release.outputs.frontend_image }}:latest
+          cache-to: type=inline
+
+      - name: Build and push Hermes plugin artifact
+        if: steps.hermes_plugin.outputs.changed == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ./third_party_plugins/hermes/memory/palaceoftruth
+          file: ./third_party_plugins/hermes/memory/palaceoftruth/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.release.outputs.hermes_plugin_image }}:${{ steps.tag.outputs.sha }}
+            ${{ steps.release.outputs.hermes_plugin_image }}:latest
+          cache-from: type=registry,ref=${{ steps.release.outputs.hermes_plugin_image }}:latest
+          cache-to: type=inline
+
+      - name: Package Hermes plugin release assets
+        if: steps.hermes_plugin.outputs.changed == 'true'
+        run: |
+          python3 scripts/package_hermes_memory_plugin.py --output-dir /tmp/hermes-plugin-release
+
+      - name: Create Hermes plugin GitHub release
+        if: steps.hermes_plugin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HERMES_PLUGIN_TAG: ${{ steps.hermes_plugin.outputs.tag }}
+          HERMES_PLUGIN_VERSION: ${{ steps.hermes_plugin.outputs.version }}
+          HERMES_PLUGIN_ASSET_BASE: ${{ steps.hermes_plugin.outputs.asset_base }}
+          HERMES_PLUGIN_IMAGE_TAG: ${{ steps.tag.outputs.sha }}
+          HERMES_PLUGIN_IMAGE: ${{ steps.release.outputs.hermes_plugin_image }}
+        run: |
+          if gh release view "$HERMES_PLUGIN_TAG" >/dev/null 2>&1; then
+            echo "Release $HERMES_PLUGIN_TAG already exists. Bump third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml before merging plugin updates." >&2
+            exit 1
+          fi
+          cat > /tmp/hermes-plugin-release/RELEASE_NOTES.md <<EOF
+          Hermes memory plugin release for Palace of Truth.
+
+          Version: ${HERMES_PLUGIN_VERSION}
+          Commit: ${GITHUB_SHA}
+          Container artifact: ${HERMES_PLUGIN_IMAGE}:${HERMES_PLUGIN_IMAGE_TAG}
+
+          Assets:
+          - ${HERMES_PLUGIN_ASSET_BASE}.tar.gz
+          - ${HERMES_PLUGIN_ASSET_BASE}.zip
+          - ${HERMES_PLUGIN_ASSET_BASE}.json
+          - ${HERMES_PLUGIN_ASSET_BASE}.sha256
+          EOF
+          gh release create "$HERMES_PLUGIN_TAG" \
+            "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.tar.gz" \
+            "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.zip" \
+            "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.json" \
+            "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.sha256" \
+            --title "Hermes Memory Plugin v${HERMES_PLUGIN_VERSION}" \
+            --notes-file /tmp/hermes-plugin-release/RELEASE_NOTES.md
+
+  publish-chart:
+    needs: build-push
+    if: github.event_name != 'pull_request'
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Read chart name
+        id: chart
+        run: |
+          CHART_NAME=$(awk '$1 == "name:" { print $2; exit }' chart/Chart.yaml)
+          if [ -z "$CHART_NAME" ]; then
+            echo "Failed to read chart name from chart/Chart.yaml" >&2
+            exit 1
+          fi
+          echo "name=${CHART_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.14.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish chart and commit release coordinates
+        id: version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3 4 5; do
+            echo "Chart release attempt ${attempt}"
+            git fetch origin main
+            git checkout -B main origin/main
+
+            VERSION=$(python3 scripts/bump_chart_release.py --app-version "${GITHUB_SHA::8}")
+            git add chart/Chart.yaml
+            git commit -m "chore(ci): bump chart to ${VERSION} [skip ci]"
+
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Main advanced during chart bump; retrying from latest origin/main" >&2
+              git rebase --abort || true
+              sleep $((attempt * 2))
+              continue
+            fi
+
+            helm package chart/ --destination /tmp/charts
+            helm push "/tmp/charts/${{ steps.chart.outputs.name }}-${VERSION}.tgz" \
+              oci://${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}
+
+            if git push origin HEAD:main; then
+              echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Main advanced before push; retrying with a freshly computed chart version" >&2
+            sleep $((attempt * 2))
+          done
+
+          echo "Failed to publish chart release after 5 attempts" >&2
+          exit 1

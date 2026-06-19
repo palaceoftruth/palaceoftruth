@@ -1,0 +1,87 @@
+{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+---
+# Headless service required by the replica StatefulSet for stable pod DNS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.valkeyReplicaName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: {{ include "palaceoftruth.valkeyReplicaName" . }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "palaceoftruth.valkeyReplicaName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "palaceoftruth.valkeyReplicaCount" . }}
+  serviceName: {{ include "palaceoftruth.valkeyReplicaName" . }}
+  selector:
+    matchLabels:
+      app: {{ include "palaceoftruth.valkeyReplicaName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.valkeyReplicaName" . }}
+        {{- include "palaceoftruth.labels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: init-config
+          image: {{ .Values.valkey.image }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Reconcile the named replica back to the primary service after
+              # a pod/IP recycle; stale Sentinel rewrites can point at dead pod IPs.
+              if [ ! -f /data/valkey.conf ]; then
+                echo "replicaof {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379" > /data/valkey.conf
+                echo "appendonly yes" >> /data/valkey.conf
+                echo "appendfilename appendonly.aof" >> /data/valkey.conf
+              else
+                sed -i '/^replicaof /d;/^slaveof /d' /data/valkey.conf
+                echo "replicaof {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379" >> /data/valkey.conf
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: valkey
+          image: {{ .Values.valkey.image }}
+          command: ["valkey-server", "/data/valkey.conf"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.valkey.storage.size }}
+{{- end }}

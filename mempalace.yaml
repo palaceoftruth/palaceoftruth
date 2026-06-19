@@ -1,0 +1,18 @@
+wing: palaceoftruth
+rooms:
+- name: frontend
+  description: Files from frontend/
+- name: k8s
+  description: Files from k8s/
+- name: argocd
+  description: Files from argocd/
+- name: chart
+  description: Files from chart/
+- name: backend
+  description: Files from backend/
+- name: documentation
+  description: Files from public Markdown and package-local README files
+- name: testing
+  description: Files from tests/
+- name: general
+  description: Files that don't fit other rooms

@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "pack_id": "palace-agent-memory-compatibility-fixtures-v1",
+  "description": "Sanitized offline fixtures that normalize the same Palace experience-memory cases across REST-shaped output, streamable HTTP MCP, stdio MCP, and Hermes-rendered recall text.",
+  "artifact_metadata": {
+    "source": "SAR-480",
+    "offline_report_only": true,
+    "network_calls": false,
+    "writes_memory": false,
+    "raw_memory_content_reported": false
+  },
+  "benchmark_targets": {
+    "compatibility_fixture_r5": {
+      "metric": "R@5",
+      "value": 1.0
+    }
+  },
+  "cases": [
+    {
+      "id": "current-profile-beats-stale-endpoint",
+      "category": "experience-compatibility",
+      "query": "current Palace local MCP profile and remote fallback policy",
+      "display_limit": 5,
+      "context_budget_chars": 520,
+      "expected_item_ids": ["workspace-palace-current-profile"],
+      "current_item_ids": ["workspace-palace-current-profile"],
+      "stale_item_ids": ["workspace-palace-remote-default"],
+      "expected_top_rank_item_id": "workspace-palace-current-profile",
+      "expected_scope_labels": {
+        "workspace-palace-current-profile": "workspace/palaceoftruth",
+        "workspace-palace-remote-default": "workspace/palaceoftruth"
+      },
+      "expected_hermes_scope_labels": ["workspace/palaceoftruth"],
+      "expected_hermes_titles": ["Current local Palace MCP profile"],
+      "expected_route": "selected_scope",
+      "forbidden_context_terms": ["PALACEOFTRUTH_API_KEY", "Bearer"],
+      "transport_outputs": {
+        "rest": {
+          "trace": {
+            "fallback_used": false,
+            "ranking_traces": [{"route": "selected_scope"}]
+          },
+          "results": [
+            {
+              "item_id": "workspace-palace-current-profile",
+              "title": "Current local Palace MCP profile",
+              "score": 0.96,
+              "scope": {"type": "workspace", "key": "palaceoftruth"}
+            },
+            {
+              "item_id": "workspace-palace-remote-default",
+              "title": "Older remote MCP default note",
+              "score": 0.81,
+              "scope": {"type": "workspace", "key": "palaceoftruth"}
+            }
+          ]
+        },
+        "mcp-http": {
+          "trace": {
+            "fallback_used": false,
+            "ranking_traces": [{"route": "selected_scope"}]
+          },
+          "results": [
+            {
+              "item_id": "workspace-palace-current-profile",
+              "title": "Current local Palace MCP profile",
+              "score": 0.96,
+              "scope_label": "workspace/palaceoftruth"
+            },
+            {
+              "item_id": "workspace-palace-remote-default",
+              "title": "Older remote MCP default note",
+              "score": 0.81,
+              "scope_label": "workspace/palaceoftruth"
+            }
+          ]
+        },
+        "mcp-stdio": {
+          "trace": {
+            "fallback_used": false,
+            "search_ranking_trace": {"route": "selected_scope"}
+          },
+          "results": [
+            {
+              "item_id": "workspace-palace-current-profile",
+              "title": "Current local Palace MCP profile",
+              "score": 0.96,
+              "scope": {"type": "workspace", "key": "palaceoftruth"}
+            },
+            {
+              "item_id": "workspace-palace-remote-default",
+              "title": "Older remote MCP default note",
+              "score": 0.81,
+              "scope": {"type": "workspace", "key": "palaceoftruth"}
+            }
+          ]
+        },
+        "hermes": {
+          "route": "selected_scope",
+          "results": [
+            {
+              "item_id": "workspace-palace-current-profile",
+              "title": "Current local Palace MCP profile",
+              "score": 0.96,
+              "scope_label": "workspace/palaceoftruth"
+            },
+            {
+              "item_id": "workspace-palace-remote-default",
+              "title": "Older remote MCP default note",
+              "score": 0.81,
+              "scope_label": "workspace/palaceoftruth"
+            }
+          ],
+          "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/palaceoftruth.\n- [0.96] Current local Palace MCP profile [note]\n  Use the repo-owned stdio adapter for local Codex; remote staging is only an explicit fallback."
+        }
+      }
+    },
+    {
+      "id": "workflow-gotcha-thread-marker",
+      "category": "experience-compatibility",
+      "query": "DOTODO claim should use current Codex thread id",
+      "display_limit": 5,
+      "context_budget_chars": 520,
+      "expected_item_ids": ["agent-codex-current-thread"],
+      "current_item_ids": ["agent-codex-current-thread"],
+      "stale_item_ids": ["agent-codex-blank-thread"],
+      "expected_top_rank_item_id": "agent-codex-current-thread",
+      "expected_scope_labels": {
+        "agent-codex-current-thread": "agent/codex",
+        "agent-codex-blank-thread": "agent/codex"
+      },
+      "expected_hermes_scope_labels": ["agent/codex"],
+      "expected_hermes_titles": ["DOTODO current thread claim"],
+      "expected_route": "selected_scope",
+      "transport_outputs": {
+        "rest": {
+          "trace": {"fallback_used": false, "ranking_traces": [{"route": "selected_scope"}]},
+          "results": [
+            {"item_id": "agent-codex-current-thread", "title": "DOTODO current thread claim", "score": 0.94, "scope": {"type": "agent", "key": "codex"}},
+            {"item_id": "agent-codex-blank-thread", "title": "Blank run-thread claim gotcha", "score": 0.8, "scope": {"type": "agent", "key": "codex"}}
+          ]
+        },
+        "mcp-http": {
+          "trace": {"fallback_used": false, "ranking_traces": [{"route": "selected_scope"}]},
+          "results": [
+            {"item_id": "agent-codex-current-thread", "title": "DOTODO current thread claim", "score": 0.94, "scope_label": "agent/codex"},
+            {"item_id": "agent-codex-blank-thread", "title": "Blank run-thread claim gotcha", "score": 0.8, "scope_label": "agent/codex"}
+          ]
+        },
+        "mcp-stdio": {
+          "trace": {"fallback_used": false, "search_ranking_trace": {"route": "selected_scope"}},
+          "results": [
+            {"item_id": "agent-codex-current-thread", "title": "DOTODO current thread claim", "score": 0.94, "scope": {"type": "agent", "key": "codex"}},
+            {"item_id": "agent-codex-blank-thread", "title": "Blank run-thread claim gotcha", "score": 0.8, "scope": {"type": "agent", "key": "codex"}}
+          ]
+        },
+        "hermes": {
+          "route": "selected_scope",
+          "results": [
+            {"item_id": "agent-codex-current-thread", "title": "DOTODO current thread claim", "score": 0.94, "scope_label": "agent/codex"},
+            {"item_id": "agent-codex-blank-thread", "title": "Blank run-thread claim gotcha", "score": 0.8, "scope_label": "agent/codex"}
+          ],
+          "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: agent/codex.\n- [0.94] DOTODO current thread claim [note]\n  Use CODEX_THREAD_ID when recording claim state; blank thread comments are stale claim evidence."
+        }
+      }
+    },
+    {
+      "id": "multi-target-source-coverage",
+      "category": "experience-compatibility",
+      "query": "what evidence explains the next Palace reliability task",
+      "display_limit": 5,
+      "context_budget_chars": 560,
+      "expected_item_ids": ["workspace-palace-task-source", "workspace-palace-research-source"],
+      "expected_source_groups": {
+        "central_task": ["workspace-palace-task-source"],
+        "research_artifact": ["workspace-palace-research-source"]
+      },
+      "expected_scope_labels": {
+        "workspace-palace-task-source": "workspace/palaceoftruth",
+        "workspace-palace-research-source": "workspace/palaceoftruth",
+        "workspace-exampleos-interference": "workspace/exampleos"
+      },
+      "expected_hermes_scope_labels": ["workspace/palaceoftruth"],
+      "expected_hermes_titles": ["SAR-480 task contract", "Palace improvement research"],
+      "expected_route": "global_merge",
+      "interfering_item_ids": ["workspace-exampleos-interference"],
+      "transport_outputs": {
+        "rest": {
+          "trace": {"fallback_used": true, "ranking_traces": [{"route": "global_merge"}]},
+          "results": [
+            {"item_id": "workspace-palace-task-source", "title": "SAR-480 task contract", "score": 0.95, "scope": {"type": "workspace", "key": "palaceoftruth"}},
+            {"item_id": "workspace-palace-research-source", "title": "Palace improvement research", "score": 0.91, "scope": {"type": "workspace", "key": "palaceoftruth"}},
+            {"item_id": "workspace-exampleos-interference", "title": "ExampleOS reliability task", "score": 0.72, "scope": {"type": "workspace", "key": "exampleos"}}
+          ]
+        },
+        "mcp-http": {
+          "trace": {"fallback_used": true, "ranking_traces": [{"route": "global_merge"}]},
+          "results": [
+            {"item_id": "workspace-palace-task-source", "title": "SAR-480 task contract", "score": 0.95, "scope_label": "workspace/palaceoftruth"},
+            {"item_id": "workspace-palace-research-source", "title": "Palace improvement research", "score": 0.91, "scope_label": "workspace/palaceoftruth"},
+            {"item_id": "workspace-exampleos-interference", "title": "ExampleOS reliability task", "score": 0.72, "scope_label": "workspace/exampleos"}
+          ]
+        },
+        "mcp-stdio": {
+          "trace": {"fallback_used": true, "search_ranking_trace": {"route": "global_merge"}},
+          "results": [
+            {"item_id": "workspace-palace-task-source", "title": "SAR-480 task contract", "score": 0.95, "scope": {"type": "workspace", "key": "palaceoftruth"}},
+            {"item_id": "workspace-palace-research-source", "title": "Palace improvement research", "score": 0.91, "scope": {"type": "workspace", "key": "palaceoftruth"}},
+            {"item_id": "workspace-exampleos-interference", "title": "ExampleOS reliability task", "score": 0.72, "scope": {"type": "workspace", "key": "exampleos"}}
+          ]
+        },
+        "hermes": {
+          "route": "global_merge",
+          "fallback_used": true,
+          "results": [
+            {"item_id": "workspace-palace-task-source", "title": "SAR-480 task contract", "score": 0.95, "scope_label": "workspace/palaceoftruth"},
+            {"item_id": "workspace-palace-research-source", "title": "Palace improvement research", "score": 0.91, "scope_label": "workspace/palaceoftruth"},
+            {"item_id": "workspace-exampleos-interference", "title": "ExampleOS reliability task", "score": 0.72, "scope_label": "workspace/exampleos"}
+          ],
+          "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/palaceoftruth and then global merge.\n- [0.95] SAR-480 task contract [note]\n- [0.91] Palace improvement research [note]\n- Interfering workspace hits were lower ranked and outside the answer source set."
+        }
+      }
+    }
+  ]
+}

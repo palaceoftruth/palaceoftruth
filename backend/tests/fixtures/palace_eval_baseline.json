@@ -1,0 +1,5 @@
+{
+  "min_palace_accuracy": 1.0,
+  "min_route_accuracy": 1.0,
+  "min_accuracy_delta": 0.3
+}

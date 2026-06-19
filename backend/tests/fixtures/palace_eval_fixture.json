@@ -1,0 +1,128 @@
+{
+  "items": [
+    {
+      "id": "pricing-launch-note",
+      "title": "Launch copy draft",
+      "summary": "Draft CTA and offer framing for the pricing release.",
+      "body": "Rewrite the CTA before launch day. Keep the offer framing tight and founder-readable.",
+      "source_type": "note",
+      "tags": ["pricing", "launch", "cta"],
+      "categories": ["product"],
+      "sync_relative_path": "product/pricing/launch-copy.md"
+    },
+    {
+      "id": "customer-objections",
+      "title": "Acme transcript",
+      "summary": "Customer calls objections about rollout and pricing risk.",
+      "body": "They worried about rollout risk, annual contract friction, and onboarding drag.",
+      "source_type": "note",
+      "tags": ["customer", "calls"],
+      "categories": ["customer"],
+      "sync_relative_path": "customers/calls/acme-transcript.md"
+    },
+    {
+      "id": "pricing-risk-memo",
+      "title": "Pricing risk memo",
+      "summary": "Customer objections collected for launch planning.",
+      "body": "Pricing risk, customer objections, launch review, and support notes for the release.",
+      "source_type": "note",
+      "tags": ["pricing", "risk"],
+      "categories": ["product"],
+      "sync_relative_path": "product/pricing/risk-memo.md"
+    },
+    {
+      "id": "failover-runbook",
+      "title": "Primary failover checklist",
+      "summary": "Steps for worker recovery after Redis or Postgres trouble.",
+      "body": "Verify Redis health, restart workers, and confirm queue drain after cluster failover. Check stale sync source warnings during worker recovery.",
+      "source_type": "note",
+      "tags": ["infra", "workers", "failover"],
+      "categories": ["ops"],
+      "sync_relative_path": "infra/agents/failover-checklist.md"
+    },
+    {
+      "id": "founder-board-note",
+      "title": "Board update memo",
+      "summary": "Founder note about trust language and retrieval quality for the April board update.",
+      "body": "Keep the board update direct. Mention support feedback and metrics, but avoid pricing launch CTA language.",
+      "source_type": "note",
+      "tags": ["founder", "board", "trust"],
+      "categories": ["journal"],
+      "sync_relative_path": "founder/weekly/board-update.md"
+    },
+    {
+      "id": "research-market-memo",
+      "title": "Competitor trust analysis",
+      "summary": "Market research on competitor positioning, trust claims, and evidence gaps.",
+      "body": "Compare competitor trust language with pricing launch messaging and support promises.",
+      "source_type": "note",
+      "tags": ["research", "competitor", "trust"],
+      "categories": ["market"],
+      "sync_relative_path": "research/market/competitor-trust.md"
+    },
+    {
+      "id": "shared-memory-contract",
+      "title": "Tenant shared memory contract",
+      "summary": "Machine contract for scoped retrieval, tenant_shared fallback, and source item auditing.",
+      "body": "Use POST memory retrieve for scoped retrieval with source_item_id audit metadata and fallback trace output.",
+      "source_type": "note",
+      "tags": ["agent", "memory", "contract"],
+      "categories": ["engineering"],
+      "sync_relative_path": "infra/agents/memory-contract.md"
+    },
+    {
+      "id": "source-freshness-dashboard",
+      "title": "Source freshness dashboard capture",
+      "summary": "Screenshot capture showing stale sync source status and missing artifact previews in the operator dashboard.",
+      "body": "The capture records the operator control tower state after a source fell behind.",
+      "source_type": "image",
+      "tags": ["ops", "source", "freshness"],
+      "categories": ["ops"],
+      "sync_relative_path": "ops/source-health/dashboard-capture.png"
+    }
+  ],
+  "queries": [
+    {
+      "query": "Where is the pricing launch CTA copy?",
+      "expected_item_id": "pricing-launch-note",
+      "expected_wing": "Product / Growth",
+      "expected_room": "Pricing"
+    },
+    {
+      "query": "Where are the customer calls objections about pricing risk?",
+      "expected_item_id": "customer-objections",
+      "expected_wing": "Customers / Calls",
+      "expected_room": "Calls"
+    },
+    {
+      "query": "Which notes cover cluster failover and worker recovery?",
+      "expected_item_id": "failover-runbook",
+      "expected_wing": "Infra / Code / Agents",
+      "expected_room": "Agents"
+    },
+    {
+      "query": "Where is the founder board note about trust language?",
+      "expected_item_id": "founder-board-note",
+      "expected_wing": "Founder notes",
+      "expected_room": "Weekly"
+    },
+    {
+      "query": "Which market research memo covers competitor evidence gaps?",
+      "expected_item_id": "research-market-memo",
+      "expected_wing": "Research / Market",
+      "expected_room": "Market"
+    },
+    {
+      "query": "Find the tenant_shared fallback contract for scoped retrieval audit metadata.",
+      "expected_item_id": "shared-memory-contract",
+      "expected_wing": "Infra / Code / Agents",
+      "expected_room": "Agents"
+    },
+    {
+      "query": "Which screenshot shows stale sync source warnings in the operator dashboard?",
+      "expected_item_id": "source-freshness-dashboard",
+      "expected_wing": "Ops",
+      "expected_room": "Source Health"
+    }
+  ]
+}

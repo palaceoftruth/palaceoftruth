@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "palaceoftruth-memory": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "../../backend",
+        "run",
+        "python",
+        "scripts/palaceoftruth_mcp.py"
+      ],
+      "cwd": ".",
+      "env": {
+        "PALACEOFTRUTH_API_BASE_URL": "https://api.palaceoftruth.test"
+      }
+    }
+  }
+}

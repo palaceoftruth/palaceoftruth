@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Palace Capture</title>
+    <link rel="icon" href="assets/icon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell popup-shell">
+      <header class="header">
+        <div>
+          <p class="eyebrow">Palace</p>
+          <h1>Capture</h1>
+        </div>
+        <img src="assets/icon.svg" alt="" width="32" height="32" />
+      </header>
+
+      <section class="panel">
+        <div class="kind-row">
+          <span id="kindLabel" class="kind-pill">Detecting</span>
+          <span id="stateLabel" class="state-text">Ready</span>
+        </div>
+        <p id="pageTitle" class="title-line">Loading current tab...</p>
+        <p id="reason" class="reason-line">Palace will choose the safest ingest route for this source.</p>
+      </section>
+
+      <section id="savedPanel" class="panel saved-panel" hidden>
+        <div class="kind-row">
+          <span id="savedLabel" class="saved-label">Checking saved state</span>
+          <span id="relatedCount" class="state-text"></span>
+        </div>
+        <ul id="relatedList" class="related-list" aria-label="Related saved web items"></ul>
+      </section>
+
+      <label class="field-label" for="tags">Tags</label>
+      <input id="tags" class="text-field" type="text" placeholder="research, read-later" autocomplete="off" />
+
+      <button id="saveButton" class="primary-button" type="button">Save to Palace</button>
+      <button id="settingsButton" class="ghost-button" type="button">Settings</button>
+
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+{{- if .Values.certificate.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-tls
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.ingress.tlsSecretName }}
+  issuerRef:
+    name: {{ .Values.certificate.clusterIssuer }}
+    kind: ClusterIssuer
+  dnsNames:
+    - {{ include "palaceoftruth.frontendHost" . | quote }}
+    - {{ include "palaceoftruth.apiHost" . | quote }}
+    {{- if and .Values.ingress.admin.enabled (ne (include "palaceoftruth.adminHost" .) (include "palaceoftruth.apiHost" .)) }}
+    - {{ include "palaceoftruth.adminHost" . | quote }}
+    {{- end }}
+    {{- if .Values.mcp.enabled }}
+    - {{ include "palaceoftruth.mcpHost" . | quote }}
+    {{- end }}
+{{- end }}
