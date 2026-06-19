@@ -19,29 +19,13 @@ env:
 
 jobs:
   validate:
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Configure self-hosted caches
-        run: |
-          TOOL_CACHE="${RUNNER_TEMP}/_tool"
-          UV_CACHE="${RUNNER_TEMP}/uv-cache"
-          UV_PYTHON_INSTALL_DIR="${RUNNER_TEMP}/uv-python"
-          mkdir -p "$TOOL_CACHE"
-          mkdir -p "$UV_CACHE"
-          mkdir -p "$UV_PYTHON_INSTALL_DIR"
-          # setup-python defaults to /Users/runner/hostedtoolcache on macOS.
-          # The hermes self-hosted runners use a different user, so use uv's
-          # managed Python path instead of actions/setup-python for validation.
-          echo "AGENT_TOOLSDIRECTORY=${TOOL_CACHE}" >> "$GITHUB_ENV"
-          echo "RUNNER_TOOL_CACHE=${TOOL_CACHE}" >> "$GITHUB_ENV"
-          echo "UV_CACHE_DIR=${UV_CACHE}" >> "$GITHUB_ENV"
-          echo "UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR}" >> "$GITHUB_ENV"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -115,7 +99,7 @@ jobs:
   build-push:
     needs: validate
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
@@ -262,7 +246,7 @@ jobs:
   publish-chart:
     needs: build-push
     if: github.event_name != 'pull_request'
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
