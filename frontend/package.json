@@ -20,21 +20,21 @@
     "react-dom": "^18.3.1",
     "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^9.0.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^7.18.0"
   },
   "overrides": {
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.11",
     "esbuild": "^0.25.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.1",
+    "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.14",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^4.3.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^8.0.16"
   }
 }
