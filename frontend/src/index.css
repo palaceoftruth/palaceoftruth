@@ -1,6 +1,4 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 :root {
   color-scheme: dark;
@@ -102,11 +100,11 @@ body {
   }
 
   .sb-select {
-    @apply sb-input pr-10 text-zinc-200;
+    @apply w-full rounded-2xl border border-zinc-700 bg-zinc-950/80 px-4 py-3 pr-10 text-sm text-zinc-200 placeholder:text-zinc-500 outline-none transition-[border-color,background-color,box-shadow] duration-200 ease-out focus:border-sky-500 focus:ring-2 focus:ring-sky-500/10;
   }
 
   .sb-textarea {
-    @apply sb-input resize-y;
+    @apply w-full resize-y rounded-2xl border border-zinc-700 bg-zinc-950/80 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none transition-[border-color,background-color,box-shadow] duration-200 ease-out focus:border-sky-500 focus:ring-2 focus:ring-sky-500/10;
   }
 
   .sb-button-primary {
@@ -146,7 +144,7 @@ body {
   }
 
   .sb-tool-panel {
-    @apply sb-panel overflow-hidden;
+    @apply overflow-hidden rounded-[28px] border border-zinc-800/80 bg-zinc-950/70 shadow-[0_20px_80px_rgba(2,6,23,0.45)] backdrop-blur-xl;
   }
 
   .sb-tool-panel-header {
