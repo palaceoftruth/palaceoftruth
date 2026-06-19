@@ -197,11 +197,3 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
 
-## Open Source Readiness Notes
-
-The planned public repository target is `github.com/palaceoftruth/palaceoftruth`,
-but this repository remains the active source until the cutover is announced.
-AGPL-3.0-only licensing, trademark guidance, notices, contributing guidance,
-support policy, and security reporting instructions are tracked in this repo.
-Private deployment coordinates should live outside this public application repo
-and be replaced by external operators.
