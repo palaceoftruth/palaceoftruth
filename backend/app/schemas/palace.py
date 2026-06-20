@@ -137,6 +137,34 @@ class PalaceRoomDetail(BaseModel):
     redirect_target: PalaceRoomSummary | None = None
 
 
+class PalaceSourceChunkSummary(BaseModel):
+    id: uuid.UUID
+    chunk_index: int
+    chunk_digest: str
+    token_count: int | None = None
+    preview: str
+
+
+class PalaceSourceRecordSummary(BaseModel):
+    id: uuid.UUID
+    item_id: uuid.UUID
+    source_kind: str
+    source_uri: str | None = None
+    source_version: str
+    content_hash: str
+    status: Literal["active", "stale", "failed", "deleted", "superseded"]
+    failure_reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    chunk_count: int
+    chunks: list[PalaceSourceChunkSummary] = Field(default_factory=list)
+
+
+class PalaceItemSourceSummary(BaseModel):
+    tenant_id: str
+    item_id: uuid.UUID
+    source_records: list[PalaceSourceRecordSummary] = Field(default_factory=list)
+
+
 class PalaceRoomUpdate(BaseModel):
     name: str
 

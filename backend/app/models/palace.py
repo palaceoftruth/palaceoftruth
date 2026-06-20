@@ -189,6 +189,79 @@ class SyncSourceFile(Base):
     )
 
 
+class SourceRecord(Base):
+    __tablename__ = "source_records"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "item_id", "source_version", name="uq_source_records_tenant_item_version"),
+        CheckConstraint(
+            "status IN ('active', 'stale', 'failed', 'deleted', 'superseded')",
+            name="ck_source_records_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SourceChunk(Base):
+    __tablename__ = "source_chunks"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_record_id", "chunk_index", name="uq_source_chunks_tenant_record_index"),
+        UniqueConstraint("tenant_id", "source_record_id", "chunk_digest", name="uq_source_chunks_tenant_record_digest"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("source_records.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    span: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+
+
 class Wing(Base):
     __tablename__ = "wings"
     __table_args__ = (UniqueConstraint("tenant_id", "slug", name="uq_wings_tenant_slug"),)

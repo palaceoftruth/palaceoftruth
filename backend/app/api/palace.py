@@ -25,6 +25,7 @@ from app.schemas.memory import (
 )
 from app.schemas.palace import (
     PalaceControlTower,
+    PalaceItemSourceSummary,
     PalaceTemporalFactSummary,
     PalaceOverview,
     PalacePinRequest,
@@ -60,6 +61,7 @@ from app.services.palace import (
     update_room,
     update_sync_source,
 )
+from app.services.source_compiler import get_item_source_summary
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/palace", tags=["palace"], dependencies=[Depends(verify_api_key)])
@@ -602,6 +604,46 @@ async def get_palace_room(
     db: AsyncSession = Depends(get_db),
 ) -> PalaceRoomDetail:
     return await get_room_detail(db, request.state.tenant_id, room_id)
+
+
+@router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary)
+async def get_palace_item_sources(
+    item_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceItemSourceSummary:
+    summary = await get_item_source_summary(db, tenant_id=request.state.tenant_id, item_id=item_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return PalaceItemSourceSummary(
+        tenant_id=summary.tenant_id,
+        item_id=summary.item_id,
+        source_records=[
+            {
+                "id": record.id,
+                "item_id": record.item_id,
+                "source_kind": record.source_kind,
+                "source_uri": record.source_uri,
+                "source_version": record.source_version,
+                "content_hash": record.content_hash,
+                "status": record.status,
+                "failure_reason": record.failure_reason,
+                "metadata": record.metadata,
+                "chunk_count": record.chunk_count,
+                "chunks": [
+                    {
+                        "id": chunk.id,
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_digest": chunk.chunk_digest,
+                        "token_count": chunk.token_count,
+                        "preview": chunk.preview,
+                    }
+                    for chunk in record.chunks
+                ],
+            }
+            for record in summary.source_records
+        ],
+    )
 
 
 @router.patch("/rooms/{room_id}", response_model=PalaceRoomDetail)

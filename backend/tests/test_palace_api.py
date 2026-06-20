@@ -41,6 +41,7 @@ from app.schemas.palace import (
     SyncRunSummary,
 )
 from app.schemas.search import SearchResult
+from app.services.source_compiler import ItemSourceSummary, SourceChunkSummary, SourceRecordSummary
 from app.workers.queues import PALACE_WORKER_QUEUE
 
 
@@ -218,6 +219,53 @@ def test_post_sync_source_returns_credential_metadata_without_secret(monkeypatch
     payload = response.json()
     assert payload["credential_type"] == "github_pat"
     assert payload["has_stored_credential"] is True
+
+
+def test_get_palace_item_sources_is_tenant_bounded(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    item_id = uuid.uuid4()
+    record_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+
+    async def fake_get_item_source_summary(db, *, tenant_id: str, item_id: uuid.UUID):
+        assert tenant_id == "tenant-a"
+        return ItemSourceSummary(
+            tenant_id=tenant_id,
+            item_id=item_id,
+            source_records=(
+                SourceRecordSummary(
+                    id=record_id,
+                    item_id=item_id,
+                    source_kind="note",
+                    source_uri="https://example.test/source",
+                    source_version="version",
+                    content_hash="hash",
+                    status="active",
+                    failure_reason=None,
+                    metadata={"item_status": "ready"},
+                    chunk_count=1,
+                    chunks=(
+                        SourceChunkSummary(
+                            id=chunk_id,
+                            chunk_index=0,
+                            chunk_digest="digest",
+                            token_count=5,
+                            preview="chunk preview",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("app.api.palace.get_item_source_summary", fake_get_item_source_summary)
+
+    response = client.get(f"/api/v1/palace/sources/{item_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tenant_id"] == "tenant-a"
+    assert payload["item_id"] == str(item_id)
+    assert payload["source_records"][0]["chunks"][0]["preview"] == "chunk preview"
     assert "github_pat" not in payload
 
 
