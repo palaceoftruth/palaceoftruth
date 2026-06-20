@@ -210,6 +210,7 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and repo conventions
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
 - [DESIGN.md](DESIGN.md): frontend and product design guidance
+- [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
 - [plugins/palaceoftruth-memory/README.md](plugins/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
