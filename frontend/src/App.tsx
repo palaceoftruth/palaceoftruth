@@ -16,6 +16,7 @@ const Feeds = lazy(() => import("./pages/Feeds"));
 const Sources = lazy(() => import("./pages/Sources"));
 const Palace = lazy(() => import("./pages/Palace"));
 const PalaceControlTower = lazy(() => import("./pages/PalaceControlTower"));
+const PalaceReviewInbox = lazy(() => import("./pages/PalaceReviewInbox"));
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="feeds" element={<Feeds />} />
           <Route path="palace" element={<Palace />} />
           <Route path="palace/control-tower" element={<PalaceControlTower />} />
+          <Route path="palace/review-inbox" element={<PalaceReviewInbox />} />
           <Route path="graph" element={<Graph />} />
           <Route path="settings" element={<Settings />} />
           <Route path="api-docs" element={<ApiDocs />} />

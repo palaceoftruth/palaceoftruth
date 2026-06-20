@@ -11,12 +11,17 @@ from app.schemas.curation_artifact import (
     CandidateCurationArtifactOut,
     CandidatePromotionHandoffOut,
     CandidateCurationArtifactUpdate,
+    ReviewInboxActionRequest,
+    ReviewInboxActionResponse,
+    ReviewInboxResponse,
 )
 from app.services.candidate_curation_promotion import render_candidate_promotion_handoff
 from app.services.curation_artifacts import (
     CandidateCurationArtifactError,
+    apply_review_inbox_action,
     create_candidate_curation_artifact,
     get_candidate_curation_artifact,
+    list_review_inbox,
     list_candidate_curation_artifacts,
     update_candidate_curation_artifact,
 )
@@ -71,6 +76,40 @@ async def post_curation_artifact(
         await db.rollback()
         raise _validation_error(exc) from exc
     return CandidateCurationArtifactOut.model_validate(artifact)
+
+
+@router.get("/review-inbox", response_model=ReviewInboxResponse)
+async def get_review_inbox(
+    request: Request,
+    include_deferred: bool = False,
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> ReviewInboxResponse:
+    return await list_review_inbox(
+        db,
+        tenant_id=request.state.tenant_id,
+        include_deferred=include_deferred,
+        limit=limit,
+    )
+
+
+@router.post("/review-inbox/actions", response_model=ReviewInboxActionResponse)
+async def post_review_inbox_action(
+    body: ReviewInboxActionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> ReviewInboxActionResponse:
+    try:
+        artifacts = await apply_review_inbox_action(db, tenant_id=request.state.tenant_id, body=body)
+        await db.commit()
+    except CandidateCurationArtifactError as exc:
+        await db.rollback()
+        raise _validation_error(exc) from exc
+    return ReviewInboxActionResponse(
+        action=body.action,
+        artifacts=[CandidateCurationArtifactOut.model_validate(artifact) for artifact in artifacts],
+        updated=len(artifacts),
+    )
 
 
 @router.get("/{artifact_id}", response_model=CandidateCurationArtifactOut)

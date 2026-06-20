@@ -22,6 +22,7 @@ CandidateArtifactStatus = Literal[
     "deprecated",
     "superseded",
 ]
+ReviewInboxAction = Literal["accept", "reject", "pin", "defer"]
 
 
 def _not_blank(value: str, field_name: str) -> str:
@@ -218,3 +219,57 @@ class CandidatePromotionHandoffOut(BaseModel):
     gate_evidence: dict[str, Any]
     rollback_or_deprecation_notes: list[str]
     rendered_handoff: str
+
+
+class ReviewInboxItemOut(BaseModel):
+    artifact: CandidateCurationArtifactOut
+    suggested_action: str
+    confidence: float | None
+    source_count: int
+    freshness: Literal["fresh", "stale", "conflicting", "needs_source"]
+    affected_scope: str
+    pinned: bool = False
+    deferred: bool = False
+    reversible_actions: list[str]
+
+
+class ReviewInboxSummaryOut(BaseModel):
+    total: int
+    needs_source: int
+    conflicting: int
+    stale: int
+    pinned: int
+    deferred: int
+
+
+class ReviewInboxResponse(BaseModel):
+    items: list[ReviewInboxItemOut]
+    summary: ReviewInboxSummaryOut
+
+
+class ReviewInboxActionRequest(BaseModel):
+    action: ReviewInboxAction
+    artifact_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+    actor: str = Field(default="operator", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
+    defer_until: datetime | None = None
+
+    @field_validator("artifact_ids")
+    @classmethod
+    def artifact_ids_unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        unique = list(dict.fromkeys(value))
+        if len(unique) != len(value):
+            raise ValueError("artifact_ids must be unique")
+        return unique
+
+    @model_validator(mode="after")
+    def validate_batch_safety(self) -> "ReviewInboxActionRequest":
+        if len(self.artifact_ids) > 1 and self.action not in {"pin", "defer"}:
+            raise ValueError("batch review inbox actions are limited to pin and defer")
+        return self
+
+
+class ReviewInboxActionResponse(BaseModel):
+    action: ReviewInboxAction
+    artifacts: list[CandidateCurationArtifactOut]
+    updated: int
