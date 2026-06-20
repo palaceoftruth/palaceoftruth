@@ -33,7 +33,8 @@ def test_lifecycle_payloads_use_scoped_dry_run_defaults() -> None:
     assert payload["workspace_key"] == "palaceoftruth"
     assert payload["dry_run"] is True
     steps = {step["tool"]: step for step in payload["steps"]}
-    assert steps["palace_context"]["arguments"]["memory_scope_key"] == "codex"
+    assert steps["get_wakeup_context"]["arguments"]["agent_scope_key"] == "codex"
+    assert steps["get_wakeup_context"]["arguments"]["workspace_scope_keys"] == ["palaceoftruth"]
     assert steps["retrieve_agent_memory"]["arguments"]["workspace_scope_keys"] == ["palaceoftruth"]
     assert steps["retrieve_agent_memory"]["arguments"]["include_broad_corpus"] is False
     checkpoint_args = steps["capture_checkpoint"]["arguments"]
@@ -74,6 +75,7 @@ def test_plugin_readme_references_core_mcp_tools_and_fallback() -> None:
 
     assert "codex_session_lifecycle.py" in text
     assert "whoami" in text
+    assert "get_wakeup_context" in text
     assert "palace_context" in text
     assert "retrieve_agent_memory" in text
     assert "capture_checkpoint" in text

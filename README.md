@@ -122,6 +122,13 @@ The browser extension submits captures through `/api/v1/capture/browser`; see [e
 
 The standalone MCP adapter lives at [backend/app/mcp_server.py](backend/app/mcp_server.py). It is a thin MCP wrapper over the existing Palace REST API and supports `stdio` and streamable HTTP transports.
 
+For session startup, use `get_wakeup_context` when an agent needs one compact
+package with wake-up status, selected agent/workspace/session memory summaries,
+checkpoint pointers, readiness warnings, and safe follow-up probes. Use
+`palace_search` or `retrieve_agent_memory` after that for a specific question,
+and use `capture_checkpoint` only when writing a reviewed handoff or compaction
+checkpoint.
+
 The repo-packaged Codex plugin lives in [plugins/palaceoftruth-memory](plugins/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
 For governed multi-agent memory positioning, use `scripts/demo_agent_organization_memory.py`. The demo shows specialist agents writing private `agent/<key>` memories while `agent/orchestrator` retrieves only server-authorized specialist scopes and writes only to its own agent scope.
@@ -196,4 +203,3 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [plugins/palaceoftruth-memory/README.md](plugins/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
-

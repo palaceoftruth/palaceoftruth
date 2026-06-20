@@ -30,12 +30,13 @@ cleanup operations.
 Use `scripts/codex_session_lifecycle.py` when you need copyable dry-run payloads
 for startup recall, checkpoint preview, or post-run write-back. The helper never
 connects to Palace and never prints raw secrets or transcript bodies.
+Packaged docs may render this lifecycle contract as `codex-session-lifecycle.md`.
 
 Before broad repo exploration or external research, run a Palace-first lookup
 unless the request is trivial and self-contained.
 
 When the MCP server exposes Codex-friendly aliases, prefer them for the common
-loop: `palace_context` for startup context, `palace_search` for route-aware
+loop: `get_wakeup_context` for compact startup context, `palace_search` for route-aware
 recall, `palace_remember` for concise durable write-back, and
 `palace_checkpoint` for handoff or compaction checkpoints. These aliases route
 through the same canonical tools and REST contract described below.
@@ -45,9 +46,10 @@ through the same canonical tools and REST contract described below.
 Use this sequence at the start of non-trivial work:
 
 1. `whoami` when tenant identity or MCP configuration is uncertain.
-2. `palace_context` for startup wake-up context plus recent scoped memory when
-   available; use `get_wakeup_brief` directly only when you need that single
-   primitive.
+2. `get_wakeup_context` for startup wake-up context, selected scope summaries,
+   checkpoint pointers, and readiness warnings when available; use
+   `palace_context` for legacy wake-up-plus-recent-memory shape, and
+   `get_wakeup_brief` directly only when you need that single primitive.
 3. `retrieve_agent_memory` with:
    - `agent_scope_key="codex"`
    - `workspace_scope_keys` containing stable repo or project keys, such as

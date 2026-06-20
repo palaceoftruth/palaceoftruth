@@ -95,14 +95,16 @@ will explicitly call `backfill_deferred_relationships`.
 Allowed tools are the adapter's current memory, wake-up, job-list, search,
 tag-list, item-list, bounded graph, item-relationship, temporal-fact, and
 Palace-room tools. The `palace_search`, `palace_remember`,
-`palace_checkpoint`, and `palace_context` tools are Codex-friendly aliases over
-those same canonical tools, not a separate memory API.
+`palace_checkpoint`, `palace_context`, and `get_wakeup_context` tools are
+Codex-friendly aliases over those same canonical tools, not a separate memory
+API.
 
 The only MCP write tools are `create_memory_entry`, `capture_checkpoint`, and
 `backfill_deferred_relationships`, plus the shorthand aliases
 `palace_remember` and `palace_checkpoint`. Graph, item-relationship,
 temporal-fact, Palace-room, wake-up, retrieval, search, tag, item, job-list,
-`palace_search`, and `palace_context` tools are read-only MCP surfaces.
+`palace_search`, `palace_context`, and `get_wakeup_context` tools are read-only
+MCP surfaces.
 
 Do not add or route through admin registration, key rotation, failed-job retry,
 cleanup, delete/restore, fact writes, graph writes, room mutation, sync-source

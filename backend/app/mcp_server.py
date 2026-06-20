@@ -80,6 +80,18 @@ ALL_MCP_OPERATION_SCOPES: tuple[McpOperationScope, ...] = (
     "destructive_prohibited",
 )
 WRITE_OPERATIONS = {"create_memory_entry", "capture_checkpoint", "backfill_deferred_relationships"}
+SESSION_CONTEXT_ENTRY_FIELDS = (
+    "id",
+    "item_id",
+    "title",
+    "summary",
+    "scope",
+    "source",
+    "source_url",
+    "created_at",
+    "updated_at",
+    "tags",
+)
 SECRET_PARAM_KEYS = {
     "api_key",
     "key_hash",
@@ -921,6 +933,143 @@ def _summarize_result_for_audit(result: Any) -> dict[str, Any]:
     return summary
 
 
+def _compact_memory_entries(payload: dict[str, Any], *, limit: int) -> dict[str, Any]:
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    compact_entries = []
+    for entry in entries[:limit]:
+        if not isinstance(entry, dict):
+            continue
+        compact_entries.append(
+            {
+                key: entry[key]
+                for key in SESSION_CONTEXT_ENTRY_FIELDS
+                if key in entry and entry[key] not in (None, [], {})
+            }
+        )
+    return {
+        "entries": compact_entries,
+        "total": payload.get("total", len(compact_entries)),
+        "limit": payload.get("limit", limit),
+        "next_cursor": payload.get("next_cursor"),
+    }
+
+
+async def _list_context_scope(
+    runtime: SecondBrainMcpRuntime,
+    *,
+    scope_type: ScopeType,
+    scope_key: str | None,
+    tags: list[str] | None,
+    tags_mode: Literal["any", "all"],
+    limit: int,
+) -> dict[str, Any]:
+    try:
+        payload = await runtime.api.list_memory_entries(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            tags=tags,
+            tags_mode=tags_mode,
+            limit=limit,
+            cursor=None,
+        )
+        status = "ok"
+        error = None
+    except Exception as exc:
+        payload = {"entries": [], "total": 0, "limit": limit, "next_cursor": None}
+        status = "error"
+        error = {"class": type(exc).__name__, "message": str(exc)}
+    result = _compact_memory_entries(payload, limit=limit)
+    result.update(
+        {
+            "status": status,
+            "scope": _build_scope(scope_type, scope_key),
+            "tags": tags or [],
+            "tags_mode": tags_mode,
+        }
+    )
+    if error:
+        result["error"] = error
+    return result
+
+
+def _session_context_freshness(wakeup_brief: dict[str, Any], scopes: list[dict[str, Any]]) -> dict[str, Any]:
+    warnings: list[str] = []
+    if wakeup_brief.get("stale") is True:
+        warnings.append("wakeup_brief_stale")
+    freshness = wakeup_brief.get("freshness")
+    if isinstance(freshness, str) and freshness.lower() not in {"fresh", "current", "ok"}:
+        warnings.append(f"wakeup_brief_{freshness.lower()}")
+    failed_scopes = [
+        f"{scope.get('scope', {}).get('type')}/{scope.get('scope', {}).get('key', '')}".rstrip("/")
+        for scope in scopes
+        if scope.get("status") != "ok"
+    ]
+    if failed_scopes:
+        warnings.append("partial_scope_context")
+    empty_scopes = [
+        f"{scope.get('scope', {}).get('type')}/{scope.get('scope', {}).get('key', '')}".rstrip("/")
+        for scope in scopes
+        if scope.get("status") == "ok" and not scope.get("entries")
+    ]
+    return {
+        "status": "partial" if failed_scopes else "ready",
+        "freshness": freshness,
+        "stale": bool(wakeup_brief.get("stale")),
+        "warnings": list(dict.fromkeys(warnings)),
+        "empty_scopes": list(dict.fromkeys(empty_scopes)),
+        "failed_scopes": failed_scopes,
+    }
+
+
+def _session_context_follow_up_probes(
+    *,
+    agent_scope_key: str | None,
+    workspace_scope_keys: list[str] | None,
+    session_scope_key: str | None,
+    include_tenant_shared: bool,
+) -> list[dict[str, Any]]:
+    probes: list[dict[str, Any]] = [
+        {
+            "purpose": "Focused recall across the same startup scopes.",
+            "tool": "palace_search",
+            "arguments": {
+                "query": "<specific task or question>",
+                "agent_scope_key": agent_scope_key,
+                "workspace_scope_keys": workspace_scope_keys or [],
+                "session_scope_key": session_scope_key,
+                "include_tenant_shared": include_tenant_shared,
+                "include_broad_corpus": False,
+                "display_limit": 5,
+                "context_budget_chars": 6000,
+            },
+        },
+        {
+            "purpose": "Inspect deterministic recent memory pointers for one scope.",
+            "tool": "list_memory_entries",
+            "arguments": {
+                "scope_type": "agent",
+                "scope_key": agent_scope_key,
+                "limit": 10,
+            },
+        },
+        {
+            "purpose": "Write a resumable checkpoint only after reviewing the session state.",
+            "tool": "capture_checkpoint",
+            "arguments": {
+                "title": "<checkpoint title>",
+                "summary": "<concise summary>",
+                "evidence_snippets": ["<non-sensitive evidence pointer>"],
+                "scope_type": "agent",
+                "scope_key": agent_scope_key,
+                "dry_run": True,
+            },
+        },
+    ]
+    return probes
+
+
 async def _record_audit_safely(
     runtime: SecondBrainMcpRuntime,
     *,
@@ -1010,6 +1159,7 @@ mcp = FastMCP(
         "Use create_memory_entry for durable memory writes, retrieve_memory for scoped recall, "
         "capture_checkpoint for safe Codex/Hermes checkpoint writes, "
         "list_memory_entries for deterministic scoped memory enumeration, "
+        "get_wakeup_context for compact session-start recall, "
         "list_memory_scopes, retrieve_agent_memory, and retrieve_memory_trajectory for route-aware agent recall, "
         "get_wakeup_brief for startup context, list_memory_jobs for read-only job health, "
         "get_graph/get_item_relationships/list_temporal_facts/get_palace_room for read-only graph, fact, "
@@ -1761,6 +1911,114 @@ async def palace_context(
         "wakeup_brief": wakeup_brief,
         "recent_memory": recent_memory,
     }
+
+
+@mcp.tool()
+async def get_wakeup_context(
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    agent_scope_key: str | None = "codex",
+    workspace_scope_keys: list[str] | None = None,
+    session_scope_key: str | None = None,
+    include_tenant_shared: bool = True,
+    wakeup_scope_type: WakeupBriefScopeType = "tenant",
+    wakeup_scope_key: str | None = None,
+    memory_limit_per_scope: int = 5,
+    checkpoint_limit_per_scope: int = 3,
+    include_recent_jobs: bool = True,
+) -> dict[str, Any]:
+    """Return compact session-start memory context with provenance pointers and readiness signals."""
+
+    async def call() -> dict[str, Any]:
+        if memory_limit_per_scope < 0:
+            raise ValueError("memory_limit_per_scope must be 0 or greater")
+        if checkpoint_limit_per_scope < 0:
+            raise ValueError("checkpoint_limit_per_scope must be 0 or greater")
+
+        runtime = _runtime(ctx)
+        tenant = await runtime.api.whoami()
+        wakeup_brief = await runtime.api.get_wakeup_brief(
+            scope_type=wakeup_scope_type,
+            scope_key=wakeup_scope_key,
+        )
+
+        selected_scopes: list[tuple[ScopeType, str | None]] = []
+        if agent_scope_key:
+            selected_scopes.append(("agent", agent_scope_key))
+        for workspace_scope_key in workspace_scope_keys or []:
+            if workspace_scope_key:
+                selected_scopes.append(("workspace", workspace_scope_key))
+        if session_scope_key:
+            selected_scopes.append(("session", session_scope_key))
+        if include_tenant_shared:
+            selected_scopes.append(("tenant_shared", None))
+
+        scope_summaries = [
+            await _list_context_scope(
+                runtime,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                tags=None,
+                tags_mode="any",
+                limit=memory_limit_per_scope,
+            )
+            for scope_type, scope_key in selected_scopes
+        ]
+        checkpoint_pointers = [
+            await _list_context_scope(
+                runtime,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                tags=["checkpoint"],
+                tags_mode="any",
+                limit=checkpoint_limit_per_scope,
+            )
+            for scope_type, scope_key in selected_scopes
+        ]
+        recent_jobs = None
+        if include_recent_jobs:
+            try:
+                recent_jobs = await runtime.api.list_memory_jobs(status=None, page=1, per_page=5)
+            except Exception as exc:
+                recent_jobs = {"status": "error", "error": {"class": type(exc).__name__, "message": str(exc)}}
+
+        readiness = _session_context_freshness(wakeup_brief, [*scope_summaries, *checkpoint_pointers])
+        if recent_jobs is not None and isinstance(recent_jobs, dict) and recent_jobs.get("status") == "error":
+            readiness["status"] = "partial"
+            readiness["warnings"] = list(dict.fromkeys([*readiness["warnings"], "recent_jobs_unavailable"]))
+
+        return {
+            "schema_version": 1,
+            "tenant": {
+                "tenant_id": tenant.get("tenant_id"),
+                "auth_mode": tenant.get("auth_mode"),
+            },
+            "readiness": readiness,
+            "wakeup_brief": wakeup_brief,
+            "selected_scopes": [
+                {"type": scope_type, **({"key": scope_key} if scope_key else {})}
+                for scope_type, scope_key in selected_scopes
+            ],
+            "scope_summaries": scope_summaries,
+            "checkpoint_pointers": checkpoint_pointers,
+            "recent_jobs": recent_jobs,
+            "follow_up_probes": _session_context_follow_up_probes(
+                agent_scope_key=agent_scope_key,
+                workspace_scope_keys=workspace_scope_keys,
+                session_scope_key=session_scope_key,
+                include_tenant_shared=include_tenant_shared,
+            ),
+            "privacy": {
+                "raw_memory_bodies_included": False,
+                "entry_fields": list(SESSION_CONTEXT_ENTRY_FIELDS),
+            },
+        }
+
+    return await _run_mcp_operation(
+        ctx,
+        operation="get_wakeup_context",
+        params={key: value for key, value in locals().items() if key != "call"},
+        call=call,
+    )
 
 
 @mcp.tool()
