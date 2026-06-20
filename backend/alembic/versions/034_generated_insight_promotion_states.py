@@ -1,6 +1,6 @@
 """Add generated insight promotion states.
 
-Revision ID: 034_generated_insight_promotion_states
+Revision ID: 034_gen_insight_promo_states
 Revises: 033_embedding_profile_metadata
 Create Date: 2026-06-20
 """
@@ -8,7 +8,7 @@ Create Date: 2026-06-20
 from alembic import op
 
 
-revision = "034_generated_insight_promotion_states"
+revision = "034_gen_insight_promo_states"
 down_revision = "033_embedding_profile_metadata"
 branch_labels = None
 depends_on = None
