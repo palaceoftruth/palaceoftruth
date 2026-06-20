@@ -15,11 +15,25 @@ from app.schemas.curation_artifact import (
 
 
 ARTIFACT_STATUSES: frozenset[str] = frozenset(
-    {"draft", "proposed", "approved", "rejected", "deprecated", "superseded"}
+    {
+        "draft",
+        "needs_source",
+        "reviewable",
+        "promoted",
+        "proposed",
+        "approved",
+        "rejected",
+        "stale",
+        "deprecated",
+        "superseded",
+    }
 )
-TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "deprecated", "superseded"})
+TERMINAL_STATUSES: frozenset[str] = frozenset({"rejected", "stale", "deprecated", "superseded"})
 DESTRUCTIVE_STATUSES: frozenset[str] = frozenset({"deleted", "purged", "removed"})
 APPROVAL_REQUIRED_GATES: tuple[str, ...] = ("approved_by", "approved_at", "decision")
+SOURCE_REQUIRED_STATUSES: frozenset[str] = frozenset({"reviewable", "promoted", "proposed", "approved"})
+STRICT_DIGEST_COVERAGE_STATUSES: frozenset[str] = frozenset({"reviewable", "promoted", "approved"})
+PROMOTED_STATUSES: frozenset[str] = frozenset({"promoted", "approved"})
 FORBIDDEN_BODY_MARKERS: tuple[str, ...] = (
     "-----begin",
     "api_key=",
@@ -76,13 +90,39 @@ def _validate_privacy_review(privacy_review: dict[str, Any]) -> None:
 
 
 def _validate_approval(status: str, approval: dict[str, Any]) -> None:
-    if status != "approved":
+    if status not in PROMOTED_STATUSES:
         return
     missing = [key for key in APPROVAL_REQUIRED_GATES if not approval.get(key)]
     if missing:
         raise CandidateCurationArtifactError(
-            f"approved candidates require approval fields: {', '.join(missing)}"
+            f"promoted candidates require approval fields: {', '.join(missing)}"
         )
+
+
+def _validate_source_support(
+    *,
+    status: str,
+    source_item_ids: list[str],
+    source_digests: dict[str, str],
+    metadata: dict[str, Any],
+) -> None:
+    if status in SOURCE_REQUIRED_STATUSES and (not source_item_ids or not source_digests):
+        raise CandidateCurationArtifactError(
+            f"{status} generated insights require source_item_ids and source_digests"
+        )
+    if status in STRICT_DIGEST_COVERAGE_STATUSES:
+        missing_digests = [item_id for item_id in source_item_ids if item_id not in source_digests]
+        if missing_digests:
+            raise CandidateCurationArtifactError(
+                "source_digests must include a stable digest for each source_item_id"
+            )
+    if status in PROMOTED_STATUSES:
+        if metadata.get("source_evidence_stale") is True:
+            raise CandidateCurationArtifactError("promoted generated insights require fresh source evidence")
+        if metadata.get("source_conflicts") is True:
+            raise CandidateCurationArtifactError(
+                "promoted generated insights require conflict-free source evidence"
+            )
 
 
 def validate_candidate_payload(
@@ -91,12 +131,21 @@ def validate_candidate_payload(
     candidate_body: str,
     privacy_review: dict[str, Any],
     approval: dict[str, Any],
+    source_item_ids: list[str] | None = None,
+    source_digests: dict[str, str] | None = None,
+    metadata: dict[str, Any] | None = None,
     superseded_by_artifact_id: uuid.UUID | None = None,
 ) -> str:
     normalized_status = _normalize_status(status)
     _validate_candidate_body(candidate_body)
     _validate_privacy_review(privacy_review)
     _validate_approval(normalized_status, approval)
+    _validate_source_support(
+        status=normalized_status,
+        source_item_ids=list(source_item_ids or []),
+        source_digests=dict(source_digests or {}),
+        metadata=dict(metadata or {}),
+    )
     if normalized_status == "superseded" and superseded_by_artifact_id is None:
         raise CandidateCurationArtifactError("superseded candidates require superseded_by_artifact_id")
     return normalized_status
@@ -159,6 +208,9 @@ async def create_candidate_curation_artifact(
         candidate_body=body.candidate_body,
         privacy_review=body.privacy_review,
         approval=body.approval,
+        source_item_ids=body.source_item_ids,
+        source_digests=body.source_digests,
+        metadata=body.metadata,
     )
     if body.supersedes_artifact_id is not None:
         await _ensure_lineage_target(db, tenant_id=tenant_id, artifact_id=body.supersedes_artifact_id)
@@ -239,6 +291,9 @@ async def update_candidate_curation_artifact(
     next_status = _normalize_status(body.status) if body.status is not None else artifact.status
     next_privacy_review = body.privacy_review if body.privacy_review is not None else artifact.privacy_review
     next_approval = body.approval if body.approval is not None else artifact.approval
+    next_source_item_ids = body.source_item_ids if body.source_item_ids is not None else artifact.source_item_ids
+    next_source_digests = body.source_digests if body.source_digests is not None else artifact.source_digests
+    next_metadata = body.metadata if body.metadata is not None else artifact.metadata_
     next_superseded_by = (
         body.superseded_by_artifact_id
         if body.superseded_by_artifact_id is not None
@@ -255,6 +310,9 @@ async def update_candidate_curation_artifact(
         candidate_body=artifact.candidate_body,
         privacy_review=next_privacy_review,
         approval=next_approval,
+        source_item_ids=next_source_item_ids,
+        source_digests=next_source_digests,
+        metadata=next_metadata,
         superseded_by_artifact_id=next_superseded_by,
     )
 
@@ -276,9 +334,9 @@ async def update_candidate_curation_artifact(
         artifact.deprecated_reason = body.deprecated_reason
     if body.status is not None:
         artifact.status = next_status
-        if next_status == "approved" and artifact.approved_at is None:
+        if next_status in PROMOTED_STATUSES and artifact.approved_at is None:
             artifact.approved_at = _utc_now()
-        if next_status == "deprecated" and artifact.deprecated_at is None:
+        if next_status in {"deprecated", "stale"} and artifact.deprecated_at is None:
             artifact.deprecated_at = _utc_now()
     _record_artifact_event(db, artifact=artifact, event_type="updated", previous_snapshot=previous_snapshot)
     await db.flush()
