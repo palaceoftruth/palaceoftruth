@@ -33,7 +33,7 @@ function NavSection({
         <NavLink
           key={to}
           to={to}
-          end={to === "/"}
+          end={to === "/" || to === "/palace"}
           onClick={onNavigate}
           title={collapsed ? label : undefined}
           className={({ isActive }) =>

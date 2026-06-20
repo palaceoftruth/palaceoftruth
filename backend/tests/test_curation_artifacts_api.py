@@ -365,6 +365,154 @@ def test_list_candidate_curation_artifacts_scopes_query_by_tenant_and_status() -
     assert "candidate_curation_artifacts.status = :status_1" in normalized_sql
 
 
+def test_review_inbox_lists_existing_generated_artifacts_with_triage_context() -> None:
+    source_ready = _artifact(tenant_id="tenant-a", status="reviewable")
+    source_ready.eval_summary = {"confidence": 0.82}
+    needs_source = _artifact(tenant_id="tenant-a", status="needs_source")
+    needs_source.source_item_ids = []
+    needs_source.source_digests = {}
+    session = FakeSession(artifacts={source_ready.id: source_ready, needs_source.id: needs_source})
+    client = _client(session)
+
+    response = client.get("/api/v1/curation-artifacts/review-inbox")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total"] == 2
+    assert body["summary"]["needs_source"] == 1
+    reviewable = next(item for item in body["items"] if item["artifact"]["id"] == str(source_ready.id))
+    assert reviewable["suggested_action"] == "accept"
+    assert reviewable["confidence"] == 0.82
+    assert reviewable["source_count"] == 1
+    assert reviewable["affected_scope"] == "codex:skills/codex-pm-tasks"
+    assert reviewable["reversible_actions"] == ["pin", "defer"]
+
+
+def test_review_inbox_filters_deferred_candidates_before_limit() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.get("/api/v1/curation-artifacts/review-inbox?limit=10")
+
+    assert response.status_code == 200
+    normalized_sql = " ".join(session.statements[0].lower().split())
+    assert "candidate_curation_artifacts.metadata" in normalized_sql
+    assert "is not true" in normalized_sql
+    assert "limit" in normalized_sql
+
+
+def test_review_inbox_safe_batch_pin_updates_metadata_without_status_change() -> None:
+    first = _artifact(tenant_id="tenant-a", status="reviewable")
+    second = _artifact(tenant_id="tenant-a", status="proposed")
+    session = FakeSession(artifacts={first.id: first, second.id: second})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "pin",
+            "artifact_ids": [str(first.id), str(second.id)],
+            "actor": "operator-a",
+            "note": "Keep visible for weekly review",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == 2
+    assert first.status == "reviewable"
+    assert second.status == "proposed"
+    assert first.metadata_["review_inbox"]["pinned"] is True
+    assert first.metadata_["review_inbox"]["last_actor"] == "operator-a"
+    assert session.commits == 1
+    assert len(session.events) == 2
+
+
+def test_review_inbox_rejects_batch_accept_as_unsafe() -> None:
+    first = _artifact(tenant_id="tenant-a", status="reviewable")
+    second = _artifact(tenant_id="tenant-a", status="reviewable")
+    client = _client(FakeSession(artifacts={first.id: first, second.id: second}))
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(first.id), str(second.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "batch review inbox actions are limited to pin and defer" in response.text
+
+
+def test_review_inbox_accept_promotes_only_source_backed_artifacts() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+            "note": "Evidence is sufficient",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifacts"][0]["status"] == "promoted"
+    assert body["artifacts"][0]["approval"]["approved_by"] == "operator-a"
+    assert body["artifacts"][0]["metadata"]["review_inbox"]["resolved"] is True
+    assert artifact.approved_at is not None
+    assert session.commits == 1
+
+
+def test_review_inbox_accept_rejects_source_backed_draft() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="draft")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "only reviewable or proposed" in response.json()["detail"]
+    assert artifact.status == "draft"
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
+def test_review_inbox_accept_blocks_unsourced_artifact() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="needs_source")
+    artifact.source_item_ids = []
+    artifact.source_digests = {}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "only reviewable or proposed" in response.json()["detail"]
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
 def test_get_candidate_curation_artifact_hides_other_tenant_artifact() -> None:
     artifact = _artifact(tenant_id="tenant-b")
     client = _client(FakeSession(artifacts={artifact.id: artifact}))
