@@ -526,7 +526,7 @@ class CandidateCurationArtifact(Base):
             name="ck_candidate_curation_artifact_kind",
         ),
         CheckConstraint(
-            "status IN ('draft', 'proposed', 'approved', 'rejected', 'deprecated', 'superseded')",
+            "status IN ('draft', 'needs_source', 'reviewable', 'promoted', 'proposed', 'approved', 'rejected', 'stale', 'deprecated', 'superseded')",
             name="ck_candidate_curation_artifact_status",
         ),
         CheckConstraint(

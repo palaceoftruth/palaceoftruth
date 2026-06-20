@@ -12,9 +12,13 @@ CandidateArtifactKind = Literal[
 ]
 CandidateArtifactStatus = Literal[
     "draft",
+    "needs_source",
+    "reviewable",
+    "promoted",
     "proposed",
     "approved",
     "rejected",
+    "stale",
     "deprecated",
     "superseded",
 ]
@@ -36,11 +40,15 @@ def _clean_string_list(values: list[str], field_name: str) -> list[str]:
     return cleaned
 
 
+def _source_digests_cover_items(source_item_ids: list[str], source_digests: dict[str, str]) -> bool:
+    return all(item_id in source_digests for item_id in source_item_ids)
+
+
 class CandidateCurationArtifactCreate(BaseModel):
     artifact_kind: CandidateArtifactKind
     target_runtime: str = Field(min_length=1, max_length=80)
     target_surface: str = Field(min_length=1)
-    status: Literal["draft", "proposed"] = "draft"
+    status: Literal["draft", "needs_source", "reviewable", "proposed"] = "draft"
     source_item_ids: list[str] = Field(default_factory=list)
     source_digests: dict[str, str] = Field(default_factory=dict)
     candidate_body: str = Field(min_length=1)
@@ -70,10 +78,16 @@ class CandidateCurationArtifactCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_evidence(self) -> "CandidateCurationArtifactCreate":
-        if not self.source_item_ids:
-            raise ValueError("source_item_ids must include at least one evidence pointer")
-        if not self.source_digests:
-            raise ValueError("source_digests must include at least one stable digest")
+        if self.status in {"reviewable", "proposed"}:
+            if not self.source_item_ids:
+                raise ValueError("source_item_ids must include at least one evidence pointer")
+            if not self.source_digests:
+                raise ValueError("source_digests must include at least one stable digest")
+            if self.status == "reviewable" and not _source_digests_cover_items(
+                self.source_item_ids,
+                self.source_digests,
+            ):
+                raise ValueError("source_digests must include a stable digest for each source_item_id")
         if not self.privacy_review:
             raise ValueError("privacy_review is required")
         return self
@@ -142,6 +156,10 @@ class CandidateCurationArtifactOut(BaseModel):
     eval_summary: dict[str, Any]
     approval: dict[str, Any]
     metadata: dict[str, Any] = Field(default={}, validation_alias="metadata_")
+    promotion_state: str = "draft"
+    source_support_level: str = "no_source"
+    advisory_generated_context: bool = True
+    promoted_source_backed: bool = False
     supersedes_artifact_id: uuid.UUID | None
     superseded_by_artifact_id: uuid.UUID | None
     deprecated_reason: str | None
@@ -150,6 +168,38 @@ class CandidateCurationArtifactOut(BaseModel):
     approved_at: datetime | None
     deprecated_at: datetime | None
     model_config = {"from_attributes": True, "populate_by_name": True}
+
+    @model_validator(mode="after")
+    def derive_promotion_labels(self) -> "CandidateCurationArtifactOut":
+        metadata = self.metadata or {}
+        if metadata.get("source_evidence_stale") is True or self.status in {"stale", "deprecated", "superseded"}:
+            source_support_level = "stale"
+        elif metadata.get("source_conflicts") is True:
+            source_support_level = "conflicting"
+        elif self.source_item_ids and not _source_digests_cover_items(self.source_item_ids, self.source_digests):
+            source_support_level = "partial_source"
+        elif len(self.source_item_ids) > 1:
+            source_support_level = "multi_source"
+        elif len(self.source_item_ids) == 1:
+            source_support_level = "single_source"
+        else:
+            source_support_level = "no_source"
+
+        legacy_state_map = {
+            "proposed": "reviewable",
+            "approved": "promoted",
+            "deprecated": "stale",
+            "superseded": "stale",
+        }
+        promotion_state = legacy_state_map.get(self.status, self.status)
+        self.promotion_state = promotion_state
+        self.source_support_level = source_support_level
+        self.promoted_source_backed = (
+            promotion_state == "promoted"
+            and source_support_level in {"single_source", "multi_source"}
+        )
+        self.advisory_generated_context = not self.promoted_source_backed
+        return self
 
 
 class CandidateCurationArtifactListResponse(BaseModel):
