@@ -157,6 +157,49 @@ def _scope_labels(record: dict[str, Any], k: int) -> list[str]:
     return labels
 
 
+def _trace_count_dict(record: dict[str, Any], key: str) -> dict[str, int]:
+    trace = record.get("trace") if isinstance(record.get("trace"), dict) else {}
+    value = trace.get(key)
+    if not isinstance(value, dict):
+        search_trace = trace.get("search_ranking_trace") if isinstance(trace.get("search_ranking_trace"), dict) else {}
+        value = search_trace.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(name): count
+        for name, count in value.items()
+        if isinstance(name, str) and isinstance(count, int) and not isinstance(count, bool) and count > 0
+    }
+
+
+def _count_result_field(record: dict[str, Any], k: int, field_name: str) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in record.get("results", [])[:k]:
+        if not isinstance(row, dict):
+            continue
+        value = row.get(field_name)
+        if isinstance(value, str) and value:
+            counts[value] += 1
+    return dict(sorted(counts.items()))
+
+
+def _result_mix(record: dict[str, Any], k: int) -> dict[str, dict[str, int]]:
+    trust_class_counts = _trace_count_dict(record, "trust_class_counts") or _count_result_field(record, k, "trust_class")
+    source_support_counts = _trace_count_dict(record, "source_support_counts") or _count_result_field(
+        record, k, "source_support_state"
+    )
+    freshness_counts = _trace_count_dict(record, "freshness_counts") or _count_result_field(record, k, "freshness")
+    derived_raw_counts = _trace_count_dict(record, "derived_raw_counts") or _count_result_field(
+        record, k, "derived_raw_classification"
+    )
+    return {
+        "trust_class_counts": trust_class_counts,
+        "source_support_counts": source_support_counts,
+        "freshness_counts": freshness_counts,
+        "derived_raw_counts": derived_raw_counts,
+    }
+
+
 def capture_metadata(record: dict[str, Any]) -> dict[str, str | None]:
     capture = record.get("capture") if isinstance(record.get("capture"), dict) else {}
     trace = record.get("trace") if isinstance(record.get("trace"), dict) else {}
@@ -236,6 +279,8 @@ def compare_captures(
             matched_capture_sets[baseline_metadata["capture_set"]] += 1
         baseline_ids = result_ids(baseline, top_k)
         current_ids = result_ids(current, top_k)
+        baseline_mix = _result_mix(baseline, top_k)
+        current_mix = _result_mix(current, top_k)
         expectations = expectation_metadata(baseline)
         baseline_top = baseline_ids[0] if baseline_ids else None
         current_top = current_ids[0] if current_ids else None
@@ -318,6 +363,10 @@ def compare_captures(
                 "latency_delta_ms": round(latency_delta_ms, 3),
                 "fallback_changed": fallback_changed,
                 "fallback_regressed": fallback_regressed,
+                "result_mix": {
+                    "baseline": baseline_mix,
+                    "current": current_mix,
+                },
                 "quality": quality,
                 "expectations": {
                     "query_type": expectations["query_type"],

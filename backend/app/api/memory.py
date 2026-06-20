@@ -144,12 +144,56 @@ def _result_diagnostics(results: list[Any], *, limit: int = 8) -> list[dict[str,
             "item_id": str(getattr(result, "item_id", "")),
             "source_type": getattr(result, "source_type", None),
             "score": getattr(result, "score", None),
+            "trust_class": getattr(result, "trust_class", None),
+            "source_support_state": getattr(result, "source_support_state", None),
+            "freshness": getattr(result, "freshness", None),
+            "derived_raw_classification": getattr(result, "derived_raw_classification", None),
         }
         retrieved_scope = getattr(result, "retrieved_scope_label", None) or getattr(result, "scope_label", None)
         if retrieved_scope:
             row["scope"] = retrieved_scope
         diagnostics.append({key: value for key, value in row.items() if value not in (None, "")})
     return diagnostics
+
+
+def _trace_count_field(trace: Any, key: str) -> dict[str, int]:
+    search_trace = getattr(trace, "search_ranking_trace", None)
+    if isinstance(search_trace, dict) and isinstance(search_trace.get(key), dict):
+        return {
+            str(name): count
+            for name, count in search_trace[key].items()
+            if isinstance(name, str) and isinstance(count, int) and not isinstance(count, bool) and count > 0
+        }
+    ranking_traces = getattr(trace, "ranking_traces", []) or []
+    for ranking_trace in ranking_traces:
+        value = getattr(ranking_trace, key, None)
+        if isinstance(value, dict):
+            return {
+                str(name): count
+                for name, count in value.items()
+                if isinstance(name, str) and isinstance(count, int) and not isinstance(count, bool) and count > 0
+            }
+    return {}
+
+
+def _trace_reuse_metrics(trace: Any) -> dict[str, Any]:
+    search_trace = getattr(trace, "search_ranking_trace", None)
+    if isinstance(search_trace, dict) and isinstance(search_trace.get("reuse_metrics"), dict):
+        return {
+            str(name): value
+            for name, value in search_trace["reuse_metrics"].items()
+            if isinstance(name, str) and isinstance(value, (str, int, float, bool))
+        }
+    ranking_traces = getattr(trace, "ranking_traces", []) or []
+    for ranking_trace in ranking_traces:
+        value = getattr(ranking_trace, "reuse_metrics", None)
+        if isinstance(value, dict):
+            return {
+                str(name): field_value
+                for name, field_value in value.items()
+                if isinstance(name, str) and isinstance(field_value, (str, int, float, bool))
+            }
+    return {}
 
 
 def _trace_diagnostics(trace: Any) -> dict[str, Any]:
@@ -167,6 +211,11 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
         "expanded_rooms": getattr(trace, "expanded_rooms", []) or [],
         "global_merge_rescued_results": getattr(trace, "global_merge_rescued_results", None),
         "merge_routes": [getattr(entry, "route", None) for entry in ranking_traces if getattr(entry, "route", None)],
+        "trust_class_counts": _trace_count_field(trace, "trust_class_counts"),
+        "source_support_counts": _trace_count_field(trace, "source_support_counts"),
+        "freshness_counts": _trace_count_field(trace, "freshness_counts"),
+        "derived_raw_counts": _trace_count_field(trace, "derived_raw_counts"),
+        "reuse_metrics": _trace_reuse_metrics(trace),
         "budget_truncated": getattr(trace, "context_budget_truncated", None),
         "completeness_warning": getattr(trace, "completeness_warning", None),
     }

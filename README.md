@@ -122,6 +122,16 @@ The browser extension submits captures through `/api/v1/capture/browser`; see [e
 
 The standalone MCP adapter lives at [backend/app/mcp_server.py](backend/app/mcp_server.py). It is a thin MCP wrapper over the existing Palace REST API and supports `stdio` and streamable HTTP transports.
 
+Retrieval diagnostics include report-only provenance labels for operators:
+`trust_class`, `source_support_state`, `freshness`, and
+`derived_raw_classification`. Treat `raw_source` and source-backed
+`curated_memory` as the strongest evidence, review `generated_synthesis` before
+copying it into durable memory, and avoid letting `low_support_generated`,
+`stale_context`, or `broad_fallback` results drive an answer without checking
+the underlying source. Aggregate trace counts compare the mix across direct
+retrieval, room routing, broad fallback, and generated artifacts; they are
+diagnostic labels, not ranking approvals.
+
 For session startup, use `get_wakeup_context` when an agent needs one compact
 package with wake-up status, selected agent/workspace/session memory summaries,
 checkpoint pointers, readiness warnings, and safe follow-up probes. Use
