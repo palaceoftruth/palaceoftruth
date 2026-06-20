@@ -133,6 +133,7 @@ The package exposes the current Palace MCP adapter tools only:
 - `palace_remember`
 - `palace_checkpoint`
 - `palace_context`
+- `get_wakeup_context`
 - `whoami`
 - `create_memory_entry`
 - `get_memory_job`
@@ -156,9 +157,15 @@ The package exposes the current Palace MCP adapter tools only:
 The write tools are `create_memory_entry`, `capture_checkpoint`, and
 `backfill_deferred_relationships`, plus their `palace_remember` and
 `palace_checkpoint` aliases. The graph, item-relationship,
-temporal-fact, Palace-room, wake-up, retrieval, search, tag, item, and job-list
-tools are read-only MCP surfaces, including the `palace_search` and
-`palace_context` aliases.
+temporal-fact, Palace-room, wake-up, retrieval, search, tag, item, job-list, and
+session-context tools are read-only MCP surfaces, including the `palace_search`,
+`palace_context`, and `get_wakeup_context` aliases.
+
+Use `get_wakeup_context` for startup recall when an agent needs a bounded
+hot-cache package: wake-up readiness, selected agent/workspace/session memory
+summaries, recent checkpoint pointers, provenance IDs, and safe next probes.
+Use `palace_search` or `retrieve_agent_memory` for a specific follow-up query,
+and use `capture_checkpoint` only when writing a reviewed checkpoint.
 
 If semantic retrieval tools such as `retrieve_memory`, `retrieve_agent_memory`,
 or `palace_search` are temporarily failing, agents should not treat the whole
@@ -251,7 +258,7 @@ only after `PALACEOFTRUTH_API_KEY` is available in the runtime environment.
 For normal Codex work, use the Palace-first lifecycle rather than relying on
 manual memory habits:
 
-1. Start with `whoami`, `palace_context`, and route-aware
+1. Start with `whoami`, `get_wakeup_context`, and route-aware
    `retrieve_agent_memory` using `agent_scope_key="codex"` and the stable
    workspace key.
 2. Before handoff or compaction, dry-run `capture_checkpoint` with sanitized

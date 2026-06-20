@@ -21,6 +21,7 @@ from app.mcp_server import (
     get_item_relationships,
     get_palace_room,
     get_retrieval_doctor,
+    get_wakeup_context,
     list_memory_entries,
     list_memory_scopes,
     list_temporal_facts,
@@ -49,7 +50,7 @@ def test_settings_from_env_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_mcp_surface_exposes_no_destructive_item_or_feed_delete_tools() -> None:
     tool_names = {tool.name for tool in await mcp.list_tools()}
 
-    assert {"palace_search", "palace_remember", "palace_checkpoint", "palace_context"} <= tool_names
+    assert {"palace_search", "palace_remember", "palace_checkpoint", "palace_context", "get_wakeup_context"} <= tool_names
     assert not any("delete" in name or "purge" in name for name in tool_names)
     assert not {"delete_item", "delete_feed", "purge_item"} & tool_names
 
@@ -1717,6 +1718,189 @@ def test_palace_context_alias_loads_wakeup_and_recent_memory() -> None:
         ),
         ("POST", "/api/v1/memory/mcp/audit", {}),
     ]
+
+
+def test_get_wakeup_context_returns_compact_session_start_package() -> None:
+    seen: list[tuple[str, str, dict[str, str]]] = []
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params.multi_items())))
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"})
+        if request.url.path == "/api/v1/memory/wakeup-brief":
+            return httpx.Response(200, json={"freshness": "fresh", "stale": False, "summary": "Ready"})
+        if request.url.path == "/api/v1/memory/entries":
+            params = dict(request.url.params.multi_items())
+            tags = params.get("tags")
+            return httpx.Response(
+                200,
+                json={
+                    "entries": [
+                        {
+                            "id": "entry-1",
+                            "item_id": "item-1",
+                            "title": "Current local Palace MCP profile",
+                            "summary": "Use the repo-owned stdio adapter.",
+                            "body": "raw body must not leak",
+                            "scope": {"type": params["scope_type"], "key": params.get("scope_key")},
+                            "source": "codex",
+                            "source_url": "https://example.test/source",
+                            "tags": [tags] if tags else ["codex-memory"],
+                        }
+                    ],
+                    "total": 1,
+                    "limit": int(params["limit"]),
+                    "next_cursor": None,
+                },
+            )
+        if request.url.path == "/api/v1/memory/jobs":
+            return httpx.Response(200, json={"jobs": [{"job_id": "job-1", "status": "complete"}], "total": 1})
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await get_wakeup_context(
+                ctx=ctx,
+                workspace_scope_keys=["palaceoftruth"],
+                session_scope_key="019ee3d1-47e3-7f31-9cf4-4a307fb31b00",
+                memory_limit_per_scope=2,
+                checkpoint_limit_per_scope=1,
+            )
+
+    result = asyncio.run(scenario())
+
+    assert result["schema_version"] == 1
+    assert result["tenant"] == {"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"}
+    assert result["readiness"]["status"] == "ready"
+    assert result["privacy"]["raw_memory_bodies_included"] is False
+    assert "body" not in json.dumps(result["scope_summaries"])
+    assert result["scope_summaries"][0]["entries"][0]["item_id"] == "item-1"
+    assert result["checkpoint_pointers"][0]["tags"] == ["checkpoint"]
+    assert result["follow_up_probes"][0]["tool"] == "palace_search"
+    assert audit_payload["operation"] == "get_wakeup_context"
+    assert audit_payload["required_scope"] == "read"
+    assert seen[-1] == ("POST", "/api/v1/memory/mcp/audit", {})
+
+
+def test_get_wakeup_context_marks_empty_stale_context_partial() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/wakeup-brief":
+            return httpx.Response(200, json={"freshness": "stale", "stale": True})
+        if request.url.path == "/api/v1/memory/entries":
+            return httpx.Response(200, json={"entries": [], "total": 0, "limit": 5, "next_cursor": None})
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await get_wakeup_context(ctx=ctx, include_recent_jobs=False)
+
+    result = asyncio.run(scenario())
+
+    assert result["readiness"]["status"] == "ready"
+    assert result["readiness"]["stale"] is True
+    assert "wakeup_brief_stale" in result["readiness"]["warnings"]
+    assert result["readiness"]["empty_scopes"] == ["agent/codex", "tenant_shared"]
+
+
+def test_get_wakeup_context_requires_read_scope_before_fetching_context() -> None:
+    seen: list[str] = []
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    client_scopes=("write",),
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await get_wakeup_context(ctx=ctx)
+
+    with pytest.raises(PermissionError, match="missing read scope"):
+        asyncio.run(scenario())
+
+    assert seen == ["/api/v1/memory/mcp/audit"]
+    assert audit_payload["operation"] == "get_wakeup_context"
+    assert audit_payload["status"] == "denied"
 
 
 def test_retrieval_doctor_api_client_posts_redacted_probe_request() -> None:

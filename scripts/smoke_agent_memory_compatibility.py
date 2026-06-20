@@ -56,6 +56,7 @@ CODEX_BRIDGE_REQUIRED_SKILLS = (
 )
 CODEX_BRIDGE_REQUIRED_TOOLS = {
     "whoami",
+    "get_wakeup_context",
     "palace_context",
     "palace_search",
     "retrieve_agent_memory",
