@@ -5,6 +5,7 @@ import { LoaderCircle, MessageSquare, PencilLine, Plus, Send, Trash2 } from "luc
 import { api, streamChat } from "../api/client";
 import ArtifactCitation from "../components/ArtifactCitation";
 import PageHeader from "../components/PageHeader";
+import ProvenanceDrawer from "../components/ProvenanceDrawer";
 import { useToast } from "../context/ToastContext";
 import type { ChatMessage, ChatSource, ConversationSummary } from "../api/types";
 
@@ -434,7 +435,27 @@ export default function Chat() {
                         <div className="mt-2 space-y-2">
                           {message.sources.map((source) => (
                             <div key={source.item_id} className="rounded-2xl bg-zinc-950/70 p-2 text-xs text-zinc-400">
-                              <p className="mb-0.5 font-medium text-zinc-300">{source.title}</p>
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="mb-0.5 min-w-0 font-medium text-zinc-300">{source.title}</p>
+                                <ProvenanceDrawer
+                                  compact
+                                  triggerLabel="Evidence"
+                                  provenance={{
+                                    title: source.title,
+                                    subtitle: "Chat citation evidence used to support this answer.",
+                                    kind: source.artifact_citation ? "derived_artifact" : "canonical_memory",
+                                    itemId: source.item_id,
+                                    sourceType: source.source_type,
+                                    sourceUrl: source.source_url,
+                                    excerpt: source.chunk_text,
+                                    artifact: source.artifact_citation,
+                                    metadata: [
+                                      { label: "Citation item", value: source.item_id },
+                                      { label: "Source type", value: source.source_type?.replace(/_/g, " ") },
+                                    ],
+                                  }}
+                                />
+                              </div>
                               <p className="line-clamp-2 italic">{source.chunk_text}</p>
                               <ArtifactCitation citation={source.artifact_citation} compact />
                             </div>
