@@ -186,6 +186,14 @@ def test_memory_ranking_trace_is_bounded_and_redacted() -> None:
             },
             "candidate_limit": 200,
             "candidate_count": 40,
+            "trust_class_counts": {"low_support_generated": 30},
+            "source_support_counts": {"unsupported": 30},
+            "freshness_counts": {"undated": 30},
+            "derived_raw_counts": {"derived": 30},
+            "reuse_metrics": {
+                "returned_to_client": 25,
+                "answer_reuse_tracked": False,
+            },
             "results": [
                 {
                     "rank": index,
@@ -200,6 +208,10 @@ def test_memory_ranking_trace_is_bounded_and_redacted() -> None:
                     "retrieved_scope_type": "workspace",
                     "retrieved_scope_key": "launch-pad",
                     "retrieved_scope_label": "workspace/launch-pad",
+                    "trust_class": "low_support_generated",
+                    "source_support_state": "unsupported",
+                    "freshness": "undated",
+                    "derived_raw_classification": "derived",
                     "reranker_score": 0.75,
                     "reranker_bonus": 0.06,
                     "reranker_provider": "lexical-overlap",
@@ -250,6 +262,14 @@ def test_memory_ranking_trace_is_bounded_and_redacted() -> None:
     }
     assert ranking_trace.candidate_limit == 200
     assert ranking_trace.candidate_count == 40
+    assert ranking_trace.trust_class_counts == {"low_support_generated": 30}
+    assert ranking_trace.source_support_counts == {"unsupported": 30}
+    assert ranking_trace.freshness_counts == {"undated": 30}
+    assert ranking_trace.derived_raw_counts == {"derived": 30}
+    assert ranking_trace.reuse_metrics == {
+        "returned_to_client": 25,
+        "answer_reuse_tracked": False,
+    }
     assert ranking_trace.result_count == 25
     assert len(ranking_trace.results) == 25
     assert ranking_trace.results[0].adjustments == {
@@ -264,6 +284,10 @@ def test_memory_ranking_trace_is_bounded_and_redacted() -> None:
     assert ranking_trace.results[0].artifact_provenance_label == "Wake-up brief"
     assert ranking_trace.results[0].derived_artifact_keys == ["wakeup_brief"]
     assert ranking_trace.results[0].retrieved_scope_label == "workspace/launch-pad"
+    assert ranking_trace.results[0].trust_class == "low_support_generated"
+    assert ranking_trace.results[0].source_support_state == "unsupported"
+    assert ranking_trace.results[0].freshness == "undated"
+    assert ranking_trace.results[0].derived_raw_classification == "derived"
     assert ranking_trace.routing == {
         "scope_type": "workspace",
         "scope_key": "launch-pad",

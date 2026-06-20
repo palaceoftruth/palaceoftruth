@@ -7,6 +7,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.job import JobProgressEventResponse
+from app.schemas.retrieval_provenance import (
+    RetrievalDerivedRawClass,
+    RetrievalFreshnessClass,
+    RetrievalSourceSupportState,
+    RetrievalTrustClass,
+)
 from app.schemas.search import SearchResult
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
@@ -222,6 +228,10 @@ class PalaceRankingTraceResult(BaseModel):
     retrieved_scope_type: str | None = Field(default=None, exclude_if=lambda value: value is None)
     retrieved_scope_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
     retrieved_scope_label: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    trust_class: RetrievalTrustClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_support_state: RetrievalSourceSupportState | None = Field(default=None, exclude_if=lambda value: value is None)
+    freshness: RetrievalFreshnessClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    derived_raw_classification: RetrievalDerivedRawClass | None = Field(default=None, exclude_if=lambda value: value is None)
     source_publication_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     source_role: str | None = Field(default=None, exclude_if=lambda value: value is None)
     query_source_role: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -248,6 +258,11 @@ class PalaceRankingTrace(BaseModel):
     display_limit: int | None = None
     candidate_limit: int | None = None
     candidate_count: int | None = None
+    trust_class_counts: dict[str, int] = Field(default_factory=dict)
+    source_support_counts: dict[str, int] = Field(default_factory=dict)
+    freshness_counts: dict[str, int] = Field(default_factory=dict)
+    derived_raw_counts: dict[str, int] = Field(default_factory=dict)
+    reuse_metrics: dict[str, Any] = Field(default_factory=dict)
     result_count: int = 0
     routing: dict[str, Any] = Field(default_factory=dict)
     results: list[PalaceRankingTraceResult] = Field(default_factory=list)

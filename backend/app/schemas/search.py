@@ -5,7 +5,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.artifact_citation import ArtifactCitation
-from app.schemas.retrieval_provenance import RetrievalProvenance
+from app.schemas.retrieval_provenance import (
+    RetrievalDerivedRawClass,
+    RetrievalFreshnessClass,
+    RetrievalProvenance,
+    RetrievalSourceSupportState,
+    RetrievalTrustClass,
+)
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
 TagsMode = Literal["any", "all"]
@@ -56,6 +62,10 @@ class SearchResult(BaseModel):
     score: float
     artifact_citation: ArtifactCitation | None = Field(default=None, exclude_if=lambda value: value is None)
     retrieval_provenance: RetrievalProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
+    trust_class: RetrievalTrustClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_support_state: RetrievalSourceSupportState | None = Field(default=None, exclude_if=lambda value: value is None)
+    freshness: RetrievalFreshnessClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    derived_raw_classification: RetrievalDerivedRawClass | None = Field(default=None, exclude_if=lambda value: value is None)
     context_chunks: list[SearchContextChunk] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
