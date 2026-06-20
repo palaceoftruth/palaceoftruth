@@ -241,3 +241,165 @@ jobs:
             "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.sha256" \
             --title "Hermes Memory Plugin v${HERMES_PLUGIN_VERSION}" \
             --notes-file /tmp/hermes-plugin-release/RELEASE_NOTES.md
+
+  publish-chart:
+    needs: build-push
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Detect chart-only release bump
+        id: release_scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vx 'chart/Chart.yaml' >/dev/null; then
+            echo "Skipping chart publish for chart-only release-coordinate update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Read chart name
+        if: steps.release_scope.outputs.skip != 'true'
+        id: chart
+        run: |
+          CHART_NAME=$(awk '$1 == "name:" { print $2; exit }' chart/Chart.yaml)
+          if [ -z "$CHART_NAME" ]; then
+            echo "Failed to read chart name from chart/Chart.yaml" >&2
+            exit 1
+          fi
+          echo "name=${CHART_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Helm
+        if: steps.release_scope.outputs.skip != 'true'
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.14.0
+
+      - name: Log in to GHCR
+        if: steps.release_scope.outputs.skip != 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish chart and prepare release-coordinate PR
+        if: steps.release_scope.outputs.skip != 'true'
+        id: version
+        env:
+          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_PR_TOKEN" ]; then
+            echo "RELEASE_PR_TOKEN is required to push a chart release branch and open a PR." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${RELEASE_PR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          for attempt in 1 2 3 4 5; do
+            echo "Chart release attempt ${attempt}"
+            git fetch origin main
+            RELEASE_BRANCH="ci/chart-release-${GITHUB_SHA::8}"
+            git checkout -B "$RELEASE_BRANCH" origin/main
+
+            VERSION=$(python3 scripts/bump_chart_release.py --app-version "${GITHUB_SHA::8}")
+            git add chart/Chart.yaml
+            git commit -m "chore(ci): bump chart to ${VERSION}"
+
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Main advanced during chart bump; retrying from latest origin/main" >&2
+              git rebase --abort || true
+              sleep $((attempt * 2))
+              continue
+            fi
+
+            helm package chart/ --destination /tmp/charts
+            helm push "/tmp/charts/${{ steps.chart.outputs.name }}-${VERSION}.tgz" \
+              oci://${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}
+
+            if git ls-remote --exit-code --heads origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+              git fetch origin "$RELEASE_BRANCH"
+              PUSH_COMMAND=(git push --force-with-lease="refs/heads/${RELEASE_BRANCH}" origin "${RELEASE_BRANCH}:${RELEASE_BRANCH}")
+            else
+              PUSH_COMMAND=(git push origin "${RELEASE_BRANCH}:${RELEASE_BRANCH}")
+            fi
+
+            if "${PUSH_COMMAND[@]}"; then
+              echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+              echo "branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Failed to push chart release branch; retrying with a freshly computed chart version" >&2
+            sleep $((attempt * 2))
+          done
+
+          echo "Failed to publish chart release branch after 5 attempts" >&2
+          exit 1
+
+      - name: Open chart release PR
+        if: steps.release_scope.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+          RELEASE_BRANCH: ${{ steps.version.outputs.branch }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$RELEASE_BRANCH" ] || [ -z "$RELEASE_VERSION" ]; then
+            echo "Missing chart release PR coordinates" >&2
+            exit 1
+          fi
+
+          PR_URL=$(gh pr list \
+            --base main \
+            --head "$RELEASE_BRANCH" \
+            --state open \
+            --json url \
+            --jq '.[0].url // ""')
+
+          BODY=$(cat <<EOF
+          ## Summary
+
+          Records Helm chart release ${RELEASE_VERSION} for ${GITHUB_SHA::8}.
+
+          ## Notes
+
+          The chart package was published by workflow run ${GITHUB_RUN_ID}. This PR records the release coordinates in chart/Chart.yaml without bypassing main branch protection.
+          EOF
+          )
+
+          if [ -n "$PR_URL" ]; then
+            gh pr edit "$PR_URL" \
+              --title "chore(ci): bump chart to ${RELEASE_VERSION}" \
+              --body "$BODY"
+            echo "Updated existing chart release PR: ${PR_URL}"
+          else
+            gh pr create \
+              --base main \
+              --head "$RELEASE_BRANCH" \
+              --title "chore(ci): bump chart to ${RELEASE_VERSION}" \
+              --body "$BODY"
+          fi
