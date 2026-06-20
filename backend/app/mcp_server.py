@@ -59,10 +59,22 @@ PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
     "SECONDBRAIN_MCP_CHECKPOINT_CAPTURE_DISABLED",
 )
 
-McpOperationScope = Literal["read", "write", "admin", "local_only", "destructive_prohibited"]
+McpOperationScope = Literal[
+    "read",
+    "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
+    "admin",
+    "local_only",
+    "destructive_prohibited",
+]
 ALL_MCP_OPERATION_SCOPES: tuple[McpOperationScope, ...] = (
     "read",
     "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
     "admin",
     "local_only",
     "destructive_prohibited",

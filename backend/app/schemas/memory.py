@@ -25,12 +25,17 @@ MemoryWriteContractStatus = Literal[
     "processing",
     "completed",
     "retryable_degraded",
+    "rejected",
+    "quarantined",
     "permanent_tenant_mismatch",
     "dependency_unavailable",
 ]
 McpOperationScope = Literal[
     "read",
     "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
     "admin",
     "local_only",
     "destructive_prohibited",

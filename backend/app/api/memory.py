@@ -56,6 +56,7 @@ from app.services.memory import (
     retry_memory_job,
     serialize_memory_job,
 )
+from app.services.memory_admission import evaluate_memory_write_admission
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.job_progress import record_job_progress_event
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
@@ -334,10 +335,20 @@ async def create_memory_entry(
     if body.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
 
+    admission = evaluate_memory_write_admission(
+        body=body,
+        auth_mode=getattr(request.state, "auth_mode", None),
+        allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
+        mcp_client_key=getattr(request.state, "mcp_client_key", None),
+    )
+    if not admission.accepted:
+        raise HTTPException(status_code=admission.http_status_code, detail=admission.response_detail())
+
     result = await accept_canonical_memory_entry(
         db,
         body=body,
         signing_key=request.state.key_hash,
+        admission_audit=admission.audit,
     )
     if result.enqueue_requested:
         await _enqueue_memory_job_or_raise(request, db, job=result.job)

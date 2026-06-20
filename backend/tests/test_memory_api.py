@@ -350,11 +350,16 @@ def test_memory_whoami_returns_authenticated_tenant() -> None:
 def test_memory_entries_accepts_canonical_payload(monkeypatch) -> None:
     client = _build_app(FakeSession())
 
-    async def fake_accept_canonical_memory_entry(db, *, body: MemoryEntryRequest, signing_key: str):
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
         assert signing_key == "key-hash"
         assert body.scope.type == "workspace"
         assert body.scope.key == "launch-pad"
         assert body.relationship_policy == "deferred"
+        assert admission_audit is not None
+        assert admission_audit["body_sha256"]
+        assert "Agents should reuse" not in json.dumps(admission_audit)
         return MemoryArtifactAcceptanceResult(
             job=Job(
                 id=uuid.uuid4(),
@@ -398,7 +403,9 @@ def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> Non
         payload={"relationship_policy": "immediate"},
     )
 
-    async def fake_accept_canonical_memory_entry(db, *, body: MemoryEntryRequest, signing_key: str):
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
         return MemoryArtifactAcceptanceResult(
             job=job,
             enqueue_requested=True,
@@ -421,6 +428,79 @@ def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> Non
     assert job.status == "failed"
     assert job.payload["contract_status"] == "dependency_unavailable"
     assert "MasterNotFoundError" not in response.text
+
+
+def test_memory_entries_quarantines_secret_body_before_storage(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("quarantined writes must not reach storage")
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    payload = _canonical_payload()
+    payload["body"] = "Do not store Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["status"] == "quarantined"
+    assert detail["reason_code"] == "potential_secret"
+    assert detail["retryable"] is False
+    assert "abcdefghijklmnopqrstuvwxyz" not in response.text
+    assert detail["audit"]["privacy_scan"]["findings"][0]["pattern"] == "bearer_authorization"
+    assert client.app.state.arq_pool.enqueued == []
+
+
+def test_memory_entries_quarantines_raw_transcript_body_before_storage(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("quarantined writes must not reach storage")
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    payload = _canonical_payload()
+    payload["source"] = "agent-transcript-import"
+    payload["body"] = "\n".join(
+        [
+            "User: first raw turn",
+            "Assistant: second raw turn",
+            "User: third raw turn",
+            "Assistant: fourth raw turn",
+            "User: fifth raw turn",
+            "Assistant: sixth raw turn",
+        ]
+    )
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["status"] == "quarantined"
+    assert detail["reason_code"] == "raw_transcript_body"
+    assert "first raw turn" not in response.text
+    assert client.app.state.arq_pool.enqueued == []
+
+
+def test_memory_entries_redacts_secret_source_in_quarantine_response(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("quarantined writes must not reach storage")
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    payload = _canonical_payload()
+    payload["source"] = "Bearer abcdefghijklmnopqrstuvwxyz123456"
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["status"] == "quarantined"
+    assert detail["reason_code"] == "potential_secret"
+    assert "abcdefghijklmnopqrstuvwxyz" not in response.text
+    assert "source_hash" in detail["audit"]
+    assert "source" not in detail["audit"]
 
 
 def test_memory_entries_rejects_idempotency_key_longer_than_database_limit() -> None:
@@ -603,6 +683,90 @@ def test_memory_oauth_bearer_scope_denies_write_without_write_scope() -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"] == "MCP bearer token missing write scope"
+
+
+def test_memory_oauth_bearer_write_does_not_imply_scoped_workspace_write(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "plain-writer"
+        request.state.mcp_allowed_scopes = ["read", "write"]
+        return "token"
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("rejected writes must not reach storage")
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["status"] == "rejected"
+    assert detail["reason_code"] == "missing_write_workspace"
+    assert detail["audit"]["scope_grant"]["required_scope"] == "write:workspace"
+    assert "launch-pad" not in response.text
+
+
+def test_memory_oauth_bearer_scope_specific_grant_allows_workspace_write(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "workspace-writer"
+        request.state.mcp_allowed_scopes = ["read", "write", "write:workspace"]
+        return "token"
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        assert admission_audit is not None
+        assert admission_audit["scope_grant"]["grant_present"] is True
+        assert admission_audit["scope_grant"]["required_scope"] == "write:workspace"
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
 
 
 def test_memory_artifacts_accepts_legacy_payloads(monkeypatch) -> None:
@@ -2301,11 +2465,14 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         request.state.key_hash = "key-hash"
         return "raw-key"
 
-    async def fake_accept_canonical_memory_entry(db, *, body: MemoryEntryRequest, signing_key: str):
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
         assert db is session
         assert signing_key == "key-hash"
         assert body.tenant_id == "tenant-a"
         assert body.scope.type == "workspace"
+        assert admission_audit is not None
         return MemoryArtifactAcceptanceResult(
             job=Job(
                 id=uuid.uuid4(),

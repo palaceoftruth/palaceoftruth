@@ -346,6 +346,7 @@ async def accept_memory_entry(
     *,
     entry: NormalizedMemoryEntry,
     signing_key: str | None,
+    admission_audit: dict[str, Any] | None = None,
 ) -> MemoryArtifactAcceptanceResult:
     webhook_url = validate_webhook_url(entry.webhook_url) if entry.webhook_url else None
 
@@ -397,6 +398,16 @@ async def accept_memory_entry(
 
     try:
         await db.flush()
+        job_payload: dict[str, Any] = {
+            "idempotency_key": entry.idempotency_key,
+            "enable_ai_enrichment": entry.enable_ai_enrichment,
+            "scope_type": entry.scope.type,
+            "scope_key": entry.scope.key,
+            "accepted_as": entry.accepted_as,
+            "relationship_policy": entry.relationship_policy,
+        }
+        if admission_audit is not None:
+            job_payload["admission"] = admission_audit
         job = Job(
             item_id=item.id,
             job_type=MEMORY_JOB_TYPE,
@@ -405,14 +416,7 @@ async def accept_memory_entry(
             tenant_id=entry.tenant_id,
             webhook_url=webhook_url,
             signing_key=signing_key if webhook_url else None,
-            payload={
-                "idempotency_key": entry.idempotency_key,
-                "enable_ai_enrichment": entry.enable_ai_enrichment,
-                "scope_type": entry.scope.type,
-                "scope_key": entry.scope.key,
-                "accepted_as": entry.accepted_as,
-                "relationship_policy": entry.relationship_policy,
-            },
+            payload=job_payload,
         )
         db.add(job)
         await db.commit()
@@ -456,6 +460,7 @@ async def accept_memory_artifact(
         db,
         entry=normalize_legacy_memory_artifact(body),
         signing_key=signing_key,
+        admission_audit=None,
     )
 
 
@@ -464,11 +469,13 @@ async def accept_canonical_memory_entry(
     *,
     body: MemoryEntryRequest,
     signing_key: str | None,
+    admission_audit: dict[str, Any] | None = None,
 ) -> MemoryArtifactAcceptanceResult:
     return await accept_memory_entry(
         db,
         entry=normalize_memory_entry(body),
         signing_key=signing_key,
+        admission_audit=admission_audit,
     )
 
 

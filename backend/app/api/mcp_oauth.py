@@ -23,6 +23,9 @@ metadata_router = APIRouter(tags=["mcp-oauth"])
 SUPPORTED_SCOPES = (
     "read",
     "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
     "admin",
     "local_only",
     "destructive_prohibited",
