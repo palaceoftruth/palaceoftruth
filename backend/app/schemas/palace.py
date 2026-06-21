@@ -165,6 +165,33 @@ class PalaceItemSourceSummary(BaseModel):
     source_records: list[PalaceSourceRecordSummary] = Field(default_factory=list)
 
 
+class PalaceClaimSourceSupportSummary(BaseModel):
+    id: uuid.UUID
+    source_record_id: uuid.UUID
+    source_chunk_id: uuid.UUID | None = None
+    source_item_id: uuid.UUID
+    support_role: Literal["supports", "contradicts", "context", "derived_from"]
+    status: Literal["current", "stale"]
+    source_digest: str
+    source_span: dict[str, Any] = Field(default_factory=dict)
+
+
+class PalaceClaimSupportSummary(BaseModel):
+    id: uuid.UUID
+    claim_key: str
+    claim_text: str
+    claim_type: Literal["fact", "preference", "decision", "task_state", "summary", "classification", "relationship"]
+    confidence: float
+    status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    sources: list[PalaceClaimSourceSupportSummary] = Field(default_factory=list)
+
+
+class PalaceClaimSupportReport(BaseModel):
+    tenant_id: str
+    claims: list[PalaceClaimSupportSummary] = Field(default_factory=list)
+
+
 class PalaceRoomUpdate(BaseModel):
     name: str
 

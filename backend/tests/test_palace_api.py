@@ -42,6 +42,7 @@ from app.schemas.palace import (
 )
 from app.schemas.search import SearchResult
 from app.services.source_compiler import ItemSourceSummary, SourceChunkSummary, SourceRecordSummary
+from app.services.source_compiler import ClaimSourceSupportSummary, ClaimSupportReport, ClaimSupportSummary
 from app.workers.queues import PALACE_WORKER_QUEUE
 
 
@@ -266,6 +267,57 @@ def test_get_palace_item_sources_is_tenant_bounded(monkeypatch) -> None:
     assert payload["tenant_id"] == "tenant-a"
     assert payload["item_id"] == str(item_id)
     assert payload["source_records"][0]["chunks"][0]["preview"] == "chunk preview"
+    assert "github_pat" not in payload
+
+
+def test_get_palace_claim_support_is_tenant_bounded(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    claim_id = uuid.uuid4()
+    claim_source_id = uuid.uuid4()
+    source_record_id = uuid.uuid4()
+    source_item_id = uuid.uuid4()
+
+    async def fake_get_claim_support_report(db, *, tenant_id: str, status: str | None, limit: int):
+        assert tenant_id == "tenant-a"
+        assert status == "conflicted"
+        assert limit == 25
+        return ClaimSupportReport(
+            tenant_id=tenant_id,
+            claims=(
+                ClaimSupportSummary(
+                    id=claim_id,
+                    claim_key="temporal_fact:fact-key",
+                    claim_text="Palace supports claim diagnostics",
+                    claim_type="fact",
+                    confidence=0.8,
+                    status="conflicted",
+                    metadata={"temporal_fact_status": "active"},
+                    sources=(
+                        ClaimSourceSupportSummary(
+                            id=claim_source_id,
+                            source_record_id=source_record_id,
+                            source_chunk_id=None,
+                            source_item_id=source_item_id,
+                            support_role="supports",
+                            status="current",
+                            source_digest="source-fingerprint",
+                            source_span={"temporal_fact_id": str(uuid.uuid4())},
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("app.api.palace.get_claim_support_report", fake_get_claim_support_report)
+
+    response = client.get("/api/v1/palace/claims/support?status=conflicted&limit=25")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tenant_id"] == "tenant-a"
+    assert payload["claims"][0]["status"] == "conflicted"
+    assert payload["claims"][0]["sources"][0]["status"] == "current"
+    assert payload["claims"][0]["sources"][0]["source_item_id"] == str(source_item_id)
     assert "github_pat" not in payload
 
 

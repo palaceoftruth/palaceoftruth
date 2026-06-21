@@ -11,10 +11,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.item import Item
-from app.models.palace import SourceChunk, SourceRecord
+from app.models.palace import Claim, ClaimSource, SourceChunk, SourceRecord, TemporalFact
 
 
 ACTIVE_SOURCE_STATUSES = {"active", "stale", "superseded"}
+CLAIM_SUPPORT_SOURCE_STATUSES = {"active"}
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,34 @@ class SourceBackfillReport:
 
 
 @dataclass(frozen=True)
+class ClaimProjection:
+    tenant_id: str
+    temporal_fact_id: uuid.UUID
+    source_item_id: uuid.UUID
+    claim_key: str
+    claim_text: str
+    claim_type: str
+    confidence: float
+    status: str
+    support_role: str
+    source_digest: str
+    source_span: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClaimBackfillReport:
+    tenant_id: str
+    dry_run: bool
+    facts_seen: int
+    claims_planned: int
+    claim_sources_planned: int
+    claims_upserted: int
+    claim_sources_upserted: int
+    unsupported_facts: int
+
+
+@dataclass(frozen=True)
 class SourceChunkSummary:
     id: uuid.UUID
     chunk_index: int
@@ -81,6 +110,36 @@ class ItemSourceSummary:
     tenant_id: str
     item_id: uuid.UUID
     source_records: tuple[SourceRecordSummary, ...]
+
+
+@dataclass(frozen=True)
+class ClaimSourceSupportSummary:
+    id: uuid.UUID
+    source_record_id: uuid.UUID
+    source_chunk_id: uuid.UUID | None
+    source_item_id: uuid.UUID
+    support_role: str
+    status: str
+    source_digest: str
+    source_span: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClaimSupportSummary:
+    id: uuid.UUID
+    claim_key: str
+    claim_text: str
+    claim_type: str
+    confidence: float
+    status: str
+    metadata: dict[str, Any]
+    sources: tuple[ClaimSourceSupportSummary, ...]
+
+
+@dataclass(frozen=True)
+class ClaimSupportReport:
+    tenant_id: str
+    claims: tuple[ClaimSupportSummary, ...]
 
 
 def _stable_digest(payload: Any) -> str:
@@ -226,6 +285,92 @@ def plan_source_backfill(items: Iterable[Item], *, tenant_id: str, dry_run: bool
     )
 
 
+def _claim_text_for_fact(fact: TemporalFact) -> str:
+    return " ".join((fact.subject.strip(), fact.predicate.strip(), fact.object_text.strip()))
+
+
+def _claim_status_for_fact(fact: TemporalFact) -> str:
+    metadata = _normalize_metadata(getattr(fact, "metadata_json", None))
+    contradiction_sweep = metadata.get("contradiction_sweep")
+    if fact.status == "active" and isinstance(contradiction_sweep, dict):
+        conflict_count = contradiction_sweep.get("conflict_count")
+        if isinstance(conflict_count, int) and conflict_count > 0:
+            return "conflicted"
+        conflicting_fact_ids = contradiction_sweep.get("conflicting_fact_ids")
+        if isinstance(conflicting_fact_ids, list) and conflicting_fact_ids:
+            return "conflicted"
+    if fact.status == "active":
+        return "active"
+    if fact.status == "superseded":
+        return "stale"
+    return "draft"
+
+
+def _support_role_for_fact(fact: TemporalFact) -> str:
+    if fact.status == "superseded":
+        return "derived_from"
+    return "supports"
+
+
+def project_claim_from_temporal_fact(fact: TemporalFact) -> ClaimProjection:
+    metadata = _normalize_metadata(getattr(fact, "metadata_json", None))
+    return ClaimProjection(
+        tenant_id=fact.tenant_id,
+        temporal_fact_id=fact.id,
+        source_item_id=fact.source_item_id,
+        claim_key=f"temporal_fact:{fact.fact_key}",
+        claim_text=_claim_text_for_fact(fact),
+        claim_type="fact",
+        confidence=float(fact.confidence or 1.0),
+        status=_claim_status_for_fact(fact),
+        support_role=_support_role_for_fact(fact),
+        source_digest=fact.source_fingerprint,
+        source_span={
+            "temporal_fact_id": str(fact.id),
+            "valid_from": fact.valid_from.isoformat() if fact.valid_from else None,
+            "valid_to": fact.valid_to.isoformat() if fact.valid_to else None,
+        },
+        metadata={
+            "compiler": "temporal_fact_claim_backfill",
+            "temporal_fact_id": str(fact.id),
+            "temporal_fact_key": fact.fact_key,
+            "temporal_fact_status": fact.status,
+            "source_item_id": str(fact.source_item_id),
+            "fact_metadata": metadata,
+        },
+    )
+
+
+def plan_claim_backfill(
+    facts: Iterable[TemporalFact],
+    *,
+    tenant_id: str,
+    dry_run: bool,
+    supported_source_item_ids: set[uuid.UUID],
+) -> tuple[ClaimBackfillReport, tuple[ClaimProjection, ...]]:
+    fact_rows = tuple(facts)
+    tenant_facts = tuple(fact for fact in fact_rows if fact.tenant_id == tenant_id)
+    projections = tuple(
+        project_claim_from_temporal_fact(fact)
+        for fact in tenant_facts
+        if fact.source_item_id in supported_source_item_ids
+    )
+    unsupported = len(tenant_facts) - len(projections)
+    return (
+        ClaimBackfillReport(
+            tenant_id=tenant_id,
+            dry_run=dry_run,
+            facts_seen=len(tenant_facts),
+            claims_planned=len(projections),
+            claim_sources_planned=len(projections),
+            claims_upserted=0 if dry_run else len(projections),
+            claim_sources_upserted=0 if dry_run else len(projections),
+            unsupported_facts=unsupported,
+        ),
+        projections,
+    )
+
+
 def _backfill_item_query(tenant_id: str, *, item_ids: Iterable[uuid.UUID] | None, limit: int) -> Select[tuple[Item]]:
     statement = select(Item).where(Item.tenant_id == tenant_id).order_by(Item.created_at.asc()).limit(limit)
     if item_ids is not None:
@@ -253,6 +398,84 @@ async def backfill_source_records_and_chunks(
             await _upsert_source_chunk(db, projection=projection, source_record_id=record_id, chunk=chunk)
     await db.commit()
     return report
+
+
+def _backfill_fact_query(tenant_id: str, *, fact_ids: Iterable[uuid.UUID] | None, limit: int) -> Select[tuple[TemporalFact]]:
+    statement = select(TemporalFact).where(TemporalFact.tenant_id == tenant_id).order_by(TemporalFact.extracted_at.asc()).limit(limit)
+    if fact_ids is not None:
+        statement = statement.where(TemporalFact.id.in_(tuple(fact_ids)))
+    return statement
+
+
+async def backfill_claims_from_temporal_facts(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    fact_ids: Iterable[uuid.UUID] | None = None,
+    limit: int = 500,
+    dry_run: bool = True,
+) -> ClaimBackfillReport:
+    facts = (await db.scalars(_backfill_fact_query(tenant_id, fact_ids=fact_ids, limit=limit))).all()
+    source_records_by_item_id = await _latest_source_records_by_item_id(
+        db,
+        tenant_id=tenant_id,
+        item_ids={fact.source_item_id for fact in facts},
+    )
+    report, projections = plan_claim_backfill(
+        facts,
+        tenant_id=tenant_id,
+        dry_run=dry_run,
+        supported_source_item_ids=set(source_records_by_item_id),
+    )
+    if dry_run:
+        return report
+
+    supported_fact_ids = {projection.temporal_fact_id for projection in projections}
+    for projection in projections:
+        claim_id = await _upsert_claim(db, projection)
+        source_record = source_records_by_item_id[projection.source_item_id]
+        claim_source_id = await _upsert_claim_source(
+            db,
+            projection=projection,
+            claim_id=claim_id,
+            source_record_id=source_record.id,
+        )
+        await _mark_prior_claim_sources_stale(
+            db,
+            tenant_id=projection.tenant_id,
+            claim_id=claim_id,
+            active_claim_source_id=claim_source_id,
+        )
+    for fact in facts:
+        if fact.id in supported_fact_ids:
+            continue
+        await _mark_unsupported_claim_stale(db, projection=project_claim_from_temporal_fact(fact))
+    await db.commit()
+    return report
+
+
+async def _latest_source_records_by_item_id(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    item_ids: set[uuid.UUID],
+) -> dict[uuid.UUID, SourceRecord]:
+    if not item_ids:
+        return {}
+    records = (
+        await db.scalars(
+            select(SourceRecord)
+            .where(SourceRecord.tenant_id == tenant_id)
+            .where(SourceRecord.item_id.in_(item_ids))
+            .where(SourceRecord.status.in_(CLAIM_SUPPORT_SOURCE_STATUSES))
+            .order_by(SourceRecord.item_id.asc(), SourceRecord.updated_at.desc(), SourceRecord.created_at.desc())
+        )
+    ).all()
+    latest_by_item_id: dict[uuid.UUID, SourceRecord] = {}
+    for record in records:
+        if record.item_id not in latest_by_item_id:
+            latest_by_item_id[record.item_id] = record
+    return latest_by_item_id
 
 
 async def _upsert_source_record(db: AsyncSession, projection: SourceRecordProjection) -> uuid.UUID:
@@ -335,6 +558,105 @@ async def _upsert_source_chunk(
     return await db.scalar(stmt)
 
 
+async def _upsert_claim(db: AsyncSession, projection: ClaimProjection) -> uuid.UUID:
+    stmt = (
+        insert(Claim.__table__)
+        .values(
+            tenant_id=projection.tenant_id,
+            claim_key=projection.claim_key,
+            claim_text=projection.claim_text,
+            claim_type=projection.claim_type,
+            confidence=projection.confidence,
+            status=projection.status,
+            metadata=projection.metadata,
+        )
+        .on_conflict_do_update(
+            constraint="uq_claims_tenant_claim_key",
+            set_={
+                "claim_text": projection.claim_text,
+                "claim_type": projection.claim_type,
+                "confidence": projection.confidence,
+                "status": projection.status,
+                "metadata": projection.metadata,
+                "updated_at": func.now(),
+            },
+        )
+        .returning(Claim.__table__.c.id)
+    )
+    return await db.scalar(stmt)
+
+
+async def _upsert_claim_source(
+    db: AsyncSession,
+    *,
+    projection: ClaimProjection,
+    claim_id: uuid.UUID,
+    source_record_id: uuid.UUID,
+) -> uuid.UUID:
+    stmt = (
+        insert(ClaimSource.__table__)
+        .values(
+            tenant_id=projection.tenant_id,
+            claim_id=claim_id,
+            source_record_id=source_record_id,
+            source_chunk_id=None,
+            support_role=projection.support_role,
+            status="current",
+            source_digest=projection.source_digest,
+            source_span=projection.source_span,
+        )
+        .on_conflict_do_update(
+            constraint="uq_claim_sources_support",
+            set_={
+                "source_chunk_id": None,
+                "status": "current",
+                "source_span": projection.source_span,
+            },
+        )
+        .returning(ClaimSource.__table__.c.id)
+    )
+    return await db.scalar(stmt)
+
+
+async def _mark_prior_claim_sources_stale(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    claim_id: uuid.UUID,
+    active_claim_source_id: uuid.UUID,
+) -> None:
+    await db.execute(
+        update(ClaimSource)
+        .where(ClaimSource.tenant_id == tenant_id)
+        .where(ClaimSource.claim_id == claim_id)
+        .where(ClaimSource.id != active_claim_source_id)
+        .where(ClaimSource.status == "current")
+        .values(status="stale")
+    )
+
+
+async def _mark_unsupported_claim_stale(db: AsyncSession, *, projection: ClaimProjection) -> None:
+    claim_id = await db.scalar(
+        select(Claim.id).where(Claim.tenant_id == projection.tenant_id, Claim.claim_key == projection.claim_key)
+    )
+    if claim_id is None:
+        return
+    await db.execute(
+        update(Claim)
+        .where(Claim.tenant_id == projection.tenant_id)
+        .where(Claim.id == claim_id)
+        .where(Claim.status == "active")
+        .values(status="stale", updated_at=func.now())
+    )
+    await db.execute(
+        update(ClaimSource)
+        .where(ClaimSource.tenant_id == projection.tenant_id)
+        .where(ClaimSource.claim_id == claim_id)
+        .where(ClaimSource.status == "current")
+        .values(status="stale")
+    )
+
+
 async def get_item_source_summary(db: AsyncSession, *, tenant_id: str, item_id: uuid.UUID) -> ItemSourceSummary | None:
     item_exists = await db.scalar(select(Item.id).where(Item.tenant_id == tenant_id, Item.id == item_id))
     if item_exists is None:
@@ -381,3 +703,51 @@ async def get_item_source_summary(db: AsyncSession, *, tenant_id: str, item_id: 
             )
         )
     return ItemSourceSummary(tenant_id=tenant_id, item_id=item_id, source_records=tuple(summaries))
+
+
+async def get_claim_support_report(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    status: str | None = None,
+    limit: int = 50,
+) -> ClaimSupportReport:
+    statement = select(Claim).where(Claim.tenant_id == tenant_id).order_by(Claim.updated_at.desc(), Claim.id.desc()).limit(limit)
+    if status is not None:
+        statement = statement.where(Claim.status == status)
+    claims = (await db.scalars(statement)).all()
+    summaries: list[ClaimSupportSummary] = []
+    for claim in claims:
+        rows = (
+            await db.execute(
+                select(ClaimSource, SourceRecord.item_id)
+                .join(SourceRecord, SourceRecord.id == ClaimSource.source_record_id)
+                .where(ClaimSource.tenant_id == tenant_id, ClaimSource.claim_id == claim.id)
+                .order_by(ClaimSource.created_at.asc(), ClaimSource.id.asc())
+            )
+        ).all()
+        summaries.append(
+            ClaimSupportSummary(
+                id=claim.id,
+                claim_key=claim.claim_key,
+                claim_text=claim.claim_text,
+                claim_type=claim.claim_type,
+                confidence=claim.confidence,
+                status=claim.status,
+                metadata=claim.metadata_ or {},
+                sources=tuple(
+                    ClaimSourceSupportSummary(
+                        id=claim_source.id,
+                        source_record_id=claim_source.source_record_id,
+                        source_chunk_id=claim_source.source_chunk_id,
+                        source_item_id=source_item_id,
+                        support_role=claim_source.support_role,
+                        status=claim_source.status,
+                        source_digest=claim_source.source_digest,
+                        source_span=claim_source.source_span or {},
+                    )
+                    for claim_source, source_item_id in rows
+                ),
+            )
+        )
+    return ClaimSupportReport(tenant_id=tenant_id, claims=tuple(summaries))
