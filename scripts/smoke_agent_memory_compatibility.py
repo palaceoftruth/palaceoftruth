@@ -13,9 +13,11 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -85,6 +87,7 @@ ACTIVATION_CATEGORY_NAMES = (
 )
 FEEDVALUE_INCIDENT_ITEM_ID = "ae129f46-ddb8-45ac-9487-777cc911e558"
 RECEIPT_SHELF_INCIDENT_ITEM_ID = "3eaf5fe0-1855-4e19-8898-d110ebecf3ae"
+DEFAULT_TASK_POOL_STATUSES = ("ready", "backlog", "in_progress", "review", "blocked")
 
 
 SMOKE_MATRIX = (
@@ -1769,6 +1772,16 @@ def _import_mcp_server_module() -> Any:
     return mcp_server
 
 
+def _import_benchmark_module() -> Any:
+    script_path = _scripts_dir() / "benchmark_agent_memory_retrieval.py"
+    spec = importlib.util.spec_from_file_location("benchmark_agent_memory_retrieval_for_startup", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def bridge_check(name: str, status: str, **details: Any) -> dict[str, Any]:
     return {
         "name": name,
@@ -2032,6 +2045,354 @@ def cmd_codex_bridge(args: argparse.Namespace) -> int:
         ]
     )
     return setup_module.run_live_smoke(setup_args)
+
+
+def _report_status(value: Any) -> str:
+    if isinstance(value, dict):
+        status = value.get("status")
+        if isinstance(status, str):
+            return status
+        summary = value.get("summary")
+        if isinstance(summary, dict) and isinstance(summary.get("passed"), bool):
+            return "passed" if summary["passed"] else "failed"
+    return "unknown"
+
+
+def _startup_check(
+    *,
+    name: str,
+    status: str,
+    source: str,
+    evidence_type: str = "direct_local",
+    signals: dict[str, Any] | None = None,
+    command: list[str] | None = None,
+    warning: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": status,
+        "source": source,
+        "evidence_type": evidence_type,
+        **({"signals": signals} if signals else {}),
+        **({"command": command} if command else {}),
+        **({"warning": warning} if warning else {}),
+    }
+
+
+def _safe_count(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    return len(value) if isinstance(value, list) else 0
+
+
+def _summarize_compatibility_fixture(args: argparse.Namespace) -> dict[str, Any]:
+    benchmark_module = _import_benchmark_module()
+    parser = benchmark_module.build_parser()
+    compat_args = parser.parse_args(
+        [
+            "compatibility-report",
+            "--pack",
+            args.compatibility_pack,
+            "--top-k",
+            str(args.compatibility_top_k),
+        ]
+    )
+    payload = benchmark_module.read_compatibility_fixture_eval_pack(Path(compat_args.pack))
+    report = benchmark_module.evaluate_eval_pack(
+        payload,
+        top_k=compat_args.top_k,
+        thresholds=benchmark_module.build_thresholds(compat_args),
+    )
+    summary = report.get("summary") or {}
+    return {
+        "status": "passed" if summary.get("passed") is True else "failed",
+        "pack_id": payload.get("pack_id"),
+        "case_count": _safe_count(payload, "cases"),
+        "offline_report_only": (payload.get("artifact_metadata") or {}).get("offline_report_only"),
+        "per_transport": summary.get("per_transport", {}),
+        "forbidden_hit_count": summary.get("forbidden_hit_count"),
+    }
+
+
+def _task_pool_command(args: argparse.Namespace, status: str) -> list[str]:
+    return [
+        sys.executable,
+        "/Users/asarver/.codex/project-manager/task_pool_ops.py",
+        "list",
+        "--automation-id",
+        args.automation_id,
+        "--status",
+        status,
+        "--limit",
+        str(args.task_pool_limit),
+    ]
+
+
+def _task_pool_state(args: argparse.Namespace) -> dict[str, Any]:
+    statuses = args.task_pool_status or list(DEFAULT_TASK_POOL_STATUSES)
+    if not args.include_task_pool:
+        return {
+            "status": "skipped",
+            "reason": "pass --include-task-pool to run read-only central task-pool listing",
+            "statuses": list(statuses),
+            "commands": [_task_pool_command(args, status) for status in statuses],
+        }
+    counts: dict[str, int] = {}
+    failures: list[str] = []
+    for status in statuses:
+        command = _task_pool_command(args, status)
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=args.task_pool_timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{status}: {exc}")
+            continue
+        if result.returncode != 0:
+            failures.append(f"{status}: exit {result.returncode}: {result.stderr.strip()[:240]}")
+            continue
+        try:
+            payload = json.loads(result.stdout)
+        except ValueError as exc:
+            failures.append(f"{status}: invalid JSON: {exc}")
+            continue
+        counts[status] = int(payload.get("count") or 0)
+    return {
+        "status": "ok" if not failures else "failed",
+        "counts": counts,
+        "failures": failures,
+        "read_only": True,
+    }
+
+
+def _http_get_status(url: str, timeout: float) -> dict[str, Any]:
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json,text/html,*/*"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(512)
+            return {"status": "ok", "http_status": response.status}
+    except urllib.error.HTTPError as exc:
+        return {"status": "failed", "http_status": exc.code}
+    except urllib.error.URLError as exc:
+        return {"status": "failed", "error": str(exc)}
+
+
+def _live_deploy_state(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.include_live_deploy:
+        return {
+            "status": "skipped",
+            "reason": "pass --include-live-deploy for explicit read-only HTTP health checks",
+            "frontend_url": args.frontend_url,
+            "api_health_url": args.api_health_url,
+        }
+    frontend = _http_get_status(args.frontend_url, args.live_timeout)
+    api = _http_get_status(args.api_health_url, args.live_timeout)
+    status = "ok" if frontend.get("status") == "ok" and api.get("status") == "ok" else "failed"
+    return {
+        "status": status,
+        "frontend": frontend,
+        "api_health": api,
+        "read_only": True,
+    }
+
+
+def _git_coordinates() -> dict[str, Any]:
+    def run_git(*parts: str) -> str:
+        result = subprocess.run(
+            ["git", *parts],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return "unknown"
+        return result.stdout.strip() or "unknown"
+
+    return {
+        "branch": run_git("rev-parse", "--abbrev-ref", "HEAD"),
+        "head": run_git("rev-parse", "HEAD"),
+        "dirty": bool(run_git("status", "--porcelain")),
+    }
+
+
+def _redact_sensitive_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            is_secret_key = (
+                key_text.isupper() and SENSITIVE_ENV_RE.search(key_text) is not None
+            ) or key_lower in {"api_key", "token", "secret", "password", "credential"}
+            if is_secret_key or key == "body":
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_sensitive_values(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_values(item) for item in value]
+    if isinstance(value, str) and SENSITIVE_ENV_RE.search(value):
+        return "<redacted>"
+    return value
+
+
+def build_startup_context_report(args: argparse.Namespace) -> dict[str, Any]:
+    run_id = validate_run_id(args.run_id or default_run_id())
+    bridge_args = argparse.Namespace(
+        api_base_url=args.api_base_url,
+        run_id=run_id,
+        scope_type="agent",
+        scope_key=args.agent_scope_key,
+        workspace_key=args.workspace_key,
+        session_key=args.session_key,
+        live_smoke=False,
+    )
+    scorecard_args_ns = argparse.Namespace(
+        api_base_url=args.api_base_url,
+        api_key=args.api_key,
+        run_id=run_id[:39],
+        transport=[],
+        scope_type="workspace",
+        scope_key=args.workspace_key,
+        relationship_policy="deferred",
+        request_timeout=30.0,
+        sse_read_timeout=300.0,
+        job_interval_seconds=5.0,
+        job_timeout_seconds=300.0,
+        backfill_limit=1,
+        backfill_defer_seconds=0,
+        skip_backfill=True,
+        wakeup_scope_type="tenant",
+        wakeup_scope_key=None,
+        skip_wakeup_brief=False,
+        fail_missing_wakeup_brief=False,
+        active_skill=[],
+        mcp_url=DEFAULT_MCP_URL,
+        header=[],
+        stdio_command="uv",
+        stdio_arg=[],
+        stdio_cwd=str(DEFAULT_REPO_ROOT),
+        env=[],
+        dry_run=True,
+    )
+
+    bridge = build_codex_bridge_report(bridge_args)
+    scorecard = build_agent_memory_scorecard(scorecard_args_ns)
+    compatibility = _summarize_compatibility_fixture(args)
+    task_pool = _task_pool_state(args)
+    deploy = _live_deploy_state(args)
+
+    wakeup_tool_ready = any(
+        check.get("name") == "mcp_tool_surface" and check.get("status") == "ok"
+        for check in bridge.get("checks") or []
+    )
+    checks = [
+        _startup_check(
+            name="central_task_pool",
+            status=task_pool["status"],
+            source="task_pool_ops.py",
+            evidence_type="direct_local" if args.include_task_pool else "explicit_opt_in_required",
+            signals=task_pool,
+        ),
+        _startup_check(
+            name="wake_up_route",
+            status="ready" if wakeup_tool_ready else "warning",
+            source="codex-bridge dry-run",
+            signals={
+                "tool": "get_wakeup_context",
+                "tool_surface_ready": wakeup_tool_ready,
+                "generated_synthesis_authoritative": False,
+            },
+        ),
+        _startup_check(
+            name="codex_bridge",
+            status=_report_status(bridge),
+            source="build_codex_bridge_report",
+            signals={
+                "dry_run": bridge.get("dry_run"),
+                "live_smoke_requested": bridge.get("live_smoke_requested"),
+                "failure_count": len(bridge.get("failures") or []),
+            },
+        ),
+        _startup_check(
+            name="agent_memory_scorecard",
+            status=_report_status(scorecard),
+            source="scorecard --dry-run",
+            signals={
+                "score": scorecard.get("score"),
+                "max_score": scorecard.get("max_score"),
+                "transport_count": _safe_count(scorecard, "results"),
+            },
+        ),
+        _startup_check(
+            name="offline_compatibility_fixture",
+            status=compatibility["status"],
+            source="compatibility-report",
+            signals=compatibility,
+        ),
+        _startup_check(
+            name="live_deploy_health",
+            status=deploy["status"],
+            source="read-only HTTP health checks",
+            evidence_type="explicit_opt_in_required" if not args.include_live_deploy else "direct_live_read_only",
+            signals=deploy,
+        ),
+    ]
+    warning_statuses = {"failed", "warning", "skipped"}
+    readiness_warnings = [
+        f"{check['name']}: {check['status']}"
+        for check in checks
+        if check.get("status") in warning_statuses
+    ]
+    failed = [check for check in checks if check.get("status") == "failed"]
+    report = {
+        "report": "palace-startup-context-evidence-refresh",
+        "generated_at": utc_now().isoformat().replace("+00:00", "Z"),
+        "run_id": run_id,
+        "status": "failed" if failed else "ready",
+        "dry_run": True,
+        "read_only": True,
+        "current_chamber": {
+            "workspace_key": args.workspace_key,
+            "agent_scope_key": args.agent_scope_key,
+            "session_key": args.session_key,
+            "repo": _git_coordinates(),
+        },
+        "privacy": {
+            "writes_memory": False,
+            "queues_backfill": False,
+            "deletes_data": False,
+            "retries_jobs": False,
+            "admin_actions": False,
+            "raw_memory_content_reported": False,
+            "raw_secret_output": False,
+            "live_network_by_default": False,
+        },
+        "wake_up_route": {
+            "tool": "get_wakeup_context",
+            "status": "ready" if wakeup_tool_ready else "warning",
+            "source": "direct local MCP tool-surface and lifecycle-payload evidence",
+        },
+        "room_source_evidence": checks,
+        "readiness_warnings": readiness_warnings,
+    }
+    return _redact_sensitive_values(report)
+
+
+def cmd_startup_context_report(args: argparse.Namespace) -> int:
+    report = build_startup_context_report(args)
+    output = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output)
+    else:
+        print(output, end="")
+    return 0 if report["status"] == "ready" else 1
 
 
 def scorecard_args(args: argparse.Namespace, *, transport: str, run_id: str) -> argparse.Namespace:
@@ -2581,6 +2942,47 @@ def build_parser() -> argparse.ArgumentParser:
     codex_bridge.add_argument("--live-smoke", action="store_true")
     codex_bridge.add_argument("--output", default=None)
     codex_bridge.set_defaults(func=cmd_codex_bridge)
+
+    startup = sub.add_parser(
+        "startup-context-report",
+        help=(
+            "Compose a report-only Palace startup-context evidence refresh for "
+            "DOTODO and improvement-planning runs."
+        ),
+    )
+    startup.add_argument("--run-id", default=None)
+    startup.add_argument("--automation-id", default="dotodo-palace-of-truth")
+    startup.add_argument("--workspace-key", default="palaceoftruth")
+    startup.add_argument("--agent-scope-key", default="codex")
+    startup.add_argument("--session-key", default=None)
+    startup.add_argument(
+        "--compatibility-pack",
+        default=str(DEFAULT_REPO_ROOT / "backend" / "tests" / "fixtures" / "agent_memory_compatibility_fixture_pack.json"),
+    )
+    startup.add_argument("--compatibility-top-k", type=int, default=5)
+    startup.add_argument(
+        "--include-task-pool",
+        action="store_true",
+        help="Run read-only central task-pool listings. Default only prints command previews.",
+    )
+    startup.add_argument(
+        "--task-pool-status",
+        action="append",
+        choices=list(DEFAULT_TASK_POOL_STATUSES),
+        default=None,
+    )
+    startup.add_argument("--task-pool-limit", type=int, default=20)
+    startup.add_argument("--task-pool-timeout", type=float, default=30.0)
+    startup.add_argument(
+        "--include-live-deploy",
+        action="store_true",
+        help="Run explicit read-only HTTP checks against the configured frontend/API URLs.",
+    )
+    startup.add_argument("--frontend-url", default="https://palace.sarvent.cloud/")
+    startup.add_argument("--api-health-url", default="https://api.palace.sarvent.cloud/api/v1/health")
+    startup.add_argument("--live-timeout", type=float, default=10.0)
+    startup.add_argument("--output", default=None)
+    startup.set_defaults(func=cmd_startup_context_report)
 
     scorecard = sub.add_parser(
         "scorecard",

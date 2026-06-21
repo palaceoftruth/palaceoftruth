@@ -253,6 +253,21 @@ payloads, MCP tool reachability, dry-run checkpoint defaults, and secret
 redaction without connecting to Palace or writing memory. Add `--live-smoke`
 only after `PALACEOFTRUTH_API_KEY` is available in the runtime environment.
 
+For improvement-planning and DOTODO startup checks, generate the compact
+evidence refresh from the repository root:
+
+```bash
+uv run python scripts/smoke_agent_memory_compatibility.py startup-context-report \
+  --run-id "$(date -u +%Y%m%d-%H%M%S)"
+```
+
+By default this report is offline and report-only. It labels direct local
+evidence separately from Palace-generated synthesis, summarizes the
+`get_wakeup_context` route, Codex bridge dry run, scorecard dry run, and
+compatibility fixture health, and only previews task-pool or live deploy
+commands. Use `--include-task-pool` or `--include-live-deploy` when those
+read-only checks are intentionally part of the run.
+
 ## Codex Session Lifecycle
 
 For normal Codex work, use the Palace-first lifecycle rather than relying on
