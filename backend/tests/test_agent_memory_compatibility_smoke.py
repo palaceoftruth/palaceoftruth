@@ -1209,6 +1209,131 @@ def test_codex_bridge_report_checks_setup_lifecycle_and_tool_surface(
     }
 
 
+def test_startup_context_report_composes_offline_evidence_without_live_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        smoke_module,
+        "build_codex_bridge_report",
+        lambda args: {
+            "status": "passed",
+            "dry_run": True,
+            "live_smoke_requested": False,
+            "checks": [{"name": "mcp_tool_surface", "status": "ok"}],
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        smoke_module,
+        "build_agent_memory_scorecard",
+        lambda args: {
+            "status": "passed",
+            "score": 21,
+            "max_score": 21,
+            "results": [{"transport": "rest"}, {"transport": "mcp-http"}, {"transport": "mcp-stdio"}],
+        },
+    )
+    monkeypatch.setattr(
+        smoke_module,
+        "_summarize_compatibility_fixture",
+        lambda args: {
+            "status": "passed",
+            "pack_id": "compat-pack",
+            "case_count": 12,
+            "offline_report_only": True,
+            "per_transport": {"rest": {"case_count": 3}},
+            "forbidden_hit_count": 0,
+        },
+    )
+    args = smoke_module.build_parser().parse_args(
+        [
+            "startup-context-report",
+            "--run-id",
+            "20260621-startup",
+            "--session-key",
+            "thread-1",
+        ]
+    )
+
+    report = smoke_module.build_startup_context_report(args)
+
+    assert report["status"] == "ready"
+    assert report["read_only"] is True
+    assert report["privacy"] == {
+        "writes_memory": False,
+        "queues_backfill": False,
+        "deletes_data": False,
+        "retries_jobs": False,
+        "admin_actions": False,
+        "raw_memory_content_reported": False,
+        "raw_secret_output": False,
+        "live_network_by_default": False,
+    }
+    checks = {check["name"]: check for check in report["room_source_evidence"]}
+    assert checks["central_task_pool"]["status"] == "skipped"
+    assert checks["central_task_pool"]["evidence_type"] == "explicit_opt_in_required"
+    assert checks["wake_up_route"]["signals"] == {
+        "tool": "get_wakeup_context",
+        "tool_surface_ready": True,
+        "generated_synthesis_authoritative": False,
+    }
+    assert checks["agent_memory_scorecard"]["signals"]["transport_count"] == 3
+    assert checks["offline_compatibility_fixture"]["signals"]["offline_report_only"] is True
+    assert checks["live_deploy_health"]["status"] == "skipped"
+
+
+def test_startup_context_report_redacts_secret_and_memory_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        smoke_module,
+        "build_codex_bridge_report",
+        lambda args: {
+            "status": "passed",
+            "dry_run": True,
+            "live_smoke_requested": False,
+            "checks": [
+                {
+                    "name": "mcp_tool_surface",
+                    "status": "ok",
+                    "body": "raw memory text",
+                    "PALACEOFTRUTH_API_KEY": "secret-value",
+                }
+            ],
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        smoke_module,
+        "build_agent_memory_scorecard",
+        lambda args: {"status": "passed", "score": 1, "max_score": 1, "results": []},
+    )
+    monkeypatch.setattr(
+        smoke_module,
+        "_summarize_compatibility_fixture",
+        lambda args: {"status": "passed", "pack_id": "compat-pack", "case_count": 1},
+    )
+    output = tmp_path / "startup.json"
+    args = smoke_module.build_parser().parse_args(
+        [
+            "startup-context-report",
+            "--run-id",
+            "20260621-startup",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert smoke_module.cmd_startup_context_report(args) == 0
+    text = output.read_text()
+    assert "secret-value" not in text
+    assert "raw memory text" not in text
+    assert "PALACEOFTRUTH_API_KEY" not in text
+    report = smoke_module.json.loads(text)
+    assert report["privacy"]["raw_secret_output"] is False
+
+
 def test_codex_bridge_report_fails_closed_on_unsafe_tool_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

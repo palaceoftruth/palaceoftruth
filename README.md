@@ -139,6 +139,20 @@ checkpoint pointers, readiness warnings, and safe follow-up probes. Use
 and use `capture_checkpoint` only when writing a reviewed handoff or compaction
 checkpoint.
 
+Before improvement planning or DOTODO task selection, generate a report-only
+startup evidence refresh:
+
+```bash
+uv run python scripts/smoke_agent_memory_compatibility.py startup-context-report \
+  --run-id "$(date -u +%Y%m%d-%H%M%S)"
+```
+
+The default report stays offline and non-mutating. It summarizes the Codex
+bridge dry run, `get_wakeup_context` readiness, the dry-run scorecard, offline
+compatibility fixtures, and opt-in command previews for task-pool and live
+deploy checks. Add `--include-task-pool` or `--include-live-deploy` only when
+read-only network checks are explicitly desired.
+
 The repo-packaged Codex plugin lives in [plugins/palaceoftruth-memory](plugins/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
 For governed multi-agent memory positioning, use `scripts/demo_agent_organization_memory.py`. The demo shows specialist agents writing private `agent/<key>` memories while `agent/orchestrator` retrieves only server-authorized specialist scopes and writes only to its own agent scope.
