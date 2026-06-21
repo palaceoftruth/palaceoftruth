@@ -33,6 +33,9 @@ class StatsSession:
         self.execute_sql.append(sql)
         lower = sql.lower()
 
+        if lower.strip() == "select 1":
+            return _ScalarResult(1)
+
         if "group by items.source_type" in lower:
             return _RowsResult(
                 [
@@ -64,6 +67,7 @@ class StatsSession:
 def _client(session: StatsSession) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = SimpleNamespace(ping=_async_ping)
 
     async def override_get_db():
         yield session
@@ -76,6 +80,69 @@ def _client(session: StatsSession) -> TestClient:
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[verify_api_key] = override_verify
     return TestClient(app)
+
+
+async def _async_ping():
+    return True
+
+
+def test_health_remains_probe_compatible() -> None:
+    client = _client(StatsSession())
+
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_version_exposes_public_app_version(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.system.settings.app_version", "sha-test")
+    client = _client(StatsSession())
+
+    response = client.get("/api/v1/version")
+
+    assert response.status_code == 200
+    assert response.json() == {"name": "Palace of Truth", "version": "sha-test"}
+
+
+def test_ready_reports_dependency_state(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.system.settings.app_version", "sha-test")
+    session = StatsSession()
+    client = _client(session)
+
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "version": "sha-test",
+        "dependencies": {
+            "database": {"status": "ok"},
+            "queue": {"status": "ok", "ping": True},
+        },
+    }
+
+
+def test_ready_degrades_when_queue_ping_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.system.settings.app_version", "sha-test")
+    session = StatsSession()
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["dependencies"]["queue"] == {
+        "status": "degraded",
+        "message": "ARQ pool unavailable",
+    }
 
 
 def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:

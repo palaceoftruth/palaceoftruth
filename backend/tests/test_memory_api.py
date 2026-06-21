@@ -384,9 +384,101 @@ def test_memory_entries_accepts_canonical_payload(monkeypatch) -> None:
     assert response.status_code == 202
     assert response.json()["status"] == "queued"
     assert response.json()["contract_status"] == "accepted"
+    assert response.json()["poll_url"].endswith(f"/api/v1/memory/jobs/{response.json()['job_id']}")
+    assert response.json()["poll_after_seconds"] == 5
+    assert response.headers["X-Palace-Memory-Contract-Status"] == "accepted"
+    assert response.headers["X-Palace-Memory-Poll-After"] == "5"
+    assert response.headers["X-Palace-Rate-Limit-State"] == "not_enforced"
     assert response.json()["scope"] == {"type": "workspace", "key": "launch-pad"}
     assert response.json()["accepted_as"] == "canonical"
     assert len(client.app.state.arq_pool.enqueued) == 1
+
+
+def test_memory_entries_reports_saturated_queue_hint(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_queue_hint(_arq_pool):
+        return {
+            "state": "saturated",
+            "queue_name": "arq:queue",
+            "queued_depth": 120,
+            "worker_queue_depth": 120,
+            "oldest_queued_age_seconds": 901,
+            "retry_after_seconds": 60,
+            "poll_after_seconds": 5,
+            "rate_limit_state": "not_enforced",
+        }
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    monkeypatch.setattr("app.api.memory.build_memory_queue_hint", fake_queue_hint)
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["contract_status"] == "retryable_degraded"
+    assert payload["retryable"] is True
+    assert payload["retry_after_seconds"] == 60
+    assert payload["queue"]["state"] == "saturated"
+    assert payload["queue"]["queued_depth"] == 120
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers["X-Palace-Memory-Queue-State"] == "saturated"
+    assert response.headers["X-Palace-Memory-Queue-Depth"] == "120"
+
+
+def test_memory_entries_preserves_retry_contract_for_failed_replay(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    job_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=job_id,
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="failed",
+                progress=100,
+                payload={"relationship_policy": "immediate"},
+                error_message="Worker failed before enrichment",
+                created_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=False,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == str(job_id)
+    assert response.json()["status"] == "failed"
+    assert response.json()["contract_status"] == "retryable_degraded"
+    assert response.json()["retryable"] is True
+    assert response.json()["retry_after_seconds"] == 30
 
 
 def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> None:
@@ -424,7 +516,14 @@ def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> Non
         "message": "Memory queue unavailable; retry the accepted job after dependency recovery",
         "retryable": True,
         "job_id": str(job_id),
+        "contract_status": "dependency_unavailable",
+        "poll_url": f"http://testserver/api/v1/memory/jobs/{job_id}",
+        "poll_after_seconds": 10,
+        "retry_after_seconds": 30,
+        "rate_limit_state": "not_enforced",
     }
+    assert response.headers["Retry-After"] == "30"
+    assert response.headers["X-Palace-Memory-Contract-Status"] == "dependency_unavailable"
     assert job.status == "failed"
     assert job.payload["contract_status"] == "dependency_unavailable"
     assert "MasterNotFoundError" not in response.text

@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import text
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import verify_api_key
+from app.config import settings
 from app.database import get_db
 from app.models.item import Item
 from app.models.embedding import Embedding
@@ -16,6 +18,51 @@ router = APIRouter(tags=["system"])
 @router.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@router.get("/version")
+async def version():
+    return {
+        "name": "Palace of Truth",
+        "version": settings.app_version or "0.1.0",
+    }
+
+
+async def _check_database_ready(db: AsyncSession) -> dict:
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        return {"status": "unhealthy", "error_class": exc.__class__.__name__}
+    return {"status": "ok"}
+
+
+async def _check_queue_ready(request: Request) -> dict:
+    pool = getattr(request.app.state, "arq_pool", None)
+    if pool is None:
+        return {"status": "degraded", "message": "ARQ pool unavailable"}
+    ping = getattr(pool, "ping", None)
+    if ping is None:
+        return {"status": "degraded", "message": "ARQ ping unavailable"}
+    try:
+        result = await ping()
+    except Exception as exc:
+        return {"status": "unhealthy", "error_class": exc.__class__.__name__}
+    return {"status": "ok", "ping": bool(result)}
+
+
+@router.get("/ready")
+async def readiness(request: Request, db: AsyncSession = Depends(get_db)):
+    dependencies = {
+        "database": await _check_database_ready(db),
+        "queue": await _check_queue_ready(request),
+    }
+    statuses = {dependency["status"] for dependency in dependencies.values()}
+    status = "unhealthy" if "unhealthy" in statuses else "degraded" if "degraded" in statuses else "ok"
+    return {
+        "status": status,
+        "version": settings.app_version or "0.1.0",
+        "dependencies": dependencies,
+    }
 
 
 @router.get("/stats", dependencies=[Depends(verify_api_key)])

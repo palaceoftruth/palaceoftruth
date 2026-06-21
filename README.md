@@ -199,6 +199,24 @@ The plugin speaks the Palace memory facade:
 - `POST /api/v1/memory/retrieve-agent`
 - `POST /api/v1/memory/retrieve` as the fallback/single-scope path
 
+Memory writes return a durability contract for clients. A `202` response means
+Palace accepted a durable item/job before enqueueing background work. Clients
+should persist `job_id`, poll `poll_url` after `poll_after_seconds`, and inspect
+`contract_status`, `retryable`, `retry_after_seconds`, and `queue.state` before
+retrying. `queue.state=backpressure` or `saturated` is a retry/defer hint, not a
+hard server-side rate limit; the matching `Retry-After`,
+`X-Palace-Memory-Queue-State`, `X-Palace-Memory-Poll-After`, and
+`X-Palace-Rate-Limit-State` headers carry the same guidance for HTTP clients.
+If enqueue dependencies are unavailable, Palace returns `503` with
+`contract_status=dependency_unavailable`, the accepted `job_id`, `poll_url`, and
+`Retry-After` so clients can poll or retry the accepted job without rewriting
+the memory body.
+
+Operators and clients can use `GET /api/v1/version` for the deployed app version
+and `GET /api/v1/ready` for dependency-aware readiness. `GET /api/v1/health`
+remains the simple Kubernetes-compatible probe and intentionally returns only
+`{"status":"ok"}`.
+
 Every plugin behavior change should bump `third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` so CI can publish a new release artifact.
 
 Release assets are tagged as:
