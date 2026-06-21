@@ -36,6 +36,13 @@ def _deployment_by_name(manifests: list[dict[str, Any]], name: str) -> dict[str,
     raise AssertionError(f"deployment {name} was not rendered")
 
 
+def _manifest_by_kind_name(manifests: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any]:
+    for manifest in manifests:
+        if manifest.get("kind") == kind and manifest.get("metadata", {}).get("name") == name:
+            return manifest
+    raise AssertionError(f"{kind} {name} was not rendered")
+
+
 def _temp_volume(deployment: dict[str, Any]) -> dict[str, Any]:
     volumes = deployment["spec"]["template"]["spec"].get("volumes", [])
     for volume in volumes:
@@ -174,3 +181,35 @@ def test_shared_runtime_storage_can_use_existing_claim_without_rendering_pvc() -
         assert {"name": "upload-artifacts", "persistentVolumeClaim": {"claimName": "palace-upload-artifacts"}} in deployment[
             "spec"
         ]["template"]["spec"]["volumes"]
+
+
+def test_firecrawl_config_renders_for_self_hosted_scraping() -> None:
+    manifests = _render_chart(
+        "config.webpageScraperProvider=firecrawl-self-hosted",
+        "config.firecrawlBaseUrl=https://firecrawl.tilapia-turtle.ts.net/v2",
+        "config.firecrawlTimeoutSeconds=45",
+        "config.firecrawlOnlyMainContent=false",
+    )
+
+    config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
+
+    assert config_map["data"]["WEBPAGE_SCRAPER_PROVIDER"] == "firecrawl-self-hosted"
+    assert config_map["data"]["FIRECRAWL_BASE_URL"] == "https://firecrawl.tilapia-turtle.ts.net/v2"
+    assert config_map["data"]["FIRECRAWL_TIMEOUT_SECONDS"] == "45"
+    assert config_map["data"]["FIRECRAWL_ONLY_MAIN_CONTENT"] == "false"
+
+
+def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:
+    manifests = _render_chart(
+        "externalSecrets.enabled=true",
+        "externalSecrets.secretStoreName=bitwarden-fields",
+        "externalSecrets.appSecretItemId=app-secret-item",
+        "externalSecrets.registrySecretItemId=registry-secret-item",
+        "externalSecrets.firecrawlApiKeyProperty=firecrawl-api-key",
+    )
+
+    external_secret = _manifest_by_kind_name(manifests, "ExternalSecret", "palaceoftruth-app-secrets")
+    assert {
+        "secretKey": "FIRECRAWL_API_KEY",
+        "remoteRef": {"key": "app-secret-item", "property": "firecrawl-api-key"},
+    } in external_secret["spec"]["data"]

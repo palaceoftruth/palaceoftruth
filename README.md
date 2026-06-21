@@ -97,6 +97,32 @@ arq app.workers.worker.MediaWorkerSettings
 arq app.workers.worker.PalaceWorkerSettings
 ```
 
+Optional Firecrawl webpage scraping:
+
+- `WEBPAGE_SCRAPER_PROVIDER=local` keeps the built-in trafilatura/Playwright scraper.
+- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud` uses Firecrawl Cloud at `https://api.firecrawl.dev/v2` and requires `FIRECRAWL_API_KEY`.
+- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted` uses `FIRECRAWL_BASE_URL`; `FIRECRAWL_API_KEY` is optional for private-network self-hosted deployments.
+
+Hermes staging should set:
+
+```bash
+WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted
+FIRECRAWL_BASE_URL=https://firecrawl.tilapia-turtle.ts.net/v2
+```
+
+For Helm-managed deployments, use:
+
+```yaml
+config:
+  webpageScraperProvider: firecrawl-self-hosted
+  firecrawlBaseUrl: https://firecrawl.tilapia-turtle.ts.net/v2
+```
+
+After the worker is running inside that deployment environment, verify from an
+application pod or worker pod that the Firecrawl base URL reaches the self-hosted
+service, then run a focused webpage ingest and confirm the job metadata records
+`content_source=firecrawl`.
+
 ## API And Product Surfaces
 
 The backend registers these API domains under `/api/v1`:
