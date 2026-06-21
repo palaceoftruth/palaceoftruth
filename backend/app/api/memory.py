@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.schemas.memory import (
     MemoryEntryRequest,
     MemoryEntryListResponse,
     MemoryJobListResponse,
+    MemoryQueueHint,
     MemoryJobResponse,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorRequest,
@@ -59,6 +60,7 @@ from app.services.memory import (
 from app.services.memory_admission import evaluate_memory_write_admission
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.job_progress import record_job_progress_event
+from app.services.queue_telemetry import build_memory_queue_hint
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
 from app.workers.queues import enqueue_singleton_job
 
@@ -104,6 +106,35 @@ async def _mark_memory_enqueue_unavailable(db: AsyncSession, *, job: Job, error:
     await db.refresh(job)
 
 
+def _memory_job_poll_url(request: Request, job: Job) -> str:
+    return str(request.url_for("get_memory_job", job_id=str(job.id)))
+
+
+def _set_memory_contract_headers(
+    response: Response,
+    *,
+    job_id: uuid.UUID,
+    contract_status: str,
+    poll_after_seconds: int,
+    queue: MemoryQueueHint | None = None,
+    retry_after_seconds: int | None = None,
+) -> None:
+    response.headers["X-Palace-Memory-Job-Id"] = str(job_id)
+    response.headers["X-Palace-Memory-Contract-Status"] = contract_status
+    response.headers["X-Palace-Memory-Poll-After"] = str(poll_after_seconds)
+    response.headers["X-Palace-Rate-Limit-State"] = "not_enforced"
+    if queue is not None:
+        response.headers["X-Palace-Memory-Queue-State"] = queue.state
+        if queue.queued_depth is not None:
+            response.headers["X-Palace-Memory-Queue-Depth"] = str(queue.queued_depth)
+    if retry_after_seconds is not None:
+        response.headers["Retry-After"] = str(retry_after_seconds)
+
+
+async def _memory_queue_contract_hint(request: Request) -> MemoryQueueHint:
+    return MemoryQueueHint.model_validate(await build_memory_queue_hint(getattr(request.app.state, "arq_pool", None)))
+
+
 async def _enqueue_memory_job_or_raise(request: Request, db: AsyncSession, *, job: Job) -> None:
     try:
         await request.app.state.arq_pool.enqueue_job("memory_artifact", job_id=str(job.id))
@@ -122,6 +153,19 @@ async def _enqueue_memory_job_or_raise(request: Request, db: AsyncSession, *, jo
                 "message": "Memory queue unavailable; retry the accepted job after dependency recovery",
                 "retryable": True,
                 "job_id": str(job.id),
+                "contract_status": "dependency_unavailable",
+                "poll_url": _memory_job_poll_url(request, job),
+                "poll_after_seconds": 10,
+                "retry_after_seconds": 30,
+                "rate_limit_state": "not_enforced",
+            },
+            headers={
+                "Retry-After": "30",
+                "X-Palace-Memory-Job-Id": str(job.id),
+                "X-Palace-Memory-Contract-Status": "dependency_unavailable",
+                "X-Palace-Memory-Poll-After": "10",
+                "X-Palace-Memory-Queue-State": "unknown",
+                "X-Palace-Rate-Limit-State": "not_enforced",
             },
         ) from exc
 
@@ -379,6 +423,7 @@ async def record_mcp_request_audit(
 async def create_memory_entry(
     body: MemoryEntryRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryArtifactAcceptedResponse:
     if body.tenant_id != request.state.tenant_id:
@@ -399,9 +444,19 @@ async def create_memory_entry(
         signing_key=request.state.key_hash,
         admission_audit=admission.audit,
     )
+    queue = await _memory_queue_contract_hint(request)
     if result.enqueue_requested:
         await _enqueue_memory_job_or_raise(request, db, job=result.job)
-    return build_memory_acceptance_response(result)
+    accepted = build_memory_acceptance_response(result, poll_url=_memory_job_poll_url(request, result.job), queue=queue)
+    _set_memory_contract_headers(
+        response,
+        job_id=result.job.id,
+        contract_status=accepted.contract_status,
+        poll_after_seconds=accepted.poll_after_seconds,
+        queue=queue,
+        retry_after_seconds=accepted.retry_after_seconds,
+    )
+    return accepted
 
 
 @router.get("/entries", response_model=MemoryEntryListResponse, dependencies=[Depends(require_mcp_scope("read"))])
@@ -460,6 +515,7 @@ async def get_memory_scopes(
 async def create_memory_artifact(
     body: LegacyMemoryArtifactRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryArtifactAcceptedResponse:
     if body.tenant_id != request.state.tenant_id:
@@ -470,9 +526,19 @@ async def create_memory_artifact(
         body=body,
         signing_key=request.state.key_hash,
     )
+    queue = await _memory_queue_contract_hint(request)
     if result.enqueue_requested:
         await _enqueue_memory_job_or_raise(request, db, job=result.job)
-    return build_memory_acceptance_response(result)
+    accepted = build_memory_acceptance_response(result, poll_url=_memory_job_poll_url(request, result.job), queue=queue)
+    _set_memory_contract_headers(
+        response,
+        job_id=result.job.id,
+        contract_status=accepted.contract_status,
+        poll_after_seconds=accepted.poll_after_seconds,
+        queue=queue,
+        retry_after_seconds=accepted.retry_after_seconds,
+    )
+    return accepted
 
 
 @router.post(
@@ -540,6 +606,7 @@ async def get_memory_jobs(
 async def retry_memory_artifact_job(
     job_id: uuid.UUID,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryJobResponse:
     job = await retry_memory_job(
@@ -548,7 +615,15 @@ async def retry_memory_artifact_job(
         job_id=job_id,
     )
     await _enqueue_memory_job_or_raise(request, db, job=job)
-    return serialize_memory_job(job)
+    serialized = serialize_memory_job(job)
+    _set_memory_contract_headers(
+        response,
+        job_id=job.id,
+        contract_status=serialized.contract_status,
+        poll_after_seconds=serialized.poll_after_seconds,
+        retry_after_seconds=serialized.retry_after_seconds,
+    )
+    return serialized
 
 
 @router.get(

@@ -30,6 +30,7 @@ from app.schemas.memory import (
     MemoryEntryListResponse,
     MemoryJobListResponse,
     MemoryJobResponse,
+    MemoryQueueHint,
     MemoryWriteContractStatus,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorCheck,
@@ -248,14 +249,18 @@ def build_memory_idempotency_key(body: LegacyMemoryArtifactRequest) -> str:
 
 def serialize_memory_job(job: Job) -> MemoryJobResponse:
     mapped_status = MEMORY_JOB_PUBLIC_STATUS_MAP.get(job.status, job.status)
+    contract_status = memory_job_contract_status(job)
+    retryable = contract_status in {"retryable_degraded", "dependency_unavailable"}
     return MemoryJobResponse(
         job_id=job.id,
         status=mapped_status,
-        contract_status=memory_job_contract_status(job),
+        contract_status=contract_status,
         error_message=job.error_message,
         duplicate_of=job.duplicate_of,
         created_at=job.created_at,
         completed_at=job.completed_at,
+        retryable=retryable,
+        retry_after_seconds=30 if retryable else None,
     )
 
 
@@ -479,14 +484,31 @@ async def accept_canonical_memory_entry(
     )
 
 
-def build_memory_acceptance_response(result: MemoryArtifactAcceptanceResult) -> MemoryArtifactAcceptedResponse:
+def build_memory_acceptance_response(
+    result: MemoryArtifactAcceptanceResult,
+    *,
+    poll_url: str | None = None,
+    queue: MemoryQueueHint | None = None,
+) -> MemoryArtifactAcceptedResponse:
     serialized = serialize_memory_job(result.job)
+    queue_retry_after_seconds = queue.retry_after_seconds if queue else None
+    retry_after_seconds = queue_retry_after_seconds or serialized.retry_after_seconds
+    contract_status: MemoryWriteContractStatus = "accepted"
+    if queue and queue.state in {"backpressure", "saturated"}:
+        contract_status = "retryable_degraded"
+    elif serialized.contract_status in {"retryable_degraded", "dependency_unavailable", "permanent_tenant_mismatch"}:
+        contract_status = serialized.contract_status
     return MemoryArtifactAcceptedResponse(
         job_id=serialized.job_id,
         status=serialized.status,
-        contract_status="accepted",
+        contract_status=contract_status,
         scope={"type": result.scope_type, "key": result.scope_key},
         accepted_as=result.accepted_as,
+        poll_url=poll_url,
+        poll_after_seconds=queue.poll_after_seconds if queue else 5,
+        retryable=serialized.retryable or queue_retry_after_seconds is not None,
+        retry_after_seconds=retry_after_seconds,
+        queue=queue,
     )
 
 

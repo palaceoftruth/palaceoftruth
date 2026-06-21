@@ -6,7 +6,7 @@ import pytest
 from arq.constants import job_key_prefix, result_key_prefix
 from arq.jobs import serialize_job, serialize_result
 
-from app.services.queue_telemetry import build_worker_backpressure
+from app.services.queue_telemetry import build_memory_queue_hint, build_worker_backpressure
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
 
 
@@ -228,3 +228,48 @@ async def test_build_worker_backpressure_groups_arq_queue_metrics() -> None:
     assert by_key["relationships"].unexpected_function_count == 0
     assert by_key["palace_builds"].queued_depth == 1
     assert by_key["palace_builds"].worker_concurrency == 1
+
+
+class SaturatedMemoryArqPool(FakeArqPool):
+    def __init__(self) -> None:
+        super().__init__()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        memory_jobs = [(f"memory-{index}", now_ms - 901_000) for index in range(101)]
+        self.queues[DEFAULT_WORKER_QUEUE] = memory_jobs
+        for job_id, score in memory_jobs:
+            self.values[f"{job_key_prefix}{job_id}"] = serialize_job(
+                "memory_artifact",
+                (),
+                {"job_id": job_id},
+                None,
+                score,
+            )
+        self.values[f"{DEFAULT_WORKER_QUEUE}:health-check"] = (
+            b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=8 queued=101"
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_memory_queue_hint_reports_saturation() -> None:
+    hint = await build_memory_queue_hint(SaturatedMemoryArqPool())
+
+    assert hint["state"] == "saturated"
+    assert hint["queue_name"] == DEFAULT_WORKER_QUEUE
+    assert hint["queued_depth"] == 101
+    assert hint["retry_after_seconds"] == 60
+    assert hint["rate_limit_state"] == "not_enforced"
+
+
+class BrokenArqPool(FakeArqPool):
+    async def zrange(self, queue_name: str, _start: int, _end: int, *, withscores: bool):
+        raise RuntimeError("redis://secret-token@internal-redis:6379 unavailable")
+
+
+@pytest.mark.asyncio
+async def test_build_memory_queue_hint_redacts_telemetry_errors() -> None:
+    hint = await build_memory_queue_hint(BrokenArqPool())
+
+    assert hint["state"] == "unknown"
+    assert hint["telemetry_error"] == "Memory queue telemetry unavailable"
+    assert "secret-token" not in str(hint)
+    assert "internal-redis" not in str(hint)

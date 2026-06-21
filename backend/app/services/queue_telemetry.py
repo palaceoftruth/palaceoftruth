@@ -16,6 +16,13 @@ from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_
 
 _HEALTH_RE = re.compile(r"\bj_ongoing=(?P<ongoing>\d+)\s+queued=(?P<queued>\d+)\b")
 _MAX_RESULT_SAMPLES = 250
+MEMORY_QUEUE_BACKPRESSURE_DEPTH = 25
+MEMORY_QUEUE_SATURATED_DEPTH = 100
+MEMORY_QUEUE_BACKPRESSURE_AGE_SECONDS = 300
+MEMORY_QUEUE_SATURATED_AGE_SECONDS = 900
+MEMORY_QUEUE_BACKPRESSURE_RETRY_AFTER_SECONDS = 15
+MEMORY_QUEUE_SATURATED_RETRY_AFTER_SECONDS = 60
+MEMORY_QUEUE_POLL_AFTER_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -367,3 +374,48 @@ async def build_worker_backpressure(arq_pool: Any | None, db: Any | None = None)
         )
 
     return PalaceWorkerBackpressureSummary(generated_at=generated_at, queues=metrics)
+
+
+def _memory_queue_depth(metric: PalaceWorkerQueueMetrics) -> int:
+    return max(metric.queued_depth, metric.worker_queue_depth or 0)
+
+
+def _memory_queue_state(metric: PalaceWorkerQueueMetrics) -> tuple[str, int | None]:
+    if metric.telemetry_error:
+        return "unknown", None
+
+    depth = _memory_queue_depth(metric)
+    oldest_age = metric.oldest_queued_age_seconds or 0
+    if depth >= MEMORY_QUEUE_SATURATED_DEPTH or oldest_age >= MEMORY_QUEUE_SATURATED_AGE_SECONDS:
+        return "saturated", MEMORY_QUEUE_SATURATED_RETRY_AFTER_SECONDS
+    if depth >= MEMORY_QUEUE_BACKPRESSURE_DEPTH or oldest_age >= MEMORY_QUEUE_BACKPRESSURE_AGE_SECONDS:
+        return "backpressure", MEMORY_QUEUE_BACKPRESSURE_RETRY_AFTER_SECONDS
+    return "healthy", None
+
+
+async def build_memory_queue_hint(arq_pool: Any | None) -> dict[str, Any]:
+    """Build the public memory-write queue hint from existing worker telemetry."""
+    summary = await build_worker_backpressure(arq_pool)
+    metric = next((queue for queue in summary.queues if queue.key == "memory"), None)
+    if metric is None:
+        return {
+            "state": "unknown",
+            "poll_after_seconds": MEMORY_QUEUE_POLL_AFTER_SECONDS,
+            "rate_limit_state": "not_enforced",
+            "retry_after_seconds": None,
+            "telemetry_error": "Memory queue telemetry unavailable",
+        }
+
+    state, retry_after_seconds = _memory_queue_state(metric)
+    return {
+        "state": state,
+        "queue_name": metric.queue_name,
+        "queued_depth": metric.queued_depth,
+        "deferred_depth": metric.deferred_depth,
+        "worker_queue_depth": metric.worker_queue_depth,
+        "oldest_queued_age_seconds": metric.oldest_queued_age_seconds,
+        "retry_after_seconds": retry_after_seconds,
+        "poll_after_seconds": MEMORY_QUEUE_POLL_AFTER_SECONDS,
+        "rate_limit_state": "not_enforced",
+        "telemetry_error": "Memory queue telemetry unavailable" if metric.telemetry_error else None,
+    }

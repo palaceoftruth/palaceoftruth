@@ -30,6 +30,7 @@ MemoryWriteContractStatus = Literal[
     "permanent_tenant_mismatch",
     "dependency_unavailable",
 ]
+MemoryQueueState = Literal["healthy", "backpressure", "saturated", "unknown"]
 McpOperationScope = Literal[
     "read",
     "write",
@@ -347,12 +348,31 @@ class LegacyMemoryArtifactRequest(BaseModel):
         return self
 
 
+class MemoryQueueHint(BaseModel):
+    state: MemoryQueueState
+    queue_name: str | None = None
+    queued_depth: int | None = None
+    deferred_depth: int | None = None
+    worker_queue_depth: int | None = None
+    oldest_queued_age_seconds: int | None = None
+    retry_after_seconds: int | None = None
+    poll_after_seconds: int = 5
+    rate_limit_state: Literal["not_enforced"] = "not_enforced"
+    telemetry_error: str | None = None
+
+
 class MemoryArtifactAcceptedResponse(BaseModel):
     job_id: uuid.UUID
     status: str
     contract_status: MemoryWriteContractStatus = "accepted"
     scope: MemoryScope | None = None
     accepted_as: Literal["canonical", "legacy_artifact"] | None = None
+    poll_url: str | None = None
+    poll_after_seconds: int = 5
+    retryable: bool = False
+    retry_after_seconds: int | None = None
+    rate_limit_state: Literal["not_enforced"] = "not_enforced"
+    queue: MemoryQueueHint | None = None
 
 
 class RelationshipBackfillRequest(BaseModel):
@@ -377,6 +397,9 @@ class MemoryJobResponse(BaseModel):
     duplicate_of: uuid.UUID | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+    poll_after_seconds: int = 5
+    retryable: bool = False
+    retry_after_seconds: int | None = None
 
 
 class MemoryJobListResponse(BaseModel):
