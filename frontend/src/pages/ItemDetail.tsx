@@ -6,6 +6,7 @@ import { api, ApiError } from "../api/client";
 import type { Item, RelatedItem } from "../api/types";
 import ArtifactCitation, { artifactCitationFromItem } from "../components/ArtifactCitation";
 import PageHeader from "../components/PageHeader";
+import ProvenanceDrawer, { relatedItemsToProvenanceRelationships } from "../components/ProvenanceDrawer";
 import RelationshipBadge from "../components/RelationshipBadge";
 import SourceIcon from "../components/SourceIcon";
 import StatePanel from "../components/StatePanel";
@@ -199,14 +200,36 @@ export default function ItemDetail() {
         title={item.title}
         description="Inspect source provenance, edit tags, and review the relationships Palace derived from this captured item."
         actions={
-          <button
-            type="button"
-            onClick={handleDelete}
-            className="sb-button-secondary border-rose-900/70 bg-rose-950/20 text-rose-100 hover:border-rose-500/70 hover:bg-rose-950/40"
-          >
-            <Trash2 className="h-4 w-4" />
-            Remove item
-          </button>
+          <>
+            <ProvenanceDrawer
+              provenance={{
+                title: item.title,
+                subtitle: "Full item provenance, captured source links, derived artifacts, and relationship evidence.",
+                kind: artifactCitation ? "derived_artifact" : "raw_source",
+                itemId: item.id,
+                sourceType: item.source_type,
+                sourceUrl: item.source_url,
+                summary: item.summary,
+                excerpt: item.raw_content?.slice(0, 1000),
+                artifact: artifactCitation,
+                relationships: relatedItemsToProvenanceRelationships(related),
+                metadata: [
+                  { label: "Status", value: item.status.replace(/_/g, " ") },
+                  { label: "Captured", value: createdAt },
+                  { label: "Categories", value: item.categories.join(", ") },
+                  { label: "Tags", value: item.tags.join(", ") },
+                ],
+              }}
+            />
+            <button
+              type="button"
+              onClick={handleDelete}
+              className="sb-button-secondary border-rose-900/70 bg-rose-950/20 text-rose-100 hover:border-rose-500/70 hover:bg-rose-950/40"
+            >
+              <Trash2 className="h-4 w-4" />
+              Remove item
+            </button>
+          </>
         }
         meta={
           <>
@@ -448,9 +471,8 @@ export default function ItemDetail() {
             ) : (
               <div className="space-y-2">
                 {related.map((rel) => (
-                  <Link
+                  <article
                     key={rel.item_id}
-                    to={`/items/${rel.item_id}`}
                     className="sb-list-card flex min-w-0 flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="flex min-w-0 items-start gap-3">
@@ -458,7 +480,9 @@ export default function ItemDetail() {
                         <SourceIcon sourceType={rel.source_type} className="h-4 w-4" />
                       </div>
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-zinc-100">{rel.title}</p>
+                        <Link to={`/items/${rel.item_id}`} className="block truncate text-sm font-medium text-zinc-100 transition hover:text-sky-100">
+                          {rel.title}
+                        </Link>
                         <p className="mt-1 text-xs uppercase tracking-[0.22em] text-zinc-500">
                           {rel.source_type.replace(/_/g, " ")}
                         </p>
@@ -467,8 +491,31 @@ export default function ItemDetail() {
                     <div className="flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
                       <RelationshipBadge relationship={rel.relationship} />
                       <span className="text-xs text-zinc-500">{(rel.confidence * 100).toFixed(0)}%</span>
+                      <ProvenanceDrawer
+                        compact
+                        triggerLabel="Evidence"
+                        provenance={{
+                          title: rel.title,
+                          subtitle: `Relationship evidence connected to ${item.title}.`,
+                          kind: "canonical_memory",
+                          itemId: rel.item_id,
+                          sourceType: rel.source_type,
+                          scores: [{ label: "Relationship confidence", value: rel.confidence, tone: rel.confidence >= 0.75 ? "good" : "default" }],
+                          relationships: [{
+                            item_id: item.id,
+                            title: item.title,
+                            source_type: item.source_type,
+                            relationship: rel.relationship,
+                            confidence: rel.confidence,
+                          }],
+                          metadata: [
+                            { label: "Relationship", value: rel.relationship.replace(/_/g, " ") },
+                            { label: "Source type", value: rel.source_type.replace(/_/g, " ") },
+                          ],
+                        }}
+                      />
                     </div>
-                  </Link>
+                  </article>
                 ))}
               </div>
             )}

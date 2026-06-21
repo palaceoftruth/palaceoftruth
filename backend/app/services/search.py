@@ -16,7 +16,7 @@ from app.schemas.search import SearchContextChunk, SearchResult, split_system_pr
 from app.services.artifact_citations import build_artifact_citation
 from app.services.embedder import EmbeddingService
 from app.services.memory_entries import source_project_from_memory_metadata
-from app.services.retrieval_provenance import build_retrieval_provenance
+from app.services.retrieval_provenance import build_retrieval_provenance, classify_retrieval_trust
 from app.services.retrieval_hints import report_retrieval_hint_candidates, score_retrieval_hints_for_items
 from app.services.retrieval_lenses import resolve_retrieval_lens
 
@@ -590,6 +590,20 @@ def _artifact_provenance(candidate: _SearchCandidate) -> tuple[str, str]:
         return key, _ARTIFACT_PROVENANCE_LABELS[key]
 
     return "corpus_item", _ARTIFACT_PROVENANCE_LABELS["corpus_item"]
+
+
+def _trace_counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _source_support_level(candidate: _SearchCandidate) -> str | None:
+    value = _metadata_value(candidate, "source_support_level")
+    return str(value) if isinstance(value, str) and value else None
 
 
 def _tags_request_derived_artifacts(tags: list[str] | None) -> bool:
@@ -1292,6 +1306,7 @@ class SearchService:
             source_item_id = _conversation_fact_source_item_id(candidate.item_metadata)
             source_span = _conversation_fact_source_span(candidate.item_metadata)
             artifact_provenance_type, artifact_provenance_label = _artifact_provenance(candidate)
+            derived_artifact_keys = list(_derived_artifact_keys(candidate))
             source_project = source_project_from_memory_metadata(candidate.item_metadata)
             artifact_citation = build_artifact_citation(
                 candidate.item_metadata,
@@ -1307,6 +1322,19 @@ class SearchService:
                 source_span=source_span,
                 artifact_citation=artifact_citation,
             )
+            trust_metadata = classify_retrieval_trust(
+                source_type=candidate.source_type,
+                source_url=candidate.source_url,
+                artifact_provenance_type=artifact_provenance_type,
+                derived_artifact_keys=derived_artifact_keys,
+                retrieval_provenance=retrieval_provenance,
+                source_item_id=source_item_id,
+                source_span=source_span,
+                retrieved_scope_label=retrieved_scope_label,
+                effective_date_source=candidate.effective_date_source,
+                effective_date_quality=candidate.effective_date_quality,
+                source_support_level=_source_support_level(candidate),
+            )
             ranking_trace_rows.append(
                 {
                     "item_id": str(candidate.item_id),
@@ -1314,12 +1342,25 @@ class SearchService:
                     "source_project": source_project,
                     "artifact_provenance_type": artifact_provenance_type,
                     "artifact_provenance_label": artifact_provenance_label,
-                    "derived_artifact_keys": list(_derived_artifact_keys(candidate)),
+                    "derived_artifact_keys": derived_artifact_keys,
                     "retrieved_scope_type": retrieved_scope_type,
                     "retrieved_scope_key": retrieved_scope_key,
                     "retrieved_scope_label": retrieved_scope_label,
                     "source_item_id": str(source_item_id) if source_item_id else None,
                     "source_span": source_span,
+                    "trust_class": trust_metadata.trust_class,
+                    "source_support_state": trust_metadata.source_support_state,
+                    "freshness": trust_metadata.freshness,
+                    "derived_raw_classification": trust_metadata.derived_raw_classification,
+                    "reuse_metrics": {
+                        "returned_to_client": True,
+                        "answer_reuse_tracked": False,
+                        "session_context_reuse_tracked": bool(include_neighbor_chunks),
+                        "operator_promotion_tracked": artifact_provenance_type in {
+                            "canonical_memory",
+                            "legacy_memory_artifact",
+                        },
+                    },
                     "candidate_modality": retrieval_provenance.modality if retrieval_provenance else None,
                     "candidate_source": retrieval_provenance.candidate_source if retrieval_provenance else None,
                     "support_level": retrieval_provenance.support_level if retrieval_provenance else None,
@@ -1403,6 +1444,10 @@ class SearchService:
                     score=float(adjusted_score),
                     artifact_citation=artifact_citation,
                     retrieval_provenance=retrieval_provenance,
+                    trust_class=trust_metadata.trust_class,
+                    source_support_state=trust_metadata.source_support_state,
+                    freshness=trust_metadata.freshness,
+                    derived_raw_classification=trust_metadata.derived_raw_classification,
                 )
             )
             if len(results) >= limit:
@@ -1460,6 +1505,20 @@ class SearchService:
             "candidate_limit": effective_candidate_limit,
             "candidate_count": len(candidates),
             "relationship_graph_candidate_count": relationship_graph_candidate_count,
+            "trust_class_counts": _trace_counts(ranking_trace_rows, "trust_class"),
+            "source_support_counts": _trace_counts(ranking_trace_rows, "source_support_state"),
+            "freshness_counts": _trace_counts(ranking_trace_rows, "freshness"),
+            "derived_raw_counts": _trace_counts(ranking_trace_rows, "derived_raw_classification"),
+            "reuse_metrics": {
+                "returned_to_client": len(results),
+                "answer_reuse_tracked": False,
+                "session_context_reuse_tracked": bool(include_neighbor_chunks),
+                "operator_promotion_tracked": any(
+                    row.get("reuse_metrics", {}).get("operator_promotion_tracked")
+                    for row in ranking_trace_rows
+                    if isinstance(row.get("reuse_metrics"), dict)
+                ),
+            },
             "include_neighbor_chunks": include_neighbor_chunks,
             "neighbor_chunk_window": neighbor_chunk_window if include_neighbor_chunks else None,
             "context_budget_chars": context_budget_chars if include_neighbor_chunks else None,

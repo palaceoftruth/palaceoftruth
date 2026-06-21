@@ -55,13 +55,16 @@ def lifecycle_payloads(
             },
             {
                 "phase": "start",
-                "tool": "palace_context",
+                "tool": "get_wakeup_context",
                 "arguments": {
-                    "memory_scope_type": "agent",
-                    "memory_scope_key": agent_scope_key,
-                    "limit": 10,
+                    "agent_scope_key": agent_scope_key,
+                    "workspace_scope_keys": [resolved_workspace_key],
+                    "session_scope_key": session_key,
+                    "include_tenant_shared": True,
+                    "memory_limit_per_scope": 5,
+                    "checkpoint_limit_per_scope": 3,
                 },
-                "purpose": "Load wake-up context and recent Codex-scoped memory metadata.",
+                "purpose": "Load compact session-start context, recent memory pointers, checkpoint pointers, and readiness warnings.",
             },
             {
                 "phase": "start",

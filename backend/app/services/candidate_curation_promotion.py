@@ -25,20 +25,23 @@ class CandidatePromotionArtifact(Protocol):
     metadata_: dict[str, Any]
 
 
-PROMOTION_ALLOWED_STATUSES = frozenset({"approved"})
+PROMOTION_ALLOWED_STATUSES = frozenset({"approved", "promoted"})
 
 
 def render_candidate_promotion_handoff(artifact: CandidatePromotionArtifact) -> dict[str, Any]:
     """Render a promotion handoff for an approved candidate without applying it."""
 
     if artifact.status not in PROMOTION_ALLOWED_STATUSES:
-        raise CandidateCurationArtifactError("only approved candidate curation artifacts can render promotion handoffs")
+        raise CandidateCurationArtifactError("only promoted candidate curation artifacts can render promotion handoffs")
 
     validate_candidate_payload(
         status=artifact.status,
         candidate_body=artifact.candidate_body,
         privacy_review=dict(artifact.privacy_review or {}),
         approval=dict(artifact.approval or {}),
+        source_item_ids=list(artifact.source_item_ids or []),
+        source_digests=dict(artifact.source_digests or {}),
+        metadata=dict(artifact.metadata_ or {}),
     )
     approval = dict(artifact.approval or {})
     if str(approval.get("decision") or "").strip().lower() != "approved":

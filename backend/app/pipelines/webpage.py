@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import trafilatura
 from playwright.async_api import async_playwright
 
+from app.config import settings
 from app.pipelines.base import BasePipeline
 from app.pipelines.social import (
     SocialCaptureError,
@@ -13,6 +14,11 @@ from app.pipelines.social import (
     detect_social_post_platform,
 )
 from app.pipelines.youtube import MediaTranscriptionLimitError, MediaPipeline
+from app.services.firecrawl import (
+    FirecrawlConfig,
+    firecrawl_config_from_settings,
+    scrape_with_firecrawl,
+)
 
 _WORDS_PER_MINUTE = 200
 
@@ -38,11 +44,30 @@ class WebpagePipeline(BasePipeline):
        - Extracts the rendered HTML and passes it back through trafilatura
     """
 
+    def __init__(
+        self,
+        *args,
+        firecrawl_config: FirecrawlConfig | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.firecrawl_config = firecrawl_config or firecrawl_config_from_settings(settings)
+
     async def extract(self, url: str, job_id: str = "unknown", **_kwargs) -> tuple[str, dict[str, Any]]:
         social_platform = detect_social_post_platform(url)
 
-        # Fast path: trafilatura (synchronous — run in executor)
         loop = asyncio.get_event_loop()
+        if self.firecrawl_config.enabled and not social_platform:
+            _, article_text, metadata = await loop.run_in_executor(
+                None,
+                scrape_with_firecrawl,
+                url,
+                self.firecrawl_config,
+            )
+            if article_text:
+                return article_text, self._with_read_time_and_domain(url, article_text, metadata)
+
+        # Fast path: trafilatura (synchronous — run in executor)
         _, article_text, metadata = await loop.run_in_executor(None, self._scrape, url)
 
         if article_text:
@@ -65,6 +90,14 @@ class WebpagePipeline(BasePipeline):
         if not article_text:
             raise ValueError(f"Could not extract text from {url} (tried trafilatura and Playwright)")
         return article_text, metadata
+
+    @staticmethod
+    def _with_read_time_and_domain(url: str, article_text: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(metadata)
+        enriched.setdefault("domain", urlparse(url).netloc)
+        word_count = len(article_text.split())
+        enriched["estimated_read_time_minutes"] = max(1, round(word_count / _WORDS_PER_MINUTE))
+        return enriched
 
     async def _append_social_video_transcript(
         self,

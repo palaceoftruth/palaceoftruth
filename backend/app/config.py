@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     facebook_oembed_access_token: str = ""
     facebook_graph_api_version: str = "v25.0"
 
+    # Webpage scraping provider. Firecrawl is opt-in so existing local
+    # trafilatura/Playwright scraping remains the default.
+    webpage_scraper_provider: str = "local"
+    firecrawl_base_url: str = "https://api.firecrawl.dev/v2"
+    firecrawl_api_key: str = ""
+    firecrawl_timeout_seconds: float = 60.0
+    firecrawl_only_main_content: bool = True
+
     # Palace sync
     palace_sync_allowed_roots: str = ""
     palace_sync_max_file_bytes: int = 250_000
@@ -166,6 +174,20 @@ class Settings(BaseSettings):
             raise ValueError("ASSEMBLYAI_POLL_INTERVAL_SECONDS must be greater than 0")
         if self.transcription_max_parallel_chunks < 1:
             raise ValueError("TRANSCRIPTION_MAX_PARALLEL_CHUNKS must be at least 1")
+        webpage_scraper_provider = self.webpage_scraper_provider.strip().lower().replace("_", "-")
+        if webpage_scraper_provider not in {"local", "firecrawl-cloud", "firecrawl-self-hosted"}:
+            raise ValueError(
+                "WEBPAGE_SCRAPER_PROVIDER must be one of: local, firecrawl-cloud, firecrawl-self-hosted"
+            )
+        self.webpage_scraper_provider = webpage_scraper_provider
+        if webpage_scraper_provider.startswith("firecrawl"):
+            parsed = urlparse(self.firecrawl_base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("FIRECRAWL_BASE_URL must be an http(s) URL")
+            if self.firecrawl_timeout_seconds <= 0:
+                raise ValueError("FIRECRAWL_TIMEOUT_SECONDS must be greater than 0")
+            if webpage_scraper_provider == "firecrawl-cloud" and not self.firecrawl_api_key.strip():
+                raise ValueError("FIRECRAWL_API_KEY is required when WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud")
         return self
 
 

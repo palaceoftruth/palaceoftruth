@@ -7,6 +7,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.job import JobProgressEventResponse
+from app.schemas.retrieval_provenance import (
+    RetrievalDerivedRawClass,
+    RetrievalFreshnessClass,
+    RetrievalSourceSupportState,
+    RetrievalTrustClass,
+)
 from app.schemas.search import SearchResult
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
@@ -131,6 +137,61 @@ class PalaceRoomDetail(BaseModel):
     redirect_target: PalaceRoomSummary | None = None
 
 
+class PalaceSourceChunkSummary(BaseModel):
+    id: uuid.UUID
+    chunk_index: int
+    chunk_digest: str
+    token_count: int | None = None
+    preview: str
+
+
+class PalaceSourceRecordSummary(BaseModel):
+    id: uuid.UUID
+    item_id: uuid.UUID
+    source_kind: str
+    source_uri: str | None = None
+    source_version: str
+    content_hash: str
+    status: Literal["active", "stale", "failed", "deleted", "superseded"]
+    failure_reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    chunk_count: int
+    chunks: list[PalaceSourceChunkSummary] = Field(default_factory=list)
+
+
+class PalaceItemSourceSummary(BaseModel):
+    tenant_id: str
+    item_id: uuid.UUID
+    source_records: list[PalaceSourceRecordSummary] = Field(default_factory=list)
+
+
+class PalaceClaimSourceSupportSummary(BaseModel):
+    id: uuid.UUID
+    source_record_id: uuid.UUID
+    source_chunk_id: uuid.UUID | None = None
+    source_item_id: uuid.UUID
+    support_role: Literal["supports", "contradicts", "context", "derived_from"]
+    status: Literal["current", "stale"]
+    source_digest: str
+    source_span: dict[str, Any] = Field(default_factory=dict)
+
+
+class PalaceClaimSupportSummary(BaseModel):
+    id: uuid.UUID
+    claim_key: str
+    claim_text: str
+    claim_type: Literal["fact", "preference", "decision", "task_state", "summary", "classification", "relationship"]
+    confidence: float
+    status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    sources: list[PalaceClaimSourceSupportSummary] = Field(default_factory=list)
+
+
+class PalaceClaimSupportReport(BaseModel):
+    tenant_id: str
+    claims: list[PalaceClaimSupportSummary] = Field(default_factory=list)
+
+
 class PalaceRoomUpdate(BaseModel):
     name: str
 
@@ -222,6 +283,10 @@ class PalaceRankingTraceResult(BaseModel):
     retrieved_scope_type: str | None = Field(default=None, exclude_if=lambda value: value is None)
     retrieved_scope_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
     retrieved_scope_label: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    trust_class: RetrievalTrustClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_support_state: RetrievalSourceSupportState | None = Field(default=None, exclude_if=lambda value: value is None)
+    freshness: RetrievalFreshnessClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    derived_raw_classification: RetrievalDerivedRawClass | None = Field(default=None, exclude_if=lambda value: value is None)
     source_publication_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     source_role: str | None = Field(default=None, exclude_if=lambda value: value is None)
     query_source_role: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -248,6 +313,11 @@ class PalaceRankingTrace(BaseModel):
     display_limit: int | None = None
     candidate_limit: int | None = None
     candidate_count: int | None = None
+    trust_class_counts: dict[str, int] = Field(default_factory=dict)
+    source_support_counts: dict[str, int] = Field(default_factory=dict)
+    freshness_counts: dict[str, int] = Field(default_factory=dict)
+    derived_raw_counts: dict[str, int] = Field(default_factory=dict)
+    reuse_metrics: dict[str, Any] = Field(default_factory=dict)
     result_count: int = 0
     routing: dict[str, Any] = Field(default_factory=dict)
     results: list[PalaceRankingTraceResult] = Field(default_factory=list)

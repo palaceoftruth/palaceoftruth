@@ -97,6 +97,32 @@ arq app.workers.worker.MediaWorkerSettings
 arq app.workers.worker.PalaceWorkerSettings
 ```
 
+Optional Firecrawl webpage scraping:
+
+- `WEBPAGE_SCRAPER_PROVIDER=local` keeps the built-in trafilatura/Playwright scraper.
+- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud` uses Firecrawl Cloud at `https://api.firecrawl.dev/v2` and requires `FIRECRAWL_API_KEY`.
+- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted` uses `FIRECRAWL_BASE_URL`; `FIRECRAWL_API_KEY` is optional for private-network self-hosted deployments.
+
+Hermes staging should set:
+
+```bash
+WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted
+FIRECRAWL_BASE_URL=https://firecrawl.tilapia-turtle.ts.net/v2
+```
+
+For Helm-managed deployments, use:
+
+```yaml
+config:
+  webpageScraperProvider: firecrawl-self-hosted
+  firecrawlBaseUrl: https://firecrawl.tilapia-turtle.ts.net/v2
+```
+
+After the worker is running inside that deployment environment, verify from an
+application pod or worker pod that the Firecrawl base URL reaches the self-hosted
+service, then run a focused webpage ingest and confirm the job metadata records
+`content_source=firecrawl`.
+
 ## API And Product Surfaces
 
 The backend registers these API domains under `/api/v1`:
@@ -121,6 +147,37 @@ The browser extension submits captures through `/api/v1/capture/browser`; see [e
 ## MCP And Agent Memory
 
 The standalone MCP adapter lives at [backend/app/mcp_server.py](backend/app/mcp_server.py). It is a thin MCP wrapper over the existing Palace REST API and supports `stdio` and streamable HTTP transports.
+
+Retrieval diagnostics include report-only provenance labels for operators:
+`trust_class`, `source_support_state`, `freshness`, and
+`derived_raw_classification`. Treat `raw_source` and source-backed
+`curated_memory` as the strongest evidence, review `generated_synthesis` before
+copying it into durable memory, and avoid letting `low_support_generated`,
+`stale_context`, or `broad_fallback` results drive an answer without checking
+the underlying source. Aggregate trace counts compare the mix across direct
+retrieval, room routing, broad fallback, and generated artifacts; they are
+diagnostic labels, not ranking approvals.
+
+For session startup, use `get_wakeup_context` when an agent needs one compact
+package with wake-up status, selected agent/workspace/session memory summaries,
+checkpoint pointers, readiness warnings, and safe follow-up probes. Use
+`palace_search` or `retrieve_agent_memory` after that for a specific question,
+and use `capture_checkpoint` only when writing a reviewed handoff or compaction
+checkpoint.
+
+Before improvement planning or DOTODO task selection, generate a report-only
+startup evidence refresh:
+
+```bash
+uv run python scripts/smoke_agent_memory_compatibility.py startup-context-report \
+  --run-id "$(date -u +%Y%m%d-%H%M%S)"
+```
+
+The default report stays offline and non-mutating. It summarizes the Codex
+bridge dry run, `get_wakeup_context` readiness, the dry-run scorecard, offline
+compatibility fixtures, and opt-in command previews for task-pool and live
+deploy checks. Add `--include-task-pool` or `--include-live-deploy` only when
+read-only network checks are explicitly desired.
 
 The repo-packaged Codex plugin lives in [plugins/palaceoftruth-memory](plugins/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
@@ -193,7 +250,7 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and repo conventions
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
 - [DESIGN.md](DESIGN.md): frontend and product design guidance
+- [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
 - [plugins/palaceoftruth-memory/README.md](plugins/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
-

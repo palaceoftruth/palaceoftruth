@@ -30,6 +30,9 @@ import type {
   PalaceSyncRun,
   PalaceSyncSource,
   PalaceSyncSourceDeleteResponse,
+  ReviewInboxAction,
+  ReviewInboxActionResponse,
+  ReviewInboxResponse,
   SourceSubscription,
   SourceSubscriptionEntryListResponse,
   SourceSubscriptionListResponse,
@@ -308,6 +311,26 @@ export const api = {
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
+
+  getReviewInbox: (params?: { include_deferred?: boolean; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.include_deferred !== undefined) query.set("include_deferred", String(params.include_deferred));
+    if (params?.limit !== undefined) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query}` : "";
+    return req<ReviewInboxResponse>(`/curation-artifacts/review-inbox${suffix}`);
+  },
+
+  applyReviewInboxAction: (body: {
+    action: ReviewInboxAction;
+    artifact_ids: string[];
+    actor?: string;
+    note?: string;
+    defer_until?: string;
+  }) =>
+    req<ReviewInboxActionResponse>("/curation-artifacts/review-inbox/actions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   listPalaceMcpClients: () => req<McpOAuthClientListResponse>("/palace/mcp-clients"),
 

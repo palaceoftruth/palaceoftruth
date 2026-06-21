@@ -79,6 +79,13 @@ config:
   # X oEmbed capture needs no credentials. Facebook public post capture can use
   # a Meta app token from the app secret plus this Graph API version.
   facebookGraphApiVersion: "v25.0"
+  # Optional Firecrawl webpage scraping. Use local for built-in scraping,
+  # firecrawl-cloud for Firecrawl Cloud, or firecrawl-self-hosted for a
+  # deployment-owned Firecrawl API base URL.
+  webpageScraperProvider: local
+  firecrawlBaseUrl: "https://api.firecrawl.dev/v2"
+  firecrawlTimeoutSeconds: "60"
+  firecrawlOnlyMainContent: "true"
   # Leave blank in cluster installs unless the backend can actually see a mounted corpus path.
   palaceSyncAllowedRoots: ""
   palaceSyncMaxFileBytes: "250000"
@@ -121,6 +128,9 @@ externalSecrets:
   embeddingLocalHttpApiKeyProperty: ""
   # Optional AssemblyAI API key property for hosted diarized transcription.
   assemblyaiApiKeyProperty: ""
+  # Optional Firecrawl API key property. Cloud mode requires this; self-hosted
+  # deployments may leave it blank when private networking handles access.
+  firecrawlApiKeyProperty: ""
 
 # Used when externalSecrets.enabled=false — caller must pre-create these secrets.
 # existingSecret must contain: OPENAI_API_KEY, OPENROUTER_API_KEY, API_KEY,
@@ -129,7 +139,9 @@ externalSecrets:
 #   GITHUB_PAT / PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY for Palace repo sync,
 #   FACEBOOK_OEMBED_ACCESS_TOKEN for no-JavaScript Facebook post capture,
 #   EMBEDDING_LOCAL_HTTP_API_KEY for authenticated local embedding proxies, and
-#   ASSEMBLYAI_API_KEY when config.transcriptionProvider=assemblyai.
+#   ASSEMBLYAI_API_KEY when config.transcriptionProvider=assemblyai, and
+#   FIRECRAWL_API_KEY when config.webpageScraperProvider=firecrawl-cloud or an
+#   authenticated self-hosted Firecrawl deployment requires bearer auth.
 existingSecret: ""
 # existingRegistrySecret must be a kubernetes.io/dockerconfigjson type secret
 existingRegistrySecret: ""

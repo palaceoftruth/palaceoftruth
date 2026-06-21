@@ -78,7 +78,7 @@ def _artifact(*, tenant_id: str = "tenant-a", status: str = "draft") -> Candidat
         target_surface="skills/codex-pm-tasks",
         status=status,
         source_item_ids=["SAR-512"],
-        source_digests={"candidate_body": "sha256:test"},
+        source_digests={"SAR-512": "sha256:test"},
         candidate_body="Use the task pool helper for durable PM task writes.",
         privacy_review={
             "safe_for_review": True,
@@ -107,7 +107,7 @@ def _artifact(*, tenant_id: str = "tenant-a", status: str = "draft") -> Candidat
             "decision": "approved",
             "promotion_target": "codex skill PR",
         }
-        if status == "approved"
+        if status in {"approved", "promoted"}
         else {},
         metadata_={"created_from": "test"},
         created_at=now,
@@ -172,6 +172,142 @@ def test_create_candidate_curation_artifact_stores_sanitized_tenant_scoped_paylo
     assert session.events[0].next_snapshot["status"] == "draft"
 
 
+def test_create_no_source_generated_insight_remains_advisory_and_needs_source() -> None:
+    session = FakeSession()
+    client = _client(session)
+    payload = _payload()
+    payload["status"] = "needs_source"
+    payload["source_item_ids"] = []
+    payload["source_digests"] = {}
+
+    response = client.post("/api/v1/curation-artifacts", json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "needs_source"
+    assert body["promotion_state"] == "needs_source"
+    assert body["source_support_level"] == "no_source"
+    assert body["advisory_generated_context"] is True
+    assert body["promoted_source_backed"] is False
+    assert session.events[0].next_snapshot["status"] == "needs_source"
+
+
+def test_create_reviewable_generated_insight_accepts_single_source_support() -> None:
+    session = FakeSession()
+    client = _client(session)
+    payload = _payload()
+    payload["status"] = "reviewable"
+    payload["source_item_ids"] = ["item-1"]
+    payload["source_digests"] = {"item-1": "sha256:item-1"}
+
+    response = client.post("/api/v1/curation-artifacts", json=payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["promotion_state"] == "reviewable"
+    assert body["source_support_level"] == "single_source"
+    assert body["advisory_generated_context"] is True
+
+
+def test_promoted_generated_insight_requires_source_support() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.source_item_ids = []
+    artifact.source_digests = {}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={
+            "status": "promoted",
+            "approval": {
+                "approved_by": "codex-review",
+                "approved_at": "2026-06-20T17:30:00Z",
+                "decision": "approved",
+                "promotion_target": "codex skill PR",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "source_item_ids and source_digests" in response.json()["detail"]
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
+def test_promoted_generated_insight_blocks_conflicting_sources() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.metadata_ = {"source_conflicts": True}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={
+            "status": "promoted",
+            "approval": {
+                "approved_by": "codex-review",
+                "approved_at": "2026-06-20T17:30:00Z",
+                "decision": "approved",
+                "promotion_target": "codex skill PR",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "conflict-free source evidence" in response.json()["detail"]
+    assert session.rollbacks == 1
+
+
+def test_promoted_generated_insight_blocks_stale_sources() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.metadata_ = {"source_evidence_stale": True}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={
+            "status": "promoted",
+            "approval": {
+                "approved_by": "codex-review",
+                "approved_at": "2026-06-20T17:30:00Z",
+                "decision": "approved",
+                "promotion_target": "codex skill PR",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "fresh source evidence" in response.json()["detail"]
+    assert session.rollbacks == 1
+
+
+def test_promoted_generated_insight_requires_digest_for_each_source() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.source_item_ids = ["item-a"]
+    artifact.source_digests = {"unrelated": "sha256:unrelated"}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={
+            "status": "promoted",
+            "approval": {
+                "approved_by": "codex-review",
+                "approved_at": "2026-06-20T17:30:00Z",
+                "decision": "approved",
+                "promotion_target": "codex skill PR",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "for each source_item_id" in response.json()["detail"]
+    assert session.rollbacks == 1
+
+
 def test_create_candidate_curation_artifact_rejects_private_or_secret_body() -> None:
     session = FakeSession()
     client = _client(session)
@@ -229,6 +365,154 @@ def test_list_candidate_curation_artifacts_scopes_query_by_tenant_and_status() -
     assert "candidate_curation_artifacts.status = :status_1" in normalized_sql
 
 
+def test_review_inbox_lists_existing_generated_artifacts_with_triage_context() -> None:
+    source_ready = _artifact(tenant_id="tenant-a", status="reviewable")
+    source_ready.eval_summary = {"confidence": 0.82}
+    needs_source = _artifact(tenant_id="tenant-a", status="needs_source")
+    needs_source.source_item_ids = []
+    needs_source.source_digests = {}
+    session = FakeSession(artifacts={source_ready.id: source_ready, needs_source.id: needs_source})
+    client = _client(session)
+
+    response = client.get("/api/v1/curation-artifacts/review-inbox")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total"] == 2
+    assert body["summary"]["needs_source"] == 1
+    reviewable = next(item for item in body["items"] if item["artifact"]["id"] == str(source_ready.id))
+    assert reviewable["suggested_action"] == "accept"
+    assert reviewable["confidence"] == 0.82
+    assert reviewable["source_count"] == 1
+    assert reviewable["affected_scope"] == "codex:skills/codex-pm-tasks"
+    assert reviewable["reversible_actions"] == ["pin", "defer"]
+
+
+def test_review_inbox_filters_deferred_candidates_before_limit() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.get("/api/v1/curation-artifacts/review-inbox?limit=10")
+
+    assert response.status_code == 200
+    normalized_sql = " ".join(session.statements[0].lower().split())
+    assert "candidate_curation_artifacts.metadata" in normalized_sql
+    assert "is not true" in normalized_sql
+    assert "limit" in normalized_sql
+
+
+def test_review_inbox_safe_batch_pin_updates_metadata_without_status_change() -> None:
+    first = _artifact(tenant_id="tenant-a", status="reviewable")
+    second = _artifact(tenant_id="tenant-a", status="proposed")
+    session = FakeSession(artifacts={first.id: first, second.id: second})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "pin",
+            "artifact_ids": [str(first.id), str(second.id)],
+            "actor": "operator-a",
+            "note": "Keep visible for weekly review",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == 2
+    assert first.status == "reviewable"
+    assert second.status == "proposed"
+    assert first.metadata_["review_inbox"]["pinned"] is True
+    assert first.metadata_["review_inbox"]["last_actor"] == "operator-a"
+    assert session.commits == 1
+    assert len(session.events) == 2
+
+
+def test_review_inbox_rejects_batch_accept_as_unsafe() -> None:
+    first = _artifact(tenant_id="tenant-a", status="reviewable")
+    second = _artifact(tenant_id="tenant-a", status="reviewable")
+    client = _client(FakeSession(artifacts={first.id: first, second.id: second}))
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(first.id), str(second.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "batch review inbox actions are limited to pin and defer" in response.text
+
+
+def test_review_inbox_accept_promotes_only_source_backed_artifacts() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+            "note": "Evidence is sufficient",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifacts"][0]["status"] == "promoted"
+    assert body["artifacts"][0]["approval"]["approved_by"] == "operator-a"
+    assert body["artifacts"][0]["metadata"]["review_inbox"]["resolved"] is True
+    assert artifact.approved_at is not None
+    assert session.commits == 1
+
+
+def test_review_inbox_accept_rejects_source_backed_draft() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="draft")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "only reviewable or proposed" in response.json()["detail"]
+    assert artifact.status == "draft"
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
+def test_review_inbox_accept_blocks_unsourced_artifact() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="needs_source")
+    artifact.source_item_ids = []
+    artifact.source_digests = {}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={
+            "action": "accept",
+            "artifact_ids": [str(artifact.id)],
+            "actor": "operator-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "only reviewable or proposed" in response.json()["detail"]
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
 def test_get_candidate_curation_artifact_hides_other_tenant_artifact() -> None:
     artifact = _artifact(tenant_id="tenant-b")
     client = _client(FakeSession(artifacts={artifact.id: artifact}))
@@ -270,6 +554,36 @@ def test_patch_candidate_curation_artifact_updates_metadata_status_and_approval(
     assert session.events[0].next_status == "approved"
     assert session.events[0].previous_snapshot["metadata"] == {"created_from": "test"}
     assert session.events[0].next_snapshot["metadata"] == {"review": "passed"}
+
+
+def test_patch_candidate_curation_artifact_promotes_source_backed_generated_insight() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={
+            "status": "promoted",
+            "approval": {
+                "approved_by": "codex-review",
+                "approved_at": "2026-06-20T17:30:00Z",
+                "decision": "approved",
+                "promotion_target": "codex skill PR",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "promoted"
+    assert body["promotion_state"] == "promoted"
+    assert body["source_support_level"] == "single_source"
+    assert body["advisory_generated_context"] is False
+    assert body["promoted_source_backed"] is True
+    assert artifact.approved_at is not None
+    assert session.events[0].previous_status == "reviewable"
+    assert session.events[0].next_status == "promoted"
 
 
 def test_patch_candidate_curation_artifact_rejects_destructive_status() -> None:
@@ -346,14 +660,14 @@ def test_promotion_handoff_renders_approved_candidate_without_mutating_artifact(
 
 
 def test_promotion_handoff_blocks_unapproved_rejected_and_deprecated_candidates() -> None:
-    for status in ("draft", "proposed", "rejected", "deprecated"):
+    for status in ("draft", "needs_source", "reviewable", "proposed", "rejected", "deprecated", "stale"):
         artifact = _artifact(tenant_id="tenant-a", status=status)
         client = _client(FakeSession(artifacts={artifact.id: artifact}))
 
         response = client.get(f"/api/v1/curation-artifacts/{artifact.id}/promotion-handoff")
 
         assert response.status_code == 422
-        assert "only approved" in response.json()["detail"]
+        assert "only promoted" in response.json()["detail"]
 
 
 def test_promotion_handoff_blocks_privacy_failed_approved_candidate() -> None:
@@ -383,6 +697,18 @@ def test_promotion_handoff_blocks_score_failed_approved_candidate() -> None:
 
     assert response.status_code == 422
     assert "mcp-rendering-stays-compatible" in response.json()["detail"]
+
+
+def test_promotion_handoff_blocks_approved_candidate_with_unmatched_source_digest() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="approved")
+    artifact.source_item_ids = ["item-a"]
+    artifact.source_digests = {"unrelated": "sha256:unrelated"}
+    client = _client(FakeSession(artifacts={artifact.id: artifact}))
+
+    response = client.get(f"/api/v1/curation-artifacts/{artifact.id}/promotion-handoff")
+
+    assert response.status_code == 422
+    assert "for each source_item_id" in response.json()["detail"]
 
 
 def test_promotion_handoff_blocks_malformed_score_evidence() -> None:

@@ -6,6 +6,7 @@ import { api, ApiError } from "../api/client";
 import type { SearchResult } from "../api/types";
 import ArtifactCitation from "../components/ArtifactCitation";
 import PageHeader from "../components/PageHeader";
+import ProvenanceDrawer from "../components/ProvenanceDrawer";
 import SourceIcon from "../components/SourceIcon";
 import StatePanel from "../components/StatePanel";
 import { useToast } from "../context/ToastContext";
@@ -207,7 +208,32 @@ export default function Search() {
                     {result.chunk_text}
                   </blockquote>
                 </button>
-                <ArtifactCitation citation={result.artifact_citation} compact />
+                <div className="flex flex-col gap-3 border-t border-zinc-800/70 pt-3 sm:flex-row sm:items-start sm:justify-between">
+                  <ArtifactCitation citation={result.artifact_citation} compact />
+                  <div className="shrink-0">
+                    <ProvenanceDrawer
+                      compact
+                      triggerLabel="Evidence"
+                      provenance={{
+                        title: result.title,
+                        subtitle: "Search ranking evidence for this returned memory item.",
+                        kind: result.artifact_citation ? "derived_artifact" : "retrieval_trace",
+                        itemId: result.item_id,
+                        sourceType: result.source_type,
+                        sourceUrl: result.source_url,
+                        summary: result.summary,
+                        excerpt: result.chunk_text,
+                        artifact: result.artifact_citation,
+                        scores: [{ label: "Search score", value: result.score, tone: result.score >= 0.7 ? "good" : "default" }],
+                        metadata: [
+                          { label: "Result ID", value: result.item_id },
+                          { label: "Source type", value: result.source_type.replace(/_/g, " ") },
+                          { label: "Tags", value: result.tags?.join(", ") },
+                        ],
+                      }}
+                    />
+                  </div>
+                </div>
               </article>
             ))
           )}
