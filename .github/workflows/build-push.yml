@@ -309,6 +309,7 @@ jobs:
         id: version
         env:
           RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
         run: |
           if [ -z "$RELEASE_PR_TOKEN" ]; then
             echo "RELEASE_PR_TOKEN is required to push a chart release branch and open a PR." >&2
@@ -325,7 +326,27 @@ jobs:
             RELEASE_BRANCH="ci/chart-release-${GITHUB_SHA::8}"
             git checkout -B "$RELEASE_BRANCH" origin/main
 
-            VERSION=$(python3 scripts/bump_chart_release.py --app-version "${GITHUB_SHA::8}")
+            CHART_RELEASE_BRANCHES=$(gh pr list \
+              --base main \
+              --state open \
+              --limit 100 \
+              --json headRefName \
+              --jq '.[] | select(.headRefName | startswith("ci/chart-release-")) | .headRefName')
+            RESERVED_VERSION_ARGS=()
+            while IFS= read -r RELEASE_PR_BRANCH; do
+              if [ -z "$RELEASE_PR_BRANCH" ] || [ "$RELEASE_PR_BRANCH" = "$RELEASE_BRANCH" ]; then
+                continue
+              fi
+
+              git fetch origin "refs/heads/${RELEASE_PR_BRANCH}:refs/remotes/origin/${RELEASE_PR_BRANCH}"
+              RESERVED_VERSION=$(git show "refs/remotes/origin/${RELEASE_PR_BRANCH}:chart/Chart.yaml" \
+                | awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }')
+              if [ -n "$RESERVED_VERSION" ]; then
+                RESERVED_VERSION_ARGS+=(--reserved-version "$RESERVED_VERSION")
+              fi
+            done <<< "$CHART_RELEASE_BRANCHES"
+
+            VERSION=$(python3 scripts/bump_chart_release.py --app-version "${GITHUB_SHA::8}" "${RESERVED_VERSION_ARGS[@]}")
             git add chart/Chart.yaml
             git commit -m "chore(ci): bump chart to ${VERSION}"
 

@@ -34,6 +34,49 @@ def test_bump_chart_release_updates_chart(tmp_path: Path) -> None:
     assert 'appVersion: "abc12345"\n' in chart.read_text(encoding="utf-8")
 
 
+def test_bump_chart_release_skips_reserved_versions(tmp_path: Path) -> None:
+    chart = tmp_path / "Chart.yaml"
+    chart.write_text(
+        "\n".join(
+            [
+                "apiVersion: v2",
+                "name: palaceoftruth",
+                "version: 0.1.382",
+                'appVersion: "8a8f0e5d"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    version = bump_chart_release(
+        chart,
+        "abc12345",
+        reserved_versions={"0.1.383", "0.1.384"},
+    )
+
+    assert version == "0.1.385"
+    assert "version: 0.1.385\n" in chart.read_text(encoding="utf-8")
+    assert 'appVersion: "abc12345"\n' in chart.read_text(encoding="utf-8")
+
+
+def test_bump_chart_release_rejects_non_semantic_reserved_version(tmp_path: Path) -> None:
+    chart = tmp_path / "Chart.yaml"
+    chart.write_text(
+        "\n".join(
+            [
+                "apiVersion: v2",
+                "name: palaceoftruth",
+                "version: 0.1.106",
+                'appVersion: "8a8f0e5d"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Reserved chart version is not semantic"):
+        bump_chart_release(chart, "abc12345", reserved_versions={"latest"})
+
+
 def test_bump_chart_release_rejects_non_semantic_chart_version(tmp_path: Path) -> None:
     chart = tmp_path / "Chart.yaml"
     chart.write_text(
