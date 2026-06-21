@@ -24,6 +24,7 @@ from app.schemas.memory import (
     McpOAuthClientSummary,
 )
 from app.schemas.palace import (
+    PalaceClaimSupportReport,
     PalaceControlTower,
     PalaceItemSourceSummary,
     PalaceTemporalFactSummary,
@@ -61,7 +62,7 @@ from app.services.palace import (
     update_room,
     update_sync_source,
 )
-from app.services.source_compiler import get_item_source_summary
+from app.services.source_compiler import get_claim_support_report, get_item_source_summary
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/palace", tags=["palace"], dependencies=[Depends(verify_api_key)])
@@ -642,6 +643,44 @@ async def get_palace_item_sources(
                 ],
             }
             for record in summary.source_records
+        ],
+    )
+
+
+@router.get("/claims/support", response_model=PalaceClaimSupportReport)
+async def get_palace_claim_support(
+    request: Request,
+    status: str | None = Query(None, pattern="^(draft|active|stale|conflicted|rejected|superseded)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PalaceClaimSupportReport:
+    report = await get_claim_support_report(db, tenant_id=request.state.tenant_id, status=status, limit=limit)
+    return PalaceClaimSupportReport(
+        tenant_id=report.tenant_id,
+        claims=[
+            {
+                "id": claim.id,
+                "claim_key": claim.claim_key,
+                "claim_text": claim.claim_text,
+                "claim_type": claim.claim_type,
+                "confidence": claim.confidence,
+                "status": claim.status,
+                "metadata": claim.metadata,
+                "sources": [
+                    {
+                        "id": source.id,
+                        "source_record_id": source.source_record_id,
+                        "source_chunk_id": source.source_chunk_id,
+                        "source_item_id": source.source_item_id,
+                        "support_role": source.support_role,
+                        "status": source.status,
+                        "source_digest": source.source_digest,
+                        "source_span": source.source_span,
+                    }
+                    for source in claim.sources
+                ],
+            }
+            for claim in report.claims
         ],
     )
 

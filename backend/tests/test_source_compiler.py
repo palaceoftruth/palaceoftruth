@@ -4,8 +4,14 @@ import uuid
 from sqlalchemy.dialects import postgresql
 
 from app.models.item import Item
+from app.models.palace import TemporalFact
 from app.services import source_compiler
-from app.services.source_compiler import plan_source_backfill, project_item_source
+from app.services.source_compiler import (
+    plan_claim_backfill,
+    plan_source_backfill,
+    project_claim_from_temporal_fact,
+    project_item_source,
+)
 
 
 def _item(
@@ -29,6 +35,28 @@ def _item(
         status=status,
         deleted_at=deleted_at,
         metadata_=metadata or {},
+    )
+
+
+def _fact(
+    *,
+    tenant_id: str = "tenant-a",
+    source_item_id: uuid.UUID | None = None,
+    status: str = "active",
+    metadata=None,
+) -> TemporalFact:
+    return TemporalFact(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        source_item_id=source_item_id or uuid.uuid4(),
+        fact_key="fact-key-a",
+        source_fingerprint="source-fingerprint-a",
+        subject="Palace",
+        predicate="supports",
+        object_text="claim diagnostics",
+        confidence=0.8,
+        status=status,
+        metadata_json=metadata or {},
     )
 
 
@@ -163,3 +191,180 @@ def test_failed_projection_stales_prior_active_records() -> None:
 
     assert projection.status == "failed"
     assert "UPDATE source_records SET status=" in captured["sql"]
+
+
+def test_project_claim_from_temporal_fact_is_deterministic_and_source_backed() -> None:
+    source_item_id = uuid.uuid4()
+    fact = _fact(source_item_id=source_item_id)
+
+    first = project_claim_from_temporal_fact(fact)
+    second = project_claim_from_temporal_fact(fact)
+
+    assert first.claim_key == "temporal_fact:fact-key-a"
+    assert first.claim_key == second.claim_key
+    assert first.claim_text == "Palace supports claim diagnostics"
+    assert first.claim_type == "fact"
+    assert first.status == "active"
+    assert first.support_role == "supports"
+    assert first.source_item_id == source_item_id
+    assert first.source_digest == "source-fingerprint-a"
+    assert first.metadata["temporal_fact_id"] == str(fact.id)
+
+
+def test_project_claim_from_temporal_fact_reports_conflicts_and_stale_sources() -> None:
+    conflicted = project_claim_from_temporal_fact(
+        _fact(metadata={"contradiction_sweep": {"conflict_count": 1, "conflicting_fact_ids": ["fact-b"]}})
+    )
+    stale = project_claim_from_temporal_fact(_fact(status="superseded"))
+
+    assert conflicted.status == "conflicted"
+    assert conflicted.support_role == "supports"
+    assert stale.status == "stale"
+    assert stale.support_role == "derived_from"
+
+
+def test_claim_backfill_plan_is_tenant_bounded_and_requires_source_records() -> None:
+    supported_item_id = uuid.uuid4()
+    missing_item_id = uuid.uuid4()
+    other_tenant_item_id = uuid.uuid4()
+    supported_fact = _fact(source_item_id=supported_item_id)
+    missing_fact = _fact(source_item_id=missing_item_id)
+    other_tenant_fact = _fact(tenant_id="tenant-b", source_item_id=other_tenant_item_id)
+
+    report, projections = plan_claim_backfill(
+        [supported_fact, missing_fact, other_tenant_fact],
+        tenant_id="tenant-a",
+        dry_run=True,
+        supported_source_item_ids={supported_item_id},
+    )
+
+    assert [projection.temporal_fact_id for projection in projections] == [supported_fact.id]
+    assert report.facts_seen == 2
+    assert report.claims_planned == 1
+    assert report.claim_sources_planned == 1
+    assert report.claims_upserted == 0
+    assert report.claim_sources_upserted == 0
+    assert report.unsupported_facts == 1
+
+
+def test_claim_upsert_uses_claim_key_conflict_constraint() -> None:
+    captured = {}
+
+    class _Session:
+        async def scalar(self, statement):
+            captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return uuid.uuid4()
+
+    projection = project_claim_from_temporal_fact(_fact())
+
+    import asyncio
+
+    asyncio.run(source_compiler._upsert_claim(_Session(), projection))
+
+    assert "ON CONFLICT ON CONSTRAINT uq_claims_tenant_claim_key" in captured["sql"]
+    assert "metadata" in captured["sql"]
+
+
+def test_claim_source_upsert_uses_support_constraint() -> None:
+    captured = {}
+
+    class _Session:
+        async def scalar(self, statement):
+            captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return uuid.uuid4()
+
+    projection = project_claim_from_temporal_fact(_fact())
+
+    import asyncio
+
+    asyncio.run(
+        source_compiler._upsert_claim_source(
+            _Session(),
+            projection=projection,
+            claim_id=uuid.uuid4(),
+            source_record_id=uuid.uuid4(),
+        )
+    )
+
+    assert "ON CONFLICT ON CONSTRAINT uq_claim_sources_support" in captured["sql"]
+    assert "status" in captured["sql"]
+    assert "source_span" in captured["sql"]
+
+
+def test_claim_source_lookup_excludes_failed_and_deleted_source_records() -> None:
+    captured = {}
+
+    class _ScalarResult:
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalars(self, statement):
+            captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ScalarResult()
+
+    import asyncio
+
+    asyncio.run(
+        source_compiler._latest_source_records_by_item_id(
+            _Session(),
+            tenant_id="tenant-a",
+            item_ids={uuid.uuid4()},
+        )
+    )
+
+    assert "source_records.status IN" in captured["sql"]
+
+
+def test_mark_prior_claim_sources_stale_scopes_to_same_tenant_and_claim() -> None:
+    captured = {}
+
+    class _Session:
+        async def execute(self, statement):
+            captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+
+    import asyncio
+
+    asyncio.run(
+        source_compiler._mark_prior_claim_sources_stale(
+            _Session(),
+            tenant_id="tenant-a",
+            claim_id=uuid.uuid4(),
+            active_claim_source_id=uuid.uuid4(),
+        )
+    )
+
+    assert "UPDATE claim_sources SET status=" in captured["sql"]
+    assert "claim_sources.tenant_id = " in captured["sql"]
+    assert "claim_sources.claim_id = " in captured["sql"]
+    assert "claim_sources.id != " in captured["sql"]
+    assert "claim_sources.status = " in captured["sql"]
+
+
+def test_mark_unsupported_claim_stales_claim_and_current_sources() -> None:
+    captured = {"updates": []}
+    claim_id = uuid.uuid4()
+
+    class _Session:
+        async def scalar(self, statement):
+            captured["select"] = str(statement.compile(dialect=postgresql.dialect()))
+            return claim_id
+
+        async def execute(self, statement):
+            captured["updates"].append(str(statement.compile(dialect=postgresql.dialect())))
+
+    projection = project_claim_from_temporal_fact(_fact())
+
+    import asyncio
+
+    asyncio.run(source_compiler._mark_unsupported_claim_stale(_Session(), projection=projection))
+
+    assert "claims.claim_key = " in captured["select"]
+    assert len(captured["updates"]) == 2
+    assert "UPDATE claims SET status=" in captured["updates"][0]
+    assert "claims.tenant_id = " in captured["updates"][0]
+    assert "claims.status = " in captured["updates"][0]
+    assert "UPDATE claim_sources SET status=" in captured["updates"][1]
+    assert "claim_sources.tenant_id = " in captured["updates"][1]
+    assert "claim_sources.claim_id = " in captured["updates"][1]
+    assert "claim_sources.status = " in captured["updates"][1]
