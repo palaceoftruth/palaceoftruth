@@ -2815,6 +2815,28 @@ def _sanitize_retrieval_lens_profile(value: object) -> dict[str, Any] | None:
     }
 
 
+def _sanitize_trace_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for name, raw_count in value.items():
+        if isinstance(name, str) and isinstance(raw_count, int) and not isinstance(raw_count, bool):
+            count = max(raw_count, 0)
+            if count > 0:
+                counts[name] = count
+    return counts
+
+
+def _sanitize_trace_reuse_metrics(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(name): field_value
+        for name, field_value in value.items()
+        if isinstance(name, str) and isinstance(field_value, (str, int, float, bool))
+    }
+
+
 def _append_search_ranking_trace(
     trace: PalaceRetrieveTrace,
     service: SearchService,
@@ -2877,6 +2899,18 @@ def _append_search_ranking_trace(
                 retrieved_scope_label=(
                     str(row["retrieved_scope_label"])
                     if row.get("retrieved_scope_label") is not None
+                    else None
+                ),
+                trust_class=str(row["trust_class"]) if row.get("trust_class") is not None else None,
+                source_support_state=(
+                    str(row["source_support_state"])
+                    if row.get("source_support_state") is not None
+                    else None
+                ),
+                freshness=str(row["freshness"]) if row.get("freshness") is not None else None,
+                derived_raw_classification=(
+                    str(row["derived_raw_classification"])
+                    if row.get("derived_raw_classification") is not None
                     else None
                 ),
                 source_publication_id=(
@@ -2948,6 +2982,11 @@ def _append_search_ranking_trace(
             candidate_limit=_coerce_trace_int(raw_trace.get("candidate_limit")),
             display_limit=_coerce_trace_int(raw_trace.get("display_limit")),
             candidate_count=_coerce_trace_int(raw_trace.get("candidate_count")),
+            trust_class_counts=_sanitize_trace_counts(raw_trace.get("trust_class_counts")),
+            source_support_counts=_sanitize_trace_counts(raw_trace.get("source_support_counts")),
+            freshness_counts=_sanitize_trace_counts(raw_trace.get("freshness_counts")),
+            derived_raw_counts=_sanitize_trace_counts(raw_trace.get("derived_raw_counts")),
+            reuse_metrics=_sanitize_trace_reuse_metrics(raw_trace.get("reuse_metrics")),
             result_count=len(rows),
             routing={
                 key: value

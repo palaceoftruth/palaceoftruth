@@ -760,6 +760,79 @@ export interface McpOAuthClientRegisterResponse {
   config_snippets?: McpClientConfigSnippets | null;
 }
 
+export type CandidateArtifactStatus =
+  | "draft"
+  | "needs_source"
+  | "reviewable"
+  | "promoted"
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "stale"
+  | "deprecated"
+  | "superseded";
+
+export interface CandidateCurationArtifact {
+  id: string;
+  tenant_id: string;
+  artifact_kind: string;
+  target_runtime: string;
+  target_surface: string;
+  status: CandidateArtifactStatus;
+  source_item_ids: string[];
+  source_digests: Record<string, string>;
+  candidate_body: string;
+  privacy_review: Record<string, unknown>;
+  eval_summary: Record<string, unknown>;
+  approval: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  promotion_state: string;
+  source_support_level: string;
+  advisory_generated_context: boolean;
+  promoted_source_backed: boolean;
+  supersedes_artifact_id: string | null;
+  superseded_by_artifact_id: string | null;
+  deprecated_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  deprecated_at: string | null;
+}
+
+export type ReviewInboxAction = "accept" | "reject" | "pin" | "defer";
+
+export interface ReviewInboxItem {
+  artifact: CandidateCurationArtifact;
+  suggested_action: string;
+  confidence: number | null;
+  source_count: number;
+  freshness: "fresh" | "stale" | "conflicting" | "needs_source";
+  affected_scope: string;
+  pinned: boolean;
+  deferred: boolean;
+  reversible_actions: string[];
+}
+
+export interface ReviewInboxSummary {
+  total: number;
+  needs_source: number;
+  conflicting: number;
+  stale: number;
+  pinned: number;
+  deferred: number;
+}
+
+export interface ReviewInboxResponse {
+  items: ReviewInboxItem[];
+  summary: ReviewInboxSummary;
+}
+
+export interface ReviewInboxActionResponse {
+  action: ReviewInboxAction;
+  artifacts: CandidateCurationArtifact[];
+  updated: number;
+}
+
 export interface McpOAuthClientRevokeResponse {
   tenant_id: string;
   client: McpOAuthClientSummary;

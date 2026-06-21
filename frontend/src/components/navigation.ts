@@ -1,6 +1,7 @@
 import {
   Compass,
   FileCode2,
+  Inbox,
   LayoutDashboard,
   Library,
   Link2,
@@ -25,6 +26,7 @@ export const CORE_NAV: NavItem[] = [
   { to: "/", label: "Home", shortLabel: "Home", icon: LayoutDashboard },
   { to: "/browse", label: "Library", shortLabel: "Library", icon: Library },
   { to: "/palace", label: "Palace", shortLabel: "Palace", icon: Compass },
+  { to: "/palace/review-inbox", label: "Review Inbox", shortLabel: "Review", icon: Inbox },
   { to: "/chat", label: "Chat", shortLabel: "Chat", icon: MessageSquare },
 ];
 
@@ -45,6 +47,9 @@ export const UTILITY_NAV: NavItem[] = [
 export function routeLabel(pathname: string): string {
   if (pathname.startsWith("/palace/control-tower")) {
     return "Control Tower";
+  }
+  if (pathname.startsWith("/palace/review-inbox")) {
+    return "Review Inbox";
   }
 
   for (const item of [...CORE_NAV, ...CAPTURE_NAV, ...UTILITY_NAV]) {

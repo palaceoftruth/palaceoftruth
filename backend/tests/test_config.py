@@ -245,3 +245,31 @@ def test_settings_reject_invalid_assemblyai_base_url() -> None:
 def test_settings_reject_non_positive_parallel_transcription_chunks() -> None:
     with pytest.raises(ValidationError, match="TRANSCRIPTION_MAX_PARALLEL_CHUNKS"):
         config.Settings(**_settings_kwargs(transcription_max_parallel_chunks=0))
+
+
+def test_settings_accept_firecrawl_self_hosted_without_api_key() -> None:
+    settings = config.Settings(
+        **_settings_kwargs(
+            webpage_scraper_provider="firecrawl-self-hosted",
+            firecrawl_base_url="https://firecrawl.internal.example/v2",
+            firecrawl_api_key="",
+        )
+    )
+
+    assert settings.webpage_scraper_provider == "firecrawl-self-hosted"
+    assert settings.firecrawl_base_url == "https://firecrawl.internal.example/v2"
+
+
+def test_settings_require_firecrawl_cloud_api_key() -> None:
+    with pytest.raises(ValidationError, match="FIRECRAWL_API_KEY"):
+        config.Settings(**_settings_kwargs(webpage_scraper_provider="firecrawl-cloud", firecrawl_api_key=""))
+
+
+def test_settings_reject_invalid_firecrawl_base_url_when_enabled() -> None:
+    with pytest.raises(ValidationError, match="FIRECRAWL_BASE_URL"):
+        config.Settings(
+            **_settings_kwargs(
+                webpage_scraper_provider="firecrawl-self-hosted",
+                firecrawl_base_url="not-a-url",
+            )
+        )

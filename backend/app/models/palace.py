@@ -189,6 +189,173 @@ class SyncSourceFile(Base):
     )
 
 
+class SourceRecord(Base):
+    __tablename__ = "source_records"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "item_id", "source_version", name="uq_source_records_tenant_item_version"),
+        CheckConstraint(
+            "status IN ('active', 'stale', 'failed', 'deleted', 'superseded')",
+            name="ck_source_records_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SourceChunk(Base):
+    __tablename__ = "source_chunks"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_record_id", "chunk_index", name="uq_source_chunks_tenant_record_index"),
+        UniqueConstraint("tenant_id", "source_record_id", "chunk_digest", name="uq_source_chunks_tenant_record_digest"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("source_records.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    span: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class Claim(Base):
+    __tablename__ = "claims"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "claim_key", name="uq_claims_tenant_claim_key"),
+        CheckConstraint(
+            "claim_type IN ('fact', 'preference', 'decision', 'task_state', 'summary', 'classification', 'relationship')",
+            name="ck_claims_claim_type",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'stale', 'conflicted', 'rejected', 'superseded')",
+            name="ck_claims_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_key: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="fact")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    superseded_by_claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("claims.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class ClaimSource(Base):
+    __tablename__ = "claim_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "claim_id",
+            "source_record_id",
+            "source_digest",
+            "support_role",
+            name="uq_claim_sources_support",
+        ),
+        CheckConstraint(
+            "support_role IN ('supports', 'contradicts', 'context', 'derived_from')",
+            name="ck_claim_sources_support_role",
+        ),
+        CheckConstraint(
+            "status IN ('current', 'stale')",
+            name="ck_claim_sources_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("claims.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_record_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("source_records.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("source_chunks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    support_role: Mapped[str] = mapped_column(String(20), nullable=False, server_default="supports")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="current")
+    source_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    source_span: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+
+
 class Wing(Base):
     __tablename__ = "wings"
     __table_args__ = (UniqueConstraint("tenant_id", "slug", name="uq_wings_tenant_slug"),)
@@ -526,7 +693,7 @@ class CandidateCurationArtifact(Base):
             name="ck_candidate_curation_artifact_kind",
         ),
         CheckConstraint(
-            "status IN ('draft', 'proposed', 'approved', 'rejected', 'deprecated', 'superseded')",
+            "status IN ('draft', 'needs_source', 'reviewable', 'promoted', 'proposed', 'approved', 'rejected', 'stale', 'deprecated', 'superseded')",
             name="ck_candidate_curation_artifact_status",
         ),
         CheckConstraint(

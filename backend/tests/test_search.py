@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.schemas.search import SearchRequest
 from app.embedding_profile import resolve_embedding_profile
+from app.services.retrieval_provenance import classify_retrieval_trust
 from app.services.search import SearchService, classify_query_intent
 
 
@@ -79,6 +80,29 @@ def test_search_request_accepts_top_k_alias() -> None:
     assert body.limit == 5
     assert body.candidate_limit == 32
     assert body.tags == ["agent-retrospective"]
+
+
+def test_unknown_unsupported_raw_candidates_are_not_labeled_raw_source() -> None:
+    base = {
+        "source_type": "note",
+        "source_url": None,
+        "artifact_provenance_type": "corpus_item",
+        "derived_artifact_keys": [],
+        "retrieval_provenance": None,
+        "source_item_id": None,
+        "source_span": None,
+        "retrieved_scope_label": "workspace/palaceoftruth",
+        "effective_date_source": None,
+        "effective_date_quality": None,
+    }
+    metadata = classify_retrieval_trust(**base)
+    unsupported_metadata = classify_retrieval_trust(**base, source_support_level="no_source")
+
+    assert metadata.source_support_state == "unknown"
+    assert metadata.derived_raw_classification == "raw"
+    assert metadata.trust_class == "broad_fallback"
+    assert unsupported_metadata.source_support_state == "unsupported"
+    assert unsupported_metadata.trust_class == "broad_fallback"
 
 
 def test_classify_query_intent_modes() -> None:
@@ -1661,7 +1685,20 @@ def test_vector_search_demotes_generated_artifacts_for_ordinary_source_queries()
     assert brief_trace["derived_artifact_keys"] == ["wakeup_brief"]
     assert brief_trace["artifact_provenance_type"] == "wakeup_brief"
     assert brief_trace["artifact_provenance_label"] == "Wake-up brief"
+    assert brief_trace["trust_class"] == "low_support_generated"
+    assert brief_trace["source_support_state"] == "unknown"
+    assert brief_trace["freshness"] == "undated"
+    assert brief_trace["derived_raw_classification"] == "derived"
     assert service.last_ranking_trace["query_allows_derived_artifacts"] is False
+    assert service.last_ranking_trace["trust_class_counts"] == {
+        "low_support_generated": 1,
+        "raw_source": 1,
+    }
+    assert service.last_ranking_trace["source_support_counts"] == {"direct_source": 1, "unknown": 1}
+    assert service.last_ranking_trace["derived_raw_counts"] == {
+        "derived": 1,
+        "fallback": 1,
+    }
 
 
 def test_vector_search_explicitly_includes_generated_artifacts_when_requested() -> None:
@@ -1780,6 +1817,11 @@ def test_vector_search_serializes_conversation_fact_source_span() -> None:
     assert trace_row["derived_artifact_keys"] == ["conversation_fact"]
     assert trace_row["artifact_provenance_label"] == "Conversation fact"
     assert trace_row["source_item_id"] == str(source_item_id)
+    assert trace_row["trust_class"] == "generated_synthesis"
+    assert trace_row["source_support_state"] == "source_backed"
+    assert trace_row["derived_raw_classification"] == "derived"
+    assert results[0].trust_class == "generated_synthesis"
+    assert results[0].source_support_state == "source_backed"
 
 
 def test_vector_search_demotes_generated_artifacts_without_metadata() -> None:

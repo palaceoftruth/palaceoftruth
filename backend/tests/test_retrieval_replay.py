@@ -24,8 +24,14 @@ def _record(
     expectations: dict | None = None,
     route: str | None = None,
     scope_labels: list[str] | None = None,
+    trust_classes: list[str] | None = None,
+    source_support_states: list[str] | None = None,
+    derived_raw_classes: list[str] | None = None,
 ) -> dict:
     scope_labels = scope_labels or []
+    trust_classes = trust_classes or []
+    source_support_states = source_support_states or []
+    derived_raw_classes = derived_raw_classes or []
     return {
         "schema_version": 1,
         "capture": {
@@ -57,6 +63,17 @@ def _record(
                 "source_type": "pdf",
                 "tags": ["benchmark:nist"],
                 **({"retrieved_scope_label": scope_labels[rank - 1]} if rank <= len(scope_labels) else {}),
+                **({"trust_class": trust_classes[rank - 1]} if rank <= len(trust_classes) else {}),
+                **(
+                    {"source_support_state": source_support_states[rank - 1]}
+                    if rank <= len(source_support_states)
+                    else {}
+                ),
+                **(
+                    {"derived_raw_classification": derived_raw_classes[rank - 1]}
+                    if rank <= len(derived_raw_classes)
+                    else {}
+                ),
             }
             for rank, item_id in enumerate(item_ids, start=1)
         ],
@@ -94,6 +111,43 @@ def test_compare_captures_reports_top_rank_and_fallback_drift() -> None:
         "matched_records": 1,
         "corpus_ids": ["nist-sp800-retained-v1"],
         "run_ids": ["baseline-run", "current-run"],
+    }
+
+
+def test_compare_captures_reports_provenance_trust_mix() -> None:
+    baseline = [
+        _record(
+            ["nist-800-37r2", "nist-800-39"],
+            trust_classes=["raw_source", "raw_source"],
+            source_support_states=["direct_source", "direct_source"],
+            derived_raw_classes=["raw", "raw"],
+        )
+    ]
+    current = [
+        _record(
+            ["nist-800-37r2", "generated-brief"],
+            run_id="current-run",
+            trust_classes=["raw_source", "low_support_generated"],
+            source_support_states=["direct_source", "unsupported"],
+            derived_raw_classes=["raw", "derived"],
+        )
+    ]
+
+    report = compare_captures(baseline, current, top_k=2)
+
+    assert report["comparisons"][0]["result_mix"] == {
+        "baseline": {
+            "trust_class_counts": {"raw_source": 2},
+            "source_support_counts": {"direct_source": 2},
+            "freshness_counts": {},
+            "derived_raw_counts": {"raw": 2},
+        },
+        "current": {
+            "trust_class_counts": {"low_support_generated": 1, "raw_source": 1},
+            "source_support_counts": {"direct_source": 1, "unsupported": 1},
+            "freshness_counts": {},
+            "derived_raw_counts": {"derived": 1, "raw": 1},
+        },
     }
 
 

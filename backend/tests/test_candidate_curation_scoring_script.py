@@ -80,7 +80,10 @@ def test_render_candidate_promotion_handoff_writes_dry_run_artifact(
                         "target_surface": "skills/codex-pm-tasks",
                         "status": "approved",
                         "source_item_ids": ["SAR-514", "PR-340"],
-                        "source_digests": {"candidate_body": "sha256:body"},
+                        "source_digests": {
+                            "SAR-514": "sha256:sar-514",
+                            "PR-340": "sha256:pr-340",
+                        },
                         "candidate_body": "Use the project-manager helper for task writes.",
                         "privacy_review": {
                             "safe_for_review": True,

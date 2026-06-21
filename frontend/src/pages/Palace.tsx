@@ -17,6 +17,7 @@ import type {
 import PalaceFreshnessPill from "../components/PalaceFreshnessPill";
 import PageHeader from "../components/PageHeader";
 import PalaceStateBanner from "../components/PalaceStateBanner";
+import ProvenanceDrawer from "../components/ProvenanceDrawer";
 import StatePanel from "../components/StatePanel";
 import SourceIcon from "../components/SourceIcon";
 import { useToast } from "../context/ToastContext";
@@ -906,6 +907,39 @@ export default function Palace() {
                     <PalaceFreshnessPill label="Memberships" freshness={roomDetail.room.membership_status} />
                     <PalaceFreshnessPill label="Snapshot" freshness={roomDetail.room.snapshot_status} />
                     <PalaceFreshnessPill label="Tunnels" freshness={roomDetail.room.tunnel_status} />
+                    <ProvenanceDrawer
+                      compact
+                      triggerLabel="Room evidence"
+                      provenance={{
+                        title: roomDetail.room.name,
+                        subtitle: "Room, wing, freshness, membership, and tunnel evidence for this Palace room.",
+                        kind: "room",
+                        summary: roomDetail.room.summary,
+                        room: {
+                          name: roomDetail.room.name,
+                          wing: roomDetail.wing_name,
+                          scope: roomDetail.room.stable_key,
+                        },
+                        scores: [
+                          { label: "Memberships", value: roomDetail.room.item_count },
+                          { label: "Membership freshness", value: roomDetail.room.membership_status.status },
+                          { label: "Snapshot freshness", value: roomDetail.room.snapshot_status.status },
+                          { label: "Tunnel freshness", value: roomDetail.room.tunnel_status.status },
+                        ],
+                        relationships: roomDetail.memberships.slice(0, 8).map((membership) => ({
+                          item_id: membership.item_id,
+                          title: membership.title,
+                          source_type: membership.source_type,
+                          relationship: membership.membership_source === "pinned" ? "pinned_membership" : "auto_membership",
+                          confidence: membership.membership_source === "pinned" ? 1 : 0.75,
+                        })),
+                        metadata: [
+                          { label: "Room state", value: roomDetail.room.state },
+                          { label: "Stable key", value: roomDetail.room.stable_key },
+                          { label: "Tunnels", value: roomDetail.tunnels.length },
+                        ],
+                      }}
+                    />
                     <button
                       type="button"
                       onClick={() => void refreshRoom()}
@@ -1342,6 +1376,38 @@ export default function Palace() {
                                 {formatScore(row.adjusted_score) ? (
                                   <span className="ml-auto text-zinc-500">score {formatScore(row.adjusted_score)}</span>
                                 ) : null}
+                                <ProvenanceDrawer
+                                  compact
+                                  triggerLabel="Evidence"
+                                  provenance={{
+                                    title: row.item_id ? `Ranked item ${row.item_id}` : `Rank ${row.rank} candidate`,
+                                    subtitle: `Ranking evidence from ${formatTraceRoute(rankingTrace.route)}.`,
+                                    kind: row.artifact_provenance_type ? "derived_artifact" : "retrieval_trace",
+                                    itemId: row.item_id,
+                                    sourceType: row.source_type,
+                                    room: {
+                                      name: roomDetail?.room.name,
+                                      wing: trace.trace.selected_wing,
+                                      scope: row.retrieved_scope_label ?? row.retrieved_scope_key ?? trace.trace.requested_scope_type,
+                                    },
+                                    scores: [
+                                      { label: "Rank", value: `#${row.rank}` },
+                                      ...(typeof row.base_score === "number" ? [{ label: "Base score", value: row.base_score }] : []),
+                                      ...(typeof row.adjusted_score === "number" ? [{ label: "Adjusted score", value: row.adjusted_score, tone: "good" as const }] : []),
+                                    ],
+                                    traceSteps: [
+                                      { title: "Route", detail: formatTraceRoute(rankingTrace.route) },
+                                      ...(rankingTrace.query_intent ? [{ title: "Query intent", detail: rankingTrace.query_intent }] : []),
+                                      ...(row.derived_artifact_keys?.length ? [{ title: "Derived artifact keys", detail: row.derived_artifact_keys.join(", ") }] : []),
+                                    ],
+                                    metadata: [
+                                      { label: "Artifact provenance", value: row.artifact_provenance_label ?? row.artifact_provenance_type },
+                                      { label: "Retrieved scope", value: row.retrieved_scope_label ?? row.retrieved_scope_key },
+                                      { label: "Candidates", value: rankingTrace.candidate_count },
+                                      { label: "Results shown", value: rankingTrace.result_count },
+                                    ],
+                                  }}
+                                />
                               </div>
                               {row.derived_artifact_keys && row.derived_artifact_keys.length > 1 ? (
                                 <p className="mt-1 text-xs text-amber-200">
@@ -1359,7 +1425,31 @@ export default function Palace() {
                 <div className="space-y-2">
                   {trace.results.map((result) => (
                     <div key={`${result.item_id}-${result.chunk_text.slice(0, 20)}`} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 px-4 py-3">
-                      <p className="text-sm font-medium text-zinc-100">{result.title}</p>
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="min-w-0 text-sm font-medium text-zinc-100">{result.title}</p>
+                        <ProvenanceDrawer
+                          compact
+                          triggerLabel="Evidence"
+                          provenance={{
+                            title: result.title,
+                            subtitle: "Retrieved result evidence for the active Palace room query.",
+                            kind: result.artifact_citation ? "derived_artifact" : "retrieval_trace",
+                            itemId: result.item_id,
+                            sourceType: result.source_type,
+                            sourceUrl: result.source_url,
+                            summary: result.summary,
+                            excerpt: result.chunk_text,
+                            artifact: result.artifact_citation,
+                            room: {
+                              name: roomDetail?.room.name,
+                              wing: trace.trace.selected_wing,
+                              scope: trace.trace.requested_scope_key ?? trace.trace.requested_scope_type,
+                            },
+                            scores: [{ label: "Result score", value: result.score, tone: result.score >= 0.7 ? "good" : "default" }],
+                            traceSteps: trace.trace.steps,
+                          }}
+                        />
+                      </div>
                       {result.summary ? <p className="mt-1 text-xs text-zinc-400">{result.summary}</p> : null}
                       <blockquote className="mt-2 border-l border-zinc-700 pl-3 text-xs italic text-zinc-500">
                         {result.chunk_text}

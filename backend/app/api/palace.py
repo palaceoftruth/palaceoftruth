@@ -24,7 +24,9 @@ from app.schemas.memory import (
     McpOAuthClientSummary,
 )
 from app.schemas.palace import (
+    PalaceClaimSupportReport,
     PalaceControlTower,
+    PalaceItemSourceSummary,
     PalaceTemporalFactSummary,
     PalaceOverview,
     PalacePinRequest,
@@ -60,6 +62,7 @@ from app.services.palace import (
     update_room,
     update_sync_source,
 )
+from app.services.source_compiler import get_claim_support_report, get_item_source_summary
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/palace", tags=["palace"], dependencies=[Depends(verify_api_key)])
@@ -602,6 +605,84 @@ async def get_palace_room(
     db: AsyncSession = Depends(get_db),
 ) -> PalaceRoomDetail:
     return await get_room_detail(db, request.state.tenant_id, room_id)
+
+
+@router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary)
+async def get_palace_item_sources(
+    item_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceItemSourceSummary:
+    summary = await get_item_source_summary(db, tenant_id=request.state.tenant_id, item_id=item_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return PalaceItemSourceSummary(
+        tenant_id=summary.tenant_id,
+        item_id=summary.item_id,
+        source_records=[
+            {
+                "id": record.id,
+                "item_id": record.item_id,
+                "source_kind": record.source_kind,
+                "source_uri": record.source_uri,
+                "source_version": record.source_version,
+                "content_hash": record.content_hash,
+                "status": record.status,
+                "failure_reason": record.failure_reason,
+                "metadata": record.metadata,
+                "chunk_count": record.chunk_count,
+                "chunks": [
+                    {
+                        "id": chunk.id,
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_digest": chunk.chunk_digest,
+                        "token_count": chunk.token_count,
+                        "preview": chunk.preview,
+                    }
+                    for chunk in record.chunks
+                ],
+            }
+            for record in summary.source_records
+        ],
+    )
+
+
+@router.get("/claims/support", response_model=PalaceClaimSupportReport)
+async def get_palace_claim_support(
+    request: Request,
+    status: str | None = Query(None, pattern="^(draft|active|stale|conflicted|rejected|superseded)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PalaceClaimSupportReport:
+    report = await get_claim_support_report(db, tenant_id=request.state.tenant_id, status=status, limit=limit)
+    return PalaceClaimSupportReport(
+        tenant_id=report.tenant_id,
+        claims=[
+            {
+                "id": claim.id,
+                "claim_key": claim.claim_key,
+                "claim_text": claim.claim_text,
+                "claim_type": claim.claim_type,
+                "confidence": claim.confidence,
+                "status": claim.status,
+                "metadata": claim.metadata,
+                "sources": [
+                    {
+                        "id": source.id,
+                        "source_record_id": source.source_record_id,
+                        "source_chunk_id": source.source_chunk_id,
+                        "source_item_id": source.source_item_id,
+                        "support_role": source.support_role,
+                        "status": source.status,
+                        "source_digest": source.source_digest,
+                        "source_span": source.source_span,
+                    }
+                    for source in claim.sources
+                ],
+            }
+            for claim in report.claims
+        ],
+    )
 
 
 @router.patch("/rooms/{room_id}", response_model=PalaceRoomDetail)

@@ -124,7 +124,7 @@ def _score_candidate(candidate: dict[str, Any]) -> CandidateScore:
     }
     failing_gates = tuple(key for key, value in scores.items() if value < 1.0)
     failure_case_ids = tuple(_failure_case_ids(artifact_id, candidate, eval_summary, failing_gates))
-    promotion_ready = not failing_gates and status in {"draft", "proposed", "approved"}
+    promotion_ready = not failing_gates and status in {"draft", "needs_source", "reviewable", "promoted", "proposed", "approved"}
     scores["promotion_readiness"] = 1.0 if promotion_ready else 0.0
     expected = candidate.get("expected_promotion_ready")
     if expected is not None and not isinstance(expected, bool):
@@ -160,6 +160,7 @@ def _score_privacy(candidate_body: str, privacy_review: dict[str, Any]) -> float
 def _score_freshness(status: str, metadata: dict[str, Any]) -> float:
     stale_flags = (
         status in {"deprecated", "superseded", "rejected"},
+        status == "stale",
         metadata.get("superseded_by_newer_guidance") is True,
         metadata.get("source_evidence_stale") is True,
     )
@@ -172,6 +173,7 @@ def _score_interference(eval_summary: dict[str, Any], metadata: dict[str, Any]) 
         interference.get("overrides_newer_guidance") is True
         or interference.get("overrides_more_specific_guidance") is True
         or metadata.get("interferes_with_runtime_guidance") is True
+        or metadata.get("source_conflicts") is True
     )
     return 0.0 if failed else 1.0
 

@@ -67,6 +67,10 @@ data:
   FEED_POLL_MIN_INTERVAL: {{ .Values.config.feedPollMinInterval | quote }}
   FEED_MAX_FAILURES: {{ .Values.config.feedMaxFailures | quote }}
   FACEBOOK_GRAPH_API_VERSION: {{ .Values.config.facebookGraphApiVersion | quote }}
+  WEBPAGE_SCRAPER_PROVIDER: {{ .Values.config.webpageScraperProvider | quote }}
+  FIRECRAWL_BASE_URL: {{ .Values.config.firecrawlBaseUrl | quote }}
+  FIRECRAWL_TIMEOUT_SECONDS: {{ .Values.config.firecrawlTimeoutSeconds | quote }}
+  FIRECRAWL_ONLY_MAIN_CONTENT: {{ .Values.config.firecrawlOnlyMainContent | quote }}
   PALACE_SYNC_ALLOWED_ROOTS: {{ .Values.config.palaceSyncAllowedRoots | quote }}
   PALACE_SYNC_MAX_FILE_BYTES: {{ .Values.config.palaceSyncMaxFileBytes | quote }}
   PALACE_REPO_CHECKOUT_ROOT: {{ .Values.config.palaceRepoCheckoutRoot | quote }}
