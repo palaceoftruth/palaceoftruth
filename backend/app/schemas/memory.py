@@ -375,6 +375,37 @@ class MemoryArtifactAcceptedResponse(BaseModel):
     queue: MemoryQueueHint | None = None
 
 
+class MemoryEntryBatchRequest(BaseModel):
+    entries: list[MemoryEntryRequest] = Field(..., min_length=1, max_length=100)
+
+
+class MemoryEntryBatchResult(BaseModel):
+    index: int
+    status: str
+    contract_status: MemoryWriteContractStatus
+    retryable: bool = False
+    job_id: uuid.UUID | None = None
+    poll_url: str | None = None
+    poll_after_seconds: int | None = None
+    retry_after_seconds: int | None = None
+    accepted_as: Literal["canonical", "legacy_artifact"] | None = None
+    scope: MemoryScope | None = None
+    error: dict[str, Any] | None = None
+
+
+class MemoryEntryBatchResponse(BaseModel):
+    status: Literal["accepted", "partial", "failed"]
+    accepted: int
+    failed: int
+    max_entries: int = 100
+    poll_after_seconds: int = 5
+    retryable: bool = False
+    retry_after_seconds: int | None = None
+    rate_limit_state: Literal["not_enforced"] = "not_enforced"
+    queue: MemoryQueueHint | None = None
+    results: list[MemoryEntryBatchResult]
+
+
 class RelationshipBackfillRequest(BaseModel):
     limit: int = Field(50, ge=1, le=500)
     defer_seconds: int = Field(15, ge=0, le=3600)

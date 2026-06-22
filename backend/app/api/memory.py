@@ -19,11 +19,15 @@ from app.schemas.memory import (
     AgentMemoryRetrieveResponse,
     LegacyMemoryArtifactRequest,
     MemoryArtifactAcceptedResponse,
+    MemoryEntryBatchRequest,
+    MemoryEntryBatchResponse,
+    MemoryEntryBatchResult,
     MemoryEntryRequest,
     MemoryEntryListResponse,
     MemoryJobListResponse,
     MemoryQueueHint,
     MemoryJobResponse,
+    MemoryWriteContractStatus,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorRequest,
     MemoryRetrievalDoctorResponse,
@@ -120,6 +124,25 @@ def _set_memory_contract_headers(
     retry_after_seconds: int | None = None,
 ) -> None:
     response.headers["X-Palace-Memory-Job-Id"] = str(job_id)
+    response.headers["X-Palace-Memory-Contract-Status"] = contract_status
+    response.headers["X-Palace-Memory-Poll-After"] = str(poll_after_seconds)
+    response.headers["X-Palace-Rate-Limit-State"] = "not_enforced"
+    if queue is not None:
+        response.headers["X-Palace-Memory-Queue-State"] = queue.state
+        if queue.queued_depth is not None:
+            response.headers["X-Palace-Memory-Queue-Depth"] = str(queue.queued_depth)
+    if retry_after_seconds is not None:
+        response.headers["Retry-After"] = str(retry_after_seconds)
+
+
+def _set_memory_batch_contract_headers(
+    response: Response,
+    *,
+    contract_status: str,
+    poll_after_seconds: int,
+    queue: MemoryQueueHint | None = None,
+    retry_after_seconds: int | None = None,
+) -> None:
     response.headers["X-Palace-Memory-Contract-Status"] = contract_status
     response.headers["X-Palace-Memory-Poll-After"] = str(poll_after_seconds)
     response.headers["X-Palace-Rate-Limit-State"] = "not_enforced"
@@ -457,6 +480,133 @@ async def create_memory_entry(
         retry_after_seconds=accepted.retry_after_seconds,
     )
     return accepted
+
+
+@router.post(
+    "/entries:batch",
+    response_model=MemoryEntryBatchResponse,
+    status_code=202,
+    dependencies=[Depends(require_mcp_scope("write"))],
+)
+async def create_memory_entries_batch(
+    body: MemoryEntryBatchRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> MemoryEntryBatchResponse:
+    queue = await _memory_queue_contract_hint(request)
+    results: list[MemoryEntryBatchResult] = []
+    accepted_count = 0
+    failed_count = 0
+
+    for index, entry in enumerate(body.entries):
+        if entry.tenant_id != request.state.tenant_id:
+            failed_count += 1
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status="permanent_tenant_mismatch",
+                    retryable=False,
+                    error=_tenant_mismatch_detail(),
+                )
+            )
+            continue
+
+        admission = evaluate_memory_write_admission(
+            body=entry,
+            auth_mode=getattr(request.state, "auth_mode", None),
+            allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
+            mcp_client_key=getattr(request.state, "mcp_client_key", None),
+        )
+        if not admission.accepted:
+            failed_count += 1
+            detail = admission.response_detail()
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status=cast(MemoryWriteContractStatus, detail.get("status", "rejected")),
+                    retryable=bool(detail.get("retryable", False)),
+                    error=detail,
+                )
+            )
+            continue
+
+        result = await accept_canonical_memory_entry(
+            db,
+            body=entry,
+            signing_key=request.state.key_hash,
+            admission_audit=admission.audit,
+        )
+        try:
+            if result.enqueue_requested:
+                await _enqueue_memory_job_or_raise(request, db, job=result.job)
+        except HTTPException as exc:
+            failed_count += 1
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status=cast(MemoryWriteContractStatus, detail.get("contract_status", "dependency_unavailable")),
+                    retryable=bool(detail.get("retryable", True)),
+                    job_id=result.job.id,
+                    poll_url=detail.get("poll_url") if isinstance(detail.get("poll_url"), str) else _memory_job_poll_url(request, result.job),
+                    poll_after_seconds=detail.get("poll_after_seconds") if isinstance(detail.get("poll_after_seconds"), int) else 10,
+                    retry_after_seconds=detail.get("retry_after_seconds") if isinstance(detail.get("retry_after_seconds"), int) else 30,
+                    accepted_as=result.accepted_as,
+                    scope={"type": result.scope_type, "key": result.scope_key},
+                    error=detail,
+                )
+            )
+            continue
+
+        accepted = build_memory_acceptance_response(result, poll_url=_memory_job_poll_url(request, result.job), queue=queue)
+        item_contract_status = accepted.contract_status
+        if accepted.status in {"complete", "duplicate"}:
+            item_contract_status = "completed"
+        accepted_count += 1
+        results.append(
+            MemoryEntryBatchResult(
+                index=index,
+                status=accepted.status,
+                contract_status=item_contract_status,
+                retryable=accepted.retryable,
+                job_id=accepted.job_id,
+                poll_url=accepted.poll_url,
+                poll_after_seconds=accepted.poll_after_seconds,
+                retry_after_seconds=accepted.retry_after_seconds,
+                accepted_as=accepted.accepted_as,
+                scope=accepted.scope,
+            )
+        )
+
+    retry_after_seconds = max((result.retry_after_seconds or 0 for result in results), default=0) or None
+    response_status = "accepted" if failed_count == 0 else "failed" if accepted_count == 0 else "partial"
+    contract_status = "accepted"
+    if any(result.contract_status in {"retryable_degraded", "dependency_unavailable"} for result in results):
+        contract_status = "retryable_degraded"
+    elif failed_count:
+        contract_status = "rejected"
+    poll_after_seconds = queue.poll_after_seconds if queue else 5
+    _set_memory_batch_contract_headers(
+        response,
+        contract_status=contract_status,
+        poll_after_seconds=poll_after_seconds,
+        queue=queue,
+        retry_after_seconds=retry_after_seconds,
+    )
+    return MemoryEntryBatchResponse(
+        status=cast(Any, response_status),
+        accepted=accepted_count,
+        failed=failed_count,
+        poll_after_seconds=poll_after_seconds,
+        retryable=any(result.retryable for result in results),
+        retry_after_seconds=retry_after_seconds,
+        queue=queue,
+        results=results,
+    )
 
 
 @router.get("/entries", response_model=MemoryEntryListResponse, dependencies=[Depends(require_mcp_scope("read"))])

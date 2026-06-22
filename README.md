@@ -195,6 +195,7 @@ The plugin speaks the Palace memory facade:
 
 - `GET /api/v1/memory/whoami`
 - `POST /api/v1/memory/entries`
+- `POST /api/v1/memory/entries:batch`
 - `GET /api/v1/memory/scopes`
 - `POST /api/v1/memory/retrieve-agent`
 - `POST /api/v1/memory/retrieve` as the fallback/single-scope path
@@ -211,6 +212,17 @@ If enqueue dependencies are unavailable, Palace returns `503` with
 `contract_status=dependency_unavailable`, the accepted `job_id`, `poll_url`, and
 `Retry-After` so clients can poll or retry the accepted job without rewriting
 the memory body.
+
+Bulk clients can send up to 100 canonical memory entries to
+`POST /api/v1/memory/entries:batch`. The batch endpoint reuses the single-entry
+tenant, admission, idempotency, queue, and retry contract for each entry and
+returns ordered per-item results with `index`, `status`, `contract_status`,
+`job_id`, `poll_url`, `retryable`, and sanitized error details when an entry is
+rejected. For deterministic landing checks, write the batch, poll accepted jobs,
+then verify imported records with exact `source_url` filtering on
+`GET /api/v1/items?source_url=<encoded-url>`. Item listings continue to support
+`page`/`per_page`; created-at sorted audit scans may also follow the returned
+`next_cursor` with `GET /api/v1/items?cursor=<cursor>&sort=created_at`.
 
 Operators and clients can use `GET /api/v1/version` for the deployed app version
 and `GET /api/v1/ready` for dependency-aware readiness. `GET /api/v1/health`
