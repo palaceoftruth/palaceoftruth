@@ -320,6 +320,10 @@ def smoke_tag(run_id: str) -> str:
     return f"agent-memory-smoke-{run_id}"
 
 
+def batch_smoke_tag(run_id: str) -> str:
+    return f"batch-memory-smoke-{run_id}"
+
+
 def normalize_skill_name(value: str) -> str:
     normalized_chars: list[str] = []
     previous_was_separator = False
@@ -401,6 +405,57 @@ def make_memory_entry(
         "enable_ai_enrichment": False,
         "relationship_policy": relationship_policy,
     }
+
+
+def make_batch_memory_entries(
+    *,
+    tenant_id: str,
+    run_id: str,
+    scope_type: str,
+    scope_key: str | None,
+    relationship_policy: str,
+) -> list[dict[str, Any]]:
+    tag = batch_smoke_tag(run_id)
+    scope: dict[str, str] = {"type": scope_type}
+    if scope_type != "tenant_shared":
+        if not scope_key:
+            raise SystemExit(f"--scope-key is required when --scope-type is {scope_type}")
+        scope["key"] = scope_key
+    elif scope_key:
+        raise SystemExit("--scope-key must be omitted when --scope-type is tenant_shared")
+
+    entries: list[dict[str, Any]] = []
+    for index in range(2):
+        source_url = f"memory://production-smoke/batch/{run_id}/{index + 1}"
+        entries.append(
+            {
+                "tenant_id": tenant_id,
+                "title": f"Batch memory ingestion smoke {run_id} #{index + 1}",
+                "body": (
+                    f"BATCH-MEMORY-SMOKE-{run_id}-{index + 1}\n\n"
+                    "This bounded production smoke verifies batch memory ingestion, "
+                    "job polling, exact source_url audit listing, and cursor-based "
+                    "item listing without using deletion, admin, or secret discovery paths."
+                ),
+                "source": "batch-memory-smoke",
+                "source_url": source_url,
+                "created_at": utc_now().isoformat().replace("+00:00", "Z"),
+                "summary": "Batch memory ingestion production smoke.",
+                "tags": ["batch-memory-smoke", tag],
+                "scope": scope,
+                "created_by_role": "automation",
+                "metadata": {
+                    "run_id": run_id,
+                    "smoke": "batch-memory-ingestion",
+                    "entry_index": index,
+                    "bounded_production_smoke": True,
+                },
+                "idempotency_key": f"batch-memory-smoke:{run_id}:{index + 1}",
+                "enable_ai_enrichment": False,
+                "relationship_policy": relationship_policy,
+            }
+        )
+    return entries
 
 
 def mcp_create_memory_arguments(entry: dict[str, Any]) -> dict[str, Any]:
@@ -638,6 +693,217 @@ def run_rest_smoke(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(jobs, dict) or "jobs" not in jobs:
         raise RuntimeError(f"memory jobs listing response was not valid: {jobs}")
     result["steps"]["jobs"] = {"status": "ok", "returned": len(jobs.get("jobs") or [])}
+    return result
+
+
+def _result_job_ids(batch_response: dict[str, Any]) -> list[str]:
+    results = batch_response.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError(f"batch memory response did not include results: {batch_response}")
+    job_ids: list[str] = []
+    failed: list[dict[str, Any]] = []
+    for row in results:
+        if not isinstance(row, dict):
+            failed.append({"error": "non-object batch result"})
+            continue
+        if row.get("status") == "failed":
+            failed.append(
+                {
+                    "index": row.get("index"),
+                    "contract_status": row.get("contract_status"),
+                    "retryable": row.get("retryable"),
+                    "error": row.get("error"),
+                }
+            )
+            continue
+        job_id = row.get("job_id")
+        if isinstance(job_id, str) and job_id:
+            job_ids.append(job_id)
+    if failed:
+        raise RuntimeError(f"batch memory smoke had failed entries: {failed}")
+    if not job_ids:
+        raise RuntimeError(f"batch memory smoke did not return any job ids: {batch_response}")
+    return job_ids
+
+
+def _verify_item_for_source_url(
+    client: Client,
+    *,
+    source_url: str,
+    timeout: float,
+) -> dict[str, Any]:
+    listing = client.request(
+        "GET",
+        "/api/v1/items",
+        query={
+            "source_url": source_url,
+            "sort": "created_at",
+            "order": "desc",
+            "per_page": 1,
+        },
+        timeout=timeout,
+    )
+    if not isinstance(listing, dict):
+        raise RuntimeError(f"source_url listing response was not an object: {listing}")
+    items = listing.get("items")
+    if not isinstance(items, list) or not items:
+        raise RuntimeError(f"source_url listing did not return the smoke item for {source_url}: {listing}")
+    first = items[0]
+    if not isinstance(first, dict) or first.get("source_url") != source_url:
+        raise RuntimeError(f"source_url listing returned the wrong item for {source_url}: {listing}")
+    return {
+        "source_url": source_url,
+        "item_id": first.get("id"),
+        "status": first.get("status"),
+        "returned": len(items),
+        "total": listing.get("total"),
+    }
+
+
+def _verify_cursor_listing(
+    client: Client,
+    *,
+    tag: str,
+    expected_source_urls: set[str],
+    timeout: float,
+) -> dict[str, Any]:
+    first_page = client.request(
+        "GET",
+        "/api/v1/items",
+        query={
+            "tags": tag,
+            "sort": "created_at",
+            "order": "desc",
+            "per_page": 1,
+        },
+        timeout=timeout,
+    )
+    if not isinstance(first_page, dict):
+        raise RuntimeError(f"cursor first page was not an object: {first_page}")
+    cursor = first_page.get("next_cursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise RuntimeError(f"cursor first page did not return next_cursor: {first_page}")
+    first_items = first_page.get("items") if isinstance(first_page.get("items"), list) else []
+
+    second_page = client.request(
+        "GET",
+        "/api/v1/items",
+        query={
+            "tags": tag,
+            "sort": "created_at",
+            "order": "desc",
+            "per_page": 1,
+            "cursor": cursor,
+        },
+        timeout=timeout,
+    )
+    if not isinstance(second_page, dict):
+        raise RuntimeError(f"cursor second page was not an object: {second_page}")
+    second_items = second_page.get("items") if isinstance(second_page.get("items"), list) else []
+    seen_source_urls = {
+        item.get("source_url")
+        for item in [*first_items, *second_items]
+        if isinstance(item, dict) and isinstance(item.get("source_url"), str)
+    }
+    missing = sorted(expected_source_urls - seen_source_urls)
+    if missing:
+        raise RuntimeError(
+            f"cursor listing for tag {tag} did not include expected source_url values: {missing}"
+        )
+    return {
+        "tag": tag,
+        "pages_checked": 2,
+        "first_page_returned": len(first_items),
+        "second_page_returned": len(second_items),
+        "next_cursor_present": True,
+        "matched_source_urls": sorted(seen_source_urls & expected_source_urls),
+    }
+
+
+def run_batch_memory_production_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    api_key = (args.api_key or os.getenv("PALACEOFTRUTH_API_KEY") or os.getenv("SECONDBRAIN_API_KEY") or "").strip()
+    if not api_key:
+        raise SystemExit("--api-key, PALACEOFTRUTH_API_KEY, or SECONDBRAIN_API_KEY is required")
+
+    run_id = validate_run_id(args.run_id or default_run_id())
+    client = Client(base_url=args.api_base_url, api_key=api_key)
+    result: dict[str, Any] = {
+        "run_id": run_id,
+        "base_url": args.api_base_url,
+        "mutating": True,
+        "deletes_data": False,
+        "steps": {},
+    }
+
+    whoami = client.request("GET", "/api/v1/memory/whoami", timeout=args.request_timeout)
+    if not isinstance(whoami, dict) or not whoami.get("tenant_id"):
+        raise RuntimeError(f"whoami did not return tenant_id: {whoami}")
+    tenant_id = str(whoami["tenant_id"])
+    result["tenant_id"] = tenant_id
+    result["steps"]["whoami"] = {"status": "ok"}
+
+    entries = make_batch_memory_entries(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        scope_type=args.scope_type,
+        scope_key=args.scope_key,
+        relationship_policy=args.relationship_policy,
+    )
+    source_urls = {entry["source_url"] for entry in entries}
+    batch = client.request(
+        "POST",
+        "/api/v1/memory/entries:batch",
+        body={"entries": entries},
+        timeout=args.request_timeout,
+    )
+    if not isinstance(batch, dict):
+        raise RuntimeError(f"batch memory response was not an object: {batch}")
+    job_ids = _result_job_ids(batch)
+    if len(job_ids) != len(entries):
+        raise RuntimeError(f"expected {len(entries)} job ids from batch response, got {len(job_ids)}")
+    result["job_ids"] = job_ids
+    result["source_urls"] = sorted(source_urls)
+    result["steps"]["batch_write"] = {
+        "status": batch.get("status"),
+        "accepted": batch.get("accepted"),
+        "failed": batch.get("failed"),
+        "contract_statuses": [
+            row.get("contract_status")
+            for row in batch.get("results", [])
+            if isinstance(row, dict)
+        ],
+    }
+
+    polled = []
+    for job_id in job_ids:
+        job = poll_job(
+            client,
+            job_id=job_id,
+            interval_seconds=args.job_interval_seconds,
+            timeout_seconds=args.job_timeout_seconds,
+            request_timeout=args.request_timeout,
+        )
+        polled.append({"job_id": job_id, "status": job.get("status")})
+    result["steps"]["poll"] = {"status": "ok", "jobs": polled}
+
+    source_url_checks = [
+        _verify_item_for_source_url(client, source_url=source_url, timeout=args.request_timeout)
+        for source_url in sorted(source_urls)
+    ]
+    result["steps"]["source_url_listing"] = {
+        "status": "ok",
+        "checks": source_url_checks,
+    }
+
+    result["steps"]["cursor_listing"] = {
+        "status": "ok",
+        **_verify_cursor_listing(
+            client,
+            tag=batch_smoke_tag(run_id),
+            expected_source_urls=source_urls,
+            timeout=args.request_timeout,
+        ),
+    }
     return result
 
 
@@ -2793,6 +3059,42 @@ def cmd_rest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_batch_production_smoke(args: argparse.Namespace) -> int:
+    run_id = validate_run_id(args.run_id or default_run_id())
+    entries = make_batch_memory_entries(
+        tenant_id="dry-run-tenant",
+        run_id=run_id,
+        scope_type=args.scope_type,
+        scope_key=args.scope_key,
+        relationship_policy=args.relationship_policy,
+    )
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "mutating_when_live": True,
+                    "deletes_data": False,
+                    "requires_api_key": True,
+                    "api_base_url": args.api_base_url,
+                    "run_id": run_id,
+                    "batch_request": {"entries": entries},
+                    "verification": [
+                        "POST /api/v1/memory/entries:batch",
+                        "GET /api/v1/memory/jobs/{job_id}",
+                        "GET /api/v1/items?source_url=<exact>",
+                        f"GET /api/v1/items?tags={batch_smoke_tag(run_id)}&per_page=1",
+                        "GET /api/v1/items?cursor=<next_cursor>&per_page=1",
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    print(json.dumps(run_batch_memory_production_smoke(args), indent=2))
+    return 0
+
+
 def cmd_mcp_http(args: argparse.Namespace) -> int:
     if args.dry_run:
         run_id = validate_run_id(args.run_id or default_run_id())
@@ -3074,6 +3376,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rest.add_argument("--dry-run", action="store_true")
     rest.set_defaults(func=cmd_rest)
+
+    batch_production = sub.add_parser(
+        "batch-production-smoke",
+        help=(
+            "Run an opt-in authenticated production smoke for batch memory "
+            "ingestion and exact source_url/cursor item listing."
+        ),
+    )
+    batch_production.add_argument("--run-id", default=None)
+    batch_production.add_argument(
+        "--scope-type",
+        choices=["session", "agent", "workspace", "tenant_shared"],
+        default="workspace",
+    )
+    batch_production.add_argument("--scope-key", default="palaceoftruth")
+    batch_production.add_argument("--relationship-policy", choices=["immediate", "deferred"], default="immediate")
+    batch_production.add_argument("--request-timeout", type=float, default=30.0)
+    batch_production.add_argument("--job-interval-seconds", type=float, default=5.0)
+    batch_production.add_argument("--job-timeout-seconds", type=float, default=300.0)
+    batch_production.add_argument("--dry-run", action="store_true")
+    batch_production.set_defaults(func=cmd_batch_production_smoke)
 
     incident_doctor = sub.add_parser(
         "incident-retrieval-doctor",

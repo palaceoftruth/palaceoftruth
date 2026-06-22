@@ -178,6 +178,193 @@ def test_run_rest_smoke_exercises_canonical_sequence(monkeypatch: pytest.MonkeyP
     ]
 
 
+def test_make_batch_memory_entries_builds_bounded_audit_payloads() -> None:
+    entries = smoke_module.make_batch_memory_entries(
+        tenant_id="tenant-a",
+        run_id="20260622-smoke",
+        scope_type="workspace",
+        scope_key="palaceoftruth",
+        relationship_policy="immediate",
+    )
+
+    assert len(entries) == 2
+    assert entries[0]["tenant_id"] == "tenant-a"
+    assert entries[0]["scope"] == {"type": "workspace", "key": "palaceoftruth"}
+    assert entries[0]["source_url"] == "memory://production-smoke/batch/20260622-smoke/1"
+    assert entries[1]["source_url"] == "memory://production-smoke/batch/20260622-smoke/2"
+    assert entries[0]["idempotency_key"] == "batch-memory-smoke:20260622-smoke:1"
+    assert entries[1]["idempotency_key"] == "batch-memory-smoke:20260622-smoke:2"
+    assert entries[0]["relationship_policy"] == "immediate"
+    assert entries[0]["enable_ai_enrichment"] is False
+    assert "batch-memory-smoke-20260622-smoke" in entries[0]["tags"]
+
+
+def test_batch_production_smoke_exercises_batch_and_item_audit_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, api_key: str) -> None:
+            assert base_url == "https://api.palace.sarvent.cloud"
+            assert api_key == "secret"
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            body: dict[str, Any] | None = None,
+            query: dict[str, Any] | None = None,
+            timeout: float = 30.0,
+        ) -> Any:
+            requests.append((method, path, body, query))
+            assert timeout == 11.0
+            if (method, path) == ("GET", "/api/v1/memory/whoami"):
+                return {"status": "ok", "tenant_id": "tenant-a"}
+            if (method, path) == ("POST", "/api/v1/memory/entries:batch"):
+                assert body is not None
+                entries = body["entries"]
+                assert len(entries) == 2
+                assert entries[0]["tenant_id"] == "tenant-a"
+                assert entries[0]["source_url"] == "memory://production-smoke/batch/20260622-smoke/1"
+                assert entries[1]["source_url"] == "memory://production-smoke/batch/20260622-smoke/2"
+                assert entries[0]["idempotency_key"] == "batch-memory-smoke:20260622-smoke:1"
+                assert entries[1]["idempotency_key"] == "batch-memory-smoke:20260622-smoke:2"
+                return {
+                    "status": "accepted",
+                    "accepted": 2,
+                    "failed": 0,
+                    "results": [
+                        {"index": 0, "status": "queued", "contract_status": "accepted", "job_id": "job-1"},
+                        {"index": 1, "status": "queued", "contract_status": "accepted", "job_id": "job-2"},
+                    ],
+                }
+            if (method, path) == ("GET", "/api/v1/memory/jobs/job-1"):
+                return {"job_id": "job-1", "status": "complete"}
+            if (method, path) == ("GET", "/api/v1/memory/jobs/job-2"):
+                return {"job_id": "job-2", "status": "complete"}
+            if (method, path) == ("GET", "/api/v1/items") and query and query.get("source_url"):
+                source_url = query["source_url"]
+                assert query["per_page"] == 1
+                return {
+                    "items": [{"id": f"item-{source_url[-1]}", "source_url": source_url, "status": "ready"}],
+                    "total": 1,
+                    "next_cursor": None,
+                }
+            if (method, path) == ("GET", "/api/v1/items") and query and query.get("cursor") is None:
+                assert query == {
+                    "tags": "batch-memory-smoke-20260622-smoke",
+                    "sort": "created_at",
+                    "order": "desc",
+                    "per_page": 1,
+                }
+                return {
+                    "items": [
+                        {
+                            "id": "item-2",
+                            "source_url": "memory://production-smoke/batch/20260622-smoke/2",
+                        }
+                    ],
+                    "total": 2,
+                    "next_cursor": "cursor-1",
+                }
+            if (method, path) == ("GET", "/api/v1/items") and query and query.get("cursor") == "cursor-1":
+                assert query == {
+                    "tags": "batch-memory-smoke-20260622-smoke",
+                    "sort": "created_at",
+                    "order": "desc",
+                    "per_page": 1,
+                    "cursor": "cursor-1",
+                }
+                return {
+                    "items": [
+                        {
+                            "id": "item-1",
+                            "source_url": "memory://production-smoke/batch/20260622-smoke/1",
+                        }
+                    ],
+                    "total": 2,
+                    "next_cursor": None,
+                }
+            raise AssertionError(f"Unexpected request: {method} {path} {query}")
+
+    monkeypatch.setattr(smoke_module, "Client", FakeClient)
+    args = smoke_module.build_parser().parse_args(
+        [
+            "--api-base-url",
+            "https://api.palace.sarvent.cloud",
+            "--api-key",
+            "secret",
+            "batch-production-smoke",
+            "--run-id",
+            "20260622-smoke",
+            "--request-timeout",
+            "11",
+            "--job-interval-seconds",
+            "0",
+        ]
+    )
+
+    report = smoke_module.run_batch_memory_production_smoke(args)
+
+    assert report["mutating"] is True
+    assert report["deletes_data"] is False
+    assert report["job_ids"] == ["job-1", "job-2"]
+    assert report["source_urls"] == [
+        "memory://production-smoke/batch/20260622-smoke/1",
+        "memory://production-smoke/batch/20260622-smoke/2",
+    ]
+    assert report["steps"]["batch_write"] == {
+        "status": "accepted",
+        "accepted": 2,
+        "failed": 0,
+        "contract_statuses": ["accepted", "accepted"],
+    }
+    assert report["steps"]["source_url_listing"]["status"] == "ok"
+    assert report["steps"]["cursor_listing"]["matched_source_urls"] == report["source_urls"]
+    assert [(method, path) for method, path, _, _ in requests] == [
+        ("GET", "/api/v1/memory/whoami"),
+        ("POST", "/api/v1/memory/entries:batch"),
+        ("GET", "/api/v1/memory/jobs/job-1"),
+        ("GET", "/api/v1/memory/jobs/job-2"),
+        ("GET", "/api/v1/items"),
+        ("GET", "/api/v1/items"),
+        ("GET", "/api/v1/items"),
+        ("GET", "/api/v1/items"),
+    ]
+
+
+def test_batch_production_smoke_dry_run_redacts_secret_and_lists_verification(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = smoke_module.build_parser().parse_args(
+        [
+            "--api-base-url",
+            "https://api.palace.sarvent.cloud",
+            "--api-key",
+            "secret-value",
+            "batch-production-smoke",
+            "--run-id",
+            "20260622-smoke",
+            "--dry-run",
+        ]
+    )
+
+    assert smoke_module.cmd_batch_production_smoke(args) == 0
+    output = capsys.readouterr().out
+    report = smoke_module.json.loads(output)
+
+    assert "secret-value" not in output
+    assert report["dry_run"] is True
+    assert report["mutating_when_live"] is True
+    assert report["deletes_data"] is False
+    assert report["batch_request"]["entries"][0]["source_url"] == (
+        "memory://production-smoke/batch/20260622-smoke/1"
+    )
+    assert "GET /api/v1/items?cursor=<next_cursor>&per_page=1" in report["verification"]
+
+
 def test_incident_retrieval_doctor_posts_redacted_feedvalue_receipt_shelf_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

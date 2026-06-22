@@ -224,6 +224,23 @@ then verify imported records with exact `source_url` filtering on
 `page`/`per_page`; created-at sorted audit scans may also follow the returned
 `next_cursor` with `GET /api/v1/items?cursor=<cursor>&sort=created_at`.
 
+For an explicit authenticated production smoke, set an operator-provided API key
+in the runtime environment and run:
+
+```bash
+PALACEOFTRUTH_API_KEY=... uv run python scripts/smoke_agent_memory_compatibility.py \
+  --api-base-url https://api.palace.sarvent.cloud \
+  batch-production-smoke \
+  --run-id "$(date -u +%Y%m%d-%H%M%S)"
+```
+
+The smoke writes two bounded `memory://production-smoke/batch/<run-id>/...`
+entries, polls their accepted jobs, verifies each item through exact
+`source_url` filtering, and follows a returned item-listing cursor for the
+unique run tag. It does not read cluster secrets, use admin endpoints, or delete
+production data. Use `--dry-run` to inspect the exact payload and verification
+plan without writing.
+
 Operators and clients can use `GET /api/v1/version` for the deployed app version
 and `GET /api/v1/ready` for dependency-aware readiness. `GET /api/v1/health`
 remains the simple Kubernetes-compatible probe and intentionally returns only
