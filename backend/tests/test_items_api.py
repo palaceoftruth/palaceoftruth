@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from app.api.items import router
+from app.api.items import _encode_items_cursor, router
 from app.auth import verify_api_key
 from app.database import get_db
 from app.models.item import Item
@@ -295,6 +295,92 @@ def test_list_items_applies_case_insensitive_title_sort() -> None:
 
     assert response.status_code == 200
     assert any("ORDER BY lower(items.title) ASC, items.id ASC" in sql for sql in session.execute_sql)
+
+
+def test_list_items_filters_by_exact_source_url_and_returns_cursor() -> None:
+    first = Item(
+        id=uuid.uuid4(),
+        source_type="note",
+        source_url="https://example.test/audit",
+        title="First",
+        tenant_id="tenant-a",
+        status="ready",
+        created_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    second = Item(
+        id=uuid.uuid4(),
+        source_type="note",
+        source_url="https://example.test/audit",
+        title="Second",
+        tenant_id="tenant-a",
+        status="ready",
+        created_at=datetime(2026, 4, 13, 12, 0, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    session = ListItemsSession([first, second])
+    client = _client(session)
+
+    response = client.get("/api/v1/items?source_url=https%3A%2F%2Fexample.test%2Faudit&per_page=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert [row["title"] for row in payload["items"]] == ["First"]
+    assert payload["next_cursor"] == _encode_items_cursor(first)
+    assert any("items.source_url = 'https://example.test/audit'" in sql for sql in session.execute_sql)
+
+
+def test_list_items_cursor_requires_created_at_page_one() -> None:
+    ready_item = Item(
+        id=uuid.uuid4(),
+        source_type="note",
+        title="Ready",
+        tenant_id="tenant-a",
+        status="ready",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    cursor = _encode_items_cursor(ready_item)
+    session = ListItemsSession([ready_item])
+    client = _client(session)
+
+    response = client.get(f"/api/v1/items?cursor={cursor}&sort=title")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "cursor pagination requires sort=created_at and page=1"
+    assert session.execute_sql == []
+
+
+def test_list_items_rejects_malformed_cursor() -> None:
+    ready_item = Item(
+        id=uuid.uuid4(),
+        source_type="note",
+        title="Ready",
+        tenant_id="tenant-a",
+        status="ready",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    session = ListItemsSession([ready_item])
+    client = _client(session)
+
+    response = client.get("/api/v1/items?cursor=%25%25%25%25")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "cursor must be a valid item listing cursor"
 
 
 def test_list_items_rejects_unknown_sort_field() -> None:

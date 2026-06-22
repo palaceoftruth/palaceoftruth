@@ -529,6 +529,110 @@ def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> Non
     assert "MasterNotFoundError" not in response.text
 
 
+def test_memory_entries_batch_reports_mixed_item_results(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    accepted_job_id = uuid.uuid4()
+    duplicate_job_id = uuid.uuid4()
+    calls: list[str] = []
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        assert signing_key == "key-hash"
+        assert admission_audit is not None
+        calls.append(body.title)
+        job_id = accepted_job_id if body.title == "Shared launch brief" else duplicate_job_id
+        status = "queued" if body.title == "Shared launch brief" else "completed"
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=job_id,
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status=status,
+                progress=0 if status == "queued" else 100,
+                created_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc) if status == "completed" else None,
+            ),
+            enqueue_requested=status == "queued",
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    duplicate = _canonical_payload()
+    duplicate["title"] = "Duplicate memory"
+    duplicate["idempotency_key"] = "duplicate-key"
+    tenant_mismatch = _canonical_payload()
+    tenant_mismatch["tenant_id"] = "tenant-b"
+    tenant_mismatch["idempotency_key"] = "tenant-mismatch-key"
+
+    response = client.post(
+        "/api/v1/memory/entries:batch",
+        json={"entries": [_canonical_payload(), duplicate, tenant_mismatch]},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "partial"
+    assert payload["accepted"] == 2
+    assert payload["failed"] == 1
+    assert payload["max_entries"] == 100
+    assert [result["index"] for result in payload["results"]] == [0, 1, 2]
+    assert payload["results"][0]["job_id"] == str(accepted_job_id)
+    assert payload["results"][0]["poll_url"].endswith(f"/api/v1/memory/jobs/{accepted_job_id}")
+    assert payload["results"][1]["status"] == "complete"
+    assert payload["results"][1]["contract_status"] == "completed"
+    assert payload["results"][2]["status"] == "failed"
+    assert payload["results"][2]["contract_status"] == "permanent_tenant_mismatch"
+    assert payload["results"][2]["error"]["retryable"] is False
+    assert calls == ["Shared launch brief", "Duplicate memory"]
+    assert len(client.app.state.arq_pool.enqueued) == 1
+
+
+def test_memory_entries_batch_reports_queue_dependency_failure_per_item(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    client.app.state.arq_pool.raise_on_enqueue = RuntimeError("MasterNotFoundError: private endpoint")
+    job_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=job_id,
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+                payload={"relationship_policy": "immediate"},
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    response = client.post("/api/v1/memory/entries:batch", json={"entries": [_canonical_payload()]})
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["accepted"] == 0
+    assert payload["failed"] == 1
+    assert payload["retryable"] is True
+    assert response.headers["Retry-After"] == "30"
+    result = payload["results"][0]
+    assert result["job_id"] == str(job_id)
+    assert result["contract_status"] == "dependency_unavailable"
+    assert result["retryable"] is True
+    assert "MasterNotFoundError" not in response.text
+
+
 def test_memory_entries_quarantines_secret_body_before_storage(monkeypatch) -> None:
     client = _build_app(FakeSession())
 

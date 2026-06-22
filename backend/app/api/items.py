@@ -1,6 +1,10 @@
+import base64
+import binascii
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -30,6 +34,29 @@ _SORT_ORDERS = frozenset({"asc", "desc"})
 
 def _is_deleted(row: Item) -> bool:
     return row.deleted_at is not None or row.status == "deleted"
+
+
+def _encode_items_cursor(row: Item) -> str:
+    payload = {
+        "created_at": row.created_at.isoformat(),
+        "id": str(row.id),
+    }
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+
+def _decode_items_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        payload: Any = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("cursor payload must be an object")
+        created_at = payload.get("created_at")
+        item_id = payload.get("id")
+        if not isinstance(created_at, str) or not isinstance(item_id, str):
+            raise ValueError("cursor payload is missing created_at or id")
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")), uuid.UUID(item_id)
+    except (binascii.Error, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="cursor must be a valid item listing cursor") from exc
 
 
 def _tombstone_item(row: Item, *, actor_id: str | None, deleted_via: str) -> datetime:
@@ -102,6 +129,8 @@ async def list_items(
     order: str = Query("desc"),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    source_url: str | None = Query(None, description="Exact source_url match for audit verification"),
+    cursor: str | None = Query(None, description="Stable cursor returned by a previous created_at-sorted listing"),
     db: AsyncSession = Depends(get_db),
 ):
     sort_key = sort.strip().lower()
@@ -111,6 +140,8 @@ async def list_items(
         raise HTTPException(status_code=422, detail=f"Unsupported sort field: {sort}")
     if order_key not in _SORT_ORDERS:
         raise HTTPException(status_code=422, detail=f"Unsupported sort order: {order}")
+    if cursor and (sort_key != "created_at" or page != 1):
+        raise HTTPException(status_code=422, detail="cursor pagination requires sort=created_at and page=1")
 
     # Hide failed and soft-deleted items from shared library browse flows.
     q = select(Item).where(
@@ -121,6 +152,8 @@ async def list_items(
     )
     if source_type:
         q = q.where(Item.source_type == source_type)
+    if source_url is not None:
+        q = q.where(Item.source_url == source_url)
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         if tag_list:
@@ -135,16 +168,35 @@ async def list_items(
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar_one()
 
+    if cursor:
+        cursor_created_at, cursor_id = _decode_items_cursor(cursor)
+        if order_key == "asc":
+            q = q.where(
+                (Item.created_at > cursor_created_at)
+                | ((Item.created_at == cursor_created_at) & (Item.id > cursor_id))
+            )
+        else:
+            q = q.where(
+                (Item.created_at < cursor_created_at)
+                | ((Item.created_at == cursor_created_at) & (Item.id < cursor_id))
+            )
+
     primary_order = sort_column.asc() if order_key == "asc" else sort_column.desc()
     tie_breaker = Item.id.asc() if order_key == "asc" else Item.id.desc()
-    q = q.order_by(primary_order, tie_breaker).offset((page - 1) * per_page).limit(per_page)
+    q = q.order_by(primary_order, tie_breaker)
+    q = q.offset(0 if cursor else (page - 1) * per_page).limit(per_page + 1)
     rows = (await db.execute(q)).scalars().all()
+    next_cursor = None
+    if len(rows) > per_page:
+        rows = rows[:per_page]
+        next_cursor = _encode_items_cursor(rows[-1])
 
     return ItemListResponse(
         items=[ItemResponse.model_validate(r) for r in rows],
         total=total,
         page=page,
         per_page=per_page,
+        next_cursor=next_cursor,
     )
 
 
