@@ -18,8 +18,9 @@ import logging
 import os
 import threading
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -36,8 +37,14 @@ DEFAULT_CONTEXT_BUDGET_CHARS = 4000
 DEFAULT_TIMEOUT_SECONDS = 10
 DEFAULT_SOURCE = "hermes-agent"
 DEFAULT_CREATED_BY_ROLE = "assistant"
+MAX_MEMORY_BODY_CHARS = 24000
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
+DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
+DEFAULT_CIRCUIT_COOLDOWN_SECONDS = 30
 SEARCH_TOOL_NAME = "palace_search"
 REMEMBER_TOOL_NAME = "palace_remember"
+BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
 SKILL_TAG_PREFIX = "skill-"
 SCOPE_TYPES = {"session", "agent", "workspace", "tenant_shared"}
 _SELF_NEGATION_PHRASES = (
@@ -87,6 +94,17 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         parsed = int(raw)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = float(raw)
     except ValueError:
         return default
     return parsed if parsed > 0 else default
@@ -238,6 +256,120 @@ def _scope_type_counts(scopes: list[dict[str, Any]]) -> dict[str, int]:
 def _log_retrieval_diagnostic(level: int, event: str, **fields: Any) -> None:
     payload = {key: value for key, value in fields.items() if value not in (None, "", [], {})}
     logger.log(level, "Palace of Truth retrieval diagnostic event=%s fields=%s", event, payload)
+
+
+class PalaceTransientError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: int | None = None,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = retryable
+
+
+class PalaceCircuitOpenError(RuntimeError):
+    def __init__(self, retry_after_seconds: int) -> None:
+        super().__init__(
+            f"Palace of Truth circuit is open; retry after {retry_after_seconds} seconds"
+        )
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = True
+
+
+class PalacePayloadTooLargeError(ValueError):
+    pass
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    if not value:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = int(stripped)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(stripped)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        parsed = int((retry_at.astimezone(UTC) - datetime.now(UTC)).total_seconds())
+    return parsed if parsed > 0 else None
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
+
+
+def _write_contract_summary(response: dict[str, Any]) -> dict[str, Any]:
+    status = str(response.get("status") or "").strip() or "unknown"
+    contract_status = str(response.get("contract_status") or status).strip() or status
+    summary: dict[str, Any] = {
+        "status": status,
+        "contract_status": contract_status,
+        "durable": contract_status == "completed" or status in {"complete", "duplicate"},
+        "retryable": bool(response.get("retryable", False)),
+    }
+    for key in (
+        "job_id",
+        "poll_url",
+        "poll_after_seconds",
+        "retry_after_seconds",
+        "accepted_as",
+        "scope",
+        "queue",
+    ):
+        value = response.get(key)
+        if value not in (None, "", [], {}):
+            summary[key] = value
+    return summary
+
+
+def _safe_exception_summary(exc: Exception) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    if isinstance(retry_after, int) and retry_after > 0:
+        summary["retry_after_seconds"] = retry_after
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(retryable, bool):
+        summary["retryable"] = retryable
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        summary["status_code"] = status_code
+    return summary
+
+
+def _body_with_truncation_metadata(text: str) -> tuple[str, dict[str, Any]]:
+    if len(text) <= MAX_MEMORY_BODY_CHARS:
+        return text, {}
+    return (
+        _trim(text, MAX_MEMORY_BODY_CHARS),
+        {
+            "body_truncated": True,
+            "original_body_chars": len(text),
+            "stored_body_chars": MAX_MEMORY_BODY_CHARS,
+        },
+    )
+
+
+def _reject_oversized_explicit_write(content: str) -> None:
+    if len(content) <= MAX_MEMORY_BODY_CHARS:
+        return
+    raise PalacePayloadTooLargeError(
+        "explicit Palace memory write exceeds "
+        f"{MAX_MEMORY_BODY_CHARS} characters; shorten or split the memory"
+    )
 
 
 def _scope_key(scope: dict[str, Any]) -> str | None:
@@ -489,6 +621,19 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
         "timeout_seconds": _env_int(
             "PALACEOFTRUTH_REQUEST_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
         ),
+        "retry_attempts": _env_int("PALACEOFTRUTH_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS),
+        "retry_backoff_seconds": _env_float(
+            "PALACEOFTRUTH_RETRY_BACKOFF_SECONDS",
+            DEFAULT_RETRY_BACKOFF_SECONDS,
+        ),
+        "circuit_failure_threshold": _env_int(
+            "PALACEOFTRUTH_CIRCUIT_FAILURE_THRESHOLD",
+            DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+        ),
+        "circuit_cooldown_seconds": _env_int(
+            "PALACEOFTRUTH_CIRCUIT_COOLDOWN_SECONDS",
+            DEFAULT_CIRCUIT_COOLDOWN_SECONDS,
+        ),
         "source": os.environ.get("PALACEOFTRUTH_SOURCE", DEFAULT_SOURCE).strip()
         or DEFAULT_SOURCE,
         "created_by_role": os.environ.get(
@@ -526,6 +671,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._include_tenant_shared = False
         self._include_broad_corpus = False
         self._timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+        self._retry_attempts = DEFAULT_RETRY_ATTEMPTS
+        self._retry_backoff_seconds = DEFAULT_RETRY_BACKOFF_SECONDS
+        self._circuit_failure_threshold = DEFAULT_CIRCUIT_FAILURE_THRESHOLD
+        self._circuit_cooldown_seconds = DEFAULT_CIRCUIT_COOLDOWN_SECONDS
+        self._circuit_failure_count = 0
+        self._circuit_opened_until = 0.0
+        self._circuit_lock = threading.Lock()
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
         self._session_id = ""
@@ -622,6 +774,26 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "description": "HTTP timeout in seconds",
                 "default": str(DEFAULT_TIMEOUT_SECONDS),
             },
+            {
+                "key": "retry_attempts",
+                "description": "Maximum attempts for transient Palace failures",
+                "default": str(DEFAULT_RETRY_ATTEMPTS),
+            },
+            {
+                "key": "retry_backoff_seconds",
+                "description": "Base retry backoff in seconds",
+                "default": str(DEFAULT_RETRY_BACKOFF_SECONDS),
+            },
+            {
+                "key": "circuit_failure_threshold",
+                "description": "Transient failures before temporarily opening the circuit",
+                "default": str(DEFAULT_CIRCUIT_FAILURE_THRESHOLD),
+            },
+            {
+                "key": "circuit_cooldown_seconds",
+                "description": "Circuit cooldown in seconds after repeated transient failures",
+                "default": str(DEFAULT_CIRCUIT_COOLDOWN_SECONDS),
+            },
         ]
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
@@ -689,6 +861,46 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         )
         self._timeout_seconds = int(
             self._config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        )
+        self._retry_attempts = min(
+            5,
+            max(1, int(self._config.get("retry_attempts", DEFAULT_RETRY_ATTEMPTS))),
+        )
+        self._retry_backoff_seconds = min(
+            60.0,
+            max(
+                0.1,
+                float(
+                    self._config.get(
+                        "retry_backoff_seconds",
+                        DEFAULT_RETRY_BACKOFF_SECONDS,
+                    )
+                ),
+            ),
+        )
+        self._circuit_failure_threshold = min(
+            20,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "circuit_failure_threshold",
+                        DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+                    )
+                ),
+            ),
+        )
+        self._circuit_cooldown_seconds = min(
+            600,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "circuit_cooldown_seconds",
+                        DEFAULT_CIRCUIT_COOLDOWN_SECONDS,
+                    )
+                ),
+            ),
         )
         self._source = str(self._config.get("source", DEFAULT_SOURCE)).strip() or DEFAULT_SOURCE
         self._created_by_role = (
@@ -766,7 +978,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "name": REMEMBER_TOOL_NAME,
                 "description": (
                     "Save a concise durable memory to Palace of Truth under the "
-                    "active Hermes orchestrator scope."
+                    "active Hermes orchestrator scope. The result reports whether "
+                    "the write is queued, durable, or degraded."
                 ),
                 "parameters": {
                     "type": "object",
@@ -789,6 +1002,37 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": BULK_REMEMBER_TOOL_NAME,
+                "description": (
+                    "Save up to 100 concise durable memories using Palace batch "
+                    "ingestion. The ordered result reports accepted and failed "
+                    "items separately."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "contents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 100,
+                            "description": "Durable memories to save in order.",
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["memory", "user"],
+                            "description": (
+                                "Use memory for operational/project facts and user "
+                                "for stable user preferences."
+                            ),
+                            "default": "memory",
+                        },
+                    },
+                    "required": ["contents"],
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
@@ -801,7 +1045,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": "query is required",
                     }
                 )
-            text = self._retrieve_text(query, self._session_id)
+            try:
+                text = self._retrieve_text(query, self._session_id)
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "query": query,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
             return json.dumps(
                 {
                     "ok": True,
@@ -842,18 +1095,124 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": "could not resolve Palace of Truth tenant",
                     }
                 )
-            payload = self._build_memory_write_payload(
-                action="add",
-                target=target,
-                content=content,
-                tenant_id=tenant_id,
-            )
-            response = self._request_json("POST", "/api/v1/memory/entries", payload)
+            try:
+                payload = self._build_memory_write_payload(
+                    action="add",
+                    target=target,
+                    content=content,
+                    tenant_id=tenant_id,
+                )
+                response = self._request_json("POST", "/api/v1/memory/entries", payload)
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "target": target,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
+            contract = _write_contract_summary(response)
             return json.dumps(
                 {
                     "ok": True,
                     "target": target,
                     "scope": payload.get("scope"),
+                    "durability": contract,
+                    "response": response,
+                }
+            )
+
+        if tool_name == BULK_REMEMBER_TOOL_NAME:
+            raw_contents = args.get("contents")
+            if not isinstance(raw_contents, list):
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "contents must be an array",
+                    }
+                )
+            contents = [str(content or "").strip() for content in raw_contents]
+            if not contents or any(not content for content in contents):
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "contents must contain 1 to 100 non-empty strings",
+                    }
+                )
+            if len(contents) > 100:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "contents is limited to 100 entries",
+                    }
+                )
+            target = str(args.get("target") or "memory").strip().lower() or "memory"
+            if target not in {"memory", "user"}:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "target must be memory or user",
+                    }
+                )
+            if self._writes_disabled:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "writes are disabled for this agent context",
+                    }
+                )
+            tenant_id = self._resolve_tenant_id()
+            if not tenant_id:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "could not resolve Palace of Truth tenant",
+                    }
+                )
+            try:
+                entries = [
+                    self._build_memory_write_payload(
+                        action="add",
+                        target=target,
+                        content=content,
+                        tenant_id=tenant_id,
+                    )
+                    for content in contents
+                ]
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "target": target,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
+            try:
+                response = self._request_json(
+                    "POST",
+                    "/api/v1/memory/entries:batch",
+                    {"entries": entries},
+                )
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "target": target,
+                        "scope": entries[0].get("scope") if entries else None,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
+            return json.dumps(
+                {
+                    "ok": response.get("status") in {"accepted", "partial"},
+                    "target": target,
+                    "scope": entries[0].get("scope") if entries else None,
+                    "accepted": response.get("accepted", 0),
+                    "failed": response.get("failed", 0),
+                    "retryable": bool(response.get("retryable", False)),
+                    "retry_after_seconds": response.get("retry_after_seconds"),
+                    "poll_after_seconds": response.get("poll_after_seconds"),
+                    "results": response.get("results", []),
                     "response": response,
                 }
             )
@@ -1007,6 +1366,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._raise_if_circuit_open()
         body = None
         headers = {
             "Accept": "application/json",
@@ -1033,22 +1393,101 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             method=method,
             headers=headers,
         )
-        try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Palace of Truth {method} {path} failed: {exc.code} {detail}"
-            ) from exc
-        except URLError as exc:
-            raise RuntimeError(f"Palace of Truth {method} {path} failed: {exc}") from exc
+
+        last_error: Exception | None = None
+        attempts = max(1, self._retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                with urlopen(request, timeout=self._timeout_seconds) as response:
+                    raw = response.read().decode("utf-8")
+                self._record_request_success()
+                break
+            except HTTPError as exc:
+                retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
+                if not _is_retryable_http_status(exc.code):
+                    exc.read()
+                    raise RuntimeError(
+                        f"Palace of Truth {method} {path} failed with HTTP {exc.code}"
+                    ) from exc
+                last_error = PalaceTransientError(
+                    f"Palace of Truth {method} {path} retryable HTTP {exc.code}",
+                    status_code=exc.code,
+                    retry_after_seconds=retry_after,
+                )
+            except URLError as exc:
+                last_error = PalaceTransientError(
+                    f"Palace of Truth {method} {path} transient network failure",
+                )
+
+            if attempt >= attempts:
+                assert last_error is not None
+                self._record_request_failure(last_error)
+                raise last_error
+            delay = self._retry_delay_seconds(attempt, last_error)
+            logger.warning(
+                "Palace of Truth request retrying method=%s path=%s attempt=%s "
+                "retry_after_seconds=%s error_class=%s",
+                method,
+                path,
+                attempt,
+                getattr(last_error, "retry_after_seconds", None),
+                last_error.__class__.__name__ if last_error else None,
+            )
+            sleep(delay)
+        else:
+            raw = ""
+
         if not raw.strip():
             return {}
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise RuntimeError(f"Palace of Truth {method} {path} returned non-object JSON")
         return parsed
+
+    def _raise_if_circuit_open(self) -> None:
+        with self._circuit_lock:
+            if not self._circuit_opened_until:
+                return
+            now = perf_counter()
+            if now >= self._circuit_opened_until:
+                self._circuit_opened_until = 0.0
+                self._circuit_failure_count = 0
+                return
+            retry_after = max(1, int(self._circuit_opened_until - now))
+            raise PalaceCircuitOpenError(retry_after)
+
+    def _record_request_success(self) -> None:
+        with self._circuit_lock:
+            self._circuit_failure_count = 0
+            self._circuit_opened_until = 0.0
+
+    def _record_request_failure(self, exc: Exception) -> None:
+        with self._circuit_lock:
+            self._circuit_failure_count += 1
+            if self._circuit_failure_count < self._circuit_failure_threshold:
+                return
+            retry_after = getattr(exc, "retry_after_seconds", None)
+            cooldown = (
+                retry_after
+                if isinstance(retry_after, int) and retry_after > 0
+                else self._circuit_cooldown_seconds
+            )
+            self._circuit_opened_until = perf_counter() + cooldown
+            logger.warning(
+                "Palace of Truth circuit opened after transient failures "
+                "failure_count=%s retry_after_seconds=%s",
+                self._circuit_failure_count,
+                cooldown,
+            )
+
+    def _retry_delay_seconds(self, attempt: int, exc: Exception | None) -> float:
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if isinstance(retry_after, int) and retry_after > 0:
+            return float(min(retry_after, self._circuit_cooldown_seconds))
+        return min(
+            self._retry_backoff_seconds * (2 ** max(0, attempt - 1)),
+            float(self._circuit_cooldown_seconds),
+        )
 
     def _resolve_tenant_id(self) -> str | None:
         with self._tenant_id_lock:
@@ -1493,6 +1932,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 assistant_content or "(empty)",
             ]
         ).strip()
+        body_text, truncation_metadata = _body_with_truncation_metadata(body)
         summary = _trim(
             _first_line(assistant_content, _first_line(user_content, "Conversation turn")),
             280,
@@ -1513,7 +1953,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         payload: dict[str, Any] = {
             "tenant_id": tenant_id,
             "title": title,
-            "body": _trim(body, 24000),
+            "body": body_text,
             "summary": summary,
             "source": self._source,
             "created_at": _utc_now(),
@@ -1524,6 +1964,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "agent_identity": self._agent_identity,
                 "agent_workspace": self._agent_workspace,
                 "platform": self._platform,
+                **truncation_metadata,
             },
             "idempotency_key": idempotency_key,
         }
@@ -1534,6 +1975,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def _build_memory_write_payload(
         self, *, action: str, target: str, content: str, tenant_id: str
     ) -> dict[str, Any]:
+        _reject_oversized_explicit_write(content)
         scope = self._build_scope(self._session_id)
         target_label = "user profile" if target == "user" else "memory"
         title = _trim(
@@ -1579,7 +2021,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         payload: dict[str, Any] = {
             "tenant_id": tenant_id,
             "title": title,
-            "body": _trim(content, 24000),
+            "body": content,
             "summary": summary,
             "source": f"{self._source}-memory-tool",
             "created_at": _utc_now(),

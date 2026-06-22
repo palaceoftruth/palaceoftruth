@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import logging
 import sys
 import types
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -329,7 +334,7 @@ def test_palaceoftruth_provider_exposes_explicit_search_and_remember_tools(
     schemas = provider.get_tool_schemas()
     tool_names = {schema["name"] for schema in schemas}
 
-    assert tool_names == {"palace_search", "palace_remember"}
+    assert tool_names == {"palace_search", "palace_remember", "palace_remember_bulk"}
     assert "palace_search" in provider.system_prompt_block()
 
 
@@ -566,6 +571,32 @@ def test_palaceoftruth_search_tool_exposes_generic_title_match_evidence(monkeypa
     assert "Snippet: Generic titled hit whose decisive evidence is a tag-only match." in result["result"]
 
 
+def test_palaceoftruth_search_tool_reports_degraded_search(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    provider._retrieve_text = lambda *_args: (_ for _ in ()).throw(
+        module.PalaceCircuitOpenError(12)
+    )  # type: ignore[method-assign]
+
+    result = json.loads(provider.handle_tool_call("palace_search", {"query": "palace status"}))
+
+    assert result == {
+        "ok": False,
+        "query": "palace status",
+        "error": {
+            "type": "PalaceCircuitOpenError",
+            "message": "Palace of Truth circuit is open; retry after 12 seconds",
+            "retry_after_seconds": 12,
+            "retryable": True,
+        },
+    }
+
+
 def test_palaceoftruth_remember_tool_writes_to_memory_entries(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
@@ -615,10 +646,264 @@ def test_palaceoftruth_remember_tool_writes_to_memory_entries(monkeypatch) -> No
 
     assert result["ok"] is True
     assert result["scope"] == {"type": "agent", "key": "orchestrator"}
+    assert result["durability"] == {
+        "status": "accepted",
+        "contract_status": "accepted",
+        "durable": False,
+        "retryable": False,
+        "job_id": "job-1",
+    }
     assert result["response"] == {"job_id": "job-1", "status": "accepted"}
     assert [request[:2] for request in requests_seen] == [
         ("GET", "/api/v1/memory/whoami"),
         ("POST", "/api/v1/memory/entries"),
+    ]
+
+
+def test_palaceoftruth_request_json_retries_429_retry_after(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_BACKOFF_SECONDS", "0.1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    sleeps: list[float] = []
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(_request, timeout: int):
+        nonlocal calls
+        assert timeout == 10
+        calls += 1
+        if calls == 1:
+            error = module.HTTPError(
+                "http://palaceoftruth-backend:8000/api/v1/memory/whoami",
+                429,
+                "Too Many Requests",
+                {"Retry-After": "7"},
+                io.BytesIO(b'{"detail":"rate limited"}'),
+            )
+            raise error
+        return FakeResponse()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module, "sleep", lambda delay: sleeps.append(delay))
+
+    assert provider._request_json("GET", "/api/v1/memory/whoami") == {"status": "ok"}
+    assert calls == 2
+    assert sleeps == [7.0]
+
+
+def test_palaceoftruth_request_json_honors_retry_after_http_date(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_BACKOFF_SECONDS", "0.1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    retry_at = format_datetime(datetime.now(UTC) + timedelta(seconds=9), usegmt=True)
+    sleeps: list[float] = []
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(_request, timeout: int):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise module.HTTPError(
+                "http://palaceoftruth-backend:8000/api/v1/memory/whoami",
+                429,
+                "Too Many Requests",
+                {"Retry-After": retry_at},
+                io.BytesIO(b'{"detail":"rate limited"}'),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module, "sleep", lambda delay: sleeps.append(delay))
+
+    assert provider._request_json("GET", "/api/v1/memory/whoami") == {"status": "ok"}
+    assert calls == 2
+    assert 1.0 < sleeps[0] <= 9.0
+
+
+def test_palaceoftruth_request_json_does_not_retry_permanent_4xx(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_ATTEMPTS", "3")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    calls = 0
+
+    def fake_urlopen(_request, timeout: int):
+        nonlocal calls
+        calls += 1
+        raise module.HTTPError(
+            "http://palaceoftruth-backend:8000/api/v1/memory/entries",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"detail":"validation failed"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="400"):
+        provider._request_json("POST", "/api/v1/memory/entries", {"bad": True})
+    assert calls == 1
+
+
+def test_palaceoftruth_request_json_opens_circuit_after_repeated_transient_failures(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("PALACEOFTRUTH_CIRCUIT_FAILURE_THRESHOLD", "2")
+    monkeypatch.setenv("PALACEOFTRUTH_CIRCUIT_COOLDOWN_SECONDS", "9")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    calls = 0
+
+    def fake_urlopen(_request, timeout: int):
+        nonlocal calls
+        calls += 1
+        raise module.URLError("temporary DNS failure")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(module.PalaceTransientError):
+        provider._request_json("GET", "/api/v1/memory/whoami")
+    with pytest.raises(module.PalaceTransientError):
+        provider._request_json("GET", "/api/v1/memory/whoami")
+    with pytest.raises(module.PalaceCircuitOpenError):
+        provider._request_json("GET", "/api/v1/memory/whoami")
+    assert calls == 2
+
+
+def test_palaceoftruth_remember_tool_rejects_oversized_explicit_memory(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        raise AssertionError("oversized explicit write should not POST")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {"content": "x" * (module.MAX_MEMORY_BODY_CHARS + 1)},
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "PalacePayloadTooLargeError"
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+def test_palaceoftruth_remember_bulk_uses_batch_endpoint(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return {"tenant_id": "tenant-a"}
+        if method == "POST" and path == "/api/v1/memory/entries:batch":
+            assert payload is not None
+            assert [entry["body"] for entry in payload["entries"]] == [
+                "Remember A.",
+                "Remember B.",
+            ]
+            assert all(entry["tenant_id"] == "tenant-a" for entry in payload["entries"])
+            return {
+                "status": "accepted",
+                "accepted": 2,
+                "failed": 0,
+                "poll_after_seconds": 5,
+                "retryable": False,
+                "results": [
+                    {"index": 0, "status": "queued", "contract_status": "queued"},
+                    {"index": 1, "status": "queued", "contract_status": "queued"},
+                ],
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember_bulk",
+            {"contents": ["Remember A.", "Remember B."]},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["accepted"] == 2
+    assert result["failed"] == 0
+    assert [request[:2] for request in requests_seen] == [
+        ("GET", "/api/v1/memory/whoami"),
+        ("POST", "/api/v1/memory/entries:batch"),
     ]
 
 

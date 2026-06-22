@@ -25,6 +25,27 @@ Why this lives here:
   `PALACEOFTRUTH_AGENT_BROAD_CANDIDATE_LIMIT`,
   `PALACEOFTRUTH_AGENT_DISPLAY_LIMIT`, and
   `PALACEOFTRUTH_CONTEXT_BUDGET_CHARS`.
+- Palace API calls use bounded retries for transient failures only: network
+  errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
+  validation failures, tenant mismatch, and privacy/admission rejections are not
+  retried.
+- Retry and circuit-breaker knobs are local to this plugin:
+  `PALACEOFTRUTH_RETRY_ATTEMPTS` (default `3`),
+  `PALACEOFTRUTH_RETRY_BACKOFF_SECONDS` (default `1.0`),
+  `PALACEOFTRUTH_CIRCUIT_FAILURE_THRESHOLD` (default `3`), and
+  `PALACEOFTRUTH_CIRCUIT_COOLDOWN_SECONDS` (default `30`). `Retry-After` is
+  honored when Palace sends it.
+- `palace_remember` reports write contract status honestly. A successful tool
+  call can still mean accepted or queued rather than durable; inspect the
+  returned `durability`, `job_id`, `poll_url`, `poll_after_seconds`, and retry
+  hints before claiming the memory is fully persisted.
+- `palace_remember_bulk` writes up to 100 explicit memories through
+  `/api/v1/memory/entries:batch` and returns ordered per-item results. Use it
+  for intentional bulk saves, not as a local offline spool or replay queue.
+- Explicit memory tool writes over 24,000 characters are rejected with a clear
+  error instead of being silently truncated. Automatic turn sync may still trim
+  very long conversation bodies, but it records truncation metadata so operators
+  can audit the stored body length.
 
 Agent-visible search results:
 
