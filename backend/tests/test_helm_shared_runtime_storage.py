@@ -213,3 +213,40 @@ def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:
         "secretKey": "FIRECRAWL_API_KEY",
         "remoteRef": {"key": "app-secret-item", "property": "firecrawl-api-key"},
     } in external_secret["spec"]["data"]
+
+
+def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonitor_by_default() -> None:
+    manifests = _render_chart()
+
+    backend_service = _manifest_by_kind_name(manifests, "Service", "palaceoftruth-backend")
+
+    assert backend_service["metadata"]["labels"]["app"] == "palaceoftruth-backend"
+    assert backend_service["metadata"]["annotations"] == {
+        "prometheus.io/scrape": "true",
+        "prometheus.io/path": "/api/v1/metrics",
+        "prometheus.io/port": "8000",
+    }
+    assert backend_service["spec"]["ports"][0]["name"] == "http"
+    assert not any(manifest.get("kind") == "ServiceMonitor" for manifest in manifests)
+
+
+def test_backend_servicemonitor_renders_when_enabled() -> None:
+    manifests = _render_chart(
+        "metrics.serviceMonitor.enabled=true",
+        "metrics.serviceMonitor.labels.release=kube-prometheus",
+        "metrics.serviceMonitor.interval=15s",
+        "metrics.serviceMonitor.scrapeTimeout=5s",
+    )
+
+    service_monitor = _manifest_by_kind_name(manifests, "ServiceMonitor", "palaceoftruth-backend")
+
+    assert service_monitor["metadata"]["labels"]["release"] == "kube-prometheus"
+    assert service_monitor["spec"]["selector"]["matchLabels"] == {"app": "palaceoftruth-backend"}
+    assert service_monitor["spec"]["endpoints"] == [
+        {
+            "port": "http",
+            "path": "/api/v1/metrics",
+            "interval": "15s",
+            "scrapeTimeout": "5s",
+        }
+    ]
