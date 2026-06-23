@@ -302,6 +302,19 @@ backend:
       memory: "2Gi"
       cpu: "500m"
 
+metrics:
+  path: /api/v1/metrics
+  serviceAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /api/v1/metrics
+    prometheus.io/port: "8000"
+  serviceMonitor:
+    # Enable in clusters with the Prometheus Operator ServiceMonitor CRD.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
 mcp:
   enabled: true
   replicas: 1

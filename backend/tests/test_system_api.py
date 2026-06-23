@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.api.system import router
 from app.auth import verify_api_key
 from app.database import get_db
+from app.services.prometheus_metrics import HttpMetricsRecorder
 
 
 class _ScalarResult:
@@ -19,6 +20,17 @@ class _ScalarResult:
 class _RowsResult:
     def __init__(self, rows) -> None:
         self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _MappingsResult:
+    def __init__(self, rows) -> None:
+        self._rows = rows
+
+    def mappings(self):
+        return self
 
     def all(self):
         return self._rows
@@ -64,6 +76,44 @@ class StatsSession:
         raise AssertionError(f"Unexpected SQL: {sql}")
 
 
+class MetricsSession:
+    async def execute(self, statement):
+        sql = str(statement).lower()
+        if "from jobs" in sql and "where job_type = 'memory_artifact'" in sql:
+            return _MappingsResult([{"status": "queued", "count": 3}, {"status": "failed", "count": 1}])
+        if "from jobs" in sql and "where webhook_url is not null" in sql:
+            return _MappingsResult([{"status": "failed", "count": 2}, {"status": "completed", "count": 5}])
+        if "from jobs" in sql and "group by job_type, status" in sql:
+            return _MappingsResult(
+                [
+                    {"job_type": "memory_artifact", "status": "queued", "count": 3},
+                    {"job_type": "media", "status": "failed", "count": 1},
+                ]
+            )
+        if "from items" in sql and "group by source_type, status" in sql:
+            return _MappingsResult(
+                [
+                    {"source_type": "note", "status": "ready", "count": 7},
+                    {"source_type": "tenant-a-private-type", "status": "ready", "count": 3},
+                    {"source_type": "pdf", "status": "processing", "count": 1},
+                ]
+            )
+        if "from sync_runs" in sql:
+            return _MappingsResult([{"status": "completed", "count": 4}])
+        if "from palace_runs" in sql:
+            return _MappingsResult([{"status": "queued", "count": 2}])
+        if "from embeddings" in sql:
+            return _MappingsResult([{"indexed_items": 6, "embedding_chunks": 42}])
+        if "from palace_tenant_state" in sql:
+            return _MappingsResult([{"dirty_items": 5, "backlog_generation": 9}])
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+
+class BrokenMetricsSession:
+    async def execute(self, _statement):
+        raise RuntimeError("database unavailable")
+
+
 def _client(session: StatsSession) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -79,6 +129,21 @@ def _client(session: StatsSession) -> TestClient:
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[verify_api_key] = override_verify
+    return TestClient(app)
+
+
+def _metrics_client(session) -> TestClient:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = None
+    recorder = HttpMetricsRecorder()
+    recorder.record(method="GET", route="/api/v1/health", status_code=200, duration_seconds=0.125)
+    app.state.prometheus_http_metrics = recorder
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
     return TestClient(app)
 
 
@@ -169,3 +234,36 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
     assert any("items.status != 'failed'" in sql for sql in session.execute_sql)
     assert any("count(distinct(embeddings.item_id))" in sql.lower() for sql in session.execute_sql)
     assert any("item_relationships" in sql and "NOT (EXISTS" in sql for sql in session.execute_sql)
+
+
+def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
+    client = _metrics_client(MetricsSession())
+
+    response = client.get("/api/v1/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
+    body = response.text
+    assert 'palace_http_requests_total{method="GET",route="/api/v1/health",status_code="200"} 1' in body
+    assert 'palace_jobs{job_type="memory_artifact",status="queued"} 3' in body
+    assert 'palace_memory_jobs{status="failed"} 1' in body
+    assert 'palace_items{source_type="note",status="ready"} 7' in body
+    assert 'palace_items{source_type="other",status="ready"} 3' in body
+    assert "palace_indexed_items 6" in body
+    assert "palace_embedding_chunks 42" in body
+    assert "palace_dirty_backlog_items 5" in body
+    assert "palace_dirty_backlog_generation 9" in body
+    assert 'palace_webhook_jobs{status="failed"} 2' in body
+    assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
+    assert "tenant-a" not in body
+
+
+def test_metrics_degrades_to_error_gauge_when_database_scrape_fails() -> None:
+    client = _metrics_client(BrokenMetricsSession())
+
+    response = client.get("/api/v1/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "palace_metrics_scrape 1" in body
+    assert "palace_metrics_database_scrape_error 1" in body

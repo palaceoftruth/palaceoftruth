@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import text
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from app.models.embedding import Embedding
 from app.models.job import Job
 from app.models.feed import Feed
 from app.services.graph_telemetry import count_orphaned_ready_items
+from app.services.prometheus_metrics import build_prometheus_metrics, prometheus_content_type
 
 router = APIRouter(tags=["system"])
 
@@ -63,6 +64,16 @@ async def readiness(request: Request, db: AsyncSession = Depends(get_db)):
         "version": settings.app_version or "0.1.0",
         "dependencies": dependencies,
     }
+
+
+@router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request, db: AsyncSession = Depends(get_db)):
+    body = await build_prometheus_metrics(
+        db=db,
+        arq_pool=getattr(request.app.state, "arq_pool", None),
+        http_metrics=getattr(request.app.state, "prometheus_http_metrics", None),
+    )
+    return Response(content=body, media_type=prometheus_content_type())
 
 
 @router.get("/stats", dependencies=[Depends(verify_api_key)])

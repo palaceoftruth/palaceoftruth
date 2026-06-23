@@ -35,8 +35,10 @@ from app.schemas.palace import SyncSourceCreate
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
 from app.services.palace import create_sync_source
+from app.services.prometheus_metrics import HttpMetricsRecorder, monotonic_seconds
 
 logger = logging.getLogger(__name__)
+_HTTP_METRICS = HttpMetricsRecorder()
 
 
 async def _seed_default_api_key() -> None:
@@ -159,6 +161,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def record_http_metrics(request, call_next):
+    start = monotonic_seconds()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = getattr(request.scope.get("route"), "path", None) or "unmatched"
+        if route != "/api/v1/metrics":
+            _HTTP_METRICS.record(
+                method=request.method,
+                route=route,
+                status_code=status_code,
+                duration_seconds=monotonic_seconds() - start,
+            )
+
+
+app.state.prometheus_http_metrics = _HTTP_METRICS
 
 app.include_router(system.router, prefix="/api/v1")
 app.include_router(ingest.router, prefix="/api/v1")
