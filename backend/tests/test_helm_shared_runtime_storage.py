@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -197,6 +198,26 @@ def test_firecrawl_config_renders_for_self_hosted_scraping() -> None:
     assert config_map["data"]["FIRECRAWL_BASE_URL"] == "https://firecrawl.tilapia-turtle.ts.net/v2"
     assert config_map["data"]["FIRECRAWL_TIMEOUT_SECONDS"] == "45"
     assert config_map["data"]["FIRECRAWL_ONLY_MAIN_CONTENT"] == "false"
+
+
+def test_default_delegated_agent_policy_allows_hermes_orchestrator_specialists() -> None:
+    manifests = _render_chart()
+    config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
+
+    policies = json.loads(config_map["data"]["PALACEOFTRUTH_DELEGATED_AGENT_MEMORY_READ_POLICIES"])
+
+    assert policies == [
+        {
+            "tenant_id": "default",
+            "subject_agent_scope_key": "orchestrator",
+            "read_agent_scope_keys": ["security", "macos"],
+            "policy_id": "hermes-orchestrator-security-macos",
+            "policy_source": "chart/values.yaml",
+            "require_access_reason": True,
+            "max_cross_agent_scopes": 2,
+        }
+    ]
+    assert "allow_all_agent_scopes" not in policies[0]
 
 
 def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:

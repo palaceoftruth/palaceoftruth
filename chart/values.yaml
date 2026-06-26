@@ -69,9 +69,9 @@ config:
   retrievalSecondStageRerankerTimeoutMs: "150"
   retrievalSecondStageRerankerMaxBonus: "0.08"
   # JSON list of deployment-owned delegated agent memory read policies.
-  # Leave empty unless a tenant/caller pair should read explicitly allowlisted
-  # specialist agent scopes through /api/v1/memory/retrieve-agent.
-  palaceoftruthDelegatedAgentMemoryReadPolicies: ""
+  # Hermes orchestrator may read only the allowlisted specialist agent scopes.
+  palaceoftruthDelegatedAgentMemoryReadPolicies: >-
+    [{"tenant_id":"default","subject_agent_scope_key":"orchestrator","read_agent_scope_keys":["security","macos"],"policy_id":"hermes-orchestrator-security-macos","policy_source":"chart/values.yaml","require_access_reason":true,"max_cross_agent_scopes":2}]
   # Backward-compatible delegated policy alias for existing deployments.
   agentMemoryDelegatedReadPoliciesJson: ""
   feedPollMinInterval: "300"
