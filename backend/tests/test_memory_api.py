@@ -1466,10 +1466,12 @@ def test_agent_memory_retrieve_uses_policy_request(monkeypatch, caplog) -> None:
     payload = response.json()
     assert payload["trace"]["broad_corpus_searched"] is True
     assert payload["trace"]["excluded_scope_types"] == ["agent", "workspace", "session"]
+    assert payload["trace"]["context_budget_chars"] == 4000
     assert payload["results"][0]["item_id"] == str(item_id)
     assert "memory retrieval diagnostics" in caplog.text
     assert "/api/v1/memory/retrieve-agent" in caplog.text
     assert "searched_scope_count" in caplog.text
+    assert "context_budget_chars" in caplog.text
     assert "available ExampleOS memory" not in caplog.text
     assert "workspace/exampleos context" not in caplog.text
 
@@ -2257,6 +2259,7 @@ def test_agent_memory_retrieve_capture_records_trace_without_raw_query(monkeypat
     assert record["request"]["workspace_scope_keys"] == ["feedvalue"]
     assert record["trace"]["searched_scopes"][1] == {"type": "workspace", "key": "feedvalue"}
     assert record["trace"]["selected_scope_result_count"] == 2
+    assert record["trace"]["context_budget_chars"] == 4000
     assert record["trace"]["context_budget_truncated"] is True
     assert record["results"][0]["item_id"] == str(item_id)
     assert "secret feedvalue miss" not in record_text

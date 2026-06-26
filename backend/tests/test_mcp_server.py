@@ -1484,6 +1484,7 @@ def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() ->
                             "agent/security-agent": 1,
                         },
                         "broad_corpus_searched": False,
+                        "context_budget_chars": 4000,
                     },
                     "results": [
                         {
@@ -1578,6 +1579,7 @@ def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() ->
         "agent/codex": 0,
         "agent/security-agent": 1,
     }
+    assert result_summary["trace"]["context_budget_chars"] == 4000
     assert "raw specialist memory body" not in json.dumps(audit_payload)
     assert "secret summary" not in json.dumps(audit_payload)
 
