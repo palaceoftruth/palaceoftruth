@@ -1159,6 +1159,7 @@ def test_retrieve_agent_memory_uses_candidate_display_and_context_budgets(monkey
     assert response.trace.selected_scope_result_count == 4
     assert response.trace.broad_result_count == 2
     assert response.trace.deduped_result_count == 5
+    assert response.trace.context_budget_chars == 1200
     assert response.trace.budget_truncated is True
 
 
@@ -1204,6 +1205,7 @@ def test_retrieve_agent_memory_context_budget_truncates_first_result(monkeypatch
 
     assert len(response.results) == 1
     assert response.results[0].chunk_text.endswith("...")
+    assert response.trace.context_budget_chars == 220
     assert response.trace.context_budget_truncated is True
 
 

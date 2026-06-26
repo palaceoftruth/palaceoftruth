@@ -318,6 +318,7 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
                 "broad_corpus_duration_ms": getattr(trace, "broad_corpus_duration_ms", None),
                 "merge_duration_ms": getattr(trace, "merge_duration_ms", None),
                 "total_duration_ms": getattr(trace, "total_duration_ms", None),
+                "context_budget_chars": getattr(trace, "context_budget_chars", None),
                 "budget_truncated": getattr(trace, "budget_truncated", None),
                 "context_budget_truncated": getattr(trace, "context_budget_truncated", None),
                 "completeness_warnings": getattr(trace, "completeness_warnings", []) or [],
@@ -940,6 +941,17 @@ async def retrieve_agent_memory_artifacts(
             body=body,
             delegated_policy=delegated_policy,
         )
+        if (
+            body.context_budget_chars is not None
+            and response.trace.context_budget_chars != body.context_budget_chars
+        ):
+            response = response.model_copy(
+                update={
+                    "trace": response.trace.model_copy(
+                        update={"context_budget_chars": body.context_budget_chars}
+                    )
+                }
+            )
     except Exception as exc:
         latency_ms = (perf_counter() - started) * 1000
         _log_retrieval_diagnostics(

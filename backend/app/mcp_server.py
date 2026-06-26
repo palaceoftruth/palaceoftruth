@@ -896,6 +896,7 @@ def _summarize_trace_for_audit(trace: dict[str, Any]) -> dict[str, Any]:
         "selected_scope_result_count",
         "broad_result_count",
         "deduped_result_count",
+        "context_budget_chars",
         "budget_truncated",
         "context_budget_truncated",
         "completeness_warnings",
