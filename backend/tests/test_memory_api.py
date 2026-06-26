@@ -1685,6 +1685,7 @@ async def test_delegated_agent_memory_without_policy_denies_requested_agent_scop
     monkeypatch,
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
+    broad_calls: list[dict] = []
 
     async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
         del db, embedder, tenant_id, query_vector
@@ -1700,12 +1701,17 @@ async def test_delegated_agent_memory_without_policy_denies_requested_agent_scop
             total=0,
         )
 
-    class FailingSearchService:
-        def __init__(self, *args, **kwargs) -> None:
-            raise AssertionError("denied delegated scopes must not fall through to broad corpus")
+    class BroadSearchService:
+        def __init__(self, db, embedder, *, tenant_id: str) -> None:
+            del db, embedder
+            assert tenant_id == "tenant-a"
+
+        async def vector_search(self, **kwargs):
+            broad_calls.append(kwargs)
+            return []
 
     monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
-    monkeypatch.setattr(memory_service, "SearchService", FailingSearchService)
+    monkeypatch.setattr(memory_service, "SearchService", BroadSearchService)
 
     response = await memory_service.retrieve_agent_memory(
         FakeSession(),
@@ -1726,8 +1732,10 @@ async def test_delegated_agent_memory_without_policy_denies_requested_agent_scop
     assert response.trace.authorized_agent_scope_keys == []
     assert response.trace.denied_agent_scope_keys == ["security-agent"]
     assert response.trace.delegated_agent_deny_reasons == ["no_delegated_agent_policy"]
-    assert response.trace.broad_corpus_searched is False
-    assert response.trace.broad_corpus_skipped_reason == "delegated_agent_denial_blocks_broad_corpus"
+    assert broad_calls
+    assert broad_calls[0]["exclude_private_memory_scopes"] is True
+    assert response.trace.broad_corpus_searched is True
+    assert response.trace.broad_corpus_skipped_reason is None
 
 
 @pytest.mark.asyncio
@@ -2011,6 +2019,7 @@ async def test_delegated_agent_memory_policy_reports_denied_scopes_without_query
     monkeypatch,
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
+    broad_calls: list[dict] = []
 
     async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
         del db, embedder, tenant_id, query_vector
@@ -2026,7 +2035,17 @@ async def test_delegated_agent_memory_policy_reports_denied_scopes_without_query
             total=0,
         )
 
+    class BroadSearchService:
+        def __init__(self, db, embedder, *, tenant_id: str) -> None:
+            del db, embedder
+            assert tenant_id == "tenant-a"
+
+        async def vector_search(self, **kwargs):
+            broad_calls.append(kwargs)
+            return []
+
     monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+    monkeypatch.setattr(memory_service, "SearchService", BroadSearchService)
 
     response = await memory_service.retrieve_agent_memory(
         FakeSession(),
@@ -2052,8 +2071,10 @@ async def test_delegated_agent_memory_policy_reports_denied_scopes_without_query
     assert response.trace.authorized_agent_scope_keys == ["security-agent"]
     assert response.trace.denied_agent_scope_keys == ["frontend-agent"]
     assert response.trace.delegated_agent_deny_reasons == ["agent_scope_not_allowlisted"]
-    assert response.trace.broad_corpus_searched is False
-    assert response.trace.broad_corpus_skipped_reason == "delegated_agent_denial_blocks_broad_corpus"
+    assert broad_calls
+    assert broad_calls[0]["exclude_private_memory_scopes"] is True
+    assert response.trace.broad_corpus_searched is True
+    assert response.trace.broad_corpus_skipped_reason is None
 
 
 @pytest.mark.asyncio

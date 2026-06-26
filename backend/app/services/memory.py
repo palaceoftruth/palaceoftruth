@@ -1240,9 +1240,6 @@ async def retrieve_agent_memory(
         preferred_agent_keys=preferred_agent_keys,
     )
     allow_broad_corpus, broad_policy_skip_reason = _should_search_broad_corpus(body)
-    if delegated_decision.denied_agent_scope_keys:
-        allow_broad_corpus = False
-        broad_policy_skip_reason = "delegated_agent_denial_blocks_broad_corpus"
     if allow_broad_corpus and _scoped_results_satisfy_agent_memory_request(
         scoped_deduped_results,
         display_limit=display_limit,
