@@ -141,6 +141,25 @@ path, enabled/pinned/skipped flags, and restart-required state for a later
 explicit apply or rollback command. The planner does not edit local profiles,
 deployment repositories, release artifacts, or production systems.
 
+For cross-client package compatibility validation, use the read-only
+compatibility checker:
+
+```bash
+uv run python scripts/check_agent_plugin_compatibility.py --format json
+```
+
+The compatibility target is Codex bundle support plus ClawHub skill
+import/export compatibility first, with Claude-style metadata kept as a simple
+adjacent client shape. Native OpenClaw plugin support is intentionally deferred
+until Palace needs runtime capability registration. The checker validates strict
+semantic versions and relative paths for the Codex package, validates
+`SKILL.md` frontmatter shape for ClawHub-style installs, preserves source,
+version, and digest metadata in its report, flags missing runtime environment
+or binary declarations, reports bundle-size concerns, and reports unsupported
+ClawHub/OpenClaw fields instead of silently dropping them. It does not edit
+local profiles, deployment repositories, release artifacts, or production
+systems.
+
 This package's `.codex-plugin/plugin.json` version tracks the Codex/Claude
 client install surface only. It does not participate in Hermes runtime release
 selection unless a future updater explicitly maps it to the Hermes update
