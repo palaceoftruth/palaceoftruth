@@ -2070,7 +2070,7 @@ def _json_contains_raw_secret(payload: Any) -> bool:
 
 
 def _skillpack_files() -> list[Path]:
-    root = DEFAULT_REPO_ROOT / "plugins" / "palaceoftruth-memory"
+    root = DEFAULT_REPO_ROOT / "third_party_plugins" / "agent_clients" / "palaceoftruth-memory"
     return [
         root / ".codex-plugin" / "plugin.json",
         root / ".mcp.json",

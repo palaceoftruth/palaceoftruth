@@ -11,8 +11,10 @@ extension/                    Chrome-compatible capture extension
 chart/                        Portable Helm chart and default public values
 argocd/                       Notes for external ArgoCD Application ownership
 k8s/                          Notes for external raw manifest ownership
-plugins/palaceoftruth-memory/ Codex plugin packaging for the MCP adapter
-third_party_plugins/hermes/   canonical Hermes memory plugin source
+third_party_plugins/           third-party plugin packages
+  agent_clients/palaceoftruth-memory/
+                                Codex/Claude plugin packaging for the MCP adapter
+  hermes/                       canonical Hermes memory plugin source
 scripts/                      smoke, benchmark, packaging, migration, and operator helpers
 ```
 

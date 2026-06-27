@@ -31,8 +31,10 @@ extension/                    Chrome-compatible browser capture extension
 chart/                        Helm chart for Kubernetes deployments
 argocd/                       Notes for external ArgoCD Application ownership
 k8s/                          Notes for external raw manifest ownership
-plugins/palaceoftruth-memory/ Codex plugin packaging for the Palace MCP adapter
-third_party_plugins/hermes/   canonical Hermes memory plugin source
+third_party_plugins/           third-party plugin packages
+  agent_clients/palaceoftruth-memory/
+                                Codex/Claude plugin packaging for the Palace MCP adapter
+  hermes/                       canonical Hermes memory plugin source
 scripts/                      local smoke, benchmark, packaging, migration, and operator helpers
 ```
 
@@ -179,7 +181,7 @@ compatibility fixtures, and opt-in command previews for task-pool and live
 deploy checks. Add `--include-task-pool` or `--include-live-deploy` only when
 read-only network checks are explicitly desired.
 
-The repo-packaged Codex plugin lives in [plugins/palaceoftruth-memory](plugins/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
+The repo-packaged Codex/Claude plugin lives in [third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
 For governed multi-agent memory positioning, use `scripts/demo_agent_organization_memory.py`. The demo shows specialist agents writing private `agent/<key>` memories while `agent/orchestrator` retrieves only server-authorized specialist scopes and writes only to its own agent scope.
 
@@ -298,6 +300,6 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
 - [DESIGN.md](DESIGN.md): frontend and product design guidance
 - [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
-- [plugins/palaceoftruth-memory/README.md](plugins/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
+- [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](third_party_plugins/agent_clients/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.

@@ -40,7 +40,7 @@ Key points:
 - The Helm chart can run it as a dedicated `mcp` workload that reuses the backend image and calls the in-cluster backend Service.
 
 Run and configuration details live in the MCP adapter section of [README.md](./README.md)
-and in the packaged plugin guide at [plugins/palaceoftruth-memory/README.md](./plugins/palaceoftruth-memory/README.md).
+and in the packaged plugin guide at [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](./third_party_plugins/agent_clients/palaceoftruth-memory/README.md).
 
 ---
 

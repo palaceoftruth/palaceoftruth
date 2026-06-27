@@ -38,7 +38,7 @@ Prefer local `stdio` for Codex and other local agents. The packaged MCP config
 launches the existing repo adapter:
 
 ```bash
-uv --directory ../../backend run python scripts/palaceoftruth_mcp.py
+uv --directory ../../../backend run python scripts/palaceoftruth_mcp.py
 ```
 
 That command runs the repository's primary adapter source at

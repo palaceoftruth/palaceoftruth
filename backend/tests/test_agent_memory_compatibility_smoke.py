@@ -1273,7 +1273,7 @@ def test_codex_bridge_report_can_write_json_report(tmp_path: Path, monkeypatch: 
         lambda args: {
             "dry_run": True,
             "mutating": False,
-            "skillpack": "/repo/plugins/palaceoftruth-memory/skills/palaceoftruth-codex-memory/SKILL.md",
+            "skillpack": "/repo/third_party_plugins/agent_clients/palaceoftruth-memory/skills/palaceoftruth-codex-memory/SKILL.md",
             "live_smoke_command": [
                 "python",
                 "scripts/smoke_agent_memory_compatibility.py",
@@ -1334,7 +1334,7 @@ def test_codex_bridge_report_checks_setup_lifecycle_and_tool_surface(
         lambda args: {
             "dry_run": True,
             "mutating": False,
-            "skillpack": "/repo/plugins/palaceoftruth-memory/skills/palaceoftruth-codex-memory/SKILL.md",
+            "skillpack": "/repo/third_party_plugins/agent_clients/palaceoftruth-memory/skills/palaceoftruth-codex-memory/SKILL.md",
             "live_smoke_command": [
                 "python",
                 "scripts/smoke_agent_memory_compatibility.py",
