@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +42,104 @@ def test_setup_default_is_redacted_non_mutating_dry_run() -> None:
         "delete_retry_admin_operations": False,
         "raw_secret_output": False,
     }
+
+
+def test_plugin_check_reports_missing_install_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    args = parse_args(
+        [
+            "--check",
+            "--codex-home",
+            str(tmp_path / "codex-home"),
+            "--format",
+            "json",
+        ]
+    )
+
+    report = setup_script.build_plugin_check_report(args)
+
+    assert report["report"] == "palace-plugin-install-check"
+    assert report["dry_run"] is True
+    assert report["mutating"] is False
+    assert report["codex"]["installed"] is False
+    assert report["codex"]["status"] == "missing"
+    assert report["codex"]["update_state"] == "install-available"
+    assert report["codex"]["api_key_env"] == "PALACEOFTRUTH_API_KEY"
+    assert report["codex"]["auth_env_present"] is False
+    assert report["codex"]["mcp_command_drift"] == ["installed Codex plugin is missing"]
+    assert report["codex"]["marketplace"]["registered"] is True
+    assert report["codex"]["marketplace"]["path"] == (
+        "./third_party_plugins/agent_clients/palaceoftruth-memory"
+    )
+    assert report["hermes"]["package_surface"] == "hermes"
+    assert report["hermes"]["status"] == "separate-package-surface"
+    assert "PALACEOFTRUTH_API_KEY" not in json.dumps(report["codex"]["next_action"])
+
+
+def test_plugin_check_detects_version_mcp_and_skillpack_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = tmp_path / "installed-palace-plugin"
+    shutil.copytree(setup_script.SKILLPACK_ROOT, installed)
+    manifest_path = installed / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = "0.0.1"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    mcp_path = installed / ".mcp.json"
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+    mcp["mcpServers"]["palaceoftruth-memory"]["command"] = "python"
+    mcp["mcpServers"]["palaceoftruth-memory"]["env"]["PALACEOFTRUTH_API_KEY"] = "secret"
+    mcp_path.write_text(json.dumps(mcp), encoding="utf-8")
+    (installed / "skills" / "palaceoftruth-codex-memory" / "SKILL.md").write_text(
+        "changed skill\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret-value")
+    args = parse_args(
+        [
+            "--check",
+            "--installed-plugin-path",
+            str(installed),
+            "--codex-home",
+            str(tmp_path / "codex-home"),
+        ]
+    )
+
+    report = setup_script.build_plugin_check_report(args)
+
+    assert report["codex"]["installed"] is True
+    assert report["codex"]["status"] == "drifted"
+    assert report["codex"]["update_state"] == "update-available"
+    assert report["codex"]["installed_version"] == "0.0.1"
+    assert report["codex"]["restart_required"] is True
+    assert "MCP command differs from repo manifest" in report["codex"]["mcp_command_drift"]
+    assert any("PALACEOFTRUTH_API_KEY" in item for item in report["codex"]["mcp_command_drift"])
+    assert "palaceoftruth-codex-memory/SKILL.md" in report["codex"]["skillpack_drift"]["changed"]
+    assert "secret-value" not in json.dumps(report)
+    assert "secret\"" not in json.dumps(report)
+
+
+def test_plugin_check_discovers_cached_codex_plugin(tmp_path: Path) -> None:
+    installed = (
+        tmp_path
+        / "codex-home"
+        / "plugins"
+        / "cache"
+        / "palaceoftruth"
+        / "palaceoftruth-memory"
+    )
+    shutil.copytree(setup_script.SKILLPACK_ROOT, installed)
+    args = parse_args(["--check", "--codex-home", str(tmp_path / "codex-home")])
+
+    report = setup_script.build_plugin_check_report(args)
+
+    assert report["codex"]["installed"] is True
+    assert report["codex"]["source"] == "codex-cache"
+    assert report["codex"]["status"] == "auth-missing"
+    assert report["codex"]["update_state"] == "current"
+    assert report["codex"]["mcp_command_drift"] == []
+    assert report["codex"]["skillpack_drift"]["drifted"] is False
 
 
 def test_setup_live_smoke_command_uses_stdio_adapter_without_backfill() -> None:
@@ -111,3 +211,26 @@ def test_setup_rejects_invalid_config_shape() -> None:
 
     with pytest.raises(setup_script.SetupError, match="is required"):
         setup_script.build_report(parse_args(["--scope-type", "agent", "--scope-key", ""]))
+
+
+def test_plugin_check_text_is_concise_and_secret_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret-value")
+    args = parse_args(["--check", "--codex-home", str(tmp_path)])
+
+    report = setup_script.build_plugin_check_report(args)
+    text = setup_script.format_text(report)
+
+    assert "Palace plugin install check" in text
+    assert "Mode: read-only dry-run" in text
+    assert "PALACEOFTRUTH_API_KEY present: true" in text
+    assert "secret-value" not in text
+
+
+def test_plugin_check_cannot_run_live_smoke(capsys: pytest.CaptureFixture[str]) -> None:
+    status = setup_script.main(["--check", "--live-smoke"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "--check cannot be combined with --live-smoke" in captured.err

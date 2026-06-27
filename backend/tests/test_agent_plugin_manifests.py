@@ -111,6 +111,9 @@ def test_package_docs_preserve_non_destructive_boundary() -> None:
         assert "never writes to stdout" in text
         assert "normalize_agent_transcripts.py" in text
         assert "does not write memory" in text
+        assert "setup_codex_palace_memory.py --check" in text
+
+    assert "plugins/palaceoftruth-memory" not in readme
 
     assert "retrieve_agent_memory" in codex_skill
     assert 'agent_scope_key="codex"' in codex_skill

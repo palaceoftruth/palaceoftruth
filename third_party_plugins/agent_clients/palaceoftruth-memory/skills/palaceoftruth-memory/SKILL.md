@@ -67,6 +67,22 @@ uv run python scripts/setup_codex_palace_memory.py \
   --api-base-url https://api.palaceoftruth.test
 ```
 
+Use the installed-state checker when an operator needs to know whether the
+Codex plugin is installed, current, enabled, and safely configured:
+
+```bash
+uv run python scripts/setup_codex_palace_memory.py --check \
+  --api-base-url https://api.palaceoftruth.test
+```
+
+The checker is read-only. It reports Codex plugin manifest version, installed
+version, marketplace source, MCP command drift, skillpack drift, missing runtime
+auth environment, restart-required state, and recommended next action. It also
+reports the Hermes plugin as a separate package surface rather than conflating
+Hermes release metadata with Codex plugin versioning. It does not mutate
+`~/.codex`, deployment repositories, release artifacts, or production systems,
+and it never prints API key values.
+
 Use `--live-smoke` only after the tenant runtime API key is available in the
 agent environment. The live setup smoke writes exactly one scoped `agent/codex`
 memory through stdio MCP, disables relationship backfill, and does not call
