@@ -141,6 +141,13 @@ path, enabled/pinned/skipped flags, and restart-required state for a later
 explicit apply or rollback command. The planner does not edit local profiles,
 deployment repositories, release artifacts, or production systems.
 
+This package's `.codex-plugin/plugin.json` version tracks the Codex/Claude
+client install surface only. It does not participate in Hermes runtime release
+selection unless a future updater explicitly maps it to the Hermes update
+manifest. Hermes release selection is driven by
+`third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` and the matching
+`palaceoftruth-hermes-memory-plugin-v<version>.json` manifest asset.
+
 After `PALACEOFTRUTH_API_KEY` is available in the Codex runtime environment,
 add `--live-smoke` to launch the stdio adapter and write exactly one scoped
 `agent/codex` memory. The live setup smoke disables relationship backfill and

@@ -8,10 +8,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = Path("third_party_plugins/hermes/memory/palaceoftruth")
+PACKAGING_SCRIPT = Path("scripts/package_hermes_memory_plugin.py")
 RELEASE_TRIGGER_FILES = {
     PLUGIN_DIR / "__init__.py",
     PLUGIN_DIR / "Dockerfile",
+    PLUGIN_DIR / "README.md",
     PLUGIN_DIR / "plugin.yaml",
+    PACKAGING_SCRIPT,
 }
 ZERO_SHA = "0" * 40
 
@@ -36,6 +39,7 @@ def _changed_paths(before: str, after: str, repo_root: Path) -> list[str]:
             after,
             "--",
             str(PLUGIN_DIR),
+            str(PACKAGING_SCRIPT),
         ],
         cwd=repo_root,
         check=True,

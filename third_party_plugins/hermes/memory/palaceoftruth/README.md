@@ -123,7 +123,21 @@ Current packaging boundary:
 Release process:
 
 - `plugin.yaml` is the release contract. Bump its `version` whenever the plugin runtime or container contract changes.
-- On every merge to `main` that touches `plugin.yaml`, `__init__.py`, or `Dockerfile`, CI packages the plugin and creates a GitHub release tagged `hermes-memory-plugin-v<version>`.
+- On every merge to `main` that touches a packaged plugin file or the packaging
+  script, CI packages the plugin and creates a GitHub release tagged
+  `hermes-memory-plugin-v<version>`.
 - Release assets include `.tar.gz`, `.zip`, metadata JSON, and a checksum file.
+- The `.json` asset is the canonical update manifest. Installers should pin
+  the `.json` manifest and archive assets by SHA-256 digest, compare declared
+  file sizes before unpacking, and reject any archive member outside the
+  declared package root.
+- The manifest reserves signature, provenance, and rollback fields even before
+  release signing exists. Treat missing signature entries as unsigned, not as a
+  successful signature verification.
+- The Hermes package version comes from this directory's `plugin.yaml`. The
+  Codex/Claude client package under
+  `third_party_plugins/agent_clients/palaceoftruth-memory` has its own manifest
+  version and does not imply a Hermes runtime package update unless the Hermes
+  manifest or packaged Hermes files change.
 - The same CI run also publishes the matching container image tag:
   `ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin:<commit-sha>`

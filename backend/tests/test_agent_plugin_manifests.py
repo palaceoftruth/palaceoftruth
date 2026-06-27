@@ -33,6 +33,24 @@ def test_codex_plugin_manifest_points_to_palace_mcp_package() -> None:
     assert "retrieval-ranking" in interface["longDescription"]
 
 
+def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
+    codex_manifest = load_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
+    codex_readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+    hermes_readme = (
+        REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth" / "README.md"
+    ).read_text(encoding="utf-8")
+    hermes_plugin_yaml = (
+        REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth" / "plugin.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert codex_manifest["version"] == "0.1.0"
+    assert "version: 1.0.17" in hermes_plugin_yaml
+    assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
+    assert "has its own manifest\n  version" in hermes_readme
+    assert "tracks the Codex/Claude\nclient install surface only" in codex_readme
+    assert "does not participate in Hermes runtime release\nselection" in codex_readme
+
+
 def test_codex_mcp_config_launches_primary_stdio_adapter() -> None:
     config = load_json(PLUGIN_ROOT / ".mcp.json")
     server = config["mcpServers"]["palaceoftruth-memory"]

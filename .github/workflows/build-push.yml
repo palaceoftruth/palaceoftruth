@@ -119,7 +119,7 @@ jobs:
           BEFORE="${{ github.event.before }}"
           if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
             CHANGED=true
-          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" -- third_party_plugins/hermes/memory/palaceoftruth | grep -q .; then
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" -- third_party_plugins/hermes/memory/palaceoftruth scripts/package_hermes_memory_plugin.py | grep -q .; then
             CHANGED=$(python3 scripts/detect_hermes_plugin_release.py --before "$BEFORE" --after "$GITHUB_SHA")
           else
             CHANGED=false
