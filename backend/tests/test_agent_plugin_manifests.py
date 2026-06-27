@@ -113,6 +113,11 @@ def test_package_docs_preserve_non_destructive_boundary() -> None:
         assert "does not write memory" in text
         assert "setup_codex_palace_memory.py --check" in text
 
+    assert "scripts/palace_plugin_manager.py plan --format json" in readme
+    assert "lockfile-backed updater planning" in readme
+    assert "previous version pointer" in readme
+    assert "does not edit local profiles" in readme
+
     assert "plugins/palaceoftruth-memory" not in readme
 
     assert "retrieve_agent_memory" in codex_skill

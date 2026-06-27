@@ -128,6 +128,19 @@ auth environment, restart-required state, and the recommended next action. It
 does not mutate `~/.codex`, deployment repositories, release artifacts, or
 production systems, and it never prints API key values.
 
+For lockfile-backed updater planning, use the separate read-only planner:
+
+```bash
+uv run python scripts/palace_plugin_manager.py plan --format json
+```
+
+The planner compares a desired Palace plugin manifest with an installed
+lockfile and reports install, update, downgrade, incompatible, or no-op states.
+Its receipt shape includes the previous version pointer, digests, installed
+path, enabled/pinned/skipped flags, and restart-required state for a later
+explicit apply or rollback command. The planner does not edit local profiles,
+deployment repositories, release artifacts, or production systems.
+
 After `PALACEOFTRUTH_API_KEY` is available in the Codex runtime environment,
 add `--live-smoke` to launch the stdio adapter and write exactly one scoped
 `agent/codex` memory. The live setup smoke disables relationship backfill and
