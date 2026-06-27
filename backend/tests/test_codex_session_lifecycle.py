@@ -7,7 +7,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "codex_session_lifecycle.py"
-PLUGIN_README_PATH = REPO_ROOT / "plugins" / "palaceoftruth-memory" / "README.md"
+PLUGIN_README_PATH = (
+    REPO_ROOT / "third_party_plugins" / "agent_clients" / "palaceoftruth-memory" / "README.md"
+)
 
 
 def _load_script_module():

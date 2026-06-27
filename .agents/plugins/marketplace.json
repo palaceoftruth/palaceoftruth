@@ -8,7 +8,7 @@
       "name": "palaceoftruth-memory",
       "source": {
         "source": "local",
-        "path": "./plugins/palaceoftruth-memory"
+        "path": "./third_party_plugins/agent_clients/palaceoftruth-memory"
       },
       "policy": {
         "installation": "AVAILABLE",

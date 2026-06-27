@@ -6,7 +6,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PLUGIN_ROOT = REPO_ROOT / "plugins" / "palaceoftruth-memory"
+PLUGIN_ROOT = REPO_ROOT / "third_party_plugins" / "agent_clients" / "palaceoftruth-memory"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -41,7 +41,7 @@ def test_codex_mcp_config_launches_primary_stdio_adapter() -> None:
     assert server["cwd"] == "."
     assert server["args"] == [
         "--directory",
-        "../../backend",
+        "../../../backend",
         "run",
         "python",
         "scripts/palaceoftruth_mcp.py",
@@ -61,7 +61,7 @@ def test_repo_marketplace_registers_palace_memory_plugin() -> None:
             "name": "palaceoftruth-memory",
             "source": {
                 "source": "local",
-                "path": "./plugins/palaceoftruth-memory",
+                "path": "./third_party_plugins/agent_clients/palaceoftruth-memory",
             },
             "policy": {
                 "installation": "AVAILABLE",

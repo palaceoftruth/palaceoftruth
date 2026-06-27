@@ -67,14 +67,15 @@ Palace-first memory behavior.
 Use local `stdio` by default. The packaged MCP server launches:
 
 ```bash
-uv --directory ../../backend run python scripts/palaceoftruth_mcp.py
+uv --directory ../../../backend run python scripts/palaceoftruth_mcp.py
 ```
 
 That command runs the repository's primary adapter source at
 `backend/scripts/palaceoftruth_mcp.py`.
 
 When installed from this repository, `../..` resolves from
-`plugins/palaceoftruth-memory` back to the repo root, while `../../backend`
+`third_party_plugins/agent_clients/palaceoftruth-memory` back to the repo root,
+while `../../../backend`
 selects the Python project that owns the adapter dependencies. For copied
 installs, update the MCP command directory to the absolute Palace `backend`
 path.
