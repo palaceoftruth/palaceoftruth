@@ -114,6 +114,20 @@ local skills, or clean up operator-created backups. Make those local profile
 changes deliberately, then rerun the verifier to confirm the repo adapter and
 skillpack are present.
 
+For an installed-state and update check, use the explicit read-only checker:
+
+```bash
+uv run python scripts/setup_codex_palace_memory.py --check \
+  --api-base-url https://api.palaceoftruth.test
+```
+
+The checker reports JSON or text for the Codex plugin package and the separate
+Hermes plugin package surface. It identifies installed version, repo manifest
+version, marketplace source, MCP command drift, skillpack drift, missing runtime
+auth environment, restart-required state, and the recommended next action. It
+does not mutate `~/.codex`, deployment repositories, release artifacts, or
+production systems, and it never prints API key values.
+
 After `PALACEOFTRUTH_API_KEY` is available in the Codex runtime environment,
 add `--live-smoke` to launch the stdio adapter and write exactly one scoped
 `agent/codex` memory. The live setup smoke disables relationship backfill and
