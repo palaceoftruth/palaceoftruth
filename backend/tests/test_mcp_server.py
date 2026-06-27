@@ -1791,7 +1791,7 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
             return await get_wakeup_context(
                 ctx=ctx,
                 workspace_scope_keys=["palaceoftruth"],
-                session_scope_key="019ee3d1-47e3-7f31-9cf4-4a307fb31b00",
+                session_scope_key="test-session-key",
                 memory_limit_per_scope=2,
                 checkpoint_limit_per_scope=1,
             )

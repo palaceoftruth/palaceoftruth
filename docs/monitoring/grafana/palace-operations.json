@@ -1265,8 +1265,8 @@
       {
         "current": {
           "selected": false,
-          "text": "k3s-lab",
-          "value": "k3s-lab"
+          "text": "example-cluster",
+          "value": "example-cluster"
         },
         "datasource": {
           "type": "prometheus",
@@ -1288,8 +1288,8 @@
       {
         "current": {
           "selected": false,
-          "text": "palace-sarvent",
-          "value": "palace-sarvent"
+          "text": "palaceoftruth",
+          "value": "palaceoftruth"
         },
         "datasource": {
           "type": "prometheus",
@@ -1311,8 +1311,8 @@
       {
         "current": {
           "selected": false,
-          "text": "palace-sarvent-backend",
-          "value": "palace-sarvent-backend"
+          "text": "palaceoftruth-backend",
+          "value": "palaceoftruth-backend"
         },
         "datasource": {
           "type": "prometheus",

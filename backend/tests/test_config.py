@@ -232,9 +232,30 @@ def test_settings_accept_assemblyai_transcription_provider() -> None:
     assert settings.transcription_max_parallel_chunks == 2
 
 
+def test_settings_accept_local_whisperx_transcription_provider() -> None:
+    settings = config.Settings(
+        **_settings_kwargs(
+            transcription_provider="local_whisperx",
+            llm_gateway_url="http://llm-gateway.test:8080",
+            llm_gateway_token="gateway-token",
+            local_whisperx_model="whisperx/small",
+        )
+    )
+
+    assert settings.transcription_provider == "local_whisperx"
+    assert settings.llm_gateway_url == "http://llm-gateway.test:8080"
+    assert settings.llm_gateway_token == "gateway-token"
+    assert settings.local_whisperx_model == "whisperx/small"
+
+
 def test_settings_reject_unknown_transcription_provider() -> None:
     with pytest.raises(ValidationError, match="TRANSCRIPTION_PROVIDER"):
         config.Settings(**_settings_kwargs(transcription_provider="local-whisper"))
+
+
+def test_settings_reject_invalid_llm_gateway_url() -> None:
+    with pytest.raises(ValidationError, match="LLM_GATEWAY_URL"):
+        config.Settings(**_settings_kwargs(llm_gateway_url="not-a-url"))
 
 
 def test_settings_reject_invalid_assemblyai_base_url() -> None:

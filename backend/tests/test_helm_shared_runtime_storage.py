@@ -187,7 +187,7 @@ def test_shared_runtime_storage_can_use_existing_claim_without_rendering_pvc() -
 def test_firecrawl_config_renders_for_self_hosted_scraping() -> None:
     manifests = _render_chart(
         "config.webpageScraperProvider=firecrawl-self-hosted",
-        "config.firecrawlBaseUrl=https://firecrawl.tilapia-turtle.ts.net/v2",
+        "config.firecrawlBaseUrl=https://firecrawl.example.internal/v2",
         "config.firecrawlTimeoutSeconds=45",
         "config.firecrawlOnlyMainContent=false",
     )
@@ -195,7 +195,7 @@ def test_firecrawl_config_renders_for_self_hosted_scraping() -> None:
     config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
 
     assert config_map["data"]["WEBPAGE_SCRAPER_PROVIDER"] == "firecrawl-self-hosted"
-    assert config_map["data"]["FIRECRAWL_BASE_URL"] == "https://firecrawl.tilapia-turtle.ts.net/v2"
+    assert config_map["data"]["FIRECRAWL_BASE_URL"] == "https://firecrawl.example.internal/v2"
     assert config_map["data"]["FIRECRAWL_TIMEOUT_SECONDS"] == "45"
     assert config_map["data"]["FIRECRAWL_ONLY_MAIN_CONTENT"] == "false"
 

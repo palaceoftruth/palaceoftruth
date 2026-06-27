@@ -4,12 +4,12 @@ This directory contains importable Grafana dashboards for Palace operations.
 
 ## Palace Operations
 
-`palace-operations.json` is built for the central operations Grafana with the
-Mimir datasource. It defaults to:
+`palace-operations.json` is built for an operations Grafana with a Mimir
+datasource. It defaults to example label values:
 
-- cluster: `k3s-lab`
-- namespace: `palace-sarvent`
-- backend job: `palace-sarvent-backend`
+- cluster: `example-cluster`
+- namespace: `palaceoftruth`
+- backend job: `palaceoftruth-backend`
 
 The dashboard covers:
 

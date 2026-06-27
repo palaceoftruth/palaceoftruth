@@ -2382,7 +2382,7 @@ def _summarize_compatibility_fixture(args: argparse.Namespace) -> dict[str, Any]
 def _task_pool_command(args: argparse.Namespace, status: str) -> list[str]:
     return [
         sys.executable,
-        "/Users/asarver/.codex/project-manager/task_pool_ops.py",
+        args.task_pool_ops_path,
         "list",
         "--automation-id",
         args.automation_id,
@@ -3273,6 +3273,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(DEFAULT_TASK_POOL_STATUSES),
         default=None,
     )
+    startup.add_argument("--task-pool-ops-path", default="task_pool_ops.py")
     startup.add_argument("--task-pool-limit", type=int, default=20)
     startup.add_argument("--task-pool-timeout", type=float, default=30.0)
     startup.add_argument(
@@ -3280,8 +3281,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run explicit read-only HTTP checks against the configured frontend/API URLs.",
     )
-    startup.add_argument("--frontend-url", default="https://palace.sarvent.cloud/")
-    startup.add_argument("--api-health-url", default="https://api.palace.sarvent.cloud/api/v1/health")
+    startup.add_argument("--frontend-url", default="https://palace.example.com/")
+    startup.add_argument("--api-health-url", default="https://api.palace.example.com/api/v1/health")
     startup.add_argument("--live-timeout", type=float, default=10.0)
     startup.add_argument("--output", default=None)
     startup.set_defaults(func=cmd_startup_context_report)

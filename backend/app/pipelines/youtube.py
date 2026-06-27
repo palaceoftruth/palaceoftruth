@@ -172,8 +172,8 @@ def _extract_openai_speaker_segments(response_dict: dict[str, Any], *, offset_se
         text = raw_segment.get("text") or raw_segment.get("transcript")
         if not isinstance(text, str) or not text.strip():
             continue
-        start = raw_segment.get("start")
-        end = raw_segment.get("end")
+        start = raw_segment.get("start", raw_segment.get("start_seconds"))
+        end = raw_segment.get("end", raw_segment.get("end_seconds"))
         try:
             start_seconds = float(start) + offset_seconds if start is not None else offset_seconds
         except (TypeError, ValueError):
@@ -476,12 +476,43 @@ class AssemblyAITranscriptionProvider:
                 await asyncio.sleep(max(0.1, settings.assemblyai_poll_interval_seconds))
 
 
-def _configured_transcription_provider() -> OpenAITranscriptionProvider | AssemblyAITranscriptionProvider:
+class LocalWhisperXTranscriptionProvider:
+    name = "local_whisperx"
+    display_name = "Local whisperX"
+
+    async def transcribe(self, audio_path: str) -> dict[str, Any]:
+        if not settings.llm_gateway_token:
+            raise TranscriptionProviderUnavailable("LLM_GATEWAY_TOKEN is required for local whisperX transcription")
+
+        headers = {"Authorization": f"Bearer {settings.llm_gateway_token}"}
+        data = {
+            "model": settings.local_whisperx_model,
+            "response_format": "verbose_json",
+            "diarize": "true",
+        }
+        timeout = httpx.Timeout(settings.transcription_request_timeout_seconds)
+        async with httpx.AsyncClient(
+            base_url=settings.llm_gateway_url.rstrip("/"),
+            headers=headers,
+            timeout=timeout,
+        ) as client:
+            with open(audio_path, "rb") as f:
+                files = {"file": (os.path.basename(audio_path), f, "application/octet-stream")}
+                response = await client.post("/v1/audio/transcriptions", files=files, data=data)
+            response.raise_for_status()
+            payload = response.json()
+            payload["provider"] = self.name
+            return payload
+
+
+def _configured_transcription_provider() -> OpenAITranscriptionProvider | AssemblyAITranscriptionProvider | LocalWhisperXTranscriptionProvider:
     provider = settings.transcription_provider.strip().lower()
     if provider in {"", "openai"}:
         return OpenAITranscriptionProvider()
     if provider == "assemblyai":
         return AssemblyAITranscriptionProvider()
+    if provider == "local_whisperx":
+        return LocalWhisperXTranscriptionProvider()
     raise ValueError(f"Unsupported transcription provider: {settings.transcription_provider}")
 
 
