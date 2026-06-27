@@ -424,3 +424,74 @@ jobs:
               --title "chore(ci): bump chart to ${RELEASE_VERSION}" \
               --body "$BODY"
           fi
+
+      - name: Close superseded chart release PRs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_RELEASE_BRANCH: ${{ steps.version.outputs.branch }}
+          NEW_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          SUPERSEDING_VERSION="$NEW_RELEASE_VERSION"
+          if [ -z "$SUPERSEDING_VERSION" ]; then
+            SUPERSEDING_VERSION=$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' chart/Chart.yaml)
+          fi
+
+          if [ -z "$SUPERSEDING_VERSION" ]; then
+            echo "::warning::Unable to determine the superseding chart version; skipping stale chart release PR cleanup."
+            exit 0
+          fi
+
+          CHART_RELEASE_PRS=$(gh pr list \
+            --base main \
+            --state open \
+            --limit 100 \
+            --json number,headRefName,url \
+            --jq '.[] | select(.headRefName | startswith("ci/chart-release-")) | [.number, .headRefName, .url] | @tsv')
+
+          if [ -z "$CHART_RELEASE_PRS" ]; then
+            echo "No open chart release PRs to check."
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r PR_NUMBER RELEASE_PR_BRANCH PR_URL; do
+            if [ -z "$PR_NUMBER" ] || [ -z "$RELEASE_PR_BRANCH" ]; then
+              continue
+            fi
+
+            if [ -n "$CURRENT_RELEASE_BRANCH" ] && [ "$RELEASE_PR_BRANCH" = "$CURRENT_RELEASE_BRANCH" ]; then
+              continue
+            fi
+
+            if ! git fetch origin "refs/heads/${RELEASE_PR_BRANCH}:refs/remotes/origin/${RELEASE_PR_BRANCH}"; then
+              echo "::warning::Unable to fetch ${RELEASE_PR_BRANCH}; skipping ${PR_URL}."
+              continue
+            fi
+
+            RELEASE_PR_VERSION=$(git show "refs/remotes/origin/${RELEASE_PR_BRANCH}:chart/Chart.yaml" \
+              | awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }')
+            if [ -z "$RELEASE_PR_VERSION" ]; then
+              echo "::warning::Unable to read chart version from ${RELEASE_PR_BRANCH}; skipping ${PR_URL}."
+              continue
+            fi
+
+            for CHART_VERSION in "$RELEASE_PR_VERSION" "$SUPERSEDING_VERSION"; do
+              if ! printf '%s\n' "$CHART_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "::warning::Unable to compare chart versions ${RELEASE_PR_VERSION} and ${SUPERSEDING_VERSION}; skipping ${PR_URL}."
+                continue 2
+              fi
+            done
+
+            NEWEST_VERSION=$(printf '%s\n%s\n' "$RELEASE_PR_VERSION" "$SUPERSEDING_VERSION" | sort -V | tail -n 1)
+            # Close release-coordinate PRs that cannot be merged without going backwards or duplicating main.
+            if [ "$NEWEST_VERSION" = "$SUPERSEDING_VERSION" ]; then
+              if gh pr close "$PR_NUMBER" \
+                --comment "Closing because chart release ${RELEASE_PR_VERSION} has been superseded by chart release ${SUPERSEDING_VERSION}."; then
+                echo "Closed superseded chart release PR ${PR_URL}."
+              else
+                echo "::warning::Failed to close superseded chart release PR ${PR_URL}."
+              fi
+            else
+              echo "Keeping ${PR_URL}; chart release ${RELEASE_PR_VERSION} is newer than ${SUPERSEDING_VERSION}."
+            fi
+          done <<< "$CHART_RELEASE_PRS"
