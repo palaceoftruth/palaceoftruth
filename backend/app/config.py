@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     embedding_local_http_truncate: bool = True
     whisper_model: str = "gpt-4o-transcribe-diarize"
     transcription_provider: str = "openai"
+    llm_gateway_url: str = "http://llm-gateway.example:8080"
+    llm_gateway_token: str = ""
+    local_whisperx_model: str = "whisperx/base"
     assemblyai_api_key: str = ""
     assemblyai_base_url: str = "https://api.assemblyai.com"
     assemblyai_speech_model: str = "universal-2"
@@ -163,9 +166,13 @@ class Settings(BaseSettings):
                     f"EMBEDDING_LOCAL_HTTP_API_KEY is required for embedding profile {profile.profile_name!r}"
                 )
         transcription_provider = self.transcription_provider.strip().lower()
-        if transcription_provider not in {"openai", "assemblyai"}:
-            raise ValueError("TRANSCRIPTION_PROVIDER must be one of: openai, assemblyai")
+        if transcription_provider not in {"openai", "assemblyai", "local_whisperx"}:
+            raise ValueError("TRANSCRIPTION_PROVIDER must be one of: openai, assemblyai, local_whisperx")
         self.transcription_provider = transcription_provider
+        if self.llm_gateway_url:
+            parsed = urlparse(self.llm_gateway_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("LLM_GATEWAY_URL must be an http(s) URL")
         if self.assemblyai_base_url:
             parsed = urlparse(self.assemblyai_base_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:

@@ -1451,7 +1451,11 @@ async def test_transcribe_with_assemblyai_uploads_polls_and_normalizes(monkeypat
         def __init__(self, **kwargs) -> None:
             assert kwargs["base_url"] == "https://api.assemblyai.test"
             assert kwargs["headers"]["authorization"] == "assembly-key"
-            self._client = real_async_client(transport=httpx.MockTransport(handler), base_url=kwargs["base_url"])
+            self._client = real_async_client(
+                transport=httpx.MockTransport(handler),
+                base_url=kwargs["base_url"],
+                headers=kwargs["headers"],
+            )
 
         async def __aenter__(self):
             return self._client
@@ -1476,6 +1480,71 @@ async def test_transcribe_with_assemblyai_uploads_polls_and_normalizes(monkeypat
         ("POST", "/v2/transcript"),
         ("GET", "/v2/transcript/transcript-123"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_with_local_whisperx_posts_audio_and_normalizes(monkeypatch, tmp_path: Path) -> None:
+    audio_path = tmp_path / "chunk.wav"
+    audio_path.write_bytes(b"audio")
+    requests: list[httpx.Request] = []
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/v1/audio/transcriptions"
+        assert request.headers["authorization"] == "Bearer gateway-token"
+        body = request.read()
+        assert b'name="model"' in body
+        assert b"whisperx/base" in body
+        assert b'name="response_format"' in body
+        assert b"verbose_json" in body
+        assert b'name="diarize"' in body
+        assert b"true" in body
+        assert b'name="file"; filename="chunk.wav"' in body
+        return httpx.Response(
+            200,
+            json={
+                "text": "Local transcript",
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "start_seconds": 1.0,
+                        "end_seconds": 2.5,
+                        "text": "Local transcript",
+                    }
+                ],
+            },
+        )
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["base_url"] == "http://llm-gateway.test:8080"
+            assert kwargs["headers"]["Authorization"] == "Bearer gateway-token"
+            self._client = real_async_client(
+                transport=httpx.MockTransport(handler),
+                base_url=kwargs["base_url"],
+                headers=kwargs["headers"],
+            )
+
+        async def __aenter__(self):
+            return self._client
+
+        async def __aexit__(self, exc_type, exc, tb):
+            await self._client.aclose()
+            return False
+
+    monkeypatch.setattr("app.pipelines.youtube.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_provider", "local_whisperx")
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_url", "http://llm-gateway.test:8080")
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_token", "gateway-token")
+    monkeypatch.setattr("app.pipelines.youtube.settings.local_whisperx_model", "whisperx/base")
+
+    pipeline = MediaPipeline(None, None, None)  # type: ignore[arg-type]
+    text, segments = await pipeline._transcribe(str(audio_path), offset_seconds=10.0)
+
+    assert text == "[00:00:11] SPEAKER 00: Local transcript"
+    assert segments == [{"speaker": "SPEAKER 00", "start_seconds": 11.0, "end_seconds": 12.5, "text": "Local transcript"}]
+    assert [(request.method, request.url.path) for request in requests] == [("POST", "/v1/audio/transcriptions")]
 
 
 @pytest.mark.asyncio

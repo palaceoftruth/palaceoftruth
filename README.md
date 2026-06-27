@@ -103,11 +103,11 @@ Optional Firecrawl webpage scraping:
 - `WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud` uses Firecrawl Cloud at `https://api.firecrawl.dev/v2` and requires `FIRECRAWL_API_KEY`.
 - `WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted` uses `FIRECRAWL_BASE_URL`; `FIRECRAWL_API_KEY` is optional for private-network self-hosted deployments.
 
-Hermes staging should set:
+Self-hosted deployments can set:
 
 ```bash
 WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted
-FIRECRAWL_BASE_URL=https://firecrawl.tilapia-turtle.ts.net/v2
+FIRECRAWL_BASE_URL=https://firecrawl.example.internal/v2
 ```
 
 For Helm-managed deployments, use:
@@ -115,7 +115,7 @@ For Helm-managed deployments, use:
 ```yaml
 config:
   webpageScraperProvider: firecrawl-self-hosted
-  firecrawlBaseUrl: https://firecrawl.tilapia-turtle.ts.net/v2
+  firecrawlBaseUrl: https://firecrawl.example.internal/v2
 ```
 
 After the worker is running inside that deployment environment, verify from an
@@ -229,7 +229,7 @@ in the runtime environment and run:
 
 ```bash
 PALACEOFTRUTH_API_KEY=... uv run python scripts/smoke_agent_memory_compatibility.py \
-  --api-base-url https://api.palace.sarvent.cloud \
+  --api-base-url https://api.palace.example.com \
   batch-production-smoke \
   --run-id "$(date -u +%Y%m%d-%H%M%S)"
 ```

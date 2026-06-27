@@ -206,7 +206,7 @@ def test_batch_production_smoke_exercises_batch_and_item_audit_sequence(
 
     class FakeClient:
         def __init__(self, base_url: str, api_key: str) -> None:
-            assert base_url == "https://api.palace.sarvent.cloud"
+            assert base_url == "https://api.palace.example.com"
             assert api_key == "secret"
 
         def request(
@@ -293,7 +293,7 @@ def test_batch_production_smoke_exercises_batch_and_item_audit_sequence(
     args = smoke_module.build_parser().parse_args(
         [
             "--api-base-url",
-            "https://api.palace.sarvent.cloud",
+            "https://api.palace.example.com",
             "--api-key",
             "secret",
             "batch-production-smoke",
@@ -341,7 +341,7 @@ def test_batch_production_smoke_dry_run_redacts_secret_and_lists_verification(
     args = smoke_module.build_parser().parse_args(
         [
             "--api-base-url",
-            "https://api.palace.sarvent.cloud",
+            "https://api.palace.example.com",
             "--api-key",
             "secret-value",
             "batch-production-smoke",
