@@ -79,16 +79,20 @@ test.describe("Settings route", () => {
     await page.goto(`${BASE_URL}/settings?e2e=${Date.now()}`);
 
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-    await expect(page.getByText("Read-only environment")).toBeVisible();
+    await expect(page.getByText("Tenant-scoped access")).toBeVisible();
     await expect(page.getByText("Browser-local preferences")).toBeVisible();
     await expect(page.getByText("API access")).toBeVisible();
     await expect(page.getByText("Credential source")).toBeVisible();
+    await expect(page.getByLabel("Browser API key")).toBeVisible();
     await expect(page.getByLabel("Items per page (Library)")).toBeVisible();
     await expect(page.getByLabel("Default sort order")).toBeVisible();
 
+    await page.getByLabel("Browser API key").fill("tenant-browser-key");
+    await page.getByRole("button", { name: "Save API key" }).click();
+    await expect(page.getByText("Browser API key saved")).toBeVisible();
+
     await page.getByLabel("Items per page (Library)").selectOption("50");
     await page.getByRole("button", { name: "Save preferences" }).click();
-    await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
     await expect(page.getByText("Preferences updated in local storage.")).toBeVisible();
   });
 });
