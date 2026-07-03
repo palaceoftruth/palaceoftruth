@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 
 from app.mcp_server import (
     McpHttpAuthMiddleware,
+    McpHttpAuthResult,
     McpHttpAuthVerifier,
     SecondBrainApiClient,
     SecondBrainMcpRuntime,
@@ -171,6 +172,52 @@ def test_mcp_http_auth_accepts_valid_api_key_for_adapter_tenant() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+def test_mcp_http_auth_preserves_api_key_scope_header_for_caller() -> None:
+    seen_scope_headers: list[tuple[str | None, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/v1/memory/whoami":
+            return httpx.Response(404, json={"detail": "not found"})
+        credential = request.headers.get("x-api-key")
+        if credential == "caller-key":
+            seen_scope_headers.append((request.headers.get("x-mcp-scope"), request.headers.get("x-mcp-scopes")))
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "tenant_id": "tenant-a",
+                    "auth_mode": "api_key",
+                    "mcp_client_key": None,
+                    "allowed_scopes": [],
+                },
+            )
+        if credential == "adapter-key":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        return httpx.Response(403, json={"detail": "Invalid or revoked API key"})
+
+    async def scenario() -> McpHttpAuthResult:
+        verifier = McpHttpAuthVerifier(
+            SecondBrainMcpSettings(
+                api_base_url="https://api.palaceoftruth.test",
+                api_key="adapter-key",
+                timeout_seconds=5.0,
+            ),
+            transport=httpx.MockTransport(handler),
+        )
+        return await verifier.verify(
+            {
+                "x-api-key": "caller-key",
+                "x-mcp-scope": "read",
+            }
+        )
+
+    auth_result = asyncio.run(scenario())
+
+    assert seen_scope_headers == [("read", None)]
+    assert auth_result.client_id == "api-key"
+    assert auth_result.scopes == ("read",)
 
 
 def test_mcp_http_auth_accepts_valid_bearer_for_adapter_tenant() -> None:
