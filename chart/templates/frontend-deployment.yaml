@@ -24,12 +24,6 @@ spec:
         - name: frontend
           image: {{ include "palaceoftruth.frontendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "palaceoftruth.appSecretName" . }}
-                  key: API_KEY
           ports:
             - containerPort: 80
           readinessProbe:

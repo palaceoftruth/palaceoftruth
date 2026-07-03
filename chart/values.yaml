@@ -22,6 +22,7 @@ config:
   openrouterDefaultModel: "minimax/minimax-m2.7"
   # Ordered fallback models for OpenRouter when the default model is unavailable.
   openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
+  corsAllowedOrigins: "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
   embeddingProvider: openai
   embeddingModel: text-embedding-3-small
   embeddingDimensions: "1536"

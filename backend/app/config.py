@@ -67,6 +67,7 @@ class Settings(BaseSettings):
 
     # API auth
     api_key: str
+    cors_allowed_origins: str = "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
 
     # Chunking
     chunk_size: int = 500

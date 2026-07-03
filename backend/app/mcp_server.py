@@ -270,7 +270,14 @@ class McpHttpAuthResult:
 def _incoming_mcp_auth_headers(headers: Mapping[str, str]) -> dict[str, str]:
     api_key = headers.get("x-api-key")
     if api_key and api_key.strip():
-        return {"X-API-Key": api_key.strip()}
+        auth_headers = {"X-API-Key": api_key.strip()}
+        mcp_scope = headers.get("x-mcp-scope")
+        mcp_scopes = headers.get("x-mcp-scopes")
+        if mcp_scope and mcp_scope.strip():
+            auth_headers["X-MCP-Scope"] = mcp_scope.strip()
+        if mcp_scopes and mcp_scopes.strip():
+            auth_headers["X-MCP-Scopes"] = mcp_scopes.strip()
+        return auth_headers
 
     authorization = headers.get("authorization")
     if authorization is None:
@@ -549,6 +556,7 @@ class SecondBrainApiClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        required_scope: McpOperationScope | None = None,
     ) -> Any:
         try:
             response = await self._client.request(
@@ -556,7 +564,7 @@ class SecondBrainApiClient:
                 path,
                 params=params,
                 json=json_body,
-                headers=await self._auth_headers(),
+                headers=await self._auth_headers(required_scope=required_scope),
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -577,9 +585,13 @@ class SecondBrainApiClient:
                 f"Palace API returned a non-JSON response for {method} {path}"
             ) from exc
 
-    async def _auth_headers(self) -> dict[str, str]:
+    async def _auth_headers(self, *, required_scope: McpOperationScope | None = None) -> dict[str, str]:
         if self.settings.api_key:
-            return {"X-API-Key": self.settings.api_key}
+            headers = {"X-API-Key": self.settings.api_key}
+            if required_scope is not None:
+                headers["X-MCP-Scope"] = required_scope
+                headers["X-MCP-Scopes"] = ",".join(self.settings.client_scopes)
+            return headers
         token = await self._active_bearer_token()
         return {"Authorization": f"Bearer {token}"}
 
@@ -636,10 +648,10 @@ class SecondBrainApiClient:
             "error_class": error_class,
             "app_version": self.settings.app_version,
         }
-        await self._request_json("POST", "/api/v1/memory/mcp/audit", json_body=payload)
+        await self._request_json("POST", "/api/v1/memory/mcp/audit", json_body=payload, required_scope="write")
 
     async def whoami(self) -> dict[str, Any]:
-        payload = await self._request_json("GET", "/api/v1/memory/whoami")
+        payload = await self._request_json("GET", "/api/v1/memory/whoami", required_scope="read")
         tenant_id = payload.get("tenant_id")
         if not isinstance(tenant_id, str) or not tenant_id.strip():
             raise RuntimeError("Palace API /memory/whoami did not return a tenant_id")
@@ -688,10 +700,10 @@ class SecondBrainApiClient:
             "enable_ai_enrichment": enable_ai_enrichment,
             "relationship_policy": relationship_policy,
         }
-        return await self._request_json("POST", "/api/v1/memory/entries", json_body=payload)
+        return await self._request_json("POST", "/api/v1/memory/entries", json_body=payload, required_scope="write")
 
     async def get_memory_job(self, job_id: str) -> dict[str, Any]:
-        return await self._request_json("GET", f"/api/v1/memory/jobs/{job_id}")
+        return await self._request_json("GET", f"/api/v1/memory/jobs/{job_id}", required_scope="read")
 
     async def list_memory_entries(
         self,
@@ -716,7 +728,7 @@ class SecondBrainApiClient:
         normalized_cursor = _normalize_optional_timestamp("cursor", cursor)
         if normalized_cursor:
             params["cursor"] = normalized_cursor
-        return await self._request_json("GET", "/api/v1/memory/entries", params=params)
+        return await self._request_json("GET", "/api/v1/memory/entries", params=params, required_scope="read")
 
     async def list_memory_scopes(
         self,
@@ -728,6 +740,7 @@ class SecondBrainApiClient:
             "GET",
             "/api/v1/memory/scopes",
             params={"limit": limit, "sample_limit": sample_limit},
+            required_scope="read",
         )
 
     async def list_memory_jobs(
@@ -743,7 +756,7 @@ class SecondBrainApiClient:
         }
         if status is not None:
             params["status"] = status
-        return await self._request_json("GET", "/api/v1/memory/jobs", params=params)
+        return await self._request_json("GET", "/api/v1/memory/jobs", params=params, required_scope="read")
 
     async def get_graph(
         self,
@@ -792,7 +805,12 @@ class SecondBrainApiClient:
             "limit": limit,
             "defer_seconds": defer_seconds,
         }
-        return await self._request_json("POST", "/api/v1/memory/relationships/backfill", json_body=payload)
+        return await self._request_json(
+            "POST",
+            "/api/v1/memory/relationships/backfill",
+            json_body=payload,
+            required_scope="admin",
+        )
 
     async def get_wakeup_brief(
         self,
@@ -803,7 +821,7 @@ class SecondBrainApiClient:
         params: dict[str, Any] = {"scope_type": scope_type}
         if scope_key is not None:
             params["scope_key"] = scope_key
-        return await self._request_json("GET", "/api/v1/memory/wakeup-brief", params=params)
+        return await self._request_json("GET", "/api/v1/memory/wakeup-brief", params=params, required_scope="read")
 
     async def retrieve_memory(
         self,
@@ -836,7 +854,7 @@ class SecondBrainApiClient:
             "scope": _build_scope(scope_type, scope_key),
             "room_id": room_id,
         }
-        return await self._request_json("POST", "/api/v1/memory/retrieve", json_body=payload)
+        return await self._request_json("POST", "/api/v1/memory/retrieve", json_body=payload, required_scope="read")
 
     async def retrieve_agent_memory(
         self,
@@ -888,7 +906,7 @@ class SecondBrainApiClient:
             "date_from": _normalize_optional_timestamp("date_from", date_from),
             "date_to": _normalize_optional_timestamp("date_to", date_to),
         }
-        return await self._request_json("POST", "/api/v1/memory/retrieve-agent", json_body=payload)
+        return await self._request_json("POST", "/api/v1/memory/retrieve-agent", json_body=payload, required_scope="read")
 
     async def retrieve_memory_trajectory(
         self,
@@ -940,7 +958,7 @@ class SecondBrainApiClient:
             "date_from": _normalize_optional_timestamp("date_from", date_from),
             "date_to": _normalize_optional_timestamp("date_to", date_to),
         }
-        return await self._request_json("POST", "/api/v1/memory/trajectory", json_body=payload)
+        return await self._request_json("POST", "/api/v1/memory/trajectory", json_body=payload, required_scope="read")
 
     async def get_retrieval_doctor(
         self,
@@ -968,7 +986,12 @@ class SecondBrainApiClient:
             "context_budget_chars": context_budget_chars,
             "sample_probes": sample_probes or [],
         }
-        return await self._request_json("POST", "/api/v1/memory/retrieval-doctor", json_body=payload)
+        return await self._request_json(
+            "POST",
+            "/api/v1/memory/retrieval-doctor",
+            json_body=payload,
+            required_scope="read",
+        )
 
     async def search_items(
         self,

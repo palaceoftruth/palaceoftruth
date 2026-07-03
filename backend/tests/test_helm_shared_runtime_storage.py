@@ -220,6 +220,24 @@ def test_default_delegated_agent_policy_allows_hermes_orchestrator_specialists()
     assert "allow_all_agent_scopes" not in policies[0]
 
 
+def test_frontend_proxy_does_not_inject_backend_api_key() -> None:
+    manifests = _render_chart()
+    nginx_config = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-frontend-nginx")
+    frontend = _deployment_by_name(manifests, "palaceoftruth-frontend")
+    container = frontend["spec"]["template"]["spec"]["containers"][0]
+
+    assert "proxy_set_header X-API-Key" not in nginx_config["data"]["default.conf"]
+    assert container.get("env", []) == []
+
+
+def test_backend_cors_uses_explicit_allowlist() -> None:
+    manifests = _render_chart("config.corsAllowedOrigins=https://palace.example.com\\,https://api.palace.example.com")
+    config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
+
+    assert config_map["data"]["CORS_ALLOWED_ORIGINS"] == "https://palace.example.com,https://api.palace.example.com"
+    assert config_map["data"]["CORS_ALLOWED_ORIGINS"] != "*"
+
+
 def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:
     manifests = _render_chart(
         "externalSecrets.enabled=true",

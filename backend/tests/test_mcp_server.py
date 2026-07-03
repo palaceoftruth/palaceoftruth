@@ -363,9 +363,11 @@ def test_connection_resources_share_same_payload() -> None:
 
 def test_create_memory_entry_uses_authenticated_tenant() -> None:
     seen_paths: list[str] = []
+    seen_scope_headers: list[tuple[str | None, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_paths.append(request.url.path)
+        seen_scope_headers.append((request.headers.get("x-mcp-scope"), request.headers.get("x-mcp-scopes")))
         if request.url.path == "/api/v1/memory/whoami":
             return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
         if request.url.path == "/api/v1/memory/entries":
@@ -417,6 +419,9 @@ def test_create_memory_entry_uses_authenticated_tenant() -> None:
 
     asyncio.run(scenario())
     assert seen_paths == ["/api/v1/memory/whoami", "/api/v1/memory/entries"]
+    default_scopes = "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
+    assert seen_scope_headers[0] == ("read", default_scopes)
+    assert seen_scope_headers[1] == ("write", default_scopes)
 
 
 def test_capture_checkpoint_normalizes_payload_and_returns_compact_ack() -> None:
@@ -709,6 +714,7 @@ def test_palace_checkpoint_alias_reuses_checkpoint_safety_defaults() -> None:
 
 def test_mcp_tool_records_redacted_audit_after_success() -> None:
     seen: list[tuple[str, dict]] = []
+    seen_audit_scope_headers: list[tuple[str | None, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/memory/whoami":
@@ -725,6 +731,7 @@ def test_mcp_tool_records_redacted_audit_after_success() -> None:
             )
         if request.url.path == "/api/v1/memory/mcp/audit":
             payload = json.loads(request.content.decode())
+            seen_audit_scope_headers.append((request.headers.get("x-mcp-scope"), request.headers.get("x-mcp-scopes")))
             seen.append((request.url.path, payload))
             return httpx.Response(
                 201,
@@ -775,6 +782,8 @@ def test_mcp_tool_records_redacted_audit_after_success() -> None:
     assert payload["params_summary"]["metadata"] == {"redacted": True, "present": True}
     assert "result_summary" not in payload["params_summary"]
     assert "raw memory body" not in json.dumps(payload)
+    default_scopes = "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
+    assert seen_audit_scope_headers == [("write", default_scopes)]
 
 
 def test_mcp_tool_denies_missing_write_scope_and_records_audit() -> None:

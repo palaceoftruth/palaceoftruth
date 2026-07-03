@@ -120,7 +120,7 @@ def log_memory_write_admission(decision: MemoryWriteAdmissionDecision) -> None:
 
 
 def _scope_write_decision(*, scope: MemoryScope, auth_mode: str | None, allowed_scopes: list[str]) -> str | None:
-    if auth_mode != "mcp_oauth":
+    if auth_mode not in {"mcp_oauth", "api_key"}:
         return None
     if "admin" in allowed_scopes:
         return None

@@ -128,7 +128,7 @@ existingRegistrySecret: ""   # set when your registry requires imagePullSecrets
 
 By default the chart deploys backend and frontend images tagged with the chart `appVersion`. Set `image.tag` only when you need to override that default.
 
-The frontend does not require a build-time `VITE_API_KEY` for cluster installs. The browser talks to `/api`, and the frontend proxy injects the deployment-specific `API_KEY` from the app secret at runtime.
+The frontend does not support a build-time browser API key for cluster installs. The browser talks to `/api` through the same-origin proxy, but the proxy must not inject the deployment-specific `API_KEY`; agent and service integrations should authenticate through MCP OAuth or server-side credentials.
 
 ### Optional S3 Credentials for Palace Sync
 
@@ -596,8 +596,8 @@ npm run dev
 ```
 
 Host-run Vite keeps `/api` on the same origin and proxies to
-`https://api.palaceoftruth.test` by default, injecting `X-API-Key` server-side from
-the repo root `.env`.
+`https://api.palaceoftruth.test` by default without injecting the shared
+backend API key into browser-originated requests.
 
 To call the API directly during local development:
 
