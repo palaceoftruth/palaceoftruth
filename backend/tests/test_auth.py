@@ -72,6 +72,44 @@ async def test_verify_api_key_sets_tenant_and_updates_last_used(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_require_mcp_scope_requires_scope_header_for_api_key() -> None:
+    request = _request()
+    request.state.auth_mode = "api_key"
+
+    dependency = auth.require_mcp_scope("write")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key", mcp_scope=None, mcp_scopes=None)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "API key missing write MCP scope header"
+
+
+@pytest.mark.asyncio
+async def test_require_mcp_scope_accepts_api_key_scope_header() -> None:
+    request = _request()
+    request.state.auth_mode = "api_key"
+
+    dependency = auth.require_mcp_scope("write")
+    await dependency(request, _="raw-key", mcp_scope="write", mcp_scopes="write:workspace,read")
+
+    assert request.state.mcp_allowed_scopes == ["write", "write:workspace", "read"]
+
+
+@pytest.mark.asyncio
+async def test_require_mcp_scope_rejects_unknown_api_key_scope_header() -> None:
+    request = _request()
+    request.state.auth_mode = "api_key"
+
+    dependency = auth.require_mcp_scope("read")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key", mcp_scope="read,root", mcp_scopes=None)
+
+    assert exc_info.value.status_code == 403
+    assert "Unsupported MCP scope header" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_verify_api_key_rejects_invalid_without_usage_update(monkeypatch) -> None:
     session = FakeSession(None)
     monkeypatch.setattr(auth, "async_session", lambda: session)

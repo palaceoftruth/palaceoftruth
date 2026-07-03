@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_mcp_scope, verify_memory_auth
+from app.auth import require_api_key_scope_header, require_mcp_scope, verify_memory_auth
 from app.config import settings
 from app.database import get_db
 from app.models.job import Job
@@ -371,7 +371,7 @@ async def whoami(request: Request) -> MemoryWhoAmIResponse:
     "/mcp/audit",
     response_model=McpRequestAuditResponse,
     status_code=201,
-    dependencies=[Depends(verify_memory_auth)],
+    dependencies=[Depends(require_api_key_scope_header("write"))],
 )
 async def record_mcp_request_audit(
     body: McpRequestAuditRequest,

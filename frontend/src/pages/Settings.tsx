@@ -29,8 +29,6 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [storageError, setStorageError] = useState(false);
 
-  const browserApiKey = import.meta.env.VITE_API_KEY as string | undefined;
-
   const handleSave = () => {
     const savedPerPage = writeLocalStorage(STORAGE_KEY_PER_PAGE, perPage);
     const savedDefaultSort = writeLocalStorage(STORAGE_KEY_SORT, defaultSort);
@@ -54,9 +52,7 @@ export default function Settings() {
           <>
             <span className="sb-chip sb-chip-inactive">Read-only environment</span>
             <span className="sb-chip sb-chip-inactive">Browser-local preferences</span>
-            <span className="sb-chip sb-chip-inactive">
-              {browserApiKey ? "Development browser key" : "Server proxy API"}
-            </span>
+            <span className="sb-chip sb-chip-inactive">No browser API key</span>
           </>
         }
       />
@@ -69,27 +65,21 @@ export default function Settings() {
           <div>
             <p className="sb-section-title">API access</p>
             <p className="mt-2 text-sm leading-7 text-zinc-300">
-              Deployed environments send API credentials from the server-side proxy. The browser does not need the shared API key.
+              Browser requests no longer receive the shared backend API key from the frontend proxy.
             </p>
             <p className="mt-2 text-sm text-zinc-500">
-              {browserApiKey
-                ? "A development-only browser key is set via VITE_API_KEY."
-                : "No browser API key is configured for this build."}
+              Agent and service integrations should use MCP OAuth or server-side credentials.
             </p>
           </div>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sb-panel-muted p-4">
             <p className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-500">Credential source</p>
-            <p className="mt-2 text-sm text-zinc-200">
-              {browserApiKey ? "VITE_API_KEY" : "Server-side proxy"}
-            </p>
+            <p className="mt-2 text-sm text-zinc-200">MCP OAuth or backend service key</p>
           </div>
           <div className="sb-panel-muted p-4">
             <p className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-500">Browser key state</p>
-            <p className={browserApiKey ? "mt-2 text-sm text-amber-200" : "mt-2 text-sm text-emerald-200"}>
-              {browserApiKey ? "Development override present" : "No browser secret exposed"}
-            </p>
+            <p className="mt-2 text-sm text-emerald-200">No shared secret exposed</p>
           </div>
         </div>
       </section>

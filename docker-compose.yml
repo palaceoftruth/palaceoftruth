@@ -38,6 +38,7 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
       OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://palaceoftruth.test,http://localhost:3000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
@@ -131,6 +132,7 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
       OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://palaceoftruth.test,http://localhost:3000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
@@ -170,6 +172,7 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_DEFAULT_MODEL: ${OPENROUTER_DEFAULT_MODEL:-minimax/minimax-m2.7}
       OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://palaceoftruth.test,http://localhost:3000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
@@ -194,8 +197,6 @@ services:
   frontend:
     build:
       context: ./frontend
-    environment:
-      API_KEY: ${API_KEY}
     networks:
       - default
       - traefik

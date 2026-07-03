@@ -39,16 +39,12 @@ import type {
   SourceSubscriptionPreview,
 } from "./types";
 
-const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 const BASE = "/api/v1";
 
 function buildHeaders(init?: RequestInit): Record<string, string> {
   const headers: Record<string, string> = {
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
-  if (API_KEY) {
-    headers["X-API-Key"] = API_KEY;
-  }
   if (!(init?.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
@@ -426,9 +422,7 @@ export const api = {
     const qs = new URLSearchParams({ format: params.format });
     if (params.source_type) qs.set("source_type", params.source_type);
     if (params.tags) qs.set("tags", params.tags);
-    const res = await fetch(`${BASE}/export?${qs}`, {
-      headers: API_KEY ? { "X-API-Key": API_KEY } : undefined,
-    });
+    const res = await fetch(`${BASE}/export?${qs}`);
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
       throw new ApiError(res.status, text);
@@ -465,7 +459,6 @@ export async function streamChat(
   const res = await fetch(`${BASE}/chat/stream`, {
     method: "POST",
     headers: {
-      ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({

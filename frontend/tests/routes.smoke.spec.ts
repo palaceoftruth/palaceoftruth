@@ -196,7 +196,7 @@ test.describe("Route smoke", () => {
 
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
     await expect(page.getByText("Browser-local preferences")).toBeVisible();
-    await expect(page.getByText(/Server proxy API|Development browser key/)).toBeVisible();
+    await expect(page.getByText("No browser API key")).toBeVisible();
 
     await page.getByLabel("Items per page (Library)").selectOption("50");
     await page.getByLabel("Default sort order").selectOption("title|asc");

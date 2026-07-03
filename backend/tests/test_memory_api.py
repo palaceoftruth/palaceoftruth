@@ -348,6 +348,61 @@ def test_record_mcp_request_audit_upserts_client_and_redacted_event() -> None:
     assert session.commits == 1
 
 
+def test_record_mcp_request_audit_rejects_api_key_without_scope_header() -> None:
+    session = FakeSession()
+    client = _build_app(session, auth_mode="api_key")
+
+    response = client.post(
+        "/api/v1/memory/mcp/audit",
+        json={
+            "client": {
+                "client_key": "codex-local",
+                "display_name": "Codex local MCP",
+                "allowed_scopes": ["read", "write"],
+                "metadata": {},
+            },
+            "operation": "create_memory_entry",
+            "required_scope": "write",
+            "params_summary": {},
+            "status": "success",
+            "latency_ms": 42,
+            "app_version": "0.1.200",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "API key missing write MCP scope header"
+    assert session.mcp_clients == []
+    assert session.mcp_audit_events == []
+
+
+def test_record_mcp_request_audit_accepts_api_key_with_scope_header() -> None:
+    session = FakeSession()
+    client = _build_app(session, auth_mode="api_key")
+
+    response = client.post(
+        "/api/v1/memory/mcp/audit",
+        headers={"X-MCP-Scope": "write"},
+        json={
+            "client": {
+                "client_key": "codex-local",
+                "display_name": "Codex local MCP",
+                "allowed_scopes": ["read", "write"],
+                "metadata": {},
+            },
+            "operation": "create_memory_entry",
+            "required_scope": "write",
+            "params_summary": {},
+            "status": "success",
+            "latency_ms": 42,
+            "app_version": "0.1.200",
+        },
+    )
+
+    assert response.status_code == 201
+    assert len(session.mcp_audit_events) == 1
+
+
 def test_memory_whoami_returns_authenticated_tenant() -> None:
     client = _build_app(FakeSession())
 
@@ -922,6 +977,91 @@ def test_memory_oauth_bearer_scope_denies_write_without_write_scope() -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"] == "MCP bearer token missing write scope"
+
+
+def test_memory_api_key_scope_denies_write_without_scope_header(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
+        request.state.mcp_client_key = None
+        request.state.mcp_allowed_scopes = None
+        return "raw-key"
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("unscoped API-key writes must not reach storage")
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "API key missing write MCP scope header"
+
+
+def test_memory_api_key_scope_specific_grant_allows_workspace_write(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
+        request.state.mcp_client_key = None
+        request.state.mcp_allowed_scopes = None
+        return "raw-key"
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        assert signing_key == "key-hash"
+        assert admission_audit is not None
+        assert admission_audit["scope_grant"]["required_scope"] == "write:workspace"
+        assert admission_audit["scope_grant"]["grant_present"] is True
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/memory/entries",
+        headers={"X-MCP-Scope": "write", "X-MCP-Scopes": "read,write,write:workspace"},
+        json=_canonical_payload(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
 
 
 def test_memory_oauth_bearer_write_does_not_imply_scoped_workspace_write(monkeypatch) -> None:

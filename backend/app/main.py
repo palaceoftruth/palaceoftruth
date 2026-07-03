@@ -155,11 +155,18 @@ app = FastAPI(
     openapi_url="/api/openapi.json",  # reachable through nginx /api/ proxy
 )
 
+def _cors_allowed_origins() -> list[str]:
+    origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
+    if not origins or "*" in origins:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS must be an explicit comma-separated origin allowlist")
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_allowed_origins(),
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-MCP-Scope", "X-MCP-Scopes"],
 )
 
 

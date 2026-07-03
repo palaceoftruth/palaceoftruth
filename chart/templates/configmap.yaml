@@ -16,6 +16,7 @@ data:
   {{- end }}
   OPENROUTER_DEFAULT_MODEL: {{ .Values.config.openrouterDefaultModel | quote }}
   OPENROUTER_FALLBACK_MODELS: {{ .Values.config.openrouterFallbackModels | quote }}
+  CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
   EMBEDDING_PROVIDER: {{ include "palaceoftruth.embeddingProvider" . | quote }}
   EMBEDDING_MODEL: {{ include "palaceoftruth.embeddingModel" . | quote }}
   EMBEDDING_DIMENSIONS: {{ include "palaceoftruth.embeddingDimensions" . | quote }}

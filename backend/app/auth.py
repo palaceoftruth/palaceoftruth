@@ -3,16 +3,19 @@ import json
 import logging
 import secrets
 from datetime import datetime, timezone
+from typing import get_args
 
 from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy import text
 
 from app.database import async_session
+from app.schemas.memory import McpOperationScope
 
 logger = logging.getLogger(__name__)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+VALID_MCP_OPERATION_SCOPES = set(get_args(McpOperationScope))
 
 
 def _hash_key(raw: str) -> str:
@@ -27,6 +30,21 @@ def _parse_json_list(value: object) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise HTTPException(status_code=403, detail="MCP client scopes are invalid")
     return [item for item in value if item.strip()]
+
+
+def _parse_scope_header(*values: str | None) -> list[str]:
+    scopes: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        for part in value.replace(",", " ").split():
+            scope = part.strip()
+            if scope:
+                scopes.append(scope)
+    invalid = sorted(set(scopes) - VALID_MCP_OPERATION_SCOPES)
+    if invalid:
+        raise HTTPException(status_code=403, detail=f"Unsupported MCP scope header: {', '.join(invalid)}")
+    return list(dict.fromkeys(scopes))
 
 
 async def verify_api_key(
@@ -305,14 +323,48 @@ async def record_oauth_client_audit_event(
 
 
 def require_mcp_scope(required_scope: str):
-    async def dependency(request: Request, _: str = Depends(verify_memory_auth)) -> None:
-        if getattr(request.state, "auth_mode", None) != "mcp_oauth":
+    async def dependency(
+        request: Request,
+        _: str = Depends(verify_memory_auth),
+        mcp_scope: str | None = Header(None, alias="X-MCP-Scope"),
+        mcp_scopes: str | None = Header(None, alias="X-MCP-Scopes"),
+    ) -> None:
+        auth_mode = getattr(request.state, "auth_mode", None)
+        if auth_mode == "api_key":
+            _require_api_key_scope_header(request, required_scope, mcp_scope, mcp_scopes)
+            return
+        if auth_mode != "mcp_oauth":
             return
         allowed_scopes = getattr(request.state, "mcp_allowed_scopes", None)
         if not isinstance(allowed_scopes, list):
             raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
         if required_scope not in allowed_scopes:
             raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_scope} scope")
+
+    return dependency
+
+
+def _require_api_key_scope_header(
+    request: Request,
+    required_scope: str,
+    mcp_scope: str | None,
+    mcp_scopes: str | None,
+) -> None:
+    api_key_scopes = _parse_scope_header(mcp_scope, mcp_scopes)
+    if required_scope not in api_key_scopes and "admin" not in api_key_scopes:
+        raise HTTPException(status_code=403, detail=f"API key missing {required_scope} MCP scope header")
+    request.state.mcp_allowed_scopes = api_key_scopes
+
+
+def require_api_key_scope_header(required_scope: str):
+    async def dependency(
+        request: Request,
+        _: str = Depends(verify_memory_auth),
+        mcp_scope: str | None = Header(None, alias="X-MCP-Scope"),
+        mcp_scopes: str | None = Header(None, alias="X-MCP-Scopes"),
+    ) -> None:
+        if getattr(request.state, "auth_mode", None) == "api_key":
+            _require_api_key_scope_header(request, required_scope, mcp_scope, mcp_scopes)
 
     return dependency
 

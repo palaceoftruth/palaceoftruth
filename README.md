@@ -77,9 +77,9 @@ npm run dev
 npm run build
 ```
 
-Host-run Vite proxies `/api`, `/docs`, and `/redoc` to the backend and injects
-the server-side `API_KEY` from the root `.env`. `VITE_API_KEY` is an optional
-local-only browser override and should normally stay unset.
+Host-run Vite proxies `/api`, `/docs`, and `/redoc` to the backend without
+injecting the shared backend `API_KEY` into browser-originated requests. Use
+MCP OAuth or direct server-side credentials for authenticated API work.
 
 Host-side backend iteration:
 
