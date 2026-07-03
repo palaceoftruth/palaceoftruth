@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -117,6 +118,17 @@ class DelegatedAgentMemoryDecision:
     decision: str
     deny_reasons: tuple[str, ...]
     max_results_per_scope: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentScopePatternResolution:
+    requested_patterns: tuple[str, ...] = ()
+    discovered_keys: tuple[str, ...] = ()
+    matched_keys: tuple[str, ...] = ()
+    selected_keys: tuple[str, ...] = ()
+    skipped_keys: tuple[str, ...] = ()
+    skip_reasons: tuple[str, ...] = ()
+    truncated: bool = False
 
 
 def _policy_string(value: object, *, field: str, required: bool = False) -> str | None:
@@ -988,14 +1000,115 @@ def _dedupe_scope_keys(keys: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     return tuple(deduped)
 
 
+_AGENT_SCOPE_QUERY_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,}")
+
+
+def _agent_scope_pattern_matches(pattern: str, key: str) -> bool:
+    normalized_pattern = pattern.strip().casefold()
+    normalized_key = key.strip().casefold()
+    if normalized_pattern.startswith("agent/"):
+        normalized_pattern = normalized_pattern.removeprefix("agent/")
+    if normalized_pattern in {"*", "agent/*"}:
+        return True
+    if normalized_pattern.endswith("*"):
+        return normalized_key.startswith(normalized_pattern[:-1])
+    return normalized_key == normalized_pattern
+
+
+def _agent_scope_relevance_score(
+    summary: MemoryScopeSummary,
+    *,
+    query_tokens: set[str],
+) -> int:
+    key = (summary.scope.key or "").casefold()
+    haystack_parts = [key, *summary.tags, *summary.sources]
+    haystack = " ".join(part.casefold() for part in haystack_parts if part)
+    score = 0
+    for token in query_tokens:
+        if token == key:
+            score += 4
+        elif token in key or key in token:
+            score += 3
+        elif token in haystack:
+            score += 1
+    return score
+
+
+async def _resolve_agent_scope_patterns(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    body: AgentMemoryRetrieveRequest,
+) -> AgentScopePatternResolution:
+    requested_patterns = _dedupe_scope_keys(body.include_agent_scope_patterns)
+    if not requested_patterns:
+        return AgentScopePatternResolution()
+
+    scope_response = await list_memory_scopes(
+        db,
+        tenant_id=tenant_id,
+        limit=max(100, body.agent_scope_pattern_limit * 10),
+        sample_limit=5,
+    )
+    agent_summaries = [summary for summary in scope_response.scopes if summary.scope.type == "agent" and summary.scope.key]
+    discovered_keys = _dedupe_scope_keys([summary.scope.key or "" for summary in agent_summaries])
+    matched_summaries = [
+        summary
+        for summary in agent_summaries
+        if any(_agent_scope_pattern_matches(pattern, summary.scope.key or "") for pattern in requested_patterns)
+    ]
+    caller_key = body.agent_scope_key.strip().casefold() if body.agent_scope_key else None
+    query_tokens = {
+        token
+        for token in _AGENT_SCOPE_QUERY_TOKEN_RE.findall(body.query.casefold())
+        if len(token) > 1
+    }
+    ranked_matches = sorted(
+        enumerate(matched_summaries),
+        key=lambda entry: (
+            -_agent_scope_relevance_score(entry[1], query_tokens=query_tokens),
+            entry[0],
+        ),
+    )
+    matched_keys = _dedupe_scope_keys([summary.scope.key or "" for summary in matched_summaries])
+    candidate_keys = [
+        summary.scope.key or ""
+        for _, summary in ranked_matches
+        if (summary.scope.key or "").casefold() != caller_key
+    ]
+    selected_keys = list(_dedupe_scope_keys(candidate_keys)[: body.agent_scope_pattern_limit])
+    selected_set = {key.casefold() for key in selected_keys}
+    skipped_keys = [key for key in matched_keys if key.casefold() not in selected_set]
+    skip_reasons: list[str] = []
+    if caller_key and any(key.casefold() == caller_key for key in matched_keys):
+        skip_reasons.append("caller_agent_scope_excluded")
+    truncated = len(skipped_keys) > 0
+    if truncated:
+        skip_reasons.append("agent_scope_pattern_limit_exceeded")
+    if not matched_keys:
+        skip_reasons.append("no_agent_scopes_matched_patterns")
+    return AgentScopePatternResolution(
+        requested_patterns=requested_patterns,
+        discovered_keys=discovered_keys,
+        matched_keys=matched_keys,
+        selected_keys=tuple(selected_keys),
+        skipped_keys=tuple(skipped_keys),
+        skip_reasons=tuple(skip_reasons),
+        truncated=truncated,
+    )
+
+
 def _evaluate_delegated_agent_memory_policy(
     *,
     tenant_id: str,
     body: AgentMemoryRetrieveRequest,
     policy: DelegatedAgentMemoryReadPolicy | None,
+    pattern_resolution: AgentScopePatternResolution | None = None,
 ) -> DelegatedAgentMemoryDecision:
     caller_agent_key = body.agent_scope_key.strip() if body.agent_scope_key else None
     requested = list(_dedupe_scope_keys(body.include_agent_scope_keys))
+    if pattern_resolution is not None:
+        requested.extend(pattern_resolution.selected_keys)
     if policy is not None and body.include_all_permitted_agent_scopes:
         requested.extend(policy.read_agent_scope_keys)
     requested_keys = tuple(key for key in _dedupe_scope_keys(tuple(requested)) if key != caller_agent_key)
@@ -1131,10 +1244,12 @@ async def retrieve_agent_memory(
     selected_candidate_limit, broad_candidate_limit, display_limit = _effective_agent_memory_budgets(
         body
     )
+    pattern_resolution = await _resolve_agent_scope_patterns(db, tenant_id=tenant_id, body=body)
     delegated_decision = _evaluate_delegated_agent_memory_policy(
         tenant_id=tenant_id,
         body=body,
         policy=delegated_policy,
+        pattern_resolution=pattern_resolution,
     )
     scopes = _agent_memory_selected_scopes(body)
     if not body.workspace_strict:
@@ -1290,6 +1405,14 @@ async def retrieve_agent_memory(
             searched_scopes=scopes,
             caller_agent_scope_key=delegated_decision.caller_agent_scope_key,
             requested_agent_scope_keys=list(delegated_decision.requested_agent_scope_keys),
+            requested_agent_scope_patterns=list(pattern_resolution.requested_patterns),
+            discovered_agent_scope_keys=list(pattern_resolution.discovered_keys),
+            matched_agent_scope_keys=list(pattern_resolution.matched_keys),
+            selected_agent_scope_keys=list(pattern_resolution.selected_keys),
+            skipped_agent_scope_keys=list(pattern_resolution.skipped_keys),
+            agent_scope_pattern_limit=body.agent_scope_pattern_limit,
+            agent_scope_pattern_truncated=pattern_resolution.truncated,
+            agent_scope_pattern_skip_reasons=list(pattern_resolution.skip_reasons),
             authorized_agent_scope_keys=list(delegated_decision.authorized_agent_scope_keys),
             denied_agent_scope_keys=list(delegated_decision.denied_agent_scope_keys),
             delegated_agent_policy_id=delegated_decision.policy_id,

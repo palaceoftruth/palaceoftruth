@@ -126,6 +126,21 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _split_patterns(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_values = value
+    elif isinstance(value, str):
+        raw_values = value.split(",")
+    else:
+        return []
+    patterns: list[str] = []
+    for raw in raw_values:
+        pattern = str(raw).strip()
+        if pattern and pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
+
+
 def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
     raw = config.get(key)
     if isinstance(raw, bool):
@@ -629,6 +644,10 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
         ),
         "include_tenant_shared": _env_bool("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", False),
         "include_broad_corpus": _env_bool("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", False),
+        "include_agent_scope_patterns": _split_patterns(
+            os.environ.get("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "")
+        ),
+        "agent_scope_pattern_limit": _env_int("PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT", 5),
         "timeout_seconds": _env_int(
             "PALACEOFTRUTH_REQUEST_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
         ),
@@ -701,6 +720,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._context_budget_chars = DEFAULT_CONTEXT_BUDGET_CHARS
         self._include_tenant_shared = False
         self._include_broad_corpus = False
+        self._include_agent_scope_patterns: list[str] = []
+        self._agent_scope_pattern_limit = 5
         self._timeout_seconds = DEFAULT_TIMEOUT_SECONDS
         self._retry_attempts = DEFAULT_RETRY_ATTEMPTS
         self._retry_backoff_seconds = DEFAULT_RETRY_BACKOFF_SECONDS
@@ -809,6 +830,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "key": "include_broad_corpus",
                 "description": "Include broad non-private corpus recall",
                 "default": "false",
+            },
+            {
+                "key": "include_agent_scope_patterns",
+                "description": "Optional comma-separated delegated agent scope patterns, for example agent/*",
+                "default": "",
+            },
+            {
+                "key": "agent_scope_pattern_limit",
+                "description": "Maximum discovered agent scopes selected from pattern matches",
+                "default": "5",
             },
             {
                 "key": "timeout_seconds",
@@ -1036,6 +1067,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._config,
             "include_broad_corpus",
             default=False,
+        )
+        self._include_agent_scope_patterns = _split_patterns(
+            self._config.get("include_agent_scope_patterns")
+        )
+        self._agent_scope_pattern_limit = min(
+            50,
+            max(1, int(self._config.get("agent_scope_pattern_limit", 5))),
         )
         active_skills = (
             kwargs.get("active_skills")
@@ -1981,6 +2019,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "display_limit": self._agent_display_limit,
                     "context_budget_chars": self._context_budget_chars,
                     "agent_scope_key": agent_scope_key,
+                    "include_agent_scope_patterns": self._include_agent_scope_patterns,
+                    "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
                     "workspace_scope_keys": workspace_scope_keys,
                     "include_tenant_shared": self._include_tenant_shared,
                     "tenant_shared_policy": "fallback_only"
@@ -1990,7 +2030,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "broad_corpus_policy": "enabled"
                     if self._include_broad_corpus
                     else "disabled",
-                    "workspace_strict": bool(workspace_scope_keys),
+                    "workspace_strict": bool(workspace_scope_keys)
+                    and not self._include_agent_scope_patterns,
                 },
             )
             trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}

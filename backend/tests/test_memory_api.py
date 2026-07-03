@@ -1987,6 +1987,184 @@ async def test_delegated_agent_memory_policy_adds_allowlisted_agent_scope(
 
 
 @pytest.mark.asyncio
+async def test_agent_scope_pattern_selects_bounded_policy_authorized_scopes(
+    monkeypatch,
+) -> None:
+    searched_scopes: list[tuple[str, str | None]] = []
+
+    async def fake_list_memory_scopes(db, *, tenant_id: str, limit: int = 50, sample_limit: int = 8):
+        del db, limit, sample_limit
+        assert tenant_id == "tenant-a"
+        return MemoryScopeListResponse(
+            scopes=[
+                MemoryScopeSummary(
+                    scope={"type": "agent", "key": "orchestrator"},
+                    entry_count=1,
+                    tags=["scope-agent"],
+                ),
+                MemoryScopeSummary(
+                    scope={"type": "agent", "key": "security"},
+                    entry_count=3,
+                    tags=["security", "incident-response"],
+                ),
+                MemoryScopeSummary(
+                    scope={"type": "agent", "key": "macos"},
+                    entry_count=2,
+                    tags=["macos", "runner"],
+                ),
+                MemoryScopeSummary(
+                    scope={"type": "agent", "key": "frontend"},
+                    entry_count=4,
+                    tags=["ui"],
+                ),
+            ],
+            total=4,
+            limit=100,
+        )
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+        del db, embedder, tenant_id, query_vector
+        searched_scopes.append((body.scope.type, body.scope.key))
+        results = []
+        if body.scope.type == "agent" and body.scope.key == "security":
+            results = [
+                _agent_memory_result(
+                    "00000000-0000-0000-0000-0000000000e1",
+                    "Security wildcard match",
+                    "Security-scoped memory selected from a pattern.",
+                    agent_key="security",
+                    score=0.95,
+                )
+            ]
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=results,
+            total=len(results),
+        )
+
+    monkeypatch.setattr(memory_service, "list_memory_scopes", fake_list_memory_scopes)
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+
+    response = await memory_service.retrieve_agent_memory(
+        FakeSession(),
+        embedder=object(),
+        tenant_id="tenant-a",
+        delegated_policy=DelegatedAgentMemoryReadPolicy(
+            tenant_id="tenant-a",
+            subject_agent_scope_key="orchestrator",
+            policy_id="policy-orchestrator",
+            policy_source="test-policy",
+            read_agent_scope_keys=("security", "macos", "frontend"),
+            max_cross_agent_scopes=2,
+        ),
+        body=AgentMemoryRetrieveRequest(
+            query="security macos recovery",
+            agent_scope_key="orchestrator",
+            include_agent_scope_patterns=["agent/*"],
+            agent_scope_pattern_limit=2,
+            access_reason="assemble delegated agent context",
+            include_tenant_shared=False,
+            include_broad_corpus=False,
+            limit=3,
+        ),
+    )
+
+    assert searched_scopes == [
+        ("agent", "orchestrator"),
+        ("agent", "security"),
+        ("agent", "macos"),
+    ]
+    assert response.trace.requested_agent_scope_patterns == ["agent/*"]
+    assert response.trace.discovered_agent_scope_keys == [
+        "orchestrator",
+        "security",
+        "macos",
+        "frontend",
+    ]
+    assert response.trace.selected_agent_scope_keys == ["security", "macos"]
+    assert response.trace.skipped_agent_scope_keys == ["orchestrator", "frontend"]
+    assert response.trace.agent_scope_pattern_truncated is True
+    assert "caller_agent_scope_excluded" in response.trace.agent_scope_pattern_skip_reasons
+    assert "agent_scope_pattern_limit_exceeded" in response.trace.agent_scope_pattern_skip_reasons
+    assert response.trace.authorized_agent_scope_keys == ["security", "macos"]
+    assert response.trace.denied_agent_scope_keys == []
+    assert response.results[0].retrieved_scope_label == "agent/security"
+
+
+@pytest.mark.asyncio
+async def test_agent_scope_pattern_denies_unauthorized_matches_without_searching_them(
+    monkeypatch,
+) -> None:
+    searched_scopes: list[tuple[str, str | None]] = []
+
+    async def fake_list_memory_scopes(db, *, tenant_id: str, limit: int = 50, sample_limit: int = 8):
+        del db, tenant_id, limit, sample_limit
+        return MemoryScopeListResponse(
+            scopes=[
+                MemoryScopeSummary(
+                    scope={"type": "agent", "key": "security"},
+                    entry_count=1,
+                    tags=["security"],
+                )
+            ],
+            total=1,
+            limit=100,
+        )
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+        del db, embedder, tenant_id, query_vector
+        searched_scopes.append((body.scope.type, body.scope.key))
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr(memory_service, "list_memory_scopes", fake_list_memory_scopes)
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+
+    response = await memory_service.retrieve_agent_memory(
+        FakeSession(),
+        embedder=object(),
+        tenant_id="tenant-a",
+        delegated_policy=DelegatedAgentMemoryReadPolicy(
+            tenant_id="tenant-a",
+            subject_agent_scope_key="orchestrator",
+            policy_id="policy-orchestrator",
+            policy_source="test-policy",
+            read_agent_scope_keys=("macos",),
+        ),
+        body=AgentMemoryRetrieveRequest(
+            query="security incident context",
+            agent_scope_key="orchestrator",
+            include_agent_scope_patterns=["agent/*"],
+            access_reason="assemble delegated agent context",
+            include_tenant_shared=False,
+            include_broad_corpus=False,
+        ),
+    )
+
+    assert searched_scopes == [("agent", "orchestrator")]
+    assert response.trace.requested_agent_scope_keys == ["security"]
+    assert response.trace.matched_agent_scope_keys == ["security"]
+    assert response.trace.selected_agent_scope_keys == ["security"]
+    assert response.trace.authorized_agent_scope_keys == []
+    assert response.trace.denied_agent_scope_keys == ["security"]
+    assert response.trace.delegated_agent_decision == "denied"
+    assert "agent_scope_not_allowlisted" in response.trace.delegated_agent_deny_reasons
+
+
+@pytest.mark.asyncio
 async def test_delegated_agent_memory_results_rank_ahead_of_broad_fallback(
     monkeypatch,
 ) -> None:

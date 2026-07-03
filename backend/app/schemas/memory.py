@@ -527,6 +527,8 @@ class AgentMemoryRetrieveRequest(BaseModel):
     query: str
     agent_scope_key: str | None = None
     include_agent_scope_keys: list[str] = Field(default_factory=list)
+    include_agent_scope_patterns: list[str] = Field(default_factory=list)
+    agent_scope_pattern_limit: int = Field(5, ge=1, le=50)
     include_all_permitted_agent_scopes: bool = False
     access_reason: str | None = None
     workspace_scope_keys: list[str] = Field(default_factory=list)
@@ -561,7 +563,7 @@ class AgentMemoryRetrieveRequest(BaseModel):
             return None
         return _validate_not_blank(value, info.field_name)
 
-    @field_validator("include_agent_scope_keys", "workspace_scope_keys")
+    @field_validator("include_agent_scope_keys", "include_agent_scope_patterns", "workspace_scope_keys")
     @classmethod
     def scope_key_lists_not_blank(cls, value: list[str], info) -> list[str]:
         cleaned: list[str] = []
@@ -599,6 +601,14 @@ class AgentMemoryRetrieveTrace(BaseModel):
     searched_scopes: list[MemoryScope] = Field(default_factory=list)
     caller_agent_scope_key: str | None = None
     requested_agent_scope_keys: list[str] = Field(default_factory=list)
+    requested_agent_scope_patterns: list[str] = Field(default_factory=list)
+    discovered_agent_scope_keys: list[str] = Field(default_factory=list)
+    matched_agent_scope_keys: list[str] = Field(default_factory=list)
+    selected_agent_scope_keys: list[str] = Field(default_factory=list)
+    skipped_agent_scope_keys: list[str] = Field(default_factory=list)
+    agent_scope_pattern_limit: int = 5
+    agent_scope_pattern_truncated: bool = False
+    agent_scope_pattern_skip_reasons: list[str] = Field(default_factory=list)
     authorized_agent_scope_keys: list[str] = Field(default_factory=list)
     denied_agent_scope_keys: list[str] = Field(default_factory=list)
     delegated_agent_policy_id: str | None = None

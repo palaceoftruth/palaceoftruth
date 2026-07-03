@@ -894,6 +894,8 @@ async def retrieve_agent_memory_artifacts(
     request_params = {
         "agent_scope_key": body.agent_scope_key,
         "include_agent_scope_keys": body.include_agent_scope_keys,
+        "include_agent_scope_patterns": body.include_agent_scope_patterns,
+        "agent_scope_pattern_limit": body.agent_scope_pattern_limit,
         "include_all_permitted_agent_scopes": body.include_all_permitted_agent_scopes,
         "access_reason_present": body.access_reason is not None,
         "workspace_scope_keys": body.workspace_scope_keys,
@@ -915,6 +917,8 @@ async def retrieve_agent_memory_artifacts(
     request_summary = {
         "agent_scope_key": body.agent_scope_key,
         "include_agent_scope_count": len(body.include_agent_scope_keys),
+        "include_agent_scope_pattern_count": len(body.include_agent_scope_patterns),
+        "agent_scope_pattern_limit": body.agent_scope_pattern_limit,
         "include_all_permitted_agent_scopes": body.include_all_permitted_agent_scopes,
         "access_reason_present": body.access_reason is not None,
         "workspace_scope_count": len(body.workspace_scope_keys),
