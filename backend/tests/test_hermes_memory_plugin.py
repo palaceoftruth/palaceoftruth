@@ -154,6 +154,8 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
                 "display_limit": 12,
                 "context_budget_chars": 4000,
                 "agent_scope_key": "sterling",
+                "include_agent_scope_patterns": [],
+                "agent_scope_pattern_limit": 5,
                 "workspace_scope_keys": ["sterling"],
                 "include_tenant_shared": False,
                 "tenant_shared_policy": "never",
@@ -174,6 +176,48 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
     assert "position sizing rules" not in caplog.text
     assert "Remember prior trading constraints" not in caplog.text
     assert "tenant-key" not in caplog.text
+
+
+def test_palaceoftruth_provider_sends_agent_scope_patterns(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "agent/*, agent/sec*")
+    monkeypatch.setenv("PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT", "3")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="palaceoftruth",
+        platform="cli",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert method == "POST"
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.prefetch("security recovery", session_id="session-1")
+
+    assert seen_payload["workspace_scope_keys"] == ["palaceoftruth"]
+    assert seen_payload["workspace_strict"] is False
+    assert seen_payload["include_agent_scope_patterns"] == ["agent/*", "agent/sec*"]
+    assert seen_payload["agent_scope_pattern_limit"] == 3
 
 
 def test_palaceoftruth_provider_uses_route_aware_budgets(monkeypatch) -> None:

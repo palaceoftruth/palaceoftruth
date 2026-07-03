@@ -25,6 +25,11 @@ Why this lives here:
   `PALACEOFTRUTH_AGENT_BROAD_CANDIDATE_LIMIT`,
   `PALACEOFTRUTH_AGENT_DISPLAY_LIMIT`, and
   `PALACEOFTRUTH_CONTEXT_BUDGET_CHARS`.
+- Delegated cross-agent recall remains opt-in. Set
+  `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS=agent/*` with
+  `PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT` to ask Palace to discover matching
+  agent scopes, select a bounded subset, and authorize those selected scopes
+  server-side before searching them.
 - Palace API calls use bounded retries for transient failures only: network
   errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
   validation failures, tenant mismatch, and privacy/admission rejections are not

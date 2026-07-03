@@ -1646,6 +1646,8 @@ def test_retrieve_agent_memory_posts_policy_request() -> None:
                 query="exampleos memory",
                 agent_scope_key="orchestrator",
                 include_agent_scope_keys=["security-agent"],
+                include_agent_scope_patterns=["agent/*"],
+                agent_scope_pattern_limit=3,
                 include_all_permitted_agent_scopes=True,
                 access_reason="assemble delegated agent context",
                 workspace_scope_keys=["exampleos"],
@@ -1671,6 +1673,8 @@ def test_retrieve_agent_memory_posts_policy_request() -> None:
     asyncio.run(scenario())
     assert seen_payload["agent_scope_key"] == "orchestrator"
     assert seen_payload["include_agent_scope_keys"] == ["security-agent"]
+    assert seen_payload["include_agent_scope_patterns"] == ["agent/*"]
+    assert seen_payload["agent_scope_pattern_limit"] == 3
     assert seen_payload["include_all_permitted_agent_scopes"] is True
     assert seen_payload["access_reason"] == "assemble delegated agent context"
     assert seen_payload["workspace_scope_keys"] == ["exampleos"]
