@@ -181,7 +181,14 @@ class FakeArqPool:
         return self.next_result
 
 
-def _build_app(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClient:
+def _build_app(
+    session: FakeSession,
+    *,
+    tenant_id: str = "tenant-a",
+    auth_mode: str | None = None,
+    mcp_client_key: str | None = None,
+    mcp_allowed_scopes: list[str] | None = None,
+) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
     app.state.arq_pool = FakeArqPool()
@@ -193,6 +200,9 @@ def _build_app(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClie
     async def override_verify(request: Request):
         request.state.tenant_id = tenant_id
         request.state.key_hash = "key-hash"
+        request.state.auth_mode = auth_mode
+        request.state.mcp_client_key = mcp_client_key
+        request.state.mcp_allowed_scopes = mcp_allowed_scopes
         return "raw-key"
 
     app.dependency_overrides[get_db] = override_get_db
@@ -344,7 +354,33 @@ def test_memory_whoami_returns_authenticated_tenant() -> None:
     response = client.get("/api/v1/memory/whoami")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "tenant_id": "tenant-a"}
+    assert response.json() == {
+        "status": "ok",
+        "tenant_id": "tenant-a",
+        "auth_mode": None,
+        "mcp_client_key": None,
+        "allowed_scopes": [],
+    }
+
+
+def test_memory_whoami_returns_mcp_oauth_scope_metadata() -> None:
+    client = _build_app(
+        FakeSession(),
+        auth_mode="mcp_oauth",
+        mcp_client_key="codex-remote",
+        mcp_allowed_scopes=["read", "write"],
+    )
+
+    response = client.get("/api/v1/memory/whoami")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "mcp_client_key": "codex-remote",
+        "allowed_scopes": ["read", "write"],
+    }
 
 
 def test_memory_entries_accepts_canonical_payload(monkeypatch) -> None:
@@ -2773,7 +2809,13 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         main_app.dependency_overrides.clear()
 
     assert whoami_response.status_code == 200
-    assert whoami_response.json() == {"status": "ok", "tenant_id": "tenant-a"}
+    assert whoami_response.json() == {
+        "status": "ok",
+        "tenant_id": "tenant-a",
+        "auth_mode": None,
+        "mcp_client_key": None,
+        "allowed_scopes": [],
+    }
     assert write_response.status_code == 202
     assert write_response.json()["accepted_as"] == "canonical"
     assert write_response.json()["scope"] == {"type": "workspace", "key": "launch-pad"}

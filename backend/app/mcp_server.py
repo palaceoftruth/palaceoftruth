@@ -6,16 +6,25 @@ import json
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Literal
 
 import httpx
+from mcp.server.auth.middleware.auth_context import (
+    AuthenticatedUser,
+    auth_context_var,
+    get_access_token,
+)
+from mcp.server.auth.provider import AccessToken
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.services.codex_memory_privacy import scan_codex_memory_privacy
 
@@ -241,6 +250,198 @@ def _extract_error_detail(response: httpx.Response) -> str:
         if isinstance(detail, str) and detail.strip():
             return detail.strip()
     return json.dumps(payload)
+
+
+class McpHttpAuthError(Exception):
+    def __init__(self, *, status_code: int, error: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.error = error
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class McpHttpAuthResult:
+    tenant_id: str
+    client_id: str
+    scopes: tuple[McpOperationScope, ...]
+
+
+def _incoming_mcp_auth_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    api_key = headers.get("x-api-key")
+    if api_key and api_key.strip():
+        return {"X-API-Key": api_key.strip()}
+
+    authorization = headers.get("authorization")
+    if authorization is None:
+        raise McpHttpAuthError(
+            status_code=401,
+            error="invalid_token",
+            detail="Missing API key or bearer token",
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise McpHttpAuthError(
+            status_code=401,
+            error="invalid_token",
+            detail="Invalid Authorization header",
+        )
+    return {"Authorization": f"Bearer {token.strip()}"}
+
+
+def _tenant_id_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("whoami response was not an object")
+    tenant_id = payload.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("whoami response did not include a tenant_id")
+    return tenant_id.strip()
+
+
+def _auth_result_from_whoami(payload: Any, *, credential_headers: dict[str, str]) -> McpHttpAuthResult:
+    tenant_id = _tenant_id_from_payload(payload)
+    if "X-API-Key" in credential_headers:
+        return McpHttpAuthResult(
+            tenant_id=tenant_id,
+            client_id="api-key",
+            scopes=ALL_MCP_OPERATION_SCOPES,
+        )
+
+    if not isinstance(payload, dict):
+        raise ValueError("whoami response was not an object")
+    if payload.get("auth_mode") != "mcp_oauth":
+        raise ValueError("bearer whoami response did not include mcp_oauth auth_mode")
+    raw_scopes = payload.get("allowed_scopes")
+    if not isinstance(raw_scopes, list) or any(not isinstance(scope, str) for scope in raw_scopes):
+        raise ValueError("bearer whoami response did not include valid allowed_scopes")
+    scopes = tuple(scope for scope in raw_scopes if scope in ALL_MCP_OPERATION_SCOPES)
+    if len(scopes) != len([scope for scope in raw_scopes if scope.strip()]):
+        raise ValueError("bearer whoami response included unsupported allowed_scopes")
+    client_id = payload.get("mcp_client_key")
+    if not isinstance(client_id, str) or not client_id.strip():
+        client_id = "mcp-oauth"
+    return McpHttpAuthResult(tenant_id=tenant_id, client_id=client_id.strip(), scopes=scopes)
+
+
+class McpHttpAuthVerifier:
+    def __init__(
+        self,
+        settings: "SecondBrainMcpSettings",
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.settings = settings
+        self._transport = transport
+        self._adapter_tenant_id: str | None = None
+
+    async def verify(self, headers: Mapping[str, str]) -> McpHttpAuthResult:
+        auth_headers = _incoming_mcp_auth_headers(headers)
+        async with httpx.AsyncClient(
+            base_url=self.settings.api_base_url,
+            timeout=self.settings.timeout_seconds,
+            headers={"User-Agent": "palaceoftruth-mcp-auth/0.1.0"},
+            transport=self._transport,
+        ) as client:
+            auth_result = await self._auth_for_headers(client, auth_headers)
+            adapter_tenant_id = await self._adapter_tenant(client)
+        if auth_result.tenant_id != adapter_tenant_id:
+            raise McpHttpAuthError(
+                status_code=403,
+                error="invalid_token",
+                detail="MCP credential tenant does not match adapter tenant",
+            )
+        return auth_result
+
+    async def _adapter_tenant(self, client: httpx.AsyncClient) -> str:
+        if self._adapter_tenant_id is not None:
+            return self._adapter_tenant_id
+        try:
+            payload = await SecondBrainApiClient(self.settings, client=client).whoami()
+            tenant_id = _tenant_id_from_payload(payload)
+        except Exception as exc:
+            raise McpHttpAuthError(
+                status_code=503,
+                error="temporarily_unavailable",
+                detail="MCP auth backend is unavailable",
+            ) from exc
+        self._adapter_tenant_id = tenant_id
+        return tenant_id
+
+    async def _auth_for_headers(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+    ) -> McpHttpAuthResult:
+        try:
+            response = await client.get("/api/v1/memory/whoami", headers=headers)
+        except httpx.HTTPError as exc:
+            raise McpHttpAuthError(
+                status_code=503,
+                error="temporarily_unavailable",
+                detail="MCP auth backend is unavailable",
+            ) from exc
+
+        if response.status_code in {401, 403}:
+            raise McpHttpAuthError(
+                status_code=403,
+                error="invalid_token",
+                detail="Invalid MCP credential",
+            )
+        if response.status_code >= 400:
+            raise McpHttpAuthError(
+                status_code=503,
+                error="temporarily_unavailable",
+                detail="MCP auth backend rejected validation",
+            )
+        try:
+            return _auth_result_from_whoami(response.json(), credential_headers=headers)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise McpHttpAuthError(
+                status_code=503,
+                error="temporarily_unavailable",
+                detail="MCP auth backend returned an invalid response",
+            ) from exc
+
+
+class McpHttpAuthMiddleware:
+    def __init__(self, app: ASGIApp, verifier: McpHttpAuthVerifier) -> None:
+        self.app = app
+        self.verifier = verifier
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            auth_result = await self.verifier.verify(Headers(scope=scope))
+        except McpHttpAuthError as exc:
+            await self._send_auth_error(scope, receive, send, exc)
+            return
+        access_token = AccessToken(
+            token="mcp-http-inbound",
+            client_id=auth_result.client_id,
+            scopes=list(auth_result.scopes),
+        )
+        context_token = auth_context_var.set(AuthenticatedUser(access_token))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            auth_context_var.reset(context_token)
+
+    async def _send_auth_error(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        exc: McpHttpAuthError,
+    ) -> None:
+        headers = {"WWW-Authenticate": f'Bearer error="{exc.error}", error_description="{exc.detail}"'}
+        response = JSONResponse(
+            {"error": exc.error, "error_description": exc.detail},
+            status_code=exc.status_code,
+            headers=headers,
+        )
+        await response(scope, receive, send)
 
 
 @dataclass(slots=True)
@@ -1119,7 +1320,26 @@ async def _run_mcp_operation(
             latency_ms=latency_ms,
             error_class="PermissionError",
         )
-        raise PermissionError(f"MCP client is not allowed to call {operation}; missing {required_scope} scope")
+        raise PermissionError(
+            f"MCP client is not allowed to call {operation}; missing {required_scope} scope"
+        )
+    caller_token = get_access_token()
+    if caller_token is not None:
+        params_summary["http_client_id"] = caller_token.client_id
+        if required_scope not in caller_token.scopes:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            await _record_audit_safely(
+                runtime,
+                operation=operation,
+                required_scope=required_scope,
+                params_summary=params_summary,
+                status="denied",
+                latency_ms=latency_ms,
+                error_class="PermissionError",
+            )
+            raise PermissionError(
+                f"MCP HTTP caller is not allowed to call {operation}; missing {required_scope} scope"
+            )
     try:
         result = await call()
     except Exception as exc:
@@ -2202,6 +2422,27 @@ def _streamable_http_transport_security(host: str) -> TransportSecuritySettings:
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
+def _streamable_http_app_with_auth() -> ASGIApp:
+    settings = SecondBrainMcpSettings.from_env()
+    return McpHttpAuthMiddleware(
+        mcp.streamable_http_app(),
+        McpHttpAuthVerifier(settings),
+    )
+
+
+async def _run_streamable_http_with_auth_async() -> None:
+    import uvicorn
+
+    config = uvicorn.Config(
+        _streamable_http_app_with_auth(),
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 def main() -> None:
     args = _parse_args()
     if args.transport == "streamable-http":
@@ -2209,6 +2450,10 @@ def main() -> None:
         mcp.settings.port = args.port
         mcp.settings.streamable_http_path = args.path
         mcp.settings.transport_security = _streamable_http_transport_security(args.host)
+        import anyio
+
+        anyio.run(_run_streamable_http_with_auth_async)
+        return
     mcp.run(transport=args.transport)
 
 
