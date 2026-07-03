@@ -40,11 +40,42 @@ import type {
 } from "./types";
 
 const BASE = "/api/v1";
+export const BROWSER_API_KEY_STORAGE_KEY = "sb:browser_api_key";
+
+export function readBrowserApiKey(): string {
+  try {
+    return localStorage.getItem(BROWSER_API_KEY_STORAGE_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function parseErrorMessage(status: number, text: string): string {
+  let message = text;
+  try {
+    const body = JSON.parse(text) as { detail?: unknown; error_description?: unknown };
+    if (typeof body.detail === "string") {
+      message = body.detail;
+    } else if (typeof body.error_description === "string") {
+      message = body.error_description;
+    }
+  } catch {
+    // Keep the raw response text when the API returns a non-JSON error body.
+  }
+  if (status === 403 && message.toLowerCase().includes("missing api key") && !readBrowserApiKey()) {
+    return "API key required. Add a browser API key in Settings.";
+  }
+  return message;
+}
 
 function buildHeaders(init?: RequestInit): Record<string, string> {
   const headers: Record<string, string> = {
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
+  const apiKey = readBrowserApiKey();
+  if (apiKey && !headers["X-API-Key"]) {
+    headers["X-API-Key"] = apiKey;
+  }
   if (!(init?.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
@@ -66,7 +97,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new ApiError(res.status, text);
+    throw new ApiError(res.status, parseErrorMessage(res.status, text));
   }
   if (res.status === 204) {
     return undefined as T;
@@ -422,10 +453,10 @@ export const api = {
     const qs = new URLSearchParams({ format: params.format });
     if (params.source_type) qs.set("source_type", params.source_type);
     if (params.tags) qs.set("tags", params.tags);
-    const res = await fetch(`${BASE}/export?${qs}`);
+    const res = await fetch(`${BASE}/export?${qs}`, { headers: buildHeaders() });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new ApiError(res.status, text);
+      throw new ApiError(res.status, parseErrorMessage(res.status, text));
     }
     const blob = await res.blob();
     const today = new Date().toISOString().split("T")[0];
@@ -458,16 +489,15 @@ export async function streamChat(
 ): Promise<void> {
   const res = await fetch(`${BASE}/chat/stream`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: buildHeaders(),
     body: JSON.stringify({
       messages,
       conversation_id: options?.conversationId,
     }),
   });
   if (!res.ok) {
-    onError(new ApiError(res.status, await res.text()));
+    const text = await res.text();
+    onError(new ApiError(res.status, parseErrorMessage(res.status, text)));
     return;
   }
   const reader = res.body!.getReader();

@@ -109,6 +109,44 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("Indexed Items")).toBeVisible();
   });
 
+  test("home route sends the browser API key from local storage", async ({ page }) => {
+    const seenKeys: string[] = [];
+    await page.addInitScript(() => {
+      localStorage.setItem("sb:browser_api_key", "browser-test-key");
+    });
+    await page.route("**/api/v1/stats", async (route) => {
+      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      await route.fulfill({
+        json: {
+          total_items: 0,
+          ready_items: 0,
+          indexed_items: 0,
+          embedding_chunks: 0,
+          total_embeddings: 0,
+          active_jobs: 0,
+          feed_count: 0,
+        },
+      });
+    });
+    await page.route("**/api/v1/items?*", async (route) => {
+      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      await route.fulfill({ json: { items: [], total: 0, page: 1, per_page: 10 } });
+    });
+    await page.route("**/api/v1/export?*", async (route) => {
+      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      await route.fulfill({
+        body: "export",
+        headers: { "Content-Type": "application/zip" },
+      });
+    });
+
+    await page.goto(`/?e2e=${Date.now()}`);
+
+    await expect(page.getByRole("heading", { name: "Home" })).toBeVisible();
+    await page.getByRole("button", { name: "Export JSON" }).click();
+    await expect.poll(() => seenKeys).toEqual(["browser-test-key", "browser-test-key", "browser-test-key"]);
+  });
+
   test("api docs route requests and renders the OpenAPI document", async ({ page }) => {
     const docs = await mockApiDocs(page);
 
@@ -196,7 +234,17 @@ test.describe("Route smoke", () => {
 
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
     await expect(page.getByText("Browser-local preferences")).toBeVisible();
-    await expect(page.getByText("No browser API key")).toBeVisible();
+    await expect(page.getByText("Browser API key needed")).toBeVisible();
+
+    await page.getByLabel("Browser API key").fill("tenant-browser-key");
+    await page.getByRole("button", { name: "Save API key" }).click();
+    await expect(page.getByText("Browser API key saved")).toBeVisible();
+    await expect(page.getByText("API key saved for this browser.")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBe("tenant-browser-key");
+
+    await page.getByRole("button", { name: "Clear" }).click();
+    await expect(page.getByText("Browser API key needed")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBeNull();
 
     await page.getByLabel("Items per page (Library)").selectOption("50");
     await page.getByLabel("Default sort order").selectOption("title|asc");
