@@ -35,6 +35,14 @@ Why this lives here:
   `PALACEOFTRUTH_CIRCUIT_FAILURE_THRESHOLD` (default `3`), and
   `PALACEOFTRUTH_CIRCUIT_COOLDOWN_SECONDS` (default `30`). `Retry-After` is
   honored when Palace sends it.
+- Client-side write guardrails are enabled by default for new installs:
+  `PALACEOFTRUTH_WRITE_QUOTAS_ENABLED` (default `true`),
+  `PALACEOFTRUTH_MAX_WRITES_PER_TURN` (default `5`),
+  `PALACEOFTRUTH_MAX_WRITES_PER_SESSION` (default `100`),
+  `PALACEOFTRUTH_MAX_BULK_CALLS_PER_TURN` (default `2`), and
+  `PALACEOFTRUTH_DEDUP_CACHE_TTL_SECONDS` (default `300`). Existing deployments
+  that need temporary compatibility can explicitly opt out by setting
+  `PALACEOFTRUTH_WRITE_QUOTAS_ENABLED=false`.
 - `palace_remember` reports write contract status honestly. A successful tool
   call can still mean accepted or queued rather than durable; inspect the
   returned `durability`, `job_id`, `poll_url`, `poll_after_seconds`, and retry
@@ -42,6 +50,8 @@ Why this lives here:
 - `palace_remember_bulk` writes up to 100 explicit memories through
   `/api/v1/memory/entries:batch` and returns ordered per-item results. Use it
   for intentional bulk saves, not as a local offline spool or replay queue.
+  The local bulk-call quota prevents a single Hermes turn from looping this
+  endpoint without an explicit operator override.
 - Explicit memory tool writes over 24,000 characters are rejected with a clear
   error instead of being silently truncated. Automatic turn sync may still trim
   very long conversation bodies, but it records truncation metadata so operators

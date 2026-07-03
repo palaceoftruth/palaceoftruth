@@ -907,6 +907,164 @@ def test_palaceoftruth_remember_bulk_uses_batch_endpoint(monkeypatch) -> None:
     ]
 
 
+def test_palaceoftruth_plugin_config_schema_includes_write_quota_defaults() -> None:
+    module = load_palaceoftruth_plugin()
+    provider = module.PalaceOfTruthMemoryProvider()
+
+    schema = {item["key"]: item for item in provider.get_config_schema()}
+
+    assert schema["write_quotas_enabled"]["default"] == "true"
+    assert schema["max_writes_per_turn"]["default"] == "5"
+    assert schema["max_writes_per_session"]["default"] == "100"
+    assert schema["max_bulk_calls_per_turn"]["default"] == "2"
+    assert schema["dedup_cache_ttl_seconds"]["default"] == "300"
+
+
+def test_palaceoftruth_remember_bulk_enforces_per_turn_bulk_cap(
+    monkeypatch,
+    caplog,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+    monkeypatch.setenv("PALACEOFTRUTH_MAX_WRITES_PER_TURN", "20")
+    monkeypatch.setenv("PALACEOFTRUTH_MAX_BULK_CALLS_PER_TURN", "2")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        assert path == "/api/v1/memory/entries:batch"
+        return {
+            "status": "accepted",
+            "accepted": len(payload["entries"]),
+            "failed": 0,
+            "results": [],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.WARNING)
+    results = [
+        json.loads(
+            provider.handle_tool_call(
+                "palace_remember_bulk",
+                {"contents": [f"Remember batch {batch} entry {index}." for index in range(100)]},
+            )
+        )
+        for batch in range(3)
+    ]
+
+    assert [result["ok"] for result in results] == [True, True, False]
+    assert results[2]["error"]["type"] == "PalaceRateLimitError"
+    assert "per-turn bulk-call cap exceeded" in results[2]["error"]["message"]
+    assert "Palace bulk write cap reached: 2/2 bulk calls this turn" in caplog.text
+    assert [
+        (method, path)
+        for method, path, _ in requests_seen
+        if method == "POST"
+    ] == [
+        ("POST", "/api/v1/memory/entries:batch"),
+        ("POST", "/api/v1/memory/entries:batch"),
+    ]
+
+
+def test_palaceoftruth_write_quota_counts_sync_and_memory_mirror(
+    monkeypatch,
+    caplog,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+    monkeypatch.setenv("PALACEOFTRUTH_MAX_WRITES_PER_TURN", "1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        return {"job_id": "job-1", "status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.WARNING)
+    provider.on_memory_write("add", "memory", "First write consumes the turn quota.")
+    provider.shutdown()
+    provider.sync_turn("User", "Assistant")
+    provider.shutdown()
+
+    assert [
+        (method, path)
+        for method, path, _ in requests_seen
+        if method == "POST"
+    ] == [("POST", "/api/v1/memory/entries")]
+    assert "per-turn write cap exceeded" in caplog.text
+    assert "Palace of Truth sync failed" in caplog.text
+
+
+def test_palaceoftruth_remember_uses_client_side_dedup(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        assert path == "/api/v1/memory/entries"
+        return {"job_id": "job-dedup", "status": "queued", "contract_status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    first = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember once."})
+    )
+    second = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember once."})
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["response"] == second["response"]
+    assert [
+        (method, path)
+        for method, path, _ in requests_seen
+        if method == "POST"
+    ] == [("POST", "/api/v1/memory/entries")]
+
+
 def test_palaceoftruth_provider_demotes_self_recall_when_workspace_docs_exist(
     monkeypatch,
 ) -> None:

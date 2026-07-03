@@ -42,6 +42,11 @@ DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
 DEFAULT_CIRCUIT_COOLDOWN_SECONDS = 30
+DEFAULT_WRITE_QUOTAS_ENABLED = True
+DEFAULT_MAX_WRITES_PER_TURN = 5
+DEFAULT_MAX_WRITES_PER_SESSION = 100
+DEFAULT_MAX_BULK_CALLS_PER_TURN = 2
+DEFAULT_DEDUP_CACHE_TTL_SECONDS = 300
 SEARCH_TOOL_NAME = "palace_search"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
@@ -284,6 +289,12 @@ class PalaceCircuitOpenError(RuntimeError):
 
 class PalacePayloadTooLargeError(ValueError):
     pass
+
+
+class PalaceRateLimitError(RuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.retryable = False
 
 
 def _parse_retry_after(value: str | None) -> int | None:
@@ -634,6 +645,26 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
             "PALACEOFTRUTH_CIRCUIT_COOLDOWN_SECONDS",
             DEFAULT_CIRCUIT_COOLDOWN_SECONDS,
         ),
+        "write_quotas_enabled": _env_bool(
+            "PALACEOFTRUTH_WRITE_QUOTAS_ENABLED",
+            DEFAULT_WRITE_QUOTAS_ENABLED,
+        ),
+        "max_writes_per_turn": _env_int(
+            "PALACEOFTRUTH_MAX_WRITES_PER_TURN",
+            DEFAULT_MAX_WRITES_PER_TURN,
+        ),
+        "max_writes_per_session": _env_int(
+            "PALACEOFTRUTH_MAX_WRITES_PER_SESSION",
+            DEFAULT_MAX_WRITES_PER_SESSION,
+        ),
+        "max_bulk_calls_per_turn": _env_int(
+            "PALACEOFTRUTH_MAX_BULK_CALLS_PER_TURN",
+            DEFAULT_MAX_BULK_CALLS_PER_TURN,
+        ),
+        "dedup_cache_ttl_seconds": _env_int(
+            "PALACEOFTRUTH_DEDUP_CACHE_TTL_SECONDS",
+            DEFAULT_DEDUP_CACHE_TTL_SECONDS,
+        ),
         "source": os.environ.get("PALACEOFTRUTH_SOURCE", DEFAULT_SOURCE).strip()
         or DEFAULT_SOURCE,
         "created_by_role": os.environ.get(
@@ -678,6 +709,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._circuit_failure_count = 0
         self._circuit_opened_until = 0.0
         self._circuit_lock = threading.Lock()
+        self._write_quotas_enabled = DEFAULT_WRITE_QUOTAS_ENABLED
+        self._max_writes_per_turn = DEFAULT_MAX_WRITES_PER_TURN
+        self._max_writes_per_session = DEFAULT_MAX_WRITES_PER_SESSION
+        self._max_bulk_calls_per_turn = DEFAULT_MAX_BULK_CALLS_PER_TURN
+        self._dedup_cache_ttl_seconds = DEFAULT_DEDUP_CACHE_TTL_SECONDS
+        self._turn_write_count = 0
+        self._turn_bulk_call_count = 0
+        self._session_write_count = 0
+        self._write_quota_lock = threading.Lock()
+        self._dedup_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
         self._session_id = ""
@@ -794,6 +835,34 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "description": "Circuit cooldown in seconds after repeated transient failures",
                 "default": str(DEFAULT_CIRCUIT_COOLDOWN_SECONDS),
             },
+            {
+                "key": "write_quotas_enabled",
+                "description": (
+                    "Enable local write quotas and idempotency-key dedup before POSTing "
+                    "to Palace. Existing deployments may set false to opt out."
+                ),
+                "default": "true",
+            },
+            {
+                "key": "max_writes_per_turn",
+                "description": "Maximum Palace write POST attempts per Hermes turn",
+                "default": str(DEFAULT_MAX_WRITES_PER_TURN),
+            },
+            {
+                "key": "max_writes_per_session",
+                "description": "Maximum Palace write POST attempts per Hermes session",
+                "default": str(DEFAULT_MAX_WRITES_PER_SESSION),
+            },
+            {
+                "key": "max_bulk_calls_per_turn",
+                "description": "Maximum palace_remember_bulk POST attempts per Hermes turn",
+                "default": str(DEFAULT_MAX_BULK_CALLS_PER_TURN),
+            },
+            {
+                "key": "dedup_cache_ttl_seconds",
+                "description": "TTL for client-side idempotency-key dedup cache",
+                "default": str(DEFAULT_DEDUP_CACHE_TTL_SECONDS),
+            },
         ]
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
@@ -902,6 +971,54 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 ),
             ),
         )
+        self._write_quotas_enabled = _config_bool(
+            self._config,
+            "write_quotas_enabled",
+            default=DEFAULT_WRITE_QUOTAS_ENABLED,
+        )
+        self._max_writes_per_turn = min(
+            100,
+            max(
+                1,
+                int(self._config.get("max_writes_per_turn", DEFAULT_MAX_WRITES_PER_TURN)),
+            ),
+        )
+        self._max_writes_per_session = min(
+            10000,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "max_writes_per_session",
+                        DEFAULT_MAX_WRITES_PER_SESSION,
+                    )
+                ),
+            ),
+        )
+        self._max_bulk_calls_per_turn = min(
+            20,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "max_bulk_calls_per_turn",
+                        DEFAULT_MAX_BULK_CALLS_PER_TURN,
+                    )
+                ),
+            ),
+        )
+        self._dedup_cache_ttl_seconds = min(
+            3600,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "dedup_cache_ttl_seconds",
+                        DEFAULT_DEDUP_CACHE_TTL_SECONDS,
+                    )
+                ),
+            ),
+        )
         self._source = str(self._config.get("source", DEFAULT_SOURCE)).strip() or DEFAULT_SOURCE
         self._created_by_role = (
             str(self._config.get("created_by_role", DEFAULT_CREATED_BY_ROLE)).strip()
@@ -931,6 +1048,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         agent_context = str(kwargs.get("agent_context", "")).strip()
         self._writes_disabled = agent_context not in {"", "primary"}
         self._tenant_id = ""
+        self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
         base = (
@@ -1102,7 +1220,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     content=content,
                     tenant_id=tenant_id,
                 )
-                response = self._request_json("POST", "/api/v1/memory/entries", payload)
+                response = self._post_memory_entries("/api/v1/memory/entries", payload)
             except Exception as exc:
                 return json.dumps(
                     {
@@ -1188,10 +1306,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     }
                 )
             try:
-                response = self._request_json(
-                    "POST",
+                response = self._post_memory_entries(
                     "/api/v1/memory/entries:batch",
                     {"entries": entries},
+                    is_bulk=True,
                 )
             except Exception as exc:
                 return json.dumps(
@@ -1293,9 +1411,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     active_session,
                     tenant_id=tenant_id,
                 )
-                self._request_json("POST", "/api/v1/memory/entries", payload)
+                self._post_memory_entries("/api/v1/memory/entries", payload)
             except Exception as exc:
                 logger.warning("Palace of Truth sync failed: %s", exc)
+            finally:
+                self._reset_write_quota()
 
         self._sync_thread = threading.Thread(target=_worker, daemon=True)
         self._sync_thread.start()
@@ -1319,6 +1439,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             }
         with self._tenant_id_lock:
             self._tenant_id = ""
+        self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         if self._writes_disabled or not self._base_url or not self._api_key:
@@ -1346,12 +1467,119 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     content=content_text,
                     tenant_id=tenant_id,
                 )
-                self._request_json("POST", "/api/v1/memory/entries", payload)
+                self._post_memory_entries("/api/v1/memory/entries", payload)
             except Exception as exc:
                 logger.warning("Palace of Truth memory mirror failed: %s", exc)
 
         self._sync_thread = threading.Thread(target=_worker, daemon=True)
         self._sync_thread.start()
+
+    def _reset_write_quota(self, *, session: bool = False) -> None:
+        with self._write_quota_lock:
+            self._turn_write_count = 0
+            self._turn_bulk_call_count = 0
+            if session:
+                self._session_write_count = 0
+
+    def _write_dedup_cache_key(self, path: str, payload: dict[str, Any]) -> str:
+        idempotency_key = payload.get("idempotency_key")
+        if isinstance(idempotency_key, str) and idempotency_key:
+            return f"{path}:{idempotency_key}"
+        entries = payload.get("entries")
+        if isinstance(entries, list):
+            keys: list[str] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return ""
+                entry_key = entry.get("idempotency_key")
+                if not isinstance(entry_key, str) or not entry_key:
+                    return ""
+                keys.append(entry_key)
+            if keys:
+                digest = hashlib.sha256(
+                    json.dumps(keys, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                return f"{path}:batch:{digest}"
+        return ""
+
+    def _dedup_cache_get(self, cache_key: str) -> dict[str, Any] | None:
+        if not self._write_quotas_enabled or not cache_key:
+            return None
+        now = perf_counter()
+        with self._write_quota_lock:
+            cached = self._dedup_cache.get(cache_key)
+            if not cached:
+                return None
+            response, expires_at = cached
+            if expires_at <= now:
+                self._dedup_cache.pop(cache_key, None)
+                return None
+            return dict(response)
+
+    def _dedup_cache_put(self, cache_key: str, response: dict[str, Any]) -> None:
+        if not self._write_quotas_enabled or not cache_key:
+            return
+        expires_at = perf_counter() + self._dedup_cache_ttl_seconds
+        with self._write_quota_lock:
+            self._dedup_cache[cache_key] = (dict(response), expires_at)
+
+    def _reserve_write_quota(self, *, is_bulk: bool) -> None:
+        if not self._write_quotas_enabled:
+            return
+        with self._write_quota_lock:
+            if self._turn_write_count >= self._max_writes_per_turn:
+                logger.warning(
+                    "Palace write cap reached: %d/%d writes this turn",
+                    self._turn_write_count,
+                    self._max_writes_per_turn,
+                )
+                raise PalaceRateLimitError(
+                    "per-turn write cap exceeded "
+                    f"({self._max_writes_per_turn}); raise max_writes_per_turn "
+                    "in palaceoftruth.json to allow more"
+                )
+            if self._session_write_count >= self._max_writes_per_session:
+                logger.warning(
+                    "Palace write cap reached: %d/%d writes this session",
+                    self._session_write_count,
+                    self._max_writes_per_session,
+                )
+                raise PalaceRateLimitError(
+                    "per-session write cap exceeded "
+                    f"({self._max_writes_per_session}); raise max_writes_per_session "
+                    "in palaceoftruth.json to allow more"
+                )
+            if is_bulk and self._turn_bulk_call_count >= self._max_bulk_calls_per_turn:
+                logger.warning(
+                    "Palace bulk write cap reached: %d/%d bulk calls this turn",
+                    self._turn_bulk_call_count,
+                    self._max_bulk_calls_per_turn,
+                )
+                raise PalaceRateLimitError(
+                    "per-turn bulk-call cap exceeded "
+                    f"({self._max_bulk_calls_per_turn}); raise max_bulk_calls_per_turn "
+                    "in palaceoftruth.json to allow more"
+                )
+            self._turn_write_count += 1
+            self._session_write_count += 1
+            if is_bulk:
+                self._turn_bulk_call_count += 1
+
+    def _post_memory_entries(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        is_bulk: bool = False,
+    ) -> dict[str, Any]:
+        cache_key = self._write_dedup_cache_key(path, payload)
+        cached = self._dedup_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        self._reserve_write_quota(is_bulk=is_bulk)
+        response = self._request_json("POST", path, payload)
+        self._dedup_cache_put(cache_key, response)
+        return response
 
     def shutdown(self) -> None:
         if self._prefetch_thread and self._prefetch_thread.is_alive():
