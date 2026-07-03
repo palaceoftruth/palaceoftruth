@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, cast
 
 import httpx
 from mcp.server.auth.middleware.auth_context import (
@@ -305,13 +305,29 @@ def _tenant_id_from_payload(payload: Any) -> str:
     return tenant_id.strip()
 
 
+def _api_key_scopes_from_headers(credential_headers: Mapping[str, str]) -> tuple[McpOperationScope, ...]:
+    scopes: list[McpOperationScope] = []
+    for header_name in ("X-MCP-Scope", "X-MCP-Scopes"):
+        raw_value = credential_headers.get(header_name)
+        if raw_value is None:
+            continue
+        for part in raw_value.replace(",", " ").split():
+            scope = part.strip()
+            if not scope:
+                continue
+            if scope not in ALL_MCP_OPERATION_SCOPES:
+                raise ValueError(f"API key MCP scope header included unsupported scope: {scope}")
+            scopes.append(cast(McpOperationScope, scope))
+    return tuple(dict.fromkeys(scopes))
+
+
 def _auth_result_from_whoami(payload: Any, *, credential_headers: dict[str, str]) -> McpHttpAuthResult:
     tenant_id = _tenant_id_from_payload(payload)
     if "X-API-Key" in credential_headers:
         return McpHttpAuthResult(
             tenant_id=tenant_id,
             client_id="api-key",
-            scopes=ALL_MCP_OPERATION_SCOPES,
+            scopes=_api_key_scopes_from_headers(credential_headers),
         )
 
     if not isinstance(payload, dict):
