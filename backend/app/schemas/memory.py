@@ -79,6 +79,9 @@ def _clean_tags(value: list[str] | None) -> list[str] | None:
 class MemoryWhoAmIResponse(BaseModel):
     status: Literal["ok"] = "ok"
     tenant_id: str
+    auth_mode: str | None = None
+    mcp_client_key: str | None = None
+    allowed_scopes: list[str] = Field(default_factory=list)
 
 
 class McpClientInfo(BaseModel):

@@ -1,11 +1,20 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
+from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
+from mcp.server.auth.provider import AccessToken
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from app.mcp_server import (
+    McpHttpAuthMiddleware,
+    McpHttpAuthVerifier,
     SecondBrainApiClient,
     SecondBrainMcpRuntime,
     SecondBrainMcpSettings,
@@ -34,6 +43,48 @@ from app.mcp_server import (
     retrieve_agent_memory,
     retrieve_memory_trajectory,
 )
+
+
+def _mcp_auth_test_client(
+    *,
+    transport: httpx.MockTransport,
+    settings: SecondBrainMcpSettings | None = None,
+) -> TestClient:
+    async def endpoint(request) -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    app = Starlette(routes=[Route("/mcp", endpoint, methods=["GET", "POST"])])
+    verifier = McpHttpAuthVerifier(
+        settings
+        or SecondBrainMcpSettings(
+            api_base_url="https://api.palaceoftruth.test",
+            api_key="adapter-key",
+            timeout_seconds=5.0,
+        ),
+        transport=transport,
+    )
+    return TestClient(McpHttpAuthMiddleware(app, verifier))
+
+
+def _whoami_transport(tenants_by_credential: dict[str, str | dict[str, Any]]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/v1/memory/whoami":
+            return httpx.Response(404, json={"detail": "not found"})
+        credential = request.headers.get("x-api-key") or request.headers.get("authorization")
+        payload = tenants_by_credential.get(credential or "")
+        if payload is None:
+            return httpx.Response(403, json={"detail": "Invalid or revoked API key"})
+        if isinstance(payload, str):
+            payload = {
+                "status": "ok",
+                "tenant_id": payload,
+                "auth_mode": "api_key",
+                "mcp_client_key": None,
+                "allowed_scopes": [],
+            }
+        return httpx.Response(200, json=payload)
+
+    return httpx.MockTransport(handler)
 
 
 def test_settings_from_env_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,6 +145,71 @@ def test_settings_from_env_prefers_palace_aliases(monkeypatch: pytest.MonkeyPatc
     assert settings.api_key == "palace-secret"
     assert settings.api_base_url == "https://api.palaceoftruth.test"
     assert settings.timeout_seconds == 12.5
+
+
+def test_mcp_http_auth_rejects_missing_credentials() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "should not be called"})
+
+    transport = httpx.MockTransport(handler)
+
+    with _mcp_auth_test_client(transport=transport) as client:
+        response = client.post("/mcp")
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "error": "invalid_token",
+        "error_description": "Missing API key or bearer token",
+    }
+
+
+def test_mcp_http_auth_accepts_valid_api_key_for_adapter_tenant() -> None:
+    transport = _whoami_transport({"adapter-key": "tenant-a"})
+
+    with _mcp_auth_test_client(transport=transport) as client:
+        response = client.post("/mcp", headers={"X-API-Key": "adapter-key"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_mcp_http_auth_accepts_valid_bearer_for_adapter_tenant() -> None:
+    transport = _whoami_transport(
+        {
+            "adapter-key": "tenant-a",
+            "Bearer caller-token": {
+                "status": "ok",
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "mcp_client_key": "codex-remote",
+                "allowed_scopes": ["read"],
+            },
+        }
+    )
+
+    with _mcp_auth_test_client(transport=transport) as client:
+        response = client.post("/mcp", headers={"Authorization": "Bearer caller-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_mcp_http_auth_rejects_valid_credential_for_different_tenant() -> None:
+    transport = _whoami_transport(
+        {
+            "adapter-key": "tenant-a",
+            "other-tenant-key": "tenant-b",
+        }
+    )
+
+    with _mcp_auth_test_client(transport=transport) as client:
+        response = client.post("/mcp", headers={"X-API-Key": "other-tenant-key"})
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "invalid_token",
+        "error_description": "MCP credential tenant does not match adapter tenant",
+    }
 
 
 @pytest.mark.asyncio
@@ -705,6 +821,64 @@ def test_mcp_tool_denies_missing_write_scope_and_records_audit() -> None:
 
     asyncio.run(scenario())
     assert seen_paths == ["/api/v1/memory/mcp/audit"]
+
+
+def test_mcp_tool_denies_http_caller_missing_write_scope_and_records_audit() -> None:
+    seen_paths: list[str] = []
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            payload = json.loads(request.content.decode())
+            audit_payload.update(payload)
+            assert payload["operation"] == "create_memory_entry"
+            assert payload["status"] == "denied"
+            assert payload["params_summary"]["http_client_id"] == "read-only-client"
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    client_scopes=("read", "write"),
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            access_token = AccessToken(
+                token="caller-token",
+                client_id="read-only-client",
+                scopes=["read"],
+            )
+            context_token = auth_context_var.set(AuthenticatedUser(access_token))
+            try:
+                with pytest.raises(PermissionError, match="missing write scope"):
+                    await create_memory_entry(title="Denied", body="secret", ctx=ctx)
+            finally:
+                auth_context_var.reset(context_token)
+
+    asyncio.run(scenario())
+    assert seen_paths == ["/api/v1/memory/mcp/audit"]
+    assert audit_payload["error_class"] == "PermissionError"
 
 
 def test_palace_remember_alias_uses_create_memory_entry_defaults() -> None:
