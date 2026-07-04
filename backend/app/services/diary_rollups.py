@@ -5,8 +5,9 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.item import Item
@@ -29,6 +30,13 @@ class DiaryRollupBatchResult:
     updated: int
     unchanged: int
     deactivated: int
+
+
+@dataclass(frozen=True)
+class _DiaryRollupSummaryRow:
+    title: str | None
+    metadata_: dict[str, Any]
+    updated_at: datetime
 
 
 async def mark_item_dirty(*args, **kwargs):
@@ -347,20 +355,19 @@ async def build_diary_rollup_summary(
     today: date | None = None,
 ) -> dict[str, object]:
     expected_through_day = (today or datetime.now(timezone.utc).date()) - timedelta(days=1)
-    rows = (
-        await db.execute(
-            select(Item)
-            .where(Item.tenant_id == tenant_id)
-            .where(Item.status == "ready")
-            .where(Item.deleted_at.is_(None))
-            .order_by(Item.updated_at.desc(), Item.id.desc())
+    rows = [
+        _DiaryRollupSummaryRow(
+            title=_row_value(row, "title", 0),
+            metadata_=_row_value(row, "metadata_", 1) or {},
+            updated_at=_row_value(row, "updated_at", 2),
         )
-    ).scalars().all()
+        for row in (await db.execute(diary_rollup_summary_statement(tenant_id=tenant_id))).all()
+    ]
 
     latest_by_scope: dict[tuple[str, str | None], dict[str, object]] = {}
     last_refreshed_at: datetime | None = None
-    for item in rows:
-        diary_rollup = (item.metadata_ or {}).get("diary_rollup")
+    for row in rows:
+        diary_rollup = (row.metadata_ or {}).get("diary_rollup")
         if not isinstance(diary_rollup, dict):
             continue
         scope_type = diary_rollup.get("scope_type")
@@ -382,11 +389,11 @@ async def build_diary_rollup_summary(
         if current is not None and isinstance(current.get("day"), date) and current["day"] >= rollup_day:
             continue
 
-        updated_at = item.updated_at
+        updated_at = row.updated_at
         if last_refreshed_at is None or updated_at > last_refreshed_at:
             last_refreshed_at = updated_at
         latest_by_scope[scope] = {
-            "title": item.title,
+            "title": row.title,
             "scope_type": scope_type,
             "scope_key": scope_key,
             "day": rollup_day,
@@ -409,3 +416,25 @@ async def build_diary_rollup_summary(
         "last_refreshed_at": last_refreshed_at,
         "recent_rollups": recent_rollups,
     }
+
+
+def diary_rollup_summary_statement(*, tenant_id: str) -> Select:
+    return (
+        select(Item.title, Item.metadata_, Item.updated_at)
+        .where(Item.tenant_id == tenant_id)
+        .where(Item.status == "ready")
+        .where(Item.deleted_at.is_(None))
+        .where(Item.metadata_.has_key("diary_rollup"))
+        .order_by(Item.updated_at.desc(), Item.id.desc())
+    )
+
+
+def _row_value(row: Any, key: str, index: int = 0) -> Any:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and key in mapping:
+        return mapping[key]
+    if hasattr(row, key):
+        return getattr(row, key)
+    if isinstance(row, tuple):
+        return row[index]
+    return row

@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from time import perf_counter
+from typing import Any, Awaitable, Callable, Iterable
 from urllib.parse import quote, urlparse
 
 import boto3
@@ -119,6 +120,7 @@ _WEBHOOK_TERMINAL_STATUSES = {"completed", "duplicate", "failed", "cancelled"}
 CONSOLIDATION_CANDIDATE_EVENT = "consolidation-candidate"
 CONSOLIDATION_CANDIDATE_LIMIT = 8
 CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD = 0.62
+CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS = 1.0
 
 SYNC_ACTIVE_STATUSES = {"queued", "running"}
 PALACE_ACTIVE_STATUSES = {"queued", "routing", "snapshotting", "tunneling"}
@@ -1625,6 +1627,16 @@ async def _build_mcp_activity(db: AsyncSession, tenant_id: str) -> PalaceMcpActi
 
 
 async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -> PalaceControlTower:
+    control_tower_started_at = perf_counter()
+    section_timings_ms: dict[str, float] = {}
+
+    async def timed_section(name: str, awaitable: Awaitable[Any]) -> Any:
+        section_started_at = perf_counter()
+        try:
+            return await awaitable
+        finally:
+            section_timings_ms[name] = round((perf_counter() - section_started_at) * 1000, 1)
+
     state = await ensure_tenant_state(db, tenant_id)
     active_run = None
     if state.active_palace_run_id:
@@ -1642,36 +1654,56 @@ async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -
                 completed_at=row.completed_at,
             )
 
-    return PalaceControlTower(
+    control_tower = PalaceControlTower(
         tenant_id=tenant_id,
         dirty_generation=state.dirty_generation,
         indexed_generation=state.indexed_generation,
         backlog_generation=max(state.dirty_generation - state.indexed_generation, 0),
         active_palace_run=active_run,
-        room_artifacts=await build_room_artifact_health(db, tenant_id=tenant_id, state=state),
-        consolidation=await find_consolidation_candidates(db, tenant_id=tenant_id),
-        worker_backpressure=await build_worker_backpressure(arq_pool, db=db),
-        mcp_activity=await _build_mcp_activity(db, tenant_id),
-        memory_health=await _build_memory_health(db, tenant_id),
-        webhook_health=await _build_webhook_health(db, tenant_id),
+        room_artifacts=await timed_section(
+            "room_artifacts",
+            build_room_artifact_health(db, tenant_id=tenant_id, state=state),
+        ),
+        consolidation=await timed_section("consolidation", find_consolidation_candidates(db, tenant_id=tenant_id)),
+        worker_backpressure=await timed_section("worker_backpressure", build_worker_backpressure(arq_pool, db=db)),
+        mcp_activity=await timed_section("mcp_activity", _build_mcp_activity(db, tenant_id)),
+        memory_health=await timed_section("memory_health", _build_memory_health(db, tenant_id)),
+        webhook_health=await timed_section("webhook_health", _build_webhook_health(db, tenant_id)),
         fact_registry=PalaceFactRegistrySummary.model_validate(
-            await build_fact_registry_summary(db, tenant_id=tenant_id)
+            await timed_section("fact_registry", build_fact_registry_summary(db, tenant_id=tenant_id))
         ),
         diary_rollups=PalaceDiaryRollupSummary.model_validate(
-            await build_diary_rollup_summary(db, tenant_id=tenant_id)
+            await timed_section("diary_rollups", build_diary_rollup_summary(db, tenant_id=tenant_id))
         ),
         wakeup_briefs=PalaceWakeupBriefSummary.model_validate(
-            await build_wakeup_brief_summary(
-                db,
-                tenant_id=tenant_id,
-                indexed_generation=state.indexed_generation,
+            await timed_section(
+                "wakeup_briefs",
+                build_wakeup_brief_summary(
+                    db,
+                    tenant_id=tenant_id,
+                    indexed_generation=state.indexed_generation,
+                ),
             )
         ),
-        source_trust_health=await _build_control_tower_source_trust_health(db, tenant_id),
-        sync_sources=await list_sync_sources(db, tenant_id),
-        sync_runs=await list_sync_runs(db, tenant_id, limit=8),
-        palace_runs=await list_palace_runs(db, tenant_id, limit=8),
+        source_trust_health=await timed_section(
+            "source_trust_health",
+            _build_control_tower_source_trust_health(db, tenant_id),
+        ),
+        sync_sources=await timed_section("sync_sources", list_sync_sources(db, tenant_id)),
+        sync_runs=await timed_section("sync_runs", list_sync_runs(db, tenant_id, limit=8)),
+        palace_runs=await timed_section("palace_runs", list_palace_runs(db, tenant_id, limit=8)),
     )
+    elapsed_seconds = perf_counter() - control_tower_started_at
+    if elapsed_seconds >= CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS:
+        logger.info(
+            "control tower build timings",
+            extra={
+                "tenant_id": tenant_id,
+                "elapsed_ms": round(elapsed_seconds * 1000, 1),
+                "section_timings_ms": section_timings_ms,
+            },
+        )
+    return control_tower
 
 
 async def _build_control_tower_source_trust_health(

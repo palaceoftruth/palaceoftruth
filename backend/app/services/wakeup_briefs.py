@@ -5,8 +5,9 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.item import Item
@@ -67,6 +68,13 @@ class WakeupFactContext:
     extracted_at: datetime
     valid_from: datetime | None
     valid_to: datetime | None
+
+
+@dataclass(frozen=True)
+class _WakeupBriefSummaryRow:
+    title: str | None
+    metadata_: dict[str, Any]
+    updated_at: datetime
 
 
 def _normalize_created_at(value: datetime) -> datetime:
@@ -604,22 +612,21 @@ async def build_wakeup_brief_summary(
     today: date | None = None,
 ) -> dict[str, object]:
     brief_day = today or datetime.now(timezone.utc).date()
-    rows = (
-        await db.execute(
-            select(Item)
-            .where(Item.tenant_id == tenant_id)
-            .where(Item.status == "ready")
-            .where(Item.deleted_at.is_(None))
-            .order_by(Item.updated_at.desc(), Item.id.desc())
+    rows = [
+        _WakeupBriefSummaryRow(
+            title=_row_value(row, "title", 0),
+            metadata_=_row_value(row, "metadata_", 1) or {},
+            updated_at=_row_value(row, "updated_at", 2),
         )
-    ).scalars().all()
+        for row in (await db.execute(wakeup_brief_summary_statement(tenant_id=tenant_id))).all()
+    ]
 
     relevant: list[dict[str, object]] = []
     last_refreshed_at = None
     fresh = 0
     stale = 0
-    for item in rows:
-        brief = (item.metadata_ or {}).get("wakeup_brief")
+    for row in rows:
+        brief = (row.metadata_ or {}).get("wakeup_brief")
         if not isinstance(brief, dict):
             continue
         if brief.get("day") != brief_day.isoformat():
@@ -627,7 +634,7 @@ async def build_wakeup_brief_summary(
         scope_type = brief.get("scope_type")
         scope_key = brief.get("scope_key")
         generation = int(brief.get("generation", 0))
-        updated_at = item.updated_at
+        updated_at = row.updated_at
         if last_refreshed_at is None or updated_at > last_refreshed_at:
             last_refreshed_at = updated_at
         is_stale = generation < indexed_generation
@@ -637,7 +644,7 @@ async def build_wakeup_brief_summary(
             fresh += 1
         relevant.append(
             {
-                "title": item.title,
+                "title": row.title,
                 "scope_type": scope_type,
                 "scope_key": scope_key,
                 "generation": generation,
@@ -656,3 +663,25 @@ async def build_wakeup_brief_summary(
         "last_refreshed_at": last_refreshed_at,
         "recent_briefs": relevant[:8],
     }
+
+
+def wakeup_brief_summary_statement(*, tenant_id: str) -> Select:
+    return (
+        select(Item.title, Item.metadata_, Item.updated_at)
+        .where(Item.tenant_id == tenant_id)
+        .where(Item.status == "ready")
+        .where(Item.deleted_at.is_(None))
+        .where(Item.metadata_.has_key("wakeup_brief"))
+        .order_by(Item.updated_at.desc(), Item.id.desc())
+    )
+
+
+def _row_value(row: Any, key: str, index: int = 0) -> Any:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and key in mapping:
+        return mapping[key]
+    if hasattr(row, key):
+        return getattr(row, key)
+    if isinstance(row, tuple):
+        return row[index]
+    return row
