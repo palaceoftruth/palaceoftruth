@@ -258,7 +258,7 @@ def _join_tags(tags: list[str] | None) -> str | None:
     return ",".join(cleaned) if cleaned else None
 
 
-def _extract_error_detail(response: httpx.Response) -> str:
+def _extract_error_detail(response: httpx.Response) -> str | dict[str, Any]:
     try:
         payload = response.json()
     except ValueError:
@@ -268,7 +268,19 @@ def _extract_error_detail(response: httpx.Response) -> str:
         detail = payload.get("detail")
         if isinstance(detail, str) and detail.strip():
             return detail.strip()
+        if isinstance(detail, dict):
+            return detail
     return json.dumps(payload)
+
+
+class PalaceApiError(RuntimeError):
+    def __init__(self, *, status_code: int, method: str, path: str, detail: str | dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.method = method
+        self.path = path
+        self.detail = detail
+        message = detail if isinstance(detail, str) else json.dumps(detail, sort_keys=True)
+        super().__init__(f"Palace API error {status_code} for {method} {path}: {message}")
 
 
 class McpHttpAuthError(Exception):
@@ -604,9 +616,11 @@ class SecondBrainApiClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = _extract_error_detail(exc.response)
-            raise RuntimeError(
-                f"Palace API error {exc.response.status_code} for {exc.request.method} "
-                f"{exc.request.url.path}: {detail}"
+            raise PalaceApiError(
+                status_code=exc.response.status_code,
+                method=exc.request.method,
+                path=exc.request.url.path,
+                detail=detail,
             ) from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"Failed to reach Palace API at {self.settings.api_base_url}: {exc}") from exc
@@ -1809,12 +1823,19 @@ async def capture_checkpoint(
             relationship_policy=relationship_policy,
         )
         job_id = accepted.get("job_id")
+        source_item_id = accepted.get("source_item_id")
+        replayed = accepted.get("replayed") is True
         job_ack: dict[str, Any] | None = None
-        if read_after_write and isinstance(job_id, str) and job_id.strip():
+        should_read_after_write = read_after_write and isinstance(job_id, str) and job_id.strip()
+        if replayed:
+            should_read_after_write = should_read_after_write and isinstance(source_item_id, str) and source_item_id.strip()
+        if should_read_after_write:
             job_ack = await runtime.api.get_memory_job(job_id)
 
         relationship_backfill: dict[str, Any] = {"queued": False}
-        if queue_relationship_backfill and relationship_policy == "deferred":
+        if replayed:
+            relationship_backfill = {"queued": False, "reason": "replayed_duplicate"}
+        elif queue_relationship_backfill and relationship_policy == "deferred":
             relationship_backfill = await runtime.api.backfill_deferred_relationships(
                 limit=backfill_limit,
                 defer_seconds=backfill_defer_seconds,
@@ -1822,11 +1843,17 @@ async def capture_checkpoint(
 
         return {
             "status": accepted.get("status", "accepted"),
+            "contract_status": accepted.get("contract_status", "accepted"),
+            "replayed": replayed,
             "accepted": True,
             "job_id": job_id,
+            "source_item_id": source_item_id,
             "accepted_as": accepted.get("accepted_as"),
             "scope": accepted.get("scope", cleaned_scope),
             "idempotency_key": final_idempotency_key,
+            "poll_url": accepted.get("poll_url"),
+            "poll_after_seconds": accepted.get("poll_after_seconds"),
+            "retryable": accepted.get("retryable", False),
             "memory_job": job_ack,
             "relationship_backfill": relationship_backfill,
         }
