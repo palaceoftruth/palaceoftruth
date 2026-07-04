@@ -654,7 +654,12 @@ async def get_palace_claim_support(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ) -> PalaceClaimSupportReport:
-    report = await get_claim_support_report(db, tenant_id=request.state.tenant_id, status=status, limit=limit)
+    report = await get_claim_support_report(
+        db,
+        tenant_id=request.state.tenant_id,
+        status=status,
+        limit=limit,
+    )
     return PalaceClaimSupportReport(
         tenant_id=report.tenant_id,
         claims=[
@@ -665,6 +670,8 @@ async def get_palace_claim_support(
                 "claim_type": claim.claim_type,
                 "confidence": claim.confidence,
                 "status": claim.status,
+                "support_state": claim.support_state,
+                "warning": claim.warning,
                 "metadata": claim.metadata,
                 "sources": [
                     {
@@ -672,6 +679,7 @@ async def get_palace_claim_support(
                         "source_record_id": source.source_record_id,
                         "source_chunk_id": source.source_chunk_id,
                         "source_item_id": source.source_item_id,
+                        "source_record_status": source.source_record_status,
                         "support_role": source.support_role,
                         "status": source.status,
                         "source_digest": source.source_digest,

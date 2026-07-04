@@ -16,6 +16,31 @@ from app.models.palace import Claim, ClaimSource, SourceChunk, SourceRecord, Tem
 
 ACTIVE_SOURCE_STATUSES = {"active", "stale", "superseded"}
 CLAIM_SUPPORT_SOURCE_STATUSES = {"active"}
+SAFE_CLAIM_METADATA_KEYS = {
+    "compiler",
+    "reviewed_at",
+    "reviewed_by",
+    "review_role",
+    "source_item_id",
+    "task_id",
+    "pr_url",
+    "run_id",
+    "source_url",
+}
+SAFE_SOURCE_SPAN_KEYS = {
+    "chunk_index",
+    "source_chunk_index",
+    "source_chunk_id",
+    "source_chunk_digest",
+    "chunk_digest",
+    "start",
+    "end",
+    "page",
+    "section",
+    "temporal_fact_id",
+    "valid_from",
+    "valid_to",
+}
 
 
 @dataclass(frozen=True)
@@ -118,6 +143,7 @@ class ClaimSourceSupportSummary:
     source_record_id: uuid.UUID
     source_chunk_id: uuid.UUID | None
     source_item_id: uuid.UUID
+    source_record_status: str
     support_role: str
     status: str
     source_digest: str
@@ -132,6 +158,8 @@ class ClaimSupportSummary:
     claim_type: str
     confidence: float
     status: str
+    support_state: str
+    warning: str | None
     metadata: dict[str, Any]
     sources: tuple[ClaimSourceSupportSummary, ...]
 
@@ -149,6 +177,16 @@ def _stable_digest(payload: Any) -> str:
 
 def _normalize_metadata(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _safe_claim_metadata(value: Any) -> dict[str, Any]:
+    metadata = _normalize_metadata(value)
+    return {key: metadata[key] for key in SAFE_CLAIM_METADATA_KEYS if key in metadata and metadata[key] not in (None, [], {})}
+
+
+def _safe_source_span(value: Any) -> dict[str, Any]:
+    span = value if isinstance(value, dict) else {}
+    return {key: span[key] for key in SAFE_SOURCE_SPAN_KEYS if key in span and span[key] not in (None, [], {})}
 
 
 def _source_kind_for_item(item: Item) -> str:
@@ -586,6 +624,55 @@ async def _upsert_claim(db: AsyncSession, projection: ClaimProjection) -> uuid.U
     return await db.scalar(stmt)
 
 
+async def _resolve_source_chunk_id(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    source_record_id: uuid.UUID,
+    projection: ClaimProjection,
+) -> uuid.UUID | None:
+    span = projection.source_span if isinstance(projection.source_span, dict) else {}
+
+    raw_chunk_id = span.get("source_chunk_id")
+    if raw_chunk_id:
+        try:
+            chunk_id = uuid.UUID(str(raw_chunk_id))
+        except ValueError:
+            chunk_id = None
+        if chunk_id is not None:
+            return await db.scalar(
+                select(SourceChunk.id)
+                .where(SourceChunk.tenant_id == tenant_id)
+                .where(SourceChunk.source_record_id == source_record_id)
+                .where(SourceChunk.id == chunk_id)
+            )
+
+    raw_chunk_digest = span.get("source_chunk_digest") or span.get("chunk_digest")
+    if isinstance(raw_chunk_digest, str) and raw_chunk_digest.strip():
+        return await db.scalar(
+            select(SourceChunk.id)
+            .where(SourceChunk.tenant_id == tenant_id)
+            .where(SourceChunk.source_record_id == source_record_id)
+            .where(SourceChunk.chunk_digest == raw_chunk_digest.strip())
+        )
+
+    raw_chunk_index = span.get("source_chunk_index") or span.get("chunk_index")
+    if raw_chunk_index is not None:
+        try:
+            chunk_index = int(raw_chunk_index)
+        except (TypeError, ValueError):
+            chunk_index = None
+        if chunk_index is not None:
+            return await db.scalar(
+                select(SourceChunk.id)
+                .where(SourceChunk.tenant_id == tenant_id)
+                .where(SourceChunk.source_record_id == source_record_id)
+                .where(SourceChunk.chunk_index == chunk_index)
+            )
+
+    return None
+
+
 async def _upsert_claim_source(
     db: AsyncSession,
     *,
@@ -593,24 +680,31 @@ async def _upsert_claim_source(
     claim_id: uuid.UUID,
     source_record_id: uuid.UUID,
 ) -> uuid.UUID:
+    source_span = _safe_source_span(projection.source_span)
+    source_chunk_id = await _resolve_source_chunk_id(
+        db,
+        tenant_id=projection.tenant_id,
+        source_record_id=source_record_id,
+        projection=projection,
+    )
     stmt = (
         insert(ClaimSource.__table__)
         .values(
             tenant_id=projection.tenant_id,
             claim_id=claim_id,
             source_record_id=source_record_id,
-            source_chunk_id=None,
+            source_chunk_id=source_chunk_id,
             support_role=projection.support_role,
             status="current",
             source_digest=projection.source_digest,
-            source_span=projection.source_span,
+            source_span=source_span,
         )
         .on_conflict_do_update(
             constraint="uq_claim_sources_support",
             set_={
-                "source_chunk_id": None,
+                "source_chunk_id": source_chunk_id,
                 "status": "current",
-                "source_span": projection.source_span,
+                "source_span": source_span,
             },
         )
         .returning(ClaimSource.__table__.c.id)
@@ -705,14 +799,37 @@ async def get_item_source_summary(db: AsyncSession, *, tenant_id: str, item_id: 
     return ItemSourceSummary(tenant_id=tenant_id, item_id=item_id, source_records=tuple(summaries))
 
 
+def _claim_support_state(claim: Claim, sources: tuple[ClaimSourceSupportSummary, ...]) -> tuple[str, str | None]:
+    if claim.status == "conflicted":
+        return "conflicted", "claim_status_conflicted"
+    if claim.status in {"rejected", "superseded"}:
+        return "not_authoritative", f"claim_status_{claim.status}"
+    if claim.status == "draft":
+        return "generated_unpromoted", "claim_not_promoted"
+    if claim.status == "stale":
+        return "stale_source", "claim_status_stale"
+    if not sources:
+        return "source_missing", "claim_has_no_source_support"
+    if any(source.status == "stale" or source.source_record_status != "active" for source in sources):
+        return "stale_source", "claim_source_not_current"
+    if any(source.support_role == "contradicts" for source in sources):
+        return "conflicted", "claim_source_contradicts"
+    if any(source.source_chunk_id is not None for source in sources):
+        return "source_backed", None
+    return "weak_source_support", "claim_source_lacks_exact_chunk"
+
+
 async def get_claim_support_report(
     db: AsyncSession,
     *,
     tenant_id: str,
+    claim_type: str | None = "decision",
     status: str | None = None,
     limit: int = 50,
 ) -> ClaimSupportReport:
     statement = select(Claim).where(Claim.tenant_id == tenant_id).order_by(Claim.updated_at.desc(), Claim.id.desc()).limit(limit)
+    if claim_type is not None:
+        statement = statement.where(Claim.claim_type == claim_type)
     if status is not None:
         statement = statement.where(Claim.status == status)
     claims = (await db.scalars(statement)).all()
@@ -720,12 +837,28 @@ async def get_claim_support_report(
     for claim in claims:
         rows = (
             await db.execute(
-                select(ClaimSource, SourceRecord.item_id)
+                select(ClaimSource, SourceRecord.item_id, SourceRecord.status)
                 .join(SourceRecord, SourceRecord.id == ClaimSource.source_record_id)
                 .where(ClaimSource.tenant_id == tenant_id, ClaimSource.claim_id == claim.id)
+                .where(SourceRecord.tenant_id == tenant_id)
                 .order_by(ClaimSource.created_at.asc(), ClaimSource.id.asc())
             )
         ).all()
+        source_summaries = tuple(
+            ClaimSourceSupportSummary(
+                id=claim_source.id,
+                source_record_id=claim_source.source_record_id,
+                source_chunk_id=claim_source.source_chunk_id,
+                source_item_id=source_item_id,
+                source_record_status=source_record_status,
+                support_role=claim_source.support_role,
+                status=claim_source.status,
+                source_digest=claim_source.source_digest,
+                source_span=_safe_source_span(claim_source.source_span),
+            )
+            for claim_source, source_item_id, source_record_status in rows
+        )
+        support_state, warning = _claim_support_state(claim, source_summaries)
         summaries.append(
             ClaimSupportSummary(
                 id=claim.id,
@@ -734,20 +867,10 @@ async def get_claim_support_report(
                 claim_type=claim.claim_type,
                 confidence=claim.confidence,
                 status=claim.status,
-                metadata=claim.metadata_ or {},
-                sources=tuple(
-                    ClaimSourceSupportSummary(
-                        id=claim_source.id,
-                        source_record_id=claim_source.source_record_id,
-                        source_chunk_id=claim_source.source_chunk_id,
-                        source_item_id=source_item_id,
-                        support_role=claim_source.support_role,
-                        status=claim_source.status,
-                        source_digest=claim_source.source_digest,
-                        source_span=claim_source.source_span or {},
-                    )
-                    for claim_source, source_item_id in rows
-                ),
+                support_state=support_state,
+                warning=warning,
+                metadata=_safe_claim_metadata(claim.metadata_),
+                sources=source_summaries,
             )
         )
     return ClaimSupportReport(tenant_id=tenant_id, claims=tuple(summaries))

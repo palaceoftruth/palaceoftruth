@@ -170,6 +170,7 @@ class PalaceClaimSourceSupportSummary(BaseModel):
     source_record_id: uuid.UUID
     source_chunk_id: uuid.UUID | None = None
     source_item_id: uuid.UUID
+    source_record_status: Literal["active", "stale", "failed", "deleted", "superseded"]
     support_role: Literal["supports", "contradicts", "context", "derived_from"]
     status: Literal["current", "stale"]
     source_digest: str
@@ -183,6 +184,16 @@ class PalaceClaimSupportSummary(BaseModel):
     claim_type: Literal["fact", "preference", "decision", "task_state", "summary", "classification", "relationship"]
     confidence: float
     status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"]
+    support_state: Literal[
+        "source_backed",
+        "weak_source_support",
+        "stale_source",
+        "source_missing",
+        "conflicted",
+        "not_authoritative",
+        "generated_unpromoted",
+    ]
+    warning: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     sources: list[PalaceClaimSourceSupportSummary] = Field(default_factory=list)
 
