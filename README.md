@@ -167,6 +167,11 @@ checkpoint pointers, readiness warnings, and safe follow-up probes. Use
 and use `capture_checkpoint` only when writing a reviewed handoff or compaction
 checkpoint.
 
+For the first public operator story, see
+[Source-Backed Wakeup for Agent Teams](docs/source-backed-wakeup-demo.md). It
+shows the sanitized quickstart, expected trust-state output, privacy boundary,
+and MVP limits before a fresh agent acts.
+
 Before improvement planning or DOTODO task selection, generate a report-only
 startup evidence refresh:
 
