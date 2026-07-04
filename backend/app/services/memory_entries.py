@@ -33,6 +33,7 @@ class NormalizedMemoryEntry:
     enable_ai_enrichment: bool
     relationship_policy: str
     accepted_as: str
+    request_fingerprint: str
     source_url: str | None = None
 
 
@@ -109,6 +110,11 @@ def _legacy_idempotency_key(body: LegacyMemoryArtifactRequest) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def request_fingerprint(entry: dict[str, Any]) -> str:
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def build_legacy_memory_tags(body: LegacyMemoryArtifactRequest) -> list[str]:
     tags = list(_BASE_TAGS_BY_KIND[body.memory_kind])
     tags.extend(body.tags)
@@ -127,6 +133,25 @@ def build_legacy_memory_tags(body: LegacyMemoryArtifactRequest) -> list[str]:
 
 def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
     idempotency_key = _canonical_idempotency_key(body)
+    normalized_tags = _dedupe_tags([*body.tags, *_scope_tags(body.scope)])
+    entry_request_fingerprint = request_fingerprint(
+        {
+            "tenant_id": body.tenant_id,
+            "title": body.title,
+            "body_sha256": hashlib.sha256(body.body.encode()).hexdigest(),
+            "summary": body.summary,
+            "source": body.source,
+            "created_at": body.created_at.astimezone(timezone.utc).isoformat(),
+            "tags": normalized_tags,
+            "scope": body.scope.model_dump(mode="json"),
+            "source_url": body.source_url,
+            "created_by_role": body.created_by_role,
+            "metadata": body.metadata,
+            "enable_ai_enrichment": body.enable_ai_enrichment,
+            "relationship_policy": body.relationship_policy,
+            "accepted_as": "canonical",
+        }
+    )
     metadata = {
         "memory_entry": {
             "schema_version": 1,
@@ -146,7 +171,7 @@ def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
         summary=body.summary,
         source=body.source,
         created_at=body.created_at,
-        tags=_dedupe_tags([*body.tags, *_scope_tags(body.scope)]),
+        tags=normalized_tags,
         scope=body.scope,
         metadata=metadata,
         idempotency_key=idempotency_key,
@@ -154,6 +179,7 @@ def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
         enable_ai_enrichment=body.enable_ai_enrichment,
         relationship_policy=body.relationship_policy,
         accepted_as="canonical",
+        request_fingerprint=entry_request_fingerprint,
         source_url=body.source_url,
     )
 
@@ -163,6 +189,33 @@ def normalize_legacy_memory_artifact(body: LegacyMemoryArtifactRequest) -> Norma
     scope = MemoryScope(
         type="workspace" if body.project_id else "tenant_shared",
         key=body.project_id if body.project_id else None,
+    )
+    normalized_tags = _dedupe_tags([*build_legacy_memory_tags(body), *_scope_tags(scope)])
+    entry_request_fingerprint = request_fingerprint(
+        {
+            "tenant_id": body.tenant_id,
+            "company_id": body.company_id,
+            "memory_kind": body.memory_kind,
+            "title": body.title,
+            "summary": body.summary,
+            "body_sha256": hashlib.sha256(body.body.encode()).hexdigest(),
+            "tags": normalized_tags,
+            "created_by_role": body.created_by_role,
+            "source": body.source,
+            "created_at": body.created_at.astimezone(timezone.utc).isoformat(),
+            "scope": scope.model_dump(mode="json"),
+            "project_id": body.project_id,
+            "ticket_id": body.ticket_id,
+            "task_id": body.task_id,
+            "outcome": body.outcome,
+            "review_status": body.review_status,
+            "repo_ref": body.repo_ref,
+            "inputs": body.inputs,
+            "outputs": body.outputs,
+            "enable_ai_enrichment": body.enable_ai_enrichment,
+            "relationship_policy": body.relationship_policy,
+            "accepted_as": "legacy_artifact",
+        }
     )
     metadata = {
         "memory_entry": {
@@ -199,7 +252,7 @@ def normalize_legacy_memory_artifact(body: LegacyMemoryArtifactRequest) -> Norma
         summary=body.summary,
         source=body.source,
         created_at=body.created_at,
-        tags=_dedupe_tags([*build_legacy_memory_tags(body), *_scope_tags(scope)]),
+        tags=normalized_tags,
         scope=scope,
         metadata=metadata,
         idempotency_key=idempotency_key,
@@ -207,4 +260,5 @@ def normalize_legacy_memory_artifact(body: LegacyMemoryArtifactRequest) -> Norma
         enable_ai_enrichment=body.enable_ai_enrichment,
         relationship_policy=body.relationship_policy,
         accepted_as="legacy_artifact",
+        request_fingerprint=entry_request_fingerprint,
     )

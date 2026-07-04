@@ -14,6 +14,7 @@ from app.api.memory import router
 from app.auth import verify_memory_auth
 from app.database import get_db
 from app.main import app as main_app
+from app.models.item import Item
 from app.models.job import Job
 from app.schemas.memory import (
     AgentMemoryRetrieveRequest,
@@ -575,6 +576,122 @@ def test_memory_entries_preserves_retry_contract_for_failed_replay(monkeypatch) 
     assert response.json()["retry_after_seconds"] == 30
 
 
+def test_memory_entries_reports_duplicate_replay_metadata(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=job_id,
+                item_id=item_id,
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="completed",
+                progress=100,
+                created_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=False,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+            replayed=True,
+            source_item_id=item_id,
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["job_id"] == str(job_id)
+    assert payload["source_item_id"] == str(item_id)
+    assert payload["replayed"] is True
+    assert payload["status"] == "complete"
+    assert payload["contract_status"] == "completed"
+
+
+def test_memory_entries_reports_queued_duplicate_replay_metadata(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=job_id,
+                item_id=item_id,
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=False,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+            replayed=True,
+            source_item_id=item_id,
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    response = client.post("/api/v1/memory/entries", json=_canonical_payload())
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["job_id"] == str(job_id)
+    assert payload["source_item_id"] == str(item_id)
+    assert payload["replayed"] is True
+    assert payload["status"] == "queued"
+    assert payload["contract_status"] == "accepted"
+
+
+def test_memory_entries_returns_structured_duplicate_conflict(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate_conflict",
+                "contract_status": "rejected",
+                "message": "Memory entry idempotency key already exists for a different payload or scope",
+                "retryable": False,
+                "conflict_kind": "payload_mismatch",
+                "idempotency_key": "shared-key",
+                "existing_job_id": str(job_id),
+                "existing_source_item_id": str(item_id),
+                "scope": {"type": "workspace", "key": "launch-pad"},
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    payload = _canonical_payload()
+    payload["idempotency_key"] = "shared-key"
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["status"] == "duplicate_conflict"
+    assert detail["contract_status"] == "rejected"
+    assert detail["retryable"] is False
+    assert detail["conflict_kind"] == "payload_mismatch"
+    assert detail["existing_job_id"] == str(job_id)
+    assert detail["existing_source_item_id"] == str(item_id)
+
+
 def test_memory_entries_reports_queue_dependency_unavailable(monkeypatch) -> None:
     client = _build_app(FakeSession())
     client.app.state.arq_pool.raise_on_enqueue = RuntimeError("MasterNotFoundError: sensitive endpoint")
@@ -683,6 +800,47 @@ def test_memory_entries_batch_reports_mixed_item_results(monkeypatch) -> None:
     assert payload["results"][2]["error"]["retryable"] is False
     assert calls == ["Shared launch brief", "Duplicate memory"]
     assert len(client.app.state.arq_pool.enqueued) == 1
+
+
+def test_memory_entries_batch_reports_duplicate_conflict_per_item(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate_conflict",
+                "contract_status": "rejected",
+                "message": "Memory entry idempotency key already exists for a different payload or scope",
+                "retryable": False,
+                "conflict_kind": "payload_mismatch",
+                "idempotency_key": "shared-key",
+                "existing_job_id": str(job_id),
+                "existing_source_item_id": str(item_id),
+                "scope": {"type": "workspace", "key": "launch-pad"},
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+
+    payload = _canonical_payload()
+    payload["idempotency_key"] = "shared-key"
+    response = client.post("/api/v1/memory/entries:batch", json={"entries": [payload]})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["accepted"] == 0
+    assert body["failed"] == 1
+    result = body["results"][0]
+    assert result["status"] == "failed"
+    assert result["contract_status"] == "rejected"
+    assert result["retryable"] is False
+    assert result["job_id"] == str(job_id)
+    assert result["source_item_id"] == str(item_id)
+    assert result["error"]["status"] == "duplicate_conflict"
 
 
 def test_memory_entries_batch_reports_queue_dependency_failure_per_item(monkeypatch) -> None:
@@ -1281,6 +1439,7 @@ def test_memory_job_endpoint_marks_stale_queued_as_retryable_degraded() -> None:
 @pytest.mark.asyncio
 async def test_dependency_unavailable_memory_job_replays_as_retryable_enqueue() -> None:
     item_id = uuid.uuid4()
+    entry = memory_service.normalize_memory_entry(MemoryEntryRequest.model_validate(_canonical_payload()))
     job = Job(
         id=uuid.uuid4(),
         item_id=item_id,
@@ -1293,12 +1452,26 @@ async def test_dependency_unavailable_memory_job_replays_as_retryable_enqueue() 
         created_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),
     )
-    item = SimpleNamespace(id=item_id, raw_content="Recovered note", status="processing")
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title=entry.title,
+        summary=entry.summary,
+        source_type="note",
+        source_url=entry.source_url,
+        raw_content=entry.body,
+        tags=entry.tags,
+        status="processing",
+        created_at=entry.created_at,
+        updated_at=entry.created_at,
+        metadata_=entry.metadata,
+        idempotency_key=entry.idempotency_key,
+    )
     session = FakeSession(jobs={job.id: job, item_id: item})
 
     result = await memory_service.accept_memory_entry(
         session,
-        entry=memory_service.normalize_memory_entry(MemoryEntryRequest.model_validate(_canonical_payload())),
+        entry=entry,
         signing_key="key-hash",
     )
 
@@ -1426,6 +1599,7 @@ def test_memory_job_retry_requeues_failed_job() -> None:
 @pytest.mark.asyncio
 async def test_dependency_unavailable_integrity_replay_requeues_existing_job() -> None:
     item_id = uuid.uuid4()
+    entry = memory_service.normalize_memory_entry(MemoryEntryRequest.model_validate(_canonical_payload()))
     job = Job(
         id=uuid.uuid4(),
         item_id=item_id,
@@ -1438,7 +1612,21 @@ async def test_dependency_unavailable_integrity_replay_requeues_existing_job() -
         created_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),
     )
-    item = SimpleNamespace(id=item_id, raw_content="Recovered note", status="processing")
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title=entry.title,
+        summary=entry.summary,
+        source_type="note",
+        source_url=entry.source_url,
+        raw_content=entry.body,
+        tags=entry.tags,
+        status="processing",
+        created_at=entry.created_at,
+        updated_at=entry.created_at,
+        metadata_=entry.metadata,
+        idempotency_key=entry.idempotency_key,
+    )
 
     class RaceSession(FakeSession):
         def __init__(self) -> None:
@@ -1463,7 +1651,7 @@ async def test_dependency_unavailable_integrity_replay_requeues_existing_job() -
 
     result = await memory_service.accept_memory_entry(
         session,
-        entry=memory_service.normalize_memory_entry(MemoryEntryRequest.model_validate(_canonical_payload())),
+        entry=entry,
         signing_key="key-hash",
     )
 

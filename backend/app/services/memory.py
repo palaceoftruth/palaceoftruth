@@ -60,6 +60,7 @@ from app.services.memory_entries import (
     build_legacy_memory_tags,
     normalize_legacy_memory_artifact,
     normalize_memory_entry,
+    request_fingerprint,
     source_project_from_memory_metadata,
 )
 from app.services.palace import retrieve_palace
@@ -91,6 +92,192 @@ class MemoryArtifactAcceptanceResult:
     scope_type: str
     scope_key: str | None
     accepted_as: str
+    replayed: bool = False
+    source_item_id: uuid.UUID | None = None
+
+
+def _duplicate_conflict_detail(
+    *,
+    entry: NormalizedMemoryEntry,
+    existing_job: Job,
+    conflict_kind: str,
+) -> dict[str, Any]:
+    return {
+        "status": "duplicate_conflict",
+        "contract_status": "rejected",
+        "message": "Memory entry idempotency key already exists for a different payload or scope",
+        "retryable": False,
+        "conflict_kind": conflict_kind,
+        "idempotency_key": entry.idempotency_key,
+        "existing_job_id": str(existing_job.id),
+        "existing_source_item_id": str(existing_job.item_id) if existing_job.item_id else None,
+        "scope": {"type": entry.scope.type, "key": entry.scope.key},
+    }
+
+
+def _existing_memory_fingerprint(job: Job) -> str | None:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    fingerprint = payload.get("request_fingerprint")
+    return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+
+
+def _existing_memory_scope(job: Job) -> tuple[str | None, str | None]:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    scope_type = payload.get("scope_type")
+    scope_key = payload.get("scope_key")
+    return (
+        scope_type if isinstance(scope_type, str) and scope_type else None,
+        scope_key if isinstance(scope_key, str) and scope_key else None,
+    )
+
+
+def _existing_memory_entry_metadata(item: Item | None) -> dict[str, Any]:
+    metadata = getattr(item, "metadata_", None) if item is not None else None
+    memory_entry = (metadata or {}).get("memory_entry") if isinstance(metadata, dict) else None
+    return memory_entry if isinstance(memory_entry, dict) else {}
+
+
+def _existing_memory_item_fingerprint(
+    *,
+    item: Item | None,
+    job: Job,
+    accepted_as: str,
+) -> str | None:
+    raw_content = getattr(item, "raw_content", None) if item is not None else None
+    if item is None or raw_content is None:
+        return None
+
+    memory_entry = _existing_memory_entry_metadata(item)
+    scope_type, scope_key = _existing_memory_scope(job)
+    scope = memory_entry.get("scope")
+    if isinstance(scope, dict):
+        scope_type = scope.get("type") if isinstance(scope.get("type"), str) else scope_type
+        scope_key = scope.get("key") if scope.get("key") is None or isinstance(scope.get("key"), str) else scope_key
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    if accepted_as == "legacy_artifact":
+        item_metadata = getattr(item, "metadata_", None)
+        contract = (item_metadata or {}).get("memory_contract") if isinstance(item_metadata, dict) else None
+        if not isinstance(contract, dict):
+            return None
+        return request_fingerprint(
+            {
+                "tenant_id": item.tenant_id,
+                "company_id": contract.get("company_id"),
+                "memory_kind": contract.get("memory_kind"),
+                "title": item.title,
+                "summary": item.summary,
+                "body_sha256": sha256(raw_content.encode()).hexdigest(),
+                "tags": item.tags or [],
+                "created_by_role": contract.get("created_by_role"),
+                "source": contract.get("source"),
+                "created_at": contract.get("created_at")
+                or (item.created_at.astimezone(timezone.utc).isoformat() if item.created_at else None),
+                "scope": {"type": scope_type, "key": scope_key},
+                "project_id": contract.get("project_id"),
+                "ticket_id": contract.get("ticket_id"),
+                "task_id": contract.get("task_id"),
+                "outcome": contract.get("outcome"),
+                "review_status": contract.get("review_status"),
+                "repo_ref": contract.get("repo_ref"),
+                "inputs": contract.get("inputs"),
+                "outputs": contract.get("outputs"),
+                "enable_ai_enrichment": bool(payload.get("enable_ai_enrichment", False)),
+                "relationship_policy": payload.get("relationship_policy", "immediate"),
+                "accepted_as": "legacy_artifact",
+            }
+        )
+
+    return request_fingerprint(
+        {
+            "tenant_id": item.tenant_id,
+            "title": item.title,
+            "body_sha256": sha256(raw_content.encode()).hexdigest(),
+            "summary": item.summary,
+            "source": memory_entry.get("source"),
+            "created_at": memory_entry.get("created_at")
+            or (item.created_at.astimezone(timezone.utc).isoformat() if item.created_at else None),
+            "tags": item.tags or [],
+            "scope": {"type": scope_type, "key": scope_key},
+            "source_url": item.source_url,
+            "created_by_role": memory_entry.get("created_by_role"),
+            "metadata": memory_entry.get("metadata"),
+            "enable_ai_enrichment": bool(payload.get("enable_ai_enrichment", False)),
+            "relationship_policy": payload.get("relationship_policy", "immediate"),
+            "accepted_as": "canonical",
+        }
+    )
+
+
+async def _ensure_duplicate_replay_matches(db: AsyncSession, *, entry: NormalizedMemoryEntry, existing_job: Job) -> None:
+    existing_scope_type, existing_scope_key = _existing_memory_scope(existing_job)
+    if existing_scope_type and (existing_scope_type != entry.scope.type or existing_scope_key != entry.scope.key):
+        raise HTTPException(
+            status_code=409,
+            detail=_duplicate_conflict_detail(
+                entry=entry,
+                existing_job=existing_job,
+                conflict_kind="scope_mismatch",
+            ),
+        )
+
+    fingerprint = _existing_memory_fingerprint(existing_job)
+    if fingerprint is None:
+        existing_item = await db.get(Item, existing_job.item_id) if existing_job.item_id else None
+        fingerprint = _existing_memory_item_fingerprint(
+            item=existing_item,
+            job=existing_job,
+            accepted_as=entry.accepted_as,
+        )
+    if fingerprint is not None and fingerprint != entry.request_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail=_duplicate_conflict_detail(
+                entry=entry,
+                existing_job=existing_job,
+                conflict_kind="payload_mismatch",
+            ),
+        )
+    if fingerprint is None:
+        raise HTTPException(
+            status_code=409,
+            detail=_duplicate_conflict_detail(
+                entry=entry,
+                existing_job=existing_job,
+                conflict_kind="unverifiable_existing_payload",
+            ),
+        )
+
+
+async def _accept_duplicate_memory_replay(
+    db: AsyncSession,
+    *,
+    entry: NormalizedMemoryEntry,
+    existing_job: Job,
+    webhook_url: str | None,
+    signing_key: str | None,
+) -> MemoryArtifactAcceptanceResult:
+    await _ensure_duplicate_replay_matches(db, entry=entry, existing_job=existing_job)
+    webhook_metadata_updated = False
+    if webhook_url and not existing_job.webhook_url:
+        existing_job.webhook_url = webhook_url
+        existing_job.signing_key = signing_key
+        webhook_metadata_updated = True
+    revived = await revive_retryable_memory_job(db, job=existing_job)
+    # Persist webhook metadata for duplicate replays even when the job did not
+    # need stale-job recovery; otherwise later webhook dispatch reads stale DB state.
+    if not revived and webhook_metadata_updated:
+        await db.commit()
+        await db.refresh(existing_job)
+    return MemoryArtifactAcceptanceResult(
+        job=existing_job,
+        enqueue_requested=revived,
+        scope_type=entry.scope.type,
+        scope_key=entry.scope.key,
+        accepted_as=entry.accepted_as,
+        replayed=True,
+        source_item_id=existing_job.item_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -377,23 +564,12 @@ async def accept_memory_entry(
         .limit(1)
     )
     if existing_job:
-        webhook_metadata_updated = False
-        if webhook_url and not existing_job.webhook_url:
-            existing_job.webhook_url = webhook_url
-            existing_job.signing_key = signing_key
-            webhook_metadata_updated = True
-        revived = await revive_retryable_memory_job(db, job=existing_job)
-        # Persist webhook metadata for duplicate replays even when the job did not
-        # need stale-job recovery; otherwise later webhook dispatch reads stale DB state.
-        if not revived and webhook_metadata_updated:
-            await db.commit()
-            await db.refresh(existing_job)
-        return MemoryArtifactAcceptanceResult(
-            job=existing_job,
-            enqueue_requested=revived,
-            scope_type=entry.scope.type,
-            scope_key=entry.scope.key,
-            accepted_as=entry.accepted_as,
+        return await _accept_duplicate_memory_replay(
+            db,
+            entry=entry,
+            existing_job=existing_job,
+            webhook_url=webhook_url,
+            signing_key=signing_key,
         )
 
     item = Item(
@@ -423,6 +599,7 @@ async def accept_memory_entry(
             "scope_key": entry.scope.key,
             "accepted_as": entry.accepted_as,
             "relationship_policy": entry.relationship_policy,
+            "request_fingerprint": entry.request_fingerprint,
         }
         if admission_audit is not None:
             job_payload["admission"] = admission_audit
@@ -445,6 +622,7 @@ async def accept_memory_entry(
             scope_type=entry.scope.type,
             scope_key=entry.scope.key,
             accepted_as=entry.accepted_as,
+            source_item_id=item.id,
         )
     except IntegrityError:
         await db.rollback()
@@ -457,15 +635,25 @@ async def accept_memory_entry(
             .limit(1)
         )
         if existing_job:
-            revived = await revive_retryable_memory_job(db, job=existing_job)
-            return MemoryArtifactAcceptanceResult(
-                job=existing_job,
-                enqueue_requested=revived,
-                scope_type=entry.scope.type,
-                scope_key=entry.scope.key,
-                accepted_as=entry.accepted_as,
+            return await _accept_duplicate_memory_replay(
+                db,
+                entry=entry,
+                existing_job=existing_job,
+                webhook_url=webhook_url,
+                signing_key=signing_key,
             )
-        raise HTTPException(status_code=409, detail="Memory entry already exists")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate_conflict",
+                "contract_status": "rejected",
+                "message": "Memory entry already exists but no existing job metadata was available",
+                "retryable": False,
+                "conflict_kind": "missing_existing_job",
+                "idempotency_key": entry.idempotency_key,
+                "scope": {"type": entry.scope.type, "key": entry.scope.key},
+            },
+        )
 
 
 async def accept_memory_artifact(
@@ -509,12 +697,16 @@ def build_memory_acceptance_response(
     contract_status: MemoryWriteContractStatus = "accepted"
     if queue and queue.state in {"backpressure", "saturated"}:
         contract_status = "retryable_degraded"
+    elif result.replayed and serialized.contract_status == "completed":
+        contract_status = "completed"
     elif serialized.contract_status in {"retryable_degraded", "dependency_unavailable", "permanent_tenant_mismatch"}:
         contract_status = serialized.contract_status
     return MemoryArtifactAcceptedResponse(
         job_id=serialized.job_id,
         status=serialized.status,
         contract_status=contract_status,
+        replayed=result.replayed,
+        source_item_id=result.source_item_id or result.job.item_id,
         scope={"type": result.scope_type, "key": result.scope_key},
         accepted_as=result.accepted_as,
         poll_url=poll_url,
