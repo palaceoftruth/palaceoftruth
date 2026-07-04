@@ -16,6 +16,7 @@ from app.mcp_server import (
     McpHttpAuthMiddleware,
     McpHttpAuthResult,
     McpHttpAuthVerifier,
+    PalaceApiError,
     SecondBrainApiClient,
     SecondBrainMcpRuntime,
     SecondBrainMcpSettings,
@@ -583,6 +584,301 @@ def test_capture_checkpoint_normalizes_payload_and_returns_compact_ack() -> None
         ("POST", "/api/v1/memory/mcp/audit"),
     ]
     assert seen_entry is not None
+
+
+def test_create_memory_entry_returns_duplicate_replay_metadata() -> None:
+    replay_payload = {
+        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": "completed",
+        "contract_status": "completed",
+        "replayed": True,
+        "source_item_id": "550e8400-e29b-41d4-a716-446655440099",
+        "scope": {"type": "workspace", "key": "palaceoftruth"},
+        "accepted_as": "canonical",
+        "poll_url": "/api/v1/memory/jobs/550e8400-e29b-41d4-a716-446655440000",
+        "poll_after_seconds": 5,
+        "retryable": False,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            return httpx.Response(202, json=replay_payload)
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            payload = json.loads(request.content.decode())
+            assert payload["operation"] == "create_memory_entry"
+            assert payload["status"] == "success"
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await create_memory_entry(
+                title="Duplicate replay",
+                body="Same safe memory body.",
+                ctx=ctx,
+                scope_type="workspace",
+                scope_key="palaceoftruth",
+                idempotency_key="same-request",
+            )
+
+    assert asyncio.run(scenario()) == replay_payload
+
+
+def test_create_memory_entry_preserves_structured_duplicate_conflict_error() -> None:
+    detail = {
+        "status": "duplicate_conflict",
+        "contract_status": "rejected",
+        "conflict_kind": "payload_mismatch",
+        "retryable": False,
+        "existing_job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "existing_source_item_id": "550e8400-e29b-41d4-a716-446655440099",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            return httpx.Response(409, json={"detail": detail})
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            payload = json.loads(request.content.decode())
+            assert payload["operation"] == "create_memory_entry"
+            assert payload["status"] == "error"
+            assert payload["error_class"] == "PalaceApiError"
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await create_memory_entry(
+                title="Duplicate conflict",
+                body="Changed body.",
+                ctx=ctx,
+                idempotency_key="same-request",
+            )
+
+    with pytest.raises(PalaceApiError) as exc_info:
+        asyncio.run(scenario())
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == detail
+
+
+def test_palace_remember_alias_returns_duplicate_replay_metadata() -> None:
+    replay_payload = {
+        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": "completed",
+        "contract_status": "completed",
+        "replayed": True,
+        "source_item_id": "550e8400-e29b-41d4-a716-446655440099",
+        "scope": {"type": "agent", "key": "codex"},
+        "accepted_as": "canonical",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            payload = json.loads(request.content.decode())
+            assert payload["source"] == "codex"
+            assert payload["scope"] == {"type": "agent", "key": "codex"}
+            return httpx.Response(202, json=replay_payload)
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await palace_remember(
+                title="Duplicate replay",
+                body="Same safe memory body.",
+                ctx=ctx,
+                idempotency_key="same-request",
+            )
+
+    assert asyncio.run(scenario()) == replay_payload
+
+
+def test_capture_checkpoint_duplicate_replay_returns_typed_ack_without_new_backfill() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "completed",
+                    "contract_status": "completed",
+                    "replayed": True,
+                    "source_item_id": "550e8400-e29b-41d4-a716-446655440099",
+                    "scope": {"type": "agent", "key": "codex"},
+                    "accepted_as": "canonical",
+                    "poll_url": "/api/v1/memory/jobs/550e8400-e29b-41d4-a716-446655440000",
+                    "poll_after_seconds": 5,
+                    "retryable": False,
+                },
+            )
+        if request.url.path == "/api/v1/memory/jobs/550e8400-e29b-41d4-a716-446655440000":
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "completed",
+                    "item_id": "550e8400-e29b-41d4-a716-446655440099",
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await capture_checkpoint(
+                title="Replay checkpoint",
+                summary="Safe summary",
+                evidence_snippets=["focused evidence"],
+                ctx=ctx,
+                scope_type="agent",
+                scope_key="codex",
+                idempotency_key="checkpoint-replay",
+            )
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "completed"
+    assert result["contract_status"] == "completed"
+    assert result["replayed"] is True
+    assert result["job_id"] == "550e8400-e29b-41d4-a716-446655440000"
+    assert result["source_item_id"] == "550e8400-e29b-41d4-a716-446655440099"
+    assert result["memory_job"] == {
+        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": "completed",
+        "item_id": "550e8400-e29b-41d4-a716-446655440099",
+    }
+    assert result["relationship_backfill"] == {"queued": False, "reason": "replayed_duplicate"}
+    assert ("POST", "/api/v1/memory/relationships/backfill") not in seen
+
+
+def test_capture_checkpoint_duplicate_replay_skips_read_without_item_pointer() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "completed",
+                    "contract_status": "completed",
+                    "replayed": True,
+                    "scope": {"type": "agent", "key": "codex"},
+                    "accepted_as": "canonical",
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await capture_checkpoint(
+                title="Replay checkpoint",
+                summary="Safe summary",
+                evidence_snippets=["focused evidence"],
+                ctx=ctx,
+                scope_type="agent",
+                scope_key="codex",
+                idempotency_key="checkpoint-replay",
+            )
+
+    result = asyncio.run(scenario())
+
+    assert result["replayed"] is True
+    assert result["memory_job"] is None
+    assert ("GET", "/api/v1/memory/jobs/550e8400-e29b-41d4-a716-446655440000") not in seen
 
 
 def test_capture_checkpoint_dry_run_preserves_idempotency_without_writing() -> None:
