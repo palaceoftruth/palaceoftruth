@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Clipboard, Loader2, Pencil, RadioTower, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowLeft, Clipboard, Loader2, Pencil, RadioTower, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
@@ -76,6 +76,14 @@ function formatOperation(value: string): string {
 }
 
 function formatProgressPhase(value: string): string {
+  return value.split("_").join(" ");
+}
+
+function formatTrustWarning(value: string): string {
+  return value.split("_").join(" ");
+}
+
+function formatTrustState(value: string): string {
   return value.split("_").join(" ");
 }
 
@@ -480,6 +488,7 @@ export default function PalaceControlTowerPage() {
   const hasSources = Boolean(tower?.sync_sources.length);
   const recentWakeupBriefs = tower?.wakeup_briefs.recent_briefs ?? [];
   const totalWakeupDiaryRollups = recentWakeupBriefs.reduce((sum, brief) => sum + brief.diary_count, 0);
+  const sourceTrustHealth = tower?.source_trust_health;
   const artifactHealth = tower?.room_artifacts;
   const consolidation = tower?.consolidation;
   const consolidationCandidates = consolidation?.candidates ?? [];
@@ -1480,6 +1489,95 @@ export default function PalaceControlTowerPage() {
                 />
               )}
             </div>
+          </div>
+
+          <div>
+            <div className="flex flex-wrap items-baseline justify-between gap-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Wakeup trust health</p>
+              <p className="text-xs text-zinc-500">
+                {sourceTrustHealth?.status === "ready"
+                  ? `${sourceTrustHealth.total_contexts} context${sourceTrustHealth.total_contexts === 1 ? "" : "s"} classified`
+                  : sourceTrustHealth?.status === "error"
+                    ? "Source trust counts failed."
+                    : "No source trust counts yet."}
+              </p>
+            </div>
+
+            {sourceTrustHealth?.status === "error" ? (
+              <div className="mt-3">
+                <StatePanel
+                  icon={RefreshCw}
+                  compact
+                  variant="error"
+                  title="Source trust counts failed."
+                  description={sourceTrustHealth.error_message ?? "MCP wakeup remains usable while the aggregate path recovers."}
+                />
+              </div>
+            ) : (
+              <>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                  <div className="rounded-2xl border border-emerald-900/50 bg-emerald-950/20 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-emerald-300/80">Source-backed</p>
+                    <p className="mt-2 text-2xl font-semibold text-emerald-100">{sourceTrustHealth?.source_backed ?? 0}</p>
+                  </div>
+                  <div className="rounded-2xl border border-amber-900/60 bg-amber-950/20 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-amber-300/80">Generated</p>
+                    <p className="mt-2 text-2xl font-semibold text-amber-100">{sourceTrustHealth?.generated_unpromoted ?? 0}</p>
+                    <p className="mt-1 text-xs text-amber-200/70">unpromoted</p>
+                  </div>
+                  <div className="rounded-2xl border border-rose-900/60 bg-rose-950/20 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-rose-300/80">Stale / missing</p>
+                    <p className="mt-2 text-2xl font-semibold text-rose-100">{sourceTrustHealth?.stale_missing ?? 0}</p>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Policy-limited</p>
+                    <p className="mt-2 text-2xl font-semibold text-zinc-100">{sourceTrustHealth?.policy_limited ?? 0}</p>
+                  </div>
+                  <div className="rounded-2xl border border-sky-900/60 bg-sky-950/20 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-sky-300/80">Total checked</p>
+                    <p className="mt-2 text-2xl font-semibold text-sky-100">{sourceTrustHealth?.total_contexts ?? 0}</p>
+                    {sourceTrustHealth?.unknown ? (
+                      <p className="mt-1 text-xs text-sky-200/70">{sourceTrustHealth.unknown} unknown</p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="mt-3">
+                  {sourceTrustHealth?.recent_warnings?.length ? (
+                    <div className="space-y-2">
+                      {sourceTrustHealth.recent_warnings.map((warning) => (
+                        <div
+                          key={`${warning.state}-${warning.warning}`}
+                          className="rounded-2xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-sm"
+                        >
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <p className="font-medium text-zinc-100">{formatTrustWarning(warning.warning)}</p>
+                              <p className="mt-1 text-xs text-zinc-400">{formatTrustState(warning.state)}</p>
+                            </div>
+                            <span className="inline-flex w-fit rounded-full border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400">
+                              {warning.count} context{warning.count === 1 ? "" : "s"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <StatePanel
+                      icon={ShieldCheck}
+                      compact
+                      variant="empty"
+                      title={sourceTrustHealth?.status === "ready" ? "No source trust warnings." : "No source trust counts yet."}
+                      description={
+                        sourceTrustHealth?.status === "ready"
+                          ? "Current startup context has no stale, missing, generated, or policy-limited warnings in this aggregate."
+                          : "Run sync sources and wake-up brief generation to populate source-backed startup context counts."
+                      }
+                    />
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           <div>

@@ -790,6 +790,9 @@ test.describe("Palace smoke", () => {
     await page.getByText("Wake-up brief freshness").scrollIntoViewIfNeeded();
     await expect(page.getByText("Wake-up brief freshness")).toBeVisible();
     await expect(page.getByRole("heading", { name: /No wake-up briefs yet/i })).toBeVisible();
+    await page.getByText("Wakeup trust health").scrollIntoViewIfNeeded();
+    await expect(page.getByText("Wakeup trust health")).toBeVisible();
+    await expect(page.getByRole("heading", { name: /No source trust counts yet/i })).toBeVisible();
     await page.getByText("Diary rollup freshness").scrollIntoViewIfNeeded();
     await expect(page.getByText("Diary rollup freshness")).toBeVisible();
     await expect(page.getByRole("heading", { name: /No diary rollups yet/i })).toBeVisible();
@@ -799,6 +802,62 @@ test.describe("Palace smoke", () => {
     await expect(page.getByRole("button", { name: "Start Palace run" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Start Palace run" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Add the first source" })).toBeVisible();
+  });
+
+  test("control tower shows loading and source trust error states", async ({ page }) => {
+    await page.route("**/api/v1/palace/control-tower", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        json: {
+          tenant_id: "default",
+          dirty_generation: 0,
+          indexed_generation: 0,
+          backlog_generation: 0,
+          active_palace_run: null,
+          memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+          webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+          fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+          diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+          wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+          source_trust_health: {
+            status: "error",
+            total_contexts: 0,
+            source_backed: 0,
+            generated_unpromoted: 0,
+            stale_missing: 0,
+            policy_limited: 0,
+            unknown: 0,
+            recent_warnings: [],
+            error_message: "Source trust counts failed; MCP wakeup remains usable.",
+          },
+          sync_sources: [],
+          sync_runs: [],
+          palace_runs: [],
+        },
+      });
+    });
+    await page.route("**/api/v1/palace/mcp-clients", async (route) => {
+      await route.fulfill({
+        json: {
+          tenant_id: "default",
+          clients: [],
+          config_snippets: {
+            codex_stdio_toml: "[mcp_servers.palaceoftruth-memory]\\ncommand = \"uv\"",
+            http_oauth_toml: "[mcp_servers.palaceoftruth-memory]",
+            oauth_token_command: "read -rsp 'Palace MCP client secret: ' PALACEOFTRUTH_MCP_CLIENT_SECRET",
+            legacy_api_key_toml: "X-API-Key = \"set-from-your-secret-manager\"",
+            secret_handling_note: "The client_secret is returned once.",
+          },
+        },
+      });
+    });
+
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+
+    await expect(page.getByText("Loading control tower")).toBeVisible();
+    await page.getByText("Wakeup trust health").scrollIntoViewIfNeeded();
+    await expect(page.getByRole("heading", { name: "Source trust counts failed." })).toBeVisible();
+    await expect(page.getByText("MCP wakeup remains usable")).toBeVisible();
   });
 
   test("control tower registers MCP agents and keeps secrets out of persistent panels", async ({ page }) => {
@@ -1259,6 +1318,7 @@ test.describe("Palace smoke", () => {
   });
 
   test("control tower shows wake-up brief freshness and diary rollup coverage", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 820 });
     await mockPalaceControlTower(page, {
       tenant_id: "default",
       dirty_generation: 8,
@@ -1343,6 +1403,28 @@ test.describe("Palace smoke", () => {
           },
         ],
       },
+      source_trust_health: {
+        status: "ready",
+        total_contexts: 7,
+        source_backed: 3,
+        generated_unpromoted: 2,
+        stale_missing: 1,
+        policy_limited: 1,
+        unknown: 0,
+        recent_warnings: [
+          {
+            state: "generated_unpromoted",
+            warning: "generated_artifact_without_promoted_source_support",
+            count: 2,
+            source_preview: "raw chunk text must not render",
+          },
+          {
+            state: "source_missing",
+            warning: "source_record_missing",
+            count: 1,
+          },
+        ],
+      },
       sync_sources: [],
       sync_runs: [],
       palace_runs: [],
@@ -1357,6 +1439,15 @@ test.describe("Palace smoke", () => {
     await expect(page.getByText("Wing 03-projects")).toBeVisible();
     await expect(page.getByText("2 diary rollups")).toBeVisible();
     await expect(page.getByText("1 diary rollup")).toBeVisible();
+    await page.getByText("Wakeup trust health").scrollIntoViewIfNeeded();
+    await expect(page.getByText("Source-backed")).toBeVisible();
+    await expect(page.getByText("Generated", { exact: true })).toBeVisible();
+    await expect(page.getByText("Stale / missing")).toBeVisible();
+    await expect(page.getByText("Policy-limited")).toBeVisible();
+    await expect(page.getByText("generated artifact without promoted source support")).toBeVisible();
+    await expect(page.getByText("source record missing")).toBeVisible();
+    await expect(page.getByText("raw chunk text must not render")).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("control tower can edit and delete a repo source", async ({ page }) => {

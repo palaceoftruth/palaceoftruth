@@ -33,6 +33,8 @@ from app.schemas.palace import (
     PalaceRoomUpdate,
     PalaceRunSummary,
     PalaceSectionFreshness,
+    PalaceSourceTrustHealthSummary,
+    PalaceSourceTrustWarning,
     SyncSourceSummary,
     PalaceTemporalFactSummary,
     PalaceWebhookHealthSummary,
@@ -633,6 +635,21 @@ def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
                     )
                 ],
             ),
+            source_trust_health=PalaceSourceTrustHealthSummary(
+                status="ready",
+                total_contexts=5,
+                source_backed=2,
+                generated_unpromoted=1,
+                stale_missing=1,
+                policy_limited=1,
+                recent_warnings=[
+                    PalaceSourceTrustWarning(
+                        state="generated_unpromoted",
+                        warning="generated_artifact_without_promoted_source_support",
+                        count=1,
+                    )
+                ],
+            ),
             sync_sources=[],
             sync_runs=[],
             palace_runs=[],
@@ -658,6 +675,8 @@ def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
     assert payload["diary_rollups"]["recent_rollups"][0]["scope_type"] == "workspace"
     assert payload["wakeup_briefs"]["fresh"] == 2
     assert payload["wakeup_briefs"]["recent_briefs"][0]["scope_type"] == "tenant"
+    assert payload["source_trust_health"]["source_backed"] == 2
+    assert payload["source_trust_health"]["recent_warnings"][0]["warning"] == "generated_artifact_without_promoted_source_support"
     assert payload["memory_health"]["recent_jobs"][0]["scope"] == {"type": "workspace", "key": "launch-pad"}
 
 

@@ -613,6 +613,31 @@ export interface PalaceWakeupBriefSummary {
   recent_briefs: PalaceWakeupBriefStatus[];
 }
 
+export interface PalaceSourceTrustWarning {
+  state:
+    | "source_backed"
+    | "curated_memory"
+    | "generated_unpromoted"
+    | "stale_source"
+    | "source_missing"
+    | "policy_limited"
+    | "unknown";
+  warning: string;
+  count: number;
+}
+
+export interface PalaceSourceTrustHealthSummary {
+  status: "ready" | "empty" | "error";
+  total_contexts: number;
+  source_backed: number;
+  generated_unpromoted: number;
+  stale_missing: number;
+  policy_limited: number;
+  unknown: number;
+  recent_warnings: PalaceSourceTrustWarning[];
+  error_message?: string | null;
+}
+
 export interface PalaceArtifactSectionHealth {
   fresh: number;
   stale: number;
@@ -862,6 +887,7 @@ export interface PalaceControlTower {
   fact_registry: PalaceFactRegistrySummary;
   diary_rollups: PalaceDiaryRollupSummary;
   wakeup_briefs: PalaceWakeupBriefSummary;
+  source_trust_health: PalaceSourceTrustHealthSummary;
   sync_sources: PalaceSyncSource[];
   sync_runs: PalaceSyncRun[];
   palace_runs: PalaceRunSummary[];

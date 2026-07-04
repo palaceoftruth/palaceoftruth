@@ -14,6 +14,7 @@ from app.services.source_trust_summary import (
     _SourceRecordRow,
     _trust_summary_for_item,
     map_retrieval_trust_class,
+    source_trust_health_item_statement,
     source_record_batch_statement,
 )
 
@@ -147,6 +148,18 @@ def test_batch_statement_counts_chunks_without_selecting_chunk_text_or_preview()
     assert "preview" not in sql
 
 
+def test_source_trust_health_item_statement_omits_raw_body_and_chunk_json() -> None:
+    statement = source_trust_health_item_statement(tenant_id="tenant-a")
+
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "items.id" in sql
+    assert "items.metadata" in sql
+    assert "items.raw_content" not in sql
+    assert "items.content_chunks" not in sql
+    assert "source_chunks.chunk_text" not in sql
+
+
 def test_get_source_trust_summaries_uses_one_item_query_and_one_source_record_query() -> None:
     item_a = _item()
     item_b = _item(metadata={"wakeup_brief": {"generation": 1}})
@@ -184,3 +197,59 @@ def test_get_source_trust_summaries_uses_one_item_query_and_one_source_record_qu
     assert "source_records.item_id IN" in captured["source_sql"]
     assert summaries[item_a.id].state == "source_backed"
     assert summaries[item_b.id].state == "generated_unpromoted"
+
+
+def test_build_source_trust_health_summary_aggregates_counts_and_warning_labels() -> None:
+    source_backed = _item()
+    generated = _item(metadata={"wakeup_brief": {"generation": 1}})
+    missing = _item()
+    policy_limited = _item(metadata={"memory_entry": {"metadata": {"policy_limited": True}}})
+    stale = _item()
+    source_record = _record(item_id=source_backed.id)
+    stale_record = _record(item_id=stale.id, status="failed")
+
+    class _ScalarResult:
+        def all(self):
+            return [source_backed, generated, missing, policy_limited, stale]
+
+    class _ExecuteResult:
+        def __init__(self, rows) -> None:
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.item_sql = ""
+
+        async def execute(self, _statement):
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                self.item_sql = str(_statement.compile(dialect=postgresql.dialect()))
+                return _ExecuteResult([
+                    (item.id, item.metadata_)
+                    for item in [source_backed, generated, missing, policy_limited, stale]
+                ])
+            return _ExecuteResult([(source_record, 2), (stale_record, 0)])
+
+        async def scalars(self, _statement):
+            return _ScalarResult()
+
+    summary_session = _Session()
+    summary = asyncio.run(
+        source_trust_summary.build_source_trust_health_summary(summary_session, tenant_id="tenant-a")
+    )
+
+    warnings = {warning.warning for warning in summary.recent_warnings or []}
+    assert summary.status == "ready"
+    assert summary.total_contexts == 5
+    assert summary.source_backed == 1
+    assert summary.generated_unpromoted == 1
+    assert summary.stale_missing == 2
+    assert summary.policy_limited == 1
+    assert "source_record_missing" in warnings
+    assert "source_record_failed" in warnings
+    assert "items.raw_content" not in summary_session.item_sql
+    assert "items.content_chunks" not in summary_session.item_sql
