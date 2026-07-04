@@ -151,10 +151,64 @@ class ApiError(RuntimeError):
         self.body = body
 
 
+def _write_scope_grant(entry: dict[str, Any] | None) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    scope = entry.get("scope")
+    if not isinstance(scope, dict):
+        return None
+    scope_type = scope.get("type")
+    if scope_type in {"agent", "workspace", "session"}:
+        return f"write:{scope_type}"
+    return None
+
+
+def _memory_entries_from_request_body(path: str, body: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return []
+    if path == "/api/v1/memory/entries":
+        return [body]
+    if path == "/api/v1/memory/entries:batch":
+        entries = body.get("entries")
+        if isinstance(entries, list):
+            return [entry for entry in entries if isinstance(entry, dict)]
+    return []
+
+
 @dataclass(frozen=True)
 class Client:
     base_url: str
     api_key: str
+
+    def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
+        normalized = method.upper(), path
+        read_routes = {
+            ("GET", "/api/v1/memory/whoami"),
+            ("GET", "/api/v1/memory/scopes"),
+            ("GET", "/api/v1/memory/entries"),
+            ("GET", "/api/v1/memory/wakeup-brief"),
+            ("GET", "/api/v1/memory/jobs"),
+        }
+        if normalized[0] == "GET" and path.startswith("/api/v1/memory/jobs/"):
+            return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
+        if normalized in read_routes or normalized in {
+            ("POST", "/api/v1/memory/retrieve"),
+            ("POST", "/api/v1/memory/retrieve-agent"),
+            ("POST", "/api/v1/memory/trajectory"),
+            ("POST", "/api/v1/memory/retrieval-doctor"),
+        }:
+            return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
+        if normalized in {
+            ("POST", "/api/v1/memory/entries"),
+            ("POST", "/api/v1/memory/entries:batch"),
+        }:
+            scopes = ["write"]
+            for entry in _memory_entries_from_request_body(path, body):
+                write_grant = _write_scope_grant(entry)
+                if write_grant and write_grant not in scopes:
+                    scopes.append(write_grant)
+            return {"X-MCP-Scope": "write", "X-MCP-Scopes": ",".join(scopes)}
+        return {}
 
     def request(
         self,
@@ -174,6 +228,7 @@ class Client:
             "Accept": "application/json",
             "X-API-Key": self.api_key,
         }
+        headers.update(self._mcp_scope_headers(method, path, body))
         if body is not None:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)

@@ -100,6 +100,8 @@ def test_sweep_write_posts_canonical_memory_entries_with_api_key(tmp_path: Path)
     assert report.write_error_count == 0
     assert requests[0].url == "https://api.palace.test/api/v1/memory/entries"
     assert requests[0].headers["X-API-Key"] == "tenant-key"
+    assert requests[0].headers["X-MCP-Scope"] == "write"
+    assert requests[0].headers["X-MCP-Scopes"] == "write,write:agent"
 
 
 def test_duplicate_sweeps_replay_same_idempotency_key(tmp_path: Path) -> None:

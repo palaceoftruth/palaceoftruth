@@ -152,10 +152,11 @@ def write_transcript_records(
     try:
         for record in records:
             try:
+                request_payload = record.entry.model_dump(mode="json")
                 response = http_client.post(
                     endpoint,
-                    headers=headers,
-                    json=record.entry.model_dump(mode="json"),
+                    headers={**headers, **_memory_entry_scope_headers(request_payload)},
+                    json=request_payload,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -175,6 +176,16 @@ def write_transcript_records(
             http_client.close()
 
     return writes, errors
+
+
+def _memory_entry_scope_headers(payload: dict[str, Any]) -> dict[str, str]:
+    scopes = ["write"]
+    scope = payload.get("scope")
+    if isinstance(scope, dict):
+        scope_type = scope.get("type")
+        if scope_type in {"agent", "workspace", "session"}:
+            scopes.append(f"write:{scope_type}")
+    return {"X-MCP-Scope": "write", "X-MCP-Scopes": ",".join(scopes)}
 
 
 def sweep_transcripts(

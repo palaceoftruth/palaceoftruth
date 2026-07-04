@@ -208,6 +208,12 @@ The plugin speaks the Palace memory facade:
 - `POST /api/v1/memory/retrieve-agent`
 - `POST /api/v1/memory/retrieve` as the fallback/single-scope path
 
+Raw API-key clients for these memory routes must send explicit MCP scope
+headers. Read routes send `X-MCP-Scope: read`; write routes send
+`X-MCP-Scope: write` plus the narrow scope grant, such as `write:agent`,
+`write:workspace`, or `write:session`, in `X-MCP-Scopes`. The repo smoke and
+import scripts add those headers automatically.
+
 Memory writes return a durability contract for clients. A `202` response means
 Palace accepted a durable item/job before enqueueing background work. Clients
 should persist `job_id`, poll `poll_url` after `poll_after_seconds`, and inspect
