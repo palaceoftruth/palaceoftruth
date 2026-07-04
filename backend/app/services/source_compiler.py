@@ -30,6 +30,10 @@ SAFE_CLAIM_METADATA_KEYS = {
     "pr_url",
     "run_id",
     "source_url",
+    "policy_limited",
+    "policy_reason",
+    "policy_scope",
+    "policy_source",
 }
 SAFE_SOURCE_SPAN_KEYS = {
     "chunk_index",
@@ -178,6 +182,42 @@ class ClaimSupportReport:
 
 
 @dataclass(frozen=True)
+class AnswerAuditSourceSummary:
+    source_record_id: uuid.UUID
+    source_chunk_id: uuid.UUID | None
+    source_item_id: uuid.UUID
+    source_record_status: str
+    support_role: str
+    support_status: str
+    source_digest: str
+    source_span: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AnswerAuditItem:
+    object_type: str
+    object_id: uuid.UUID
+    object_key: str
+    object_text: str
+    claim_type: str
+    claim_status: str
+    support_state: str
+    audit_state: str
+    warning: str | None
+    promotion_status: str
+    source_count: int
+    sources: tuple[AnswerAuditSourceSummary, ...]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AnswerAuditReport:
+    tenant_id: str
+    audit_scope: str
+    items: tuple[AnswerAuditItem, ...]
+
+
+@dataclass(frozen=True)
 class SourceInvalidationReport:
     tenant_id: str
     source_records_seen: int
@@ -204,6 +244,10 @@ def _normalize_metadata(value: Any) -> dict[str, Any]:
 def _safe_claim_metadata(value: Any) -> dict[str, Any]:
     metadata = _normalize_metadata(value)
     return {key: metadata[key] for key in SAFE_CLAIM_METADATA_KEYS if key in metadata and metadata[key] not in (None, [], {})}
+
+
+def _safe_answer_audit_metadata(value: Any) -> dict[str, Any]:
+    return _safe_claim_metadata(value)
 
 
 def _safe_source_span(value: Any) -> dict[str, Any]:
@@ -964,12 +1008,15 @@ async def get_claim_support_report(
     *,
     tenant_id: str,
     claim_type: str | None = "decision",
+    claim_id: uuid.UUID | None = None,
     status: str | None = None,
     limit: int = 50,
 ) -> ClaimSupportReport:
     statement = select(Claim).where(Claim.tenant_id == tenant_id).order_by(Claim.updated_at.desc(), Claim.id.desc()).limit(limit)
     if claim_type is not None:
         statement = statement.where(Claim.claim_type == claim_type)
+    if claim_id is not None:
+        statement = statement.where(Claim.id == claim_id)
     if status is not None:
         statement = statement.where(Claim.status == status)
     claims = (await db.scalars(statement)).all()
@@ -996,6 +1043,106 @@ async def get_claim_support_report(
             )
         )
     return ClaimSupportReport(tenant_id=tenant_id, claims=tuple(summaries))
+
+
+def _promotion_status(metadata: dict[str, Any], claim_status: str) -> str:
+    action = metadata.get("review_action")
+    if action == "promote" and claim_status == "active":
+        return "promoted"
+    if action == "reject" or claim_status == "rejected":
+        return "rejected"
+    if action == "mark_stale" or claim_status == "stale":
+        return "stale"
+    if action == "demote" or claim_status == "draft":
+        return "unpromoted"
+    return "unreviewed"
+
+
+def _answer_audit_state(claim: ClaimSupportSummary) -> str:
+    metadata = _normalize_metadata(claim.metadata)
+    if metadata.get("policy_limited") is True:
+        return "policy_limited"
+    if claim.support_state == "source_backed" and _promotion_status(metadata, claim.status) == "promoted":
+        return "curated"
+    if claim.support_state == "source_backed":
+        return "source_backed"
+    if claim.support_state == "generated_unpromoted":
+        return "generated_unpromoted"
+    if claim.support_state == "stale_source":
+        return "stale"
+    if claim.support_state in {"source_missing", "weak_source_support"}:
+        return "missing"
+    if claim.support_state == "conflicted":
+        return "conflicted"
+    return "not_authoritative"
+
+
+async def get_answer_audit_report(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    claim_id: uuid.UUID | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> AnswerAuditReport:
+    support_report = await get_claim_support_report(
+        db,
+        tenant_id=tenant_id,
+        claim_type="decision",
+        claim_id=claim_id,
+        status=status,
+        limit=limit,
+    )
+    items: list[AnswerAuditItem] = []
+    for claim in support_report.claims:
+        metadata = _safe_answer_audit_metadata(claim.metadata)
+        items.append(
+            AnswerAuditItem(
+                object_type="decision_claim",
+                object_id=claim.id,
+                object_key=claim.claim_key,
+                object_text=claim.claim_text,
+                claim_type=claim.claim_type,
+                claim_status=claim.status,
+                support_state=claim.support_state,
+                audit_state=_answer_audit_state(
+                    ClaimSupportSummary(
+                        id=claim.id,
+                        claim_key=claim.claim_key,
+                        claim_text=claim.claim_text,
+                        claim_type=claim.claim_type,
+                        confidence=claim.confidence,
+                        status=claim.status,
+                        support_state=claim.support_state,
+                        warning=claim.warning,
+                        metadata=metadata,
+                        sources=claim.sources,
+                    )
+                ),
+                warning=claim.warning,
+                promotion_status=_promotion_status(metadata, claim.status),
+                source_count=len(claim.sources),
+                sources=tuple(
+                    AnswerAuditSourceSummary(
+                        source_record_id=source.source_record_id,
+                        source_chunk_id=source.source_chunk_id,
+                        source_item_id=source.source_item_id,
+                        source_record_status=source.source_record_status,
+                        support_role=source.support_role,
+                        support_status=source.status,
+                        source_digest=source.source_digest,
+                        source_span=source.source_span,
+                    )
+                    for source in claim.sources
+                ),
+                metadata=metadata,
+            )
+        )
+    return AnswerAuditReport(
+        tenant_id=support_report.tenant_id,
+        audit_scope="decision_claims",
+        items=tuple(items),
+    )
 
 
 def _claim_has_promotable_source_support(sources: tuple[ClaimSourceSupportSummary, ...]) -> bool:

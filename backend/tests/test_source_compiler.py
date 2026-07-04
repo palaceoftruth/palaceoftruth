@@ -711,6 +711,109 @@ def test_claim_support_report_defaults_to_decisions_and_redacts_metadata_and_spa
     assert payload.sources[0].source_span == {"source_chunk_digest": "digest-a", "page": 4}
 
 
+def test_answer_audit_report_maps_states_and_redacts_policy_metadata() -> None:
+    promoted_source = ClaimSourceSupportSummary(
+        id=uuid.uuid4(),
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        source_item_id=uuid.uuid4(),
+        source_record_status="active",
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={"source_chunk_digest": "digest-a", "text": "raw source must not leak"},
+    )
+    promoted_claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:curated",
+        claim_text="Use reviewed source-backed decisions.",
+        claim_type="decision",
+        confidence=0.95,
+        status="active",
+        metadata_={
+            "review_action": "promote",
+            "reviewed_by": "operator-a",
+            "policy_limited": True,
+            "policy_reason": "workspace scope only",
+            "body": "raw claim body metadata must not leak",
+        },
+    )
+    missing_claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:missing",
+        claim_text="Missing support should stay visible.",
+        claim_type="decision",
+        confidence=0.5,
+        status="active",
+        metadata_={},
+    )
+
+    class _ScalarResult:
+        def all(self):
+            return [promoted_claim, missing_claim]
+
+    class _ExecuteResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self) -> None:
+            self.source_calls = 0
+
+        async def scalars(self, statement):
+            return _ScalarResult()
+
+        async def execute(self, statement):
+            self.source_calls += 1
+            if self.source_calls == 1:
+                return _ExecuteResult([(promoted_source, promoted_source.source_item_id, "active")])
+            return _ExecuteResult([])
+
+    import asyncio
+
+    report = asyncio.run(source_compiler.get_answer_audit_report(_Session(), tenant_id="tenant-a"))
+
+    assert report.audit_scope == "decision_claims"
+    assert report.items[0].audit_state == "policy_limited"
+    assert report.items[0].promotion_status == "promoted"
+    assert report.items[0].metadata["policy_reason"] == "workspace scope only"
+    assert report.items[0].sources[0].source_span == {"source_chunk_digest": "digest-a"}
+    assert report.items[1].audit_state == "missing"
+    assert report.items[1].warning == "claim_has_no_source_support"
+    assert "raw" not in str(report)
+
+
+def test_answer_audit_state_distinguishes_required_support_labels() -> None:
+    base = {
+        "id": uuid.uuid4(),
+        "claim_key": "decision:audit-state",
+        "claim_text": "Audit state should stay explicit.",
+        "claim_type": "decision",
+        "confidence": 1.0,
+        "warning": None,
+        "sources": (),
+    }
+
+    def claim(*, status: str, support_state: str, metadata: dict | None = None):
+        return source_compiler.ClaimSupportSummary(status=status, support_state=support_state, metadata=metadata or {}, **base)
+
+    assert source_compiler._answer_audit_state(claim(status="active", support_state="source_backed")) == "source_backed"
+    assert source_compiler._answer_audit_state(
+        claim(status="active", support_state="source_backed", metadata={"review_action": "promote"})
+    ) == "curated"
+    assert source_compiler._answer_audit_state(claim(status="draft", support_state="generated_unpromoted")) == "generated_unpromoted"
+    assert source_compiler._answer_audit_state(claim(status="stale", support_state="stale_source")) == "stale"
+    assert source_compiler._answer_audit_state(claim(status="active", support_state="source_missing")) == "missing"
+    assert source_compiler._answer_audit_state(
+        claim(status="active", support_state="source_backed", metadata={"policy_limited": True})
+    ) == "policy_limited"
+
+
 def test_review_decision_claim_promotes_only_with_exact_current_source_support() -> None:
     claim = Claim(
         id=uuid.uuid4(),

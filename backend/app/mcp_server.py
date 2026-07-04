@@ -837,6 +837,20 @@ class SecondBrainApiClient:
             params["status"] = status
         return await self._request_json("GET", "/api/v1/palace/claims/support", params=params, required_scope="read")
 
+    async def get_answer_audit(
+        self,
+        *,
+        claim_id: str | None,
+        status: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if claim_id is not None:
+            params["claim_id"] = _validate_uuid_text("claim_id", claim_id)
+        if status is not None:
+            params["status"] = status
+        return await self._request_json("GET", "/api/v1/palace/answers/audit", params=params, required_scope="read")
+
     async def get_palace_room(self, *, room_id: str) -> dict[str, Any]:
         room_id = _validate_uuid_text("room_id", room_id)
         return await self._request_json("GET", f"/api/v1/palace/rooms/{room_id}")
@@ -1589,8 +1603,8 @@ mcp = FastMCP(
         "get_wakeup_context for compact session-start recall, "
         "list_memory_scopes, retrieve_agent_memory, and retrieve_memory_trajectory for route-aware agent recall, "
         "get_wakeup_brief for startup context, list_memory_jobs for read-only job health, "
-        "get_graph/get_item_relationships/list_temporal_facts/get_claim_support/get_palace_room "
-        "for read-only graph, fact, claim-support, relationship, and room/tunnel inspection, "
+        "get_graph/get_item_relationships/list_temporal_facts/get_claim_support/get_answer_audit/get_palace_room "
+        "for read-only graph, fact, claim-support, answer-audit, relationship, and room/tunnel inspection, "
         "backfill_deferred_relationships after bulk deferred memory writes, "
         "and search_items/list_items/list_tags for corpus discovery."
     ),
@@ -2019,6 +2033,26 @@ async def get_claim_support(
         operation="get_claim_support",
         params=locals(),
         call=lambda: _runtime(ctx).api.get_claim_support(
+            status=status,
+            limit=limit,
+        ),
+    )
+
+
+@mcp.tool()
+async def get_answer_audit(
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    claim_id: str | None = None,
+    status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"] | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Inspect compact read-only answer audit state for decision claims."""
+    return await _run_mcp_operation(
+        ctx,
+        operation="get_answer_audit",
+        params=locals(),
+        call=lambda: _runtime(ctx).api.get_answer_audit(
+            claim_id=claim_id,
             status=status,
             limit=limit,
         ),
