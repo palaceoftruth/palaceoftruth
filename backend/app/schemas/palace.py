@@ -203,6 +203,56 @@ class PalaceClaimSupportReport(BaseModel):
     claims: list[PalaceClaimSupportSummary] = Field(default_factory=list)
 
 
+class PalaceAnswerAuditSourceSummary(BaseModel):
+    source_record_id: uuid.UUID
+    source_chunk_id: uuid.UUID | None = None
+    source_item_id: uuid.UUID
+    source_record_status: Literal["active", "stale", "failed", "deleted", "superseded"]
+    support_role: Literal["supports", "contradicts", "context", "derived_from"]
+    support_status: Literal["current", "stale"]
+    source_digest: str
+    source_span: dict[str, Any] = Field(default_factory=dict)
+
+
+class PalaceAnswerAuditItem(BaseModel):
+    object_type: Literal["decision_claim"]
+    object_id: uuid.UUID
+    object_key: str
+    object_text: str
+    claim_type: Literal["decision"]
+    claim_status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"]
+    support_state: Literal[
+        "source_backed",
+        "weak_source_support",
+        "stale_source",
+        "source_missing",
+        "conflicted",
+        "not_authoritative",
+        "generated_unpromoted",
+    ]
+    audit_state: Literal[
+        "source_backed",
+        "curated",
+        "generated_unpromoted",
+        "stale",
+        "missing",
+        "policy_limited",
+        "conflicted",
+        "not_authoritative",
+    ]
+    warning: str | None = None
+    promotion_status: Literal["promoted", "rejected", "stale", "unpromoted", "unreviewed"]
+    source_count: int = 0
+    sources: list[PalaceAnswerAuditSourceSummary] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PalaceAnswerAuditReport(BaseModel):
+    tenant_id: str
+    audit_scope: Literal["decision_claims"]
+    items: list[PalaceAnswerAuditItem] = Field(default_factory=list)
+
+
 class PalaceClaimReviewRequest(BaseModel):
     action: Literal["promote", "reject", "mark_stale", "demote"]
     reviewed_by: str

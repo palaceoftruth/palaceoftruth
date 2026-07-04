@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import uuid
@@ -42,7 +43,14 @@ from app.schemas.palace import (
 )
 from app.schemas.search import SearchResult
 from app.services.source_compiler import ItemSourceSummary, SourceChunkSummary, SourceRecordSummary
-from app.services.source_compiler import ClaimSourceSupportSummary, ClaimSupportReport, ClaimSupportSummary
+from app.services.source_compiler import (
+    AnswerAuditItem,
+    AnswerAuditReport,
+    AnswerAuditSourceSummary,
+    ClaimSourceSupportSummary,
+    ClaimSupportReport,
+    ClaimSupportSummary,
+)
 from app.workers.queues import PALACE_WORKER_QUEUE
 
 
@@ -342,6 +350,70 @@ def test_get_palace_claim_support_ignores_non_decision_claim_type_query(monkeypa
 
     assert response.status_code == 200
     assert captured == {"tenant_id": "tenant-a", "status": None, "limit": 10}
+
+
+def test_get_palace_answer_audit_is_tenant_bounded_and_redacted(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    claim_id = uuid.uuid4()
+    source_record_id = uuid.uuid4()
+    source_chunk_id = uuid.uuid4()
+    source_item_id = uuid.uuid4()
+    captured = {}
+
+    async def fake_get_answer_audit_report(db, **kwargs):
+        captured.update(kwargs)
+        return AnswerAuditReport(
+            tenant_id="tenant-a",
+            audit_scope="decision_claims",
+            items=(
+                AnswerAuditItem(
+                    object_type="decision_claim",
+                    object_id=claim_id,
+                    object_key="decision:source-backed-answer-audit",
+                    object_text="Audit answers through source-backed decision claims",
+                    claim_type="decision",
+                    claim_status="active",
+                    support_state="source_backed",
+                    audit_state="curated",
+                    warning=None,
+                    promotion_status="promoted",
+                    source_count=1,
+                    sources=(
+                        AnswerAuditSourceSummary(
+                            source_record_id=source_record_id,
+                            source_chunk_id=source_chunk_id,
+                            source_item_id=source_item_id,
+                            source_record_status="active",
+                            support_role="supports",
+                            support_status="current",
+                            source_digest="digest-a",
+                            source_span={"source_chunk_digest": "digest-a"},
+                        ),
+                    ),
+                    metadata={
+                        "review_action": "promote",
+                        "policy_limited": True,
+                        "policy_reason": "workspace scope only",
+                    },
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("app.api.palace.get_answer_audit_report", fake_get_answer_audit_report)
+
+    response = client.get(f"/api/v1/palace/answers/audit?claim_id={claim_id}&status=active&limit=25")
+
+    assert response.status_code == 200
+    assert captured == {"tenant_id": "tenant-a", "claim_id": claim_id, "status": "active", "limit": 25}
+    payload = response.json()
+    assert payload["tenant_id"] == "tenant-a"
+    assert payload["audit_scope"] == "decision_claims"
+    assert payload["items"][0]["audit_state"] == "curated"
+    assert payload["items"][0]["promotion_status"] == "promoted"
+    assert payload["items"][0]["sources"][0]["source_record_id"] == str(source_record_id)
+    assert payload["items"][0]["metadata"]["policy_reason"] == "workspace scope only"
+    assert "chunk_text" not in json.dumps(payload)
+    assert "raw body" not in json.dumps(payload)
 
 
 def test_review_palace_decision_claim_records_operator_action(monkeypatch) -> None:

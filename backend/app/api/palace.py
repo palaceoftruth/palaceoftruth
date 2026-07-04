@@ -24,6 +24,7 @@ from app.schemas.memory import (
     McpOAuthClientSummary,
 )
 from app.schemas.palace import (
+    PalaceAnswerAuditReport,
     PalaceClaimReviewRequest,
     PalaceClaimSupportSummary,
     PalaceClaimSupportReport,
@@ -66,6 +67,7 @@ from app.services.palace import (
 )
 from app.services.source_compiler import (
     ClaimReviewError,
+    get_answer_audit_report,
     get_claim_support_report,
     get_item_source_summary,
     review_decision_claim,
@@ -100,6 +102,36 @@ def _serialize_claim_support_summary(claim) -> dict:
                 "source_span": source.source_span,
             }
             for source in claim.sources
+        ],
+    }
+
+
+def _serialize_answer_audit_item(item) -> dict:
+    return {
+        "object_type": item.object_type,
+        "object_id": item.object_id,
+        "object_key": item.object_key,
+        "object_text": item.object_text,
+        "claim_type": item.claim_type,
+        "claim_status": item.claim_status,
+        "support_state": item.support_state,
+        "audit_state": item.audit_state,
+        "warning": item.warning,
+        "promotion_status": item.promotion_status,
+        "source_count": item.source_count,
+        "metadata": item.metadata,
+        "sources": [
+            {
+                "source_record_id": source.source_record_id,
+                "source_chunk_id": source.source_chunk_id,
+                "source_item_id": source.source_item_id,
+                "source_record_status": source.source_record_status,
+                "support_role": source.support_role,
+                "support_status": source.support_status,
+                "source_digest": source.source_digest,
+                "source_span": source.source_span,
+            }
+            for source in item.sources
         ],
     }
 
@@ -698,6 +730,28 @@ async def get_palace_claim_support(
     return PalaceClaimSupportReport(
         tenant_id=report.tenant_id,
         claims=[_serialize_claim_support_summary(claim) for claim in report.claims],
+    )
+
+
+@router.get("/answers/audit", response_model=PalaceAnswerAuditReport)
+async def get_palace_answer_audit(
+    request: Request,
+    claim_id: uuid.UUID | None = None,
+    status: str | None = Query(None, pattern="^(draft|active|stale|conflicted|rejected|superseded)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PalaceAnswerAuditReport:
+    report = await get_answer_audit_report(
+        db,
+        tenant_id=request.state.tenant_id,
+        claim_id=claim_id,
+        status=status,
+        limit=limit,
+    )
+    return PalaceAnswerAuditReport(
+        tenant_id=report.tenant_id,
+        audit_scope=report.audit_scope,
+        items=[_serialize_answer_audit_item(item) for item in report.items],
     )
 
 

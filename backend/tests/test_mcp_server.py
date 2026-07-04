@@ -29,6 +29,7 @@ from app.mcp_server import (
     create_memory_entry,
     get_graph,
     get_item_relationships,
+    get_answer_audit,
     get_claim_support,
     get_palace_room,
     get_retrieval_doctor,
@@ -110,6 +111,7 @@ async def test_mcp_surface_exposes_no_destructive_item_or_feed_delete_tools() ->
         "palace_context",
         "get_wakeup_context",
         "get_claim_support",
+        "get_answer_audit",
     } <= tool_names
     assert not any("delete" in name or "purge" in name for name in tool_names)
     assert not {"delete_item", "delete_feed", "purge_item"} & tool_names
@@ -1420,6 +1422,93 @@ def test_graph_and_fact_tools_use_bounded_read_only_rest_surfaces() -> None:
         "/api/v1/palace/facts",
         "/api/v1/memory/mcp/audit",
         f"/api/v1/palace/rooms/{room_id}",
+        "/api/v1/memory/mcp/audit",
+    ]
+
+
+def test_answer_audit_tool_calls_read_endpoint_and_records_audit() -> None:
+    seen: list[tuple[str, str, dict[str, str]]] = []
+    claim_id = "550e8400-e29b-41d4-a716-446655440001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params.multi_items())))
+        if request.url.path == "/api/v1/palace/answers/audit":
+            assert request.url.params["claim_id"] == claim_id
+            assert request.url.params["status"] == "active"
+            assert request.url.params["limit"] == "10"
+            return httpx.Response(
+                200,
+                json={
+                    "tenant_id": "tenant-a",
+                    "audit_scope": "decision_claims",
+                    "items": [
+                        {
+                            "object_type": "decision_claim",
+                            "object_id": claim_id,
+                            "object_key": "decision:answer-audit",
+                            "object_text": "Use compact answer audit state.",
+                            "claim_type": "decision",
+                            "claim_status": "active",
+                            "support_state": "source_backed",
+                            "audit_state": "curated",
+                            "warning": None,
+                            "promotion_status": "promoted",
+                            "source_count": 1,
+                            "sources": [
+                                {
+                                    "source_record_id": "550e8400-e29b-41d4-a716-446655440002",
+                                    "source_chunk_id": "550e8400-e29b-41d4-a716-446655440003",
+                                    "source_item_id": "550e8400-e29b-41d4-a716-446655440004",
+                                    "source_record_status": "active",
+                                    "support_role": "supports",
+                                    "support_status": "current",
+                                    "source_digest": "digest-a",
+                                    "source_span": {"source_chunk_digest": "digest-a"},
+                                }
+                            ],
+                            "metadata": {"review_action": "promote"},
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            payload = json.loads(request.content.decode())
+            assert payload["operation"] == "get_answer_audit"
+            assert "chunk_text" not in json.dumps(payload)
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440099",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440098",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.secondbrain.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.secondbrain.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            result = await get_answer_audit(ctx, claim_id=claim_id, status="active", limit=10)
+            assert result["items"][0]["audit_state"] == "curated"
+
+    asyncio.run(scenario())
+    assert [entry[1] for entry in seen] == [
+        "/api/v1/palace/answers/audit",
         "/api/v1/memory/mcp/audit",
     ]
 
