@@ -60,6 +60,11 @@ PALACE_MEMORY_ROUTE_SCOPES = {
     ("POST", "/api/v1/memory/entries"): "write",
     ("POST", "/api/v1/memory/entries:batch"): "write",
 }
+PALACE_MEMORY_SCOPE_WRITE_GRANTS = {
+    "agent": "write:agent",
+    "workspace": "write:workspace",
+    "session": "write:session",
+}
 _SELF_NEGATION_PHRASES = (
     "i don't have any stored knowledge",
     "i do not have any stored knowledge",
@@ -279,6 +284,49 @@ def _mcp_scope_for_memory_route(method: str, path: str) -> str | None:
         "Palace of Truth memory route is missing an explicit MCP scope mapping: "
         f"{method.upper()} {path}"
     )
+
+
+def _mcp_scopes_for_memory_route(method: str, path: str, payload: dict[str, Any] | None) -> list[str]:
+    scope = _mcp_scope_for_memory_route(method, path)
+    if scope is None:
+        return []
+    scopes = [scope]
+    if method.upper() != "POST":
+        return scopes
+    if path == "/api/v1/memory/entries":
+        scopes.extend(_scoped_write_grants_for_entry_payload(payload))
+    elif path == "/api/v1/memory/entries:batch":
+        if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
+            raise RuntimeError("Palace memory batch write payload is missing entries")
+        for entry in payload["entries"]:
+            scopes.extend(_scoped_write_grants_for_entry_payload(entry))
+    return _dedupe_preserving_order(scopes)
+
+
+def _scoped_write_grants_for_entry_payload(payload: dict[str, Any] | None) -> list[str]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("Palace memory write payload is missing")
+    scope = payload.get("scope")
+    if not isinstance(scope, dict):
+        raise RuntimeError("Palace memory write payload is missing scope")
+    scope_type = scope.get("type")
+    if scope_type == "tenant_shared":
+        return []
+    grant = PALACE_MEMORY_SCOPE_WRITE_GRANTS.get(str(scope_type))
+    if grant is None:
+        raise RuntimeError(f"Palace memory write payload has unsupported scope type: {scope_type}")
+    return [grant]
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _scope_type_counts(scopes: list[dict[str, Any]]) -> dict[str, int]:
@@ -1656,9 +1704,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "Accept": "application/json",
             "X-API-Key": self._api_key,
         }
-        mcp_scope = _mcp_scope_for_memory_route(method, path)
-        if mcp_scope:
-            headers["X-MCP-Scope"] = mcp_scope
+        mcp_scopes = _mcp_scopes_for_memory_route(method, path, payload)
+        if mcp_scopes:
+            headers["X-MCP-Scope"] = mcp_scopes[0]
+            headers["X-MCP-Scopes"] = ",".join(mcp_scopes)
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"

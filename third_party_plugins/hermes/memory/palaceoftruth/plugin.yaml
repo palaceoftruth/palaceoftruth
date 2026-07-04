@@ -1,5 +1,5 @@
 name: palaceoftruth
-version: 1.0.20
+version: 1.0.21
 description: "Palace of Truth memory facade — routed retrieval and durable turn sync over /api/v1/memory/*."
 license: AGPL-3.0-only
 repository: https://github.com/palaceoftruth/palaceoftruth

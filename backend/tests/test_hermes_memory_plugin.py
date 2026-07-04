@@ -816,11 +816,18 @@ def test_palaceoftruth_route_aware_search_sends_read_scope_for_post(
         agent_workspace="palaceoftruth",
     )
 
-    captured: list[tuple[str, str, str | None]] = []
+    captured: list[tuple[str, str, str | None, str | None]] = []
 
     def fake_urlopen(request, timeout: int):
         path = request_path(request)
-        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        captured.append(
+            (
+                request.get_method(),
+                path,
+                request.get_header("X-mcp-scope"),
+                request.get_header("X-mcp-scopes"),
+            )
+        )
         if path == "/api/v1/memory/scopes":
             return FakeJsonResponse({"scopes": [], "total": 0, "limit": 100})
         if path == "/api/v1/memory/retrieve-agent":
@@ -847,8 +854,8 @@ def test_palaceoftruth_route_aware_search_sends_read_scope_for_post(
 
     assert "Agent memory" in text
     assert captured == [
-        ("GET", "/api/v1/memory/scopes", "read"),
-        ("POST", "/api/v1/memory/retrieve-agent", "read"),
+        ("GET", "/api/v1/memory/scopes", "read", "read"),
+        ("POST", "/api/v1/memory/retrieve-agent", "read", "read"),
     ]
 
 
@@ -972,7 +979,11 @@ def test_palaceoftruth_request_json_does_not_retry_permanent_4xx(monkeypatch) ->
     monkeypatch.setattr(module, "urlopen", fake_urlopen)
 
     with pytest.raises(RuntimeError, match="400"):
-        provider._request_json("POST", "/api/v1/memory/entries", {"bad": True})
+        provider._request_json(
+            "POST",
+            "/api/v1/memory/entries",
+            {"scope": {"type": "agent", "key": "orchestrator"}},
+        )
     assert calls == 1
 
 
@@ -1115,11 +1126,18 @@ def test_palaceoftruth_write_paths_send_write_scope_for_entries(
     provider = module.PalaceOfTruthMemoryProvider()
     provider.initialize("session-1", hermes_home="/tmp/hermes-home")
 
-    captured: list[tuple[str, str, str | None]] = []
+    captured: list[tuple[str, str, str | None, str | None]] = []
 
     def fake_urlopen(request, timeout: int):
         path = request_path(request)
-        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        captured.append(
+            (
+                request.get_method(),
+                path,
+                request.get_header("X-mcp-scope"),
+                request.get_header("X-mcp-scopes"),
+            )
+        )
         if path == "/api/v1/memory/whoami":
             return FakeJsonResponse({"tenant_id": "tenant-a"})
         if path == "/api/v1/memory/entries":
@@ -1138,10 +1156,10 @@ def test_palaceoftruth_write_paths_send_write_scope_for_entries(
 
     assert remember_result["ok"] is True
     assert captured == [
-        ("GET", "/api/v1/memory/whoami", "read"),
-        ("POST", "/api/v1/memory/entries", "write"),
-        ("POST", "/api/v1/memory/entries", "write"),
-        ("POST", "/api/v1/memory/entries", "write"),
+        ("GET", "/api/v1/memory/whoami", "read", "read"),
+        ("POST", "/api/v1/memory/entries", "write", "write,write:agent"),
+        ("POST", "/api/v1/memory/entries", "write", "write,write:agent"),
+        ("POST", "/api/v1/memory/entries", "write", "write,write:agent"),
     ]
 
 
@@ -1157,11 +1175,18 @@ def test_palaceoftruth_remember_bulk_sends_write_scope_for_entries_batch(
     provider = module.PalaceOfTruthMemoryProvider()
     provider.initialize("session-1", hermes_home="/tmp/hermes-home")
 
-    captured: list[tuple[str, str, str | None]] = []
+    captured: list[tuple[str, str, str | None, str | None]] = []
 
     def fake_urlopen(request, timeout: int):
         path = request_path(request)
-        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        captured.append(
+            (
+                request.get_method(),
+                path,
+                request.get_header("X-mcp-scope"),
+                request.get_header("X-mcp-scopes"),
+            )
+        )
         if path == "/api/v1/memory/whoami":
             return FakeJsonResponse({"tenant_id": "tenant-a"})
         if path == "/api/v1/memory/entries:batch":
@@ -1186,9 +1211,48 @@ def test_palaceoftruth_remember_bulk_sends_write_scope_for_entries_batch(
 
     assert result["ok"] is True
     assert captured == [
-        ("GET", "/api/v1/memory/whoami", "read"),
-        ("POST", "/api/v1/memory/entries:batch", "write"),
+        ("GET", "/api/v1/memory/whoami", "read", "read"),
+        ("POST", "/api/v1/memory/entries:batch", "write", "write,write:agent"),
     ]
+
+
+def test_palaceoftruth_batch_write_sends_each_distinct_scoped_write_grant(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str | None, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        captured.append(
+            (
+                request.get_header("X-mcp-scope"),
+                request.get_header("X-mcp-scopes"),
+            )
+        )
+        return FakeJsonResponse({"status": "accepted", "accepted": 3, "failed": 0, "results": []})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    response = provider._request_json(
+        "POST",
+        "/api/v1/memory/entries:batch",
+        {
+            "entries": [
+                {"scope": {"type": "agent", "key": "barbara"}},
+                {"scope": {"type": "workspace", "key": "palaceoftruth"}},
+                {"scope": {"type": "tenant_shared"}},
+            ]
+        },
+    )
+
+    assert response["status"] == "accepted"
+    assert captured == [("write", "write,write:agent,write:workspace")]
 
 
 def test_palaceoftruth_request_json_fails_closed_for_unmapped_memory_route(
