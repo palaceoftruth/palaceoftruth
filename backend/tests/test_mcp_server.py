@@ -1965,7 +1965,21 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
         if request.url.path == "/api/v1/memory/whoami":
             return httpx.Response(200, json={"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"})
         if request.url.path == "/api/v1/memory/wakeup-brief":
-            return httpx.Response(200, json={"freshness": "fresh", "stale": False, "summary": "Ready"})
+            return httpx.Response(
+                200,
+                json={
+                    "freshness": "fresh",
+                    "stale": False,
+                    "summary": "Ready",
+                    "source_trust": {
+                        "item_id": "550e8400-e29b-41d4-a716-446655440010",
+                        "state": "source_backed",
+                        "source_status": "active",
+                        "chunk_count": 2,
+                        "source_url": "https://example.test/source",
+                    },
+                },
+            )
         if request.url.path == "/api/v1/memory/entries":
             params = dict(request.url.params.multi_items())
             tags = params.get("tags")
@@ -2035,6 +2049,8 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
     assert result["schema_version"] == 1
     assert result["tenant"] == {"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"}
     assert result["readiness"]["status"] == "ready"
+    assert result["wakeup_brief"]["source_trust"]["state"] == "source_backed"
+    assert "preview" not in json.dumps(result["wakeup_brief"]["source_trust"])
     assert result["privacy"]["raw_memory_bodies_included"] is False
     assert "body" not in json.dumps(result["scope_summaries"])
     assert result["scope_summaries"][0]["entries"][0]["item_id"] == "item-1"

@@ -18,6 +18,13 @@ setup_script = importlib.util.module_from_spec(SPEC)
 sys.modules["setup_codex_palace_memory"] = setup_script
 SPEC.loader.exec_module(setup_script)
 
+SMOKE_SPEC = importlib.util.spec_from_file_location("smoke_agent_memory_compatibility", setup_script.SMOKE_SCRIPT)
+assert SMOKE_SPEC is not None
+assert SMOKE_SPEC.loader is not None
+smoke_script = importlib.util.module_from_spec(SMOKE_SPEC)
+sys.modules["smoke_agent_memory_compatibility"] = smoke_script
+SMOKE_SPEC.loader.exec_module(smoke_script)
+
 
 def parse_args(values: list[str]) -> Any:
     return setup_script.build_parser().parse_args(values)
@@ -120,7 +127,8 @@ def test_plugin_check_detects_version_mcp_and_skillpack_drift(
     assert "secret\"" not in json.dumps(report)
 
 
-def test_plugin_check_discovers_cached_codex_plugin(tmp_path: Path) -> None:
+def test_plugin_check_discovers_cached_codex_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
     installed = (
         tmp_path
         / "codex-home"
@@ -163,9 +171,21 @@ def test_setup_live_smoke_command_uses_stdio_adapter_without_backfill() -> None:
     assert command[command.index("--relationship-policy") + 1] == "immediate"
     assert "--skip-backfill" in command
     assert "backfill_deferred_relationships" not in " ".join(command)
-    assert "scripts/palaceoftruth_mcp.py" in command
+    assert "--stdio-arg=scripts/palaceoftruth_mcp.py" in command
+    assert "--stdio-arg=--directory" in command
+    assert "--stdio-arg" not in command
     assert "--api-key" not in command
     assert not any(item.startswith("<redacted:") for item in command)
+
+    smoke_args = command[command.index(str(setup_script.SMOKE_SCRIPT)) + 1 :]
+    parsed = smoke_script.build_parser().parse_args(smoke_args)
+    assert parsed.stdio_arg == [
+        "--directory",
+        str(setup_script.BACKEND_ROOT),
+        "run",
+        "python",
+        "scripts/palaceoftruth_mcp.py",
+    ]
 
 
 def test_setup_live_smoke_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +218,7 @@ def test_setup_live_smoke_runs_exact_previewed_command(monkeypatch: pytest.Monke
     assert launched["env"]["PALACEOFTRUTH_API_KEY"] == "secret-value"
     assert command[command.index("--relationship-policy") + 1] == "immediate"
     assert "--skip-backfill" in command
+    assert "--stdio-arg=--directory" in command
 
 
 def test_setup_rejects_invalid_config_shape() -> None:
