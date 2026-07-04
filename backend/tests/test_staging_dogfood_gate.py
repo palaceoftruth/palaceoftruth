@@ -13,6 +13,35 @@ SPEC.loader.exec_module(benchmark_module)
 build_dogfood_gate_report = benchmark_module.build_dogfood_gate_report
 
 
+def test_benchmark_client_attaches_mcp_scope_headers(monkeypatch) -> None:
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        captured.append(dict(request.header_items()))
+        return FakeResponse()
+
+    monkeypatch.setattr(benchmark_module.urllib.request, "urlopen", fake_urlopen)
+    client = benchmark_module.Client(base_url="https://api.palace.test", api_key="secret")
+
+    client.request("GET", "/api/v1/memory/whoami")
+    client.request("POST", "/api/v1/memory/entries", body={"scope": {"type": "workspace", "key": "palaceoftruth"}})
+
+    assert captured[0]["X-mcp-scope"] == "read"
+    assert captured[0]["X-mcp-scopes"] == "read"
+    assert captured[1]["X-mcp-scope"] == "write"
+    assert captured[1]["X-mcp-scopes"] == "write,write:workspace"
+
+
 def _clean_control_tower() -> dict:
     return {
         "room_artifacts": {

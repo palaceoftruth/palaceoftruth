@@ -40,6 +40,21 @@ class HttpClient:
         self.api_key = api_key
         self.timeout = timeout
 
+    def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
+        normalized = method.upper(), path
+        if normalized in {
+            ("GET", "/memory/whoami"),
+            ("GET", "/memory/jobs"),
+        } or (normalized[0] == "GET" and path.startswith("/memory/jobs/")):
+            return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
+        if normalized == ("POST", "/memory/entries"):
+            scopes = ["write"]
+            write_grant = _write_scope_grant(body)
+            if write_grant:
+                scopes.append(write_grant)
+            return {"X-MCP-Scope": "write", "X-MCP-Scopes": ",".join(scopes)}
+        return {}
+
     def request(
         self,
         method: str,
@@ -59,6 +74,7 @@ class HttpClient:
             headers["Content-Type"] = "application/json"
         if self.api_key:
             headers["X-API-Key"] = self.api_key
+            headers.update(self._mcp_scope_headers(method, path, body))
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -118,6 +134,18 @@ def _decode_payload(raw: bytes) -> Any:
 def _read_text(path: str) -> str:
     with open(path, encoding="utf-8") as handle:
         return handle.read()
+
+
+def _write_scope_grant(entry: dict[str, Any] | None) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    scope = entry.get("scope")
+    if not isinstance(scope, dict):
+        return None
+    scope_type = scope.get("type")
+    if scope_type in {"agent", "workspace", "session"}:
+        return f"write:{scope_type}"
+    return None
 
 
 def utc_now() -> datetime:

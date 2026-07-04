@@ -557,7 +557,11 @@ def _write_entries(entries: list[Any], args: argparse.Namespace) -> dict[str, An
         for entry in entries:
             payload = _entry_json(entry, include_body=True)
             try:
-                response = client.post(endpoint, headers={"X-API-Key": api_key}, json=payload)
+                response = client.post(
+                    endpoint,
+                    headers={"X-API-Key": api_key, **_memory_entry_scope_headers(payload)},
+                    json=payload,
+                )
                 response.raise_for_status()
                 response_payload = response.json()
                 writes.append(
@@ -579,6 +583,16 @@ def _write_entries(entries: list[Any], args: argparse.Namespace) -> dict[str, An
         "writes": writes,
         "write_errors": write_errors,
     }
+
+
+def _memory_entry_scope_headers(payload: dict[str, Any]) -> dict[str, str]:
+    scopes = ["write"]
+    scope = payload.get("scope")
+    if isinstance(scope, dict):
+        scope_type = scope.get("type")
+        if scope_type in {"agent", "workspace", "session"}:
+            scopes.append(f"write:{scope_type}")
+    return {"X-MCP-Scope": "write", "X-MCP-Scopes": ",".join(scopes)}
 
 
 def _parse_headers(values: list[str]) -> dict[str, str]:

@@ -98,6 +98,64 @@ def test_make_memory_entry_rejects_invalid_scope_shape() -> None:
         )
 
 
+def test_client_attaches_mcp_scope_headers_for_raw_api_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout: float):
+        captured.append((request.get_method(), smoke_module.urllib.parse.urlparse(request.full_url).path, dict(request.header_items())))
+        return FakeResponse()
+
+    monkeypatch.setattr(smoke_module.urllib.request, "urlopen", fake_urlopen)
+    client = smoke_module.Client(base_url="https://api.palaceoftruth.test", api_key="secret")
+
+    client.request("GET", "/api/v1/memory/scopes")
+    client.request(
+        "POST",
+        "/api/v1/memory/entries",
+        body={"scope": {"type": "workspace", "key": "palaceoftruth"}},
+    )
+    client.request(
+        "POST",
+        "/api/v1/memory/entries:batch",
+        body={
+            "entries": [
+                {"scope": {"type": "agent", "key": "codex"}},
+                {"scope": {"type": "session", "key": "session-1"}},
+            ]
+        },
+    )
+    client.request("POST", "/api/v1/memory/trajectory", body={"query": "route recall"})
+    client.request("POST", "/api/v1/memory/retrieval-doctor", body={"query": "route recall"})
+
+    assert [(method, path) for method, path, _ in captured] == [
+        ("GET", "/api/v1/memory/scopes"),
+        ("POST", "/api/v1/memory/entries"),
+        ("POST", "/api/v1/memory/entries:batch"),
+        ("POST", "/api/v1/memory/trajectory"),
+        ("POST", "/api/v1/memory/retrieval-doctor"),
+    ]
+    assert captured[0][2]["X-mcp-scope"] == "read"
+    assert captured[0][2]["X-mcp-scopes"] == "read"
+    assert captured[1][2]["X-mcp-scope"] == "write"
+    assert captured[1][2]["X-mcp-scopes"] == "write,write:workspace"
+    assert captured[2][2]["X-mcp-scope"] == "write"
+    assert captured[2][2]["X-mcp-scopes"] == "write,write:agent,write:session"
+    assert captured[3][2]["X-mcp-scope"] == "read"
+    assert captured[3][2]["X-mcp-scopes"] == "read"
+    assert captured[4][2]["X-mcp-scope"] == "read"
+    assert captured[4][2]["X-mcp-scopes"] == "read"
+
+
 def test_run_rest_smoke_exercises_canonical_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]] = []
 

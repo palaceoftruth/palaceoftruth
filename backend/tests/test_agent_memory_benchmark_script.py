@@ -101,7 +101,7 @@ def test_live_report_posts_agent_policy_request(monkeypatch: pytest.MonkeyPatch,
     )
 
     assert benchmark_module.cmd_live_report(args) == 0
-    assert headers_seen == [{"X-API-Key": "secret"}]
+    assert headers_seen == [{"X-API-Key": "secret", "X-MCP-Scope": "read", "X-MCP-Scopes": "read"}]
     assert posted == [
         (
             "/api/v1/memory/retrieve-agent",

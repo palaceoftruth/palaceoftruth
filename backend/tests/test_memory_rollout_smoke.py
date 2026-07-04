@@ -25,7 +25,7 @@ def test_script_path_execution_can_resolve_sibling_script_imports() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_http_client_sends_static_api_key_header(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_client_sends_static_api_key_and_mcp_scope_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 
     class FakeResponse:
@@ -48,10 +48,12 @@ def test_http_client_sends_static_api_key_header(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
     client = rollout_smoke.HttpClient(base_url="https://api.example/api/v1", api_key="static-key", timeout=12)
 
-    result = client.request("GET", "/memory/whoami")
+    result = client.request("POST", "/memory/entries", body={"scope": {"type": "workspace", "key": "rollout-smoke"}})
 
     assert result.status == 200
     assert captured["headers"]["X-api-key"] == "static-key"
+    assert captured["headers"]["X-mcp-scope"] == "write"
+    assert captured["headers"]["X-mcp-scopes"] == "write,write:workspace"
     assert "Authorization" not in captured["headers"]
     assert captured["timeout"] == 12
 

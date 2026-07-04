@@ -351,7 +351,7 @@ def _auth_headers(args: argparse.Namespace) -> dict[str, str]:
     ).strip()
     token = (args.token or os.environ.get("PALACE_MEMORY_TOKEN") or "").strip()
     if api_key:
-        return {"X-API-Key": api_key}
+        return {"X-API-Key": api_key, "X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
     if token:
         return {"Authorization": f"Bearer {token}"}
     raise AgentMemoryEvalInputError(

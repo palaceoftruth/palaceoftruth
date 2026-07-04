@@ -131,6 +131,8 @@ def test_sweep_write_posts_canonical_memory_entries_with_api_key(tmp_path: Path)
     assert report.write_error_count == 0
     assert requests[0].url == "https://api.palace.test/api/v1/memory/entries"
     assert requests[0].headers["X-API-Key"] == "tenant-key"
+    assert requests[0].headers["X-MCP-Scope"] == "write"
+    assert requests[0].headers["X-MCP-Scopes"] == "write,write:agent"
 
 
 def test_sweep_write_missing_api_config_fails_before_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,6 +357,19 @@ def test_script_mcp_write_uses_create_memory_entry_without_api_key(tmp_path: Pat
     assert calls[1][1]["scope_type"] == "agent"
     assert calls[1][1]["scope_key"] == "codex"
     assert calls[1][1]["relationship_policy"] == "deferred"
+
+
+def test_import_script_raw_write_headers_include_scope_specific_grant() -> None:
+    module = _load_script_module()
+
+    assert module._memory_entry_scope_headers({"scope": {"type": "workspace", "key": "palaceoftruth"}}) == {
+        "X-MCP-Scope": "write",
+        "X-MCP-Scopes": "write,write:workspace",
+    }
+    assert module._memory_entry_scope_headers({"scope": {"type": "tenant_shared"}}) == {
+        "X-MCP-Scope": "write",
+        "X-MCP-Scopes": "write",
+    }
 
 
 def test_script_dry_run_excludes_rollout_summaries_by_default(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -113,6 +113,28 @@ class Client:
     base_url: str
     api_key: str
 
+    def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
+        normalized = method.upper(), path
+        if normalized in {
+            ("GET", "/api/v1/memory/whoami"),
+            ("GET", "/api/v1/memory/jobs"),
+            ("GET", "/api/v1/memory/entries"),
+            ("GET", "/api/v1/memory/scopes"),
+        } or (normalized[0] == "GET" and path.startswith("/api/v1/memory/jobs/")):
+            return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
+        if normalized in {
+            ("POST", "/api/v1/memory/retrieve"),
+            ("POST", "/api/v1/memory/retrieve-agent"),
+        }:
+            return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
+        if normalized == ("POST", "/api/v1/memory/entries"):
+            scopes = ["write"]
+            write_grant = _write_scope_grant(body)
+            if write_grant:
+                scopes.append(write_grant)
+            return {"X-MCP-Scope": "write", "X-MCP-Scopes": ",".join(scopes)}
+        return {}
+
     def request(
         self,
         method: str,
@@ -131,6 +153,7 @@ class Client:
             "Accept": "application/json",
             "X-API-Key": self.api_key,
         }
+        headers.update(self._mcp_scope_headers(method, path, body))
         if body is not None:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -145,6 +168,18 @@ class Client:
             raise ApiError(method, path, exc.code, error_body) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"{method} {path} failed: {exc}") from exc
+
+
+def _write_scope_grant(entry: dict[str, Any] | None) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    scope = entry.get("scope")
+    if not isinstance(scope, dict):
+        return None
+    scope_type = scope.get("type")
+    if scope_type in {"agent", "workspace", "session"}:
+        return f"write:{scope_type}"
+    return None
 
 
 def utc_now() -> datetime:
