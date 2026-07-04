@@ -121,6 +121,7 @@ CONSOLIDATION_CANDIDATE_EVENT = "consolidation-candidate"
 CONSOLIDATION_CANDIDATE_LIMIT = 8
 CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD = 0.62
 CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS = 1.0
+CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT = 250
 
 SYNC_ACTIVE_STATUSES = {"queued", "running"}
 PALACE_ACTIVE_STATUSES = {"queued", "routing", "snapshotting", "tunneling"}
@@ -1664,7 +1665,14 @@ async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -
             "room_artifacts",
             build_room_artifact_health(db, tenant_id=tenant_id, state=state),
         ),
-        consolidation=await timed_section("consolidation", find_consolidation_candidates(db, tenant_id=tenant_id)),
+        consolidation=await timed_section(
+            "consolidation",
+            find_consolidation_candidates(
+                db,
+                tenant_id=tenant_id,
+                max_profile_rooms=CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT,
+            ),
+        ),
         worker_backpressure=await timed_section("worker_backpressure", build_worker_backpressure(arq_pool, db=db)),
         mcp_activity=await timed_section("mcp_activity", _build_mcp_activity(db, tenant_id)),
         memory_health=await timed_section("memory_health", _build_memory_health(db, tenant_id)),
@@ -1694,12 +1702,14 @@ async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -
         palace_runs=await timed_section("palace_runs", list_palace_runs(db, tenant_id, limit=8)),
     )
     elapsed_seconds = perf_counter() - control_tower_started_at
+    control_tower.build_elapsed_ms = round(elapsed_seconds * 1000, 1)
+    control_tower.section_timings_ms = section_timings_ms
     if elapsed_seconds >= CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS:
-        logger.info(
+        logger.warning(
             "control tower build timings",
             extra={
                 "tenant_id": tenant_id,
-                "elapsed_ms": round(elapsed_seconds * 1000, 1),
+                "elapsed_ms": control_tower.build_elapsed_ms,
                 "section_timings_ms": section_timings_ms,
             },
         )
@@ -1844,12 +1854,21 @@ async def _latest_snapshots(db: AsyncSession, tenant_id: str) -> dict[uuid.UUID,
     return latest
 
 
-async def _latest_room_closets(db: AsyncSession, tenant_id: str) -> dict[uuid.UUID, RoomClosetArtifact]:
+async def _latest_room_closets(
+    db: AsyncSession,
+    tenant_id: str,
+    *,
+    room_ids: Iterable[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, RoomClosetArtifact]:
+    query = select(RoomClosetArtifact).where(RoomClosetArtifact.tenant_id == tenant_id)
+    if room_ids is not None:
+        bounded_room_ids = tuple(room_ids)
+        if not bounded_room_ids:
+            return {}
+        query = query.where(RoomClosetArtifact.room_id.in_(bounded_room_ids))
     rows = (
         await db.execute(
-            select(RoomClosetArtifact)
-            .where(RoomClosetArtifact.tenant_id == tenant_id)
-            .order_by(RoomClosetArtifact.room_id, RoomClosetArtifact.generation.desc())
+            query.order_by(RoomClosetArtifact.room_id, RoomClosetArtifact.generation.desc())
         )
     ).scalars().all()
     latest: dict[uuid.UUID, RoomClosetArtifact] = {}
@@ -1959,24 +1978,47 @@ async def find_consolidation_candidates(
     *,
     tenant_id: str,
     limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
+    max_profile_rooms: int | None = None,
 ) -> PalaceConsolidationSummary:
-    rooms = (
-        await db.execute(
-            select(Room, Wing.name)
-            .join(Wing, Wing.id == Room.wing_id)
-            .where(Room.tenant_id == tenant_id)
-            .where(Room.state == "active")
-            .order_by(Wing.name.asc(), Room.name.asc(), Room.id.asc())
+    room_query = (
+        select(Room, Wing.name)
+        .join(Wing, Wing.id == Room.wing_id)
+        .where(Room.tenant_id == tenant_id)
+        .where(Room.state == "active")
+    )
+    total_rooms: int | None = None
+    if max_profile_rooms is not None:
+        bounded_room_limit = max(int(max_profile_rooms), 1)
+        total_rooms = int(
+            await db.scalar(
+                select(func.count(Room.id))
+                .where(Room.tenant_id == tenant_id)
+                .where(Room.state == "active")
+            )
+            or 0
         )
-    ).all()
-    if len(rooms) < 2:
-        return PalaceConsolidationSummary()
+        room_query = room_query.order_by(Room.updated_at.desc(), Room.id.desc()).limit(bounded_room_limit)
+    else:
+        room_query = room_query.order_by(Wing.name.asc(), Room.name.asc(), Room.id.asc())
 
-    closets = await _latest_room_closets(db, tenant_id)
+    rooms = (await db.execute(room_query)).all()
+    evaluated_rooms = len(rooms)
+    total_room_count = total_rooms if total_rooms is not None else evaluated_rooms
+    truncated = total_room_count > evaluated_rooms
+    if len(rooms) < 2:
+        return PalaceConsolidationSummary(
+            evaluated_rooms=evaluated_rooms,
+            total_rooms=total_room_count,
+            truncated=truncated,
+        )
+
+    evaluated_room_ids = tuple(room.id for room, _wing_name in rooms)
+    closets = await _latest_room_closets(db, tenant_id, room_ids=evaluated_room_ids)
     membership_rows = (
         await db.execute(
             select(RoomMembership.room_id, RoomMembership.item_id)
             .where(RoomMembership.tenant_id == tenant_id)
+            .where(RoomMembership.room_id.in_(evaluated_room_ids))
             .order_by(RoomMembership.room_id.asc(), RoomMembership.item_id.asc())
         )
     ).all()
@@ -2018,7 +2060,13 @@ async def find_consolidation_candidates(
             str(candidate.room_id),
         )
     )
-    return PalaceConsolidationSummary(candidate_count=len(candidates), candidates=candidates[:limit])
+    return PalaceConsolidationSummary(
+        candidate_count=len(candidates),
+        candidates=candidates[:limit],
+        evaluated_rooms=evaluated_rooms,
+        total_rooms=total_room_count,
+        truncated=truncated,
+    )
 
 
 async def record_consolidation_candidate_events(

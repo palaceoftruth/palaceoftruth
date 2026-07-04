@@ -629,6 +629,9 @@ class PalaceConsolidationCandidate(BaseModel):
 class PalaceConsolidationSummary(BaseModel):
     candidate_count: int = 0
     candidates: list[PalaceConsolidationCandidate] = Field(default_factory=list)
+    evaluated_rooms: int = 0
+    total_rooms: int = 0
+    truncated: bool = False
 
 
 class PalaceWorkerQueueMetrics(BaseModel):
@@ -703,6 +706,8 @@ class PalaceControlTower(BaseModel):
     sync_sources: list["SyncSourceSummary"] = Field(default_factory=list)
     sync_runs: list["SyncRunSummary"] = Field(default_factory=list)
     palace_runs: list["PalaceRunSummary"] = Field(default_factory=list)
+    build_elapsed_ms: float | None = None
+    section_timings_ms: dict[str, float] = Field(default_factory=dict)
 
 
 class SyncSourceCreate(BaseModel):
