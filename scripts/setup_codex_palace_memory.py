@@ -364,7 +364,7 @@ def smoke_command(args: argparse.Namespace, *, include_secret: bool) -> list[str
         "python",
         "scripts/palaceoftruth_mcp.py",
     ):
-        command.extend(["--stdio-arg", item])
+        command.append(f"--stdio-arg={item}")
     return command
 
 

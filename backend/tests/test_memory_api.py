@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import json
 import logging
@@ -48,6 +49,7 @@ from app.services.memory import (
     delegated_agent_memory_policy_from_config,
     parse_delegated_agent_memory_read_policies,
 )
+from app.services.source_trust_summary import SourceTrustSummary
 from app.workers.queues import singleton_job_id
 
 
@@ -2960,6 +2962,59 @@ def test_memory_wakeup_brief_returns_authenticated_tenant_scope(monkeypatch) -> 
     assert payload["scope_type"] == "wing"
     assert payload["scope_key"] == "product-growth"
     assert payload["freshness"] == "stale"
+
+
+def test_memory_wakeup_brief_includes_compact_source_trust(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    now = datetime(2026, 4, 23, 6, 0, tzinfo=timezone.utc)
+    brief_item = SimpleNamespace(
+        id=item_id,
+        tenant_id="tenant-a",
+        status="ready",
+        deleted_at=None,
+        title="Wake-up Brief 2026-04-23",
+        summary="Startup context.",
+        raw_content="Current wakeup body",
+        source_url="memory://wakeup-brief/tenant/default/2026-04-23",
+        metadata_={
+            "wakeup_brief": {
+                "scope_type": "tenant",
+                "day": "2026-04-23",
+                "generation": 9,
+                "room_count": 3,
+                "diary_count": 2,
+                "fact_count": 5,
+            }
+        },
+        updated_at=now,
+    )
+
+    class _Session:
+        async def get(self, model, key):
+            return SimpleNamespace(indexed_generation=9)
+
+        async def execute(self, statement):
+            return _ScalarsResult([brief_item])
+
+    async def fake_source_trust(db, *, tenant_id: str, item_ids):
+        assert tenant_id == "tenant-a"
+        assert item_ids == [item_id]
+        return {
+            item_id: SourceTrustSummary(
+                item_id=item_id,
+                state="generated_unpromoted",
+                warning="generated_artifact_without_promoted_source_support",
+            )
+        }
+
+    monkeypatch.setattr(memory_service, "get_source_trust_summaries", fake_source_trust)
+
+    response = asyncio.run(memory_service.get_memory_wakeup_brief(_Session(), tenant_id="tenant-a"))
+
+    assert response.source_item_id == item_id
+    assert response.source_trust is not None
+    assert response.source_trust.state == "generated_unpromoted"
+    assert response.source_trust.warning == "generated_artifact_without_promoted_source_support"
 
 
 def test_memory_trajectory_route_uses_authenticated_tenant_and_policy(monkeypatch) -> None:

@@ -747,6 +747,26 @@ class MemoryTrajectoryResponse(BaseModel):
     total: int
 
 
+class MemorySourceTrustSummary(BaseModel):
+    item_id: uuid.UUID
+    state: Literal[
+        "source_backed",
+        "curated_memory",
+        "generated_unpromoted",
+        "stale_source",
+        "source_missing",
+        "policy_limited",
+        "unknown",
+    ]
+    source_record_id: uuid.UUID | None = None
+    source_status: str | None = None
+    chunk_count: int = 0
+    stale_reason: str | None = None
+    warning: str | None = None
+    source_title: str | None = None
+    source_url: str | None = None
+
+
 class MemoryWakeupBriefResponse(BaseModel):
     source_item_id: uuid.UUID
     title: str
@@ -764,6 +784,7 @@ class MemoryWakeupBriefResponse(BaseModel):
     diary_count: int
     fact_count: int
     updated_at: datetime
+    source_trust: MemorySourceTrustSummary | None = None
 
 
 DoctorStatus = Literal["ok", "degraded", "unhealthy"]

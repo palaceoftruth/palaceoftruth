@@ -65,6 +65,7 @@ from app.services.memory_entries import (
 from app.services.palace import retrieve_palace
 from app.services.queue_telemetry import build_worker_backpressure
 from app.services.search import SearchService
+from app.services.source_trust_summary import get_source_trust_summaries
 from app.services.wakeup_briefs import build_wakeup_brief_summary
 from app.utils.webhook import validate_webhook_url
 
@@ -1808,6 +1809,7 @@ async def get_memory_wakeup_brief(
 
     _day, generation, _updated_at, item, brief = max(candidates, key=lambda candidate: candidate[:3])
     stale = generation < indexed_generation
+    source_trust = (await get_source_trust_summaries(db, tenant_id=tenant_id, item_ids=[item.id])).get(item.id)
     return MemoryWakeupBriefResponse(
         source_item_id=item.id,
         title=item.title,
@@ -1825,6 +1827,7 @@ async def get_memory_wakeup_brief(
         diary_count=_metadata_int(brief.get("diary_count")),
         fact_count=_metadata_int(brief.get("fact_count")),
         updated_at=item.updated_at,
+        source_trust=source_trust.__dict__ if source_trust is not None else None,
     )
 
 
