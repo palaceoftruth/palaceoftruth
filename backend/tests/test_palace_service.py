@@ -459,6 +459,9 @@ class _ConsolidationCandidateDb:
     async def commit(self) -> None:
         self.commits += 1
 
+    async def scalar(self, _statement):
+        return len(self.rooms)
+
 
 @pytest.mark.asyncio
 async def test_apply_room_routing_flushes_deleted_auto_membership_before_reinsert(monkeypatch) -> None:
@@ -930,6 +933,66 @@ async def test_find_consolidation_candidates_ignores_cross_wing_matches() -> Non
 
     assert summary.candidate_count == 0
     assert summary.candidates == []
+
+
+@pytest.mark.asyncio
+async def test_find_consolidation_candidates_reports_bounded_control_tower_scan() -> None:
+    wing_id = uuid.uuid4()
+    room_a = Room(
+        id=uuid.uuid4(),
+        tenant_id="default",
+        wing_id=wing_id,
+        slug="pricing-narrative",
+        stable_key="product-growth:pricing-narrative",
+        name="Pricing Narrative",
+        state="active",
+    )
+    room_b = Room(
+        id=uuid.uuid4(),
+        tenant_id="default",
+        wing_id=wing_id,
+        slug="pricing-narratives",
+        stable_key="product-growth:pricing-narratives",
+        name="Pricing Narratives",
+        state="active",
+    )
+    room_c = Room(
+        id=uuid.uuid4(),
+        tenant_id="default",
+        wing_id=wing_id,
+        slug="unrelated",
+        stable_key="product-growth:unrelated",
+        name="Unrelated",
+        state="active",
+    )
+
+    class BoundedDb(_ConsolidationCandidateDb):
+        async def execute(self, _statement):
+            self.calls += 1
+            if self.calls == 1:
+                return _RowsResult([(room_a, "Product / Growth"), (room_b, "Product / Growth")])
+            if self.calls == 2:
+                return _ScalarsResult([])
+            if self.calls == 3:
+                return _RowsResult([])
+            return _ScalarsResult([])
+
+    db = BoundedDb(
+        rooms=[
+            (room_a, "Product / Growth"),
+            (room_b, "Product / Growth"),
+            (room_c, "Product / Growth"),
+        ],
+        closets=[],
+    )
+
+    summary = await find_consolidation_candidates(db, tenant_id="default", max_profile_rooms=2)
+
+    assert summary.total_rooms == 3
+    assert summary.evaluated_rooms == 2
+    assert summary.truncated is True
+    assert summary.candidate_count == 1
+    assert summary.candidates[0].room_id == room_a.id
 
 
 @pytest.mark.asyncio

@@ -653,6 +653,8 @@ def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
             sync_sources=[],
             sync_runs=[],
             palace_runs=[],
+            build_elapsed_ms=42.5,
+            section_timings_ms={"consolidation": 12.4, "source_trust_health": 3.1},
         )
 
     monkeypatch.setattr("app.api.palace.build_control_tower", fake_build_control_tower)
@@ -678,6 +680,8 @@ def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
     assert payload["source_trust_health"]["source_backed"] == 2
     assert payload["source_trust_health"]["recent_warnings"][0]["warning"] == "generated_artifact_without_promoted_source_support"
     assert payload["memory_health"]["recent_jobs"][0]["scope"] == {"type": "workspace", "key": "launch-pad"}
+    assert payload["build_elapsed_ms"] == 42.5
+    assert payload["section_timings_ms"] == {"consolidation": 12.4, "source_trust_health": 3.1}
 
 
 def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None:

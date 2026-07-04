@@ -682,6 +682,9 @@ export interface PalaceConsolidationCandidate {
 export interface PalaceConsolidationSummary {
   candidate_count: number;
   candidates: PalaceConsolidationCandidate[];
+  evaluated_rooms: number;
+  total_rooms: number;
+  truncated: boolean;
 }
 
 export interface PalaceWorkerQueueMetrics {
@@ -891,4 +894,6 @@ export interface PalaceControlTower {
   sync_sources: PalaceSyncSource[];
   sync_runs: PalaceSyncRun[];
   palace_runs: PalaceRunSummary[];
+  build_elapsed_ms?: number | null;
+  section_timings_ms: Record<string, number>;
 }
