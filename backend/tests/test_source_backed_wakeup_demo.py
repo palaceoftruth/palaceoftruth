@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT / "scripts" / "demo_source_backed_wakeup.py"
 FIXTURE_PATH = ROOT / "fixtures" / "source_backed_wakeup_demo.json"
+DOC_PATH = ROOT / "docs" / "source-backed-wakeup-demo.md"
 
 spec = importlib.util.spec_from_file_location("demo_source_backed_wakeup", SCRIPT_PATH)
 assert spec is not None
@@ -52,3 +53,34 @@ def test_source_backed_wakeup_privacy_scan_rejects_secret_markers() -> None:
         assert "forbidden privacy marker" in str(exc)
     else:
         raise AssertionError("expected privacy scan to reject secret-like fixture content")
+
+
+def test_source_backed_wakeup_docs_page_preserves_public_contract() -> None:
+    page = DOC_PATH.read_text(encoding="utf-8")
+
+    for heading in (
+        "# Source-Backed Wakeup for Agent Teams",
+        "## Quickstart",
+        "## Expected Output",
+        "## What The Trust States Mean",
+        "## Privacy Boundary",
+        "## What Palace Does Not Trust Yet",
+        "## Operator Next Steps",
+        "## Roadmap After The MVP Boundary",
+    ):
+        assert heading in page
+
+    for state in (
+        "source_backed",
+        "generated_unpromoted",
+        "stale_source",
+        "source_missing",
+        "policy_limited",
+    ):
+        assert state in page
+
+    assert "python3 scripts/demo_source_backed_wakeup.py" in page
+    assert "get_wakeup_context" in page
+    assert "raw chunks" in page
+    assert "source previews" in page
+    assert "does not claim full source-backed answers" in page
