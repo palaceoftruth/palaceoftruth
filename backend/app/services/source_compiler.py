@@ -76,6 +76,9 @@ class SourceBackfillReport:
     records_upserted: int
     chunks_upserted: int
     skipped_items: int
+    source_records_marked_stale: int = 0
+    claim_sources_marked_stale: int = 0
+    claims_marked_stale: int = 0
 
 
 @dataclass(frozen=True)
@@ -168,6 +171,14 @@ class ClaimSupportSummary:
 class ClaimSupportReport:
     tenant_id: str
     claims: tuple[ClaimSupportSummary, ...]
+
+
+@dataclass(frozen=True)
+class SourceInvalidationReport:
+    tenant_id: str
+    source_records_seen: int
+    claim_sources_marked_stale: int
+    claims_marked_stale: int
 
 
 def _stable_digest(payload: Any) -> str:
@@ -429,13 +440,36 @@ async def backfill_source_records_and_chunks(
     if dry_run:
         return report
 
+    source_records_marked_stale = 0
+    claim_sources_marked_stale = 0
+    claims_marked_stale = 0
     for projection in projections:
         record_id = await _upsert_source_record(db, projection)
-        await _mark_prior_source_records_stale(db, projection=projection, active_record_id=record_id)
+        stale_record_ids = await _mark_prior_source_records_stale(db, projection=projection, active_record_id=record_id)
+        source_records_marked_stale += len(stale_record_ids)
+        invalidation = await _invalidate_decision_claims_for_source_records(
+            db,
+            tenant_id=projection.tenant_id,
+            source_record_ids=stale_record_ids,
+        )
+        claim_sources_marked_stale += invalidation.claim_sources_marked_stale
+        claims_marked_stale += invalidation.claims_marked_stale
         for chunk in projection.chunks:
             await _upsert_source_chunk(db, projection=projection, source_record_id=record_id, chunk=chunk)
     await db.commit()
-    return report
+    return SourceBackfillReport(
+        tenant_id=report.tenant_id,
+        dry_run=report.dry_run,
+        items_seen=report.items_seen,
+        records_planned=report.records_planned,
+        chunks_planned=report.chunks_planned,
+        records_upserted=report.records_upserted,
+        chunks_upserted=report.chunks_upserted,
+        skipped_items=report.skipped_items,
+        source_records_marked_stale=source_records_marked_stale,
+        claim_sources_marked_stale=claim_sources_marked_stale,
+        claims_marked_stale=claims_marked_stale,
+    )
 
 
 def _backfill_fact_query(tenant_id: str, *, fact_ids: Iterable[uuid.UUID] | None, limit: int) -> Select[tuple[TemporalFact]]:
@@ -552,14 +586,78 @@ async def _mark_prior_source_records_stale(
     *,
     projection: SourceRecordProjection,
     active_record_id: uuid.UUID,
-) -> None:
-    await db.execute(
+) -> tuple[uuid.UUID, ...]:
+    result = await db.execute(
         update(SourceRecord)
         .where(SourceRecord.tenant_id == projection.tenant_id)
         .where(SourceRecord.item_id == projection.item_id)
         .where(SourceRecord.id != active_record_id)
         .where(SourceRecord.status == "active")
         .values(status="stale", updated_at=func.now())
+        .returning(SourceRecord.id)
+    )
+    return tuple(result.scalars().all())
+
+
+async def _invalidate_decision_claims_for_source_records(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    source_record_ids: Iterable[uuid.UUID],
+) -> SourceInvalidationReport:
+    record_ids = tuple(dict.fromkeys(source_record_ids))
+    if not record_ids:
+        return SourceInvalidationReport(
+            tenant_id=tenant_id,
+            source_records_seen=0,
+            claim_sources_marked_stale=0,
+            claims_marked_stale=0,
+        )
+
+    dependency_rows = (
+        await db.execute(
+            select(ClaimSource.id, ClaimSource.claim_id)
+            .join(Claim, Claim.id == ClaimSource.claim_id)
+            .where(ClaimSource.tenant_id == tenant_id)
+            .where(ClaimSource.source_record_id.in_(record_ids))
+            .where(ClaimSource.status == "current")
+            .where(Claim.tenant_id == tenant_id)
+            .where(Claim.claim_type == "decision")
+            .where(Claim.status == "active")
+        )
+    ).all()
+    claim_source_ids = tuple(row[0] for row in dependency_rows)
+    claim_ids = tuple(dict.fromkeys(row[1] for row in dependency_rows))
+    if not claim_source_ids:
+        return SourceInvalidationReport(
+            tenant_id=tenant_id,
+            source_records_seen=len(record_ids),
+            claim_sources_marked_stale=0,
+            claims_marked_stale=0,
+        )
+
+    claim_source_result = await db.execute(
+        update(ClaimSource)
+        .where(ClaimSource.tenant_id == tenant_id)
+        .where(ClaimSource.id.in_(claim_source_ids))
+        .where(ClaimSource.status == "current")
+        .values(status="stale")
+        .returning(ClaimSource.id)
+    )
+    claim_result = await db.execute(
+        update(Claim)
+        .where(Claim.tenant_id == tenant_id)
+        .where(Claim.id.in_(claim_ids))
+        .where(Claim.claim_type == "decision")
+        .where(Claim.status == "active")
+        .values(status="stale", updated_at=func.now())
+        .returning(Claim.id)
+    )
+    return SourceInvalidationReport(
+        tenant_id=tenant_id,
+        source_records_seen=len(record_ids),
+        claim_sources_marked_stale=len(claim_source_result.scalars().all()),
+        claims_marked_stale=len(claim_result.scalars().all()),
     )
 
 

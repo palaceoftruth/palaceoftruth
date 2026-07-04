@@ -98,6 +98,9 @@ def test_backfill_plan_is_tenant_bounded_and_dry_run_safe() -> None:
     assert report.records_upserted == 0
     assert report.chunks_upserted == 0
     assert report.skipped_items == 1
+    assert report.source_records_marked_stale == 0
+    assert report.claim_sources_marked_stale == 0
+    assert report.claims_marked_stale == 0
 
 
 def test_source_projection_is_idempotent_for_same_item_version() -> None:
@@ -149,16 +152,26 @@ def test_source_record_upsert_uses_mapped_metadata_attribute(monkeypatch) -> Non
 
 def test_mark_prior_source_records_stale_scopes_to_same_tenant_and_item() -> None:
     captured = {}
+    stale_record_id = uuid.uuid4()
     projection = project_item_source(_item())
     active_record_id = uuid.uuid4()
+
+    class _ScalarResult:
+        def all(self):
+            return [stale_record_id]
+
+    class _ExecuteResult:
+        def scalars(self):
+            return _ScalarResult()
 
     class _Session:
         async def execute(self, statement):
             captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ExecuteResult()
 
     import asyncio
 
-    asyncio.run(
+    result = asyncio.run(
         source_compiler._mark_prior_source_records_stale(
             _Session(),
             projection=projection,
@@ -166,6 +179,7 @@ def test_mark_prior_source_records_stale_scopes_to_same_tenant_and_item() -> Non
         )
     )
 
+    assert result == (stale_record_id,)
     assert "UPDATE source_records SET status=" in captured["sql"]
     assert "source_records.tenant_id = " in captured["sql"]
     assert "source_records.item_id = " in captured["sql"]
@@ -174,15 +188,25 @@ def test_mark_prior_source_records_stale_scopes_to_same_tenant_and_item() -> Non
 
 def test_failed_projection_stales_prior_active_records() -> None:
     captured = {}
+    stale_record_id = uuid.uuid4()
     projection = project_item_source(_item(status="failed"))
+
+    class _ScalarResult:
+        def all(self):
+            return [stale_record_id]
+
+    class _ExecuteResult:
+        def scalars(self):
+            return _ScalarResult()
 
     class _Session:
         async def execute(self, statement):
             captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ExecuteResult()
 
     import asyncio
 
-    asyncio.run(
+    result = asyncio.run(
         source_compiler._mark_prior_source_records_stale(
             _Session(),
             projection=projection,
@@ -190,6 +214,7 @@ def test_failed_projection_stales_prior_active_records() -> None:
         )
     )
 
+    assert result == (stale_record_id,)
     assert projection.status == "failed"
     assert "UPDATE source_records SET status=" in captured["sql"]
 
@@ -413,6 +438,109 @@ def test_mark_unsupported_claim_stales_claim_and_current_sources() -> None:
     assert "claim_sources.tenant_id = " in captured["updates"][1]
     assert "claim_sources.claim_id = " in captured["updates"][1]
     assert "claim_sources.status = " in captured["updates"][1]
+
+
+def test_source_record_invalidation_marks_current_decision_dependencies_stale() -> None:
+    source_record_id = uuid.uuid4()
+    claim_source_id = uuid.uuid4()
+    claim_id = uuid.uuid4()
+    captured = {"sql": []}
+
+    class _ScalarResult:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    class _ExecuteResult:
+        def __init__(self, *, rows=None, scalars=None):
+            self._rows = rows or []
+            self._scalars = scalars or []
+
+        def all(self):
+            return self._rows
+
+        def scalars(self):
+            return _ScalarResult(self._scalars)
+
+    class _Session:
+        async def execute(self, statement):
+            captured["sql"].append(str(statement.compile(dialect=postgresql.dialect())))
+            if len(captured["sql"]) == 1:
+                return _ExecuteResult(rows=[(claim_source_id, claim_id)])
+            if len(captured["sql"]) == 2:
+                return _ExecuteResult(scalars=[claim_source_id])
+            return _ExecuteResult(scalars=[claim_id])
+
+    import asyncio
+
+    report = asyncio.run(
+        source_compiler._invalidate_decision_claims_for_source_records(
+            _Session(),
+            tenant_id="tenant-a",
+            source_record_ids=(source_record_id,),
+        )
+    )
+
+    assert report.source_records_seen == 1
+    assert report.claim_sources_marked_stale == 1
+    assert report.claims_marked_stale == 1
+    assert "JOIN claims" in captured["sql"][0]
+    assert "claim_sources.tenant_id = " in captured["sql"][0]
+    assert "claims.tenant_id = " in captured["sql"][0]
+    assert "claims.claim_type = " in captured["sql"][0]
+    assert "claims.status = " in captured["sql"][0]
+    assert "UPDATE claim_sources SET status=" in captured["sql"][1]
+    assert "UPDATE claims SET status=" in captured["sql"][2]
+
+
+def test_source_record_invalidation_noops_when_dependency_absent() -> None:
+    captured = {"sql": []}
+
+    class _ExecuteResult:
+        def all(self):
+            return []
+
+    class _Session:
+        async def execute(self, statement):
+            captured["sql"].append(str(statement.compile(dialect=postgresql.dialect())))
+            return _ExecuteResult()
+
+    import asyncio
+
+    report = asyncio.run(
+        source_compiler._invalidate_decision_claims_for_source_records(
+            _Session(),
+            tenant_id="tenant-a",
+            source_record_ids=(uuid.uuid4(),),
+        )
+    )
+
+    assert report.source_records_seen == 1
+    assert report.claim_sources_marked_stale == 0
+    assert report.claims_marked_stale == 0
+    assert len(captured["sql"]) == 1
+
+
+def test_source_record_invalidation_noops_when_no_changed_source_records() -> None:
+    class _Session:
+        async def execute(self, statement):
+            raise AssertionError("no query should run without stale source records")
+
+    import asyncio
+
+    report = asyncio.run(
+        source_compiler._invalidate_decision_claims_for_source_records(
+            _Session(),
+            tenant_id="tenant-a",
+            source_record_ids=(),
+        )
+    )
+
+    assert report.source_records_seen == 0
+    assert report.claim_sources_marked_stale == 0
+    assert report.claims_marked_stale == 0
 
 
 def test_claim_support_state_reports_source_backed_weak_stale_missing_and_unpromoted() -> None:
