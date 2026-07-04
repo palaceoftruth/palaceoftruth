@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import Select, func, select, update
@@ -18,6 +19,9 @@ ACTIVE_SOURCE_STATUSES = {"active", "stale", "superseded"}
 CLAIM_SUPPORT_SOURCE_STATUSES = {"active"}
 SAFE_CLAIM_METADATA_KEYS = {
     "compiler",
+    "operator_reviews",
+    "review_action",
+    "review_rationale",
     "reviewed_at",
     "reviewed_by",
     "review_role",
@@ -179,6 +183,13 @@ class SourceInvalidationReport:
     source_records_seen: int
     claim_sources_marked_stale: int
     claims_marked_stale: int
+
+
+class ClaimReviewError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def _stable_digest(payload: Any) -> str:
@@ -917,6 +928,37 @@ def _claim_support_state(claim: Claim, sources: tuple[ClaimSourceSupportSummary,
     return "weak_source_support", "claim_source_lacks_exact_chunk"
 
 
+async def _claim_source_support_summaries(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    claim_id: uuid.UUID,
+) -> tuple[ClaimSourceSupportSummary, ...]:
+    rows = (
+        await db.execute(
+            select(ClaimSource, SourceRecord.item_id, SourceRecord.status)
+            .join(SourceRecord, SourceRecord.id == ClaimSource.source_record_id)
+            .where(ClaimSource.tenant_id == tenant_id, ClaimSource.claim_id == claim_id)
+            .where(SourceRecord.tenant_id == tenant_id)
+            .order_by(ClaimSource.created_at.asc(), ClaimSource.id.asc())
+        )
+    ).all()
+    return tuple(
+        ClaimSourceSupportSummary(
+            id=claim_source.id,
+            source_record_id=claim_source.source_record_id,
+            source_chunk_id=claim_source.source_chunk_id,
+            source_item_id=source_item_id,
+            source_record_status=source_record_status,
+            support_role=claim_source.support_role,
+            status=claim_source.status,
+            source_digest=claim_source.source_digest,
+            source_span=_safe_source_span(claim_source.source_span),
+        )
+        for claim_source, source_item_id, source_record_status in rows
+    )
+
+
 async def get_claim_support_report(
     db: AsyncSession,
     *,
@@ -933,28 +975,10 @@ async def get_claim_support_report(
     claims = (await db.scalars(statement)).all()
     summaries: list[ClaimSupportSummary] = []
     for claim in claims:
-        rows = (
-            await db.execute(
-                select(ClaimSource, SourceRecord.item_id, SourceRecord.status)
-                .join(SourceRecord, SourceRecord.id == ClaimSource.source_record_id)
-                .where(ClaimSource.tenant_id == tenant_id, ClaimSource.claim_id == claim.id)
-                .where(SourceRecord.tenant_id == tenant_id)
-                .order_by(ClaimSource.created_at.asc(), ClaimSource.id.asc())
-            )
-        ).all()
-        source_summaries = tuple(
-            ClaimSourceSupportSummary(
-                id=claim_source.id,
-                source_record_id=claim_source.source_record_id,
-                source_chunk_id=claim_source.source_chunk_id,
-                source_item_id=source_item_id,
-                source_record_status=source_record_status,
-                support_role=claim_source.support_role,
-                status=claim_source.status,
-                source_digest=claim_source.source_digest,
-                source_span=_safe_source_span(claim_source.source_span),
-            )
-            for claim_source, source_item_id, source_record_status in rows
+        source_summaries = await _claim_source_support_summaries(
+            db,
+            tenant_id=tenant_id,
+            claim_id=claim.id,
         )
         support_state, warning = _claim_support_state(claim, source_summaries)
         summaries.append(
@@ -972,3 +996,137 @@ async def get_claim_support_report(
             )
         )
     return ClaimSupportReport(tenant_id=tenant_id, claims=tuple(summaries))
+
+
+def _claim_has_promotable_source_support(sources: tuple[ClaimSourceSupportSummary, ...]) -> bool:
+    has_current_contradiction = any(
+        source.status == "current"
+        and source.source_record_status == "active"
+        and source.support_role == "contradicts"
+        for source in sources
+    )
+    if has_current_contradiction:
+        return False
+    return any(
+        source.status == "current"
+        and source.source_record_status == "active"
+        and source.support_role == "supports"
+        and source.source_chunk_id is not None
+        for source in sources
+    )
+
+
+def _reviewed_claim_metadata(
+    *,
+    existing_metadata: Any,
+    action: str,
+    previous_status: str,
+    new_status: str,
+    reviewed_by: str,
+    review_role: str,
+    rationale: str | None,
+) -> dict[str, Any]:
+    metadata = dict(_normalize_metadata(existing_metadata))
+    event = {
+        "action": action,
+        "previous_status": previous_status,
+        "new_status": new_status,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_by": reviewed_by,
+        "review_role": review_role,
+    }
+    if rationale:
+        event["rationale"] = rationale
+    events = metadata.get("operator_reviews")
+    if not isinstance(events, list):
+        events = []
+    metadata["operator_reviews"] = [*events[-24:], event]
+    metadata["reviewed_at"] = event["reviewed_at"]
+    metadata["reviewed_by"] = reviewed_by
+    metadata["review_role"] = review_role
+    metadata["review_action"] = action
+    if rationale:
+        metadata["review_rationale"] = rationale
+    else:
+        metadata.pop("review_rationale", None)
+    return metadata
+
+
+async def review_decision_claim(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    claim_id: uuid.UUID,
+    action: str,
+    reviewed_by: str,
+    review_role: str = "operator",
+    rationale: str | None = None,
+) -> ClaimSupportSummary | None:
+    claim = await db.scalar(
+        select(Claim)
+        .where(Claim.tenant_id == tenant_id)
+        .where(Claim.id == claim_id)
+        .where(Claim.claim_type == "decision")
+    )
+    if claim is None:
+        return None
+
+    sources = await _claim_source_support_summaries(db, tenant_id=tenant_id, claim_id=claim.id)
+    previous_status = claim.status
+    if action == "promote":
+        if not _claim_has_promotable_source_support(sources):
+            raise ClaimReviewError(
+                "source_support_required",
+                "Decision claims require current exact source support before promotion.",
+            )
+        new_status = "active"
+    elif action == "reject":
+        new_status = "rejected"
+    elif action == "mark_stale":
+        new_status = "stale"
+    elif action == "demote":
+        new_status = "draft"
+    else:
+        raise ClaimReviewError("unsupported_action", f"Unsupported decision-claim review action: {action}")
+
+    metadata = _reviewed_claim_metadata(
+        existing_metadata=claim.metadata_,
+        action=action,
+        previous_status=previous_status,
+        new_status=new_status,
+        reviewed_by=reviewed_by,
+        review_role=review_role,
+        rationale=rationale,
+    )
+    await db.execute(
+        update(Claim)
+        .where(Claim.tenant_id == tenant_id)
+        .where(Claim.id == claim.id)
+        .where(Claim.claim_type == "decision")
+        .values({Claim.status: new_status, Claim.metadata_: metadata, Claim.updated_at: func.now()})
+    )
+    await db.commit()
+
+    reviewed_claim = Claim(
+        id=claim.id,
+        tenant_id=claim.tenant_id,
+        claim_key=claim.claim_key,
+        claim_text=claim.claim_text,
+        claim_type=claim.claim_type,
+        confidence=claim.confidence,
+        status=new_status,
+        metadata_=metadata,
+    )
+    support_state, warning = _claim_support_state(reviewed_claim, sources)
+    return ClaimSupportSummary(
+        id=reviewed_claim.id,
+        claim_key=reviewed_claim.claim_key,
+        claim_text=reviewed_claim.claim_text,
+        claim_type=reviewed_claim.claim_type,
+        confidence=reviewed_claim.confidence,
+        status=reviewed_claim.status,
+        support_state=support_state,
+        warning=warning,
+        metadata=_safe_claim_metadata(reviewed_claim.metadata_),
+        sources=sources,
+    )

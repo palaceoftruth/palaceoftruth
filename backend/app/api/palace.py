@@ -24,6 +24,8 @@ from app.schemas.memory import (
     McpOAuthClientSummary,
 )
 from app.schemas.palace import (
+    PalaceClaimReviewRequest,
+    PalaceClaimSupportSummary,
     PalaceClaimSupportReport,
     PalaceControlTower,
     PalaceItemSourceSummary,
@@ -62,11 +64,44 @@ from app.services.palace import (
     update_room,
     update_sync_source,
 )
-from app.services.source_compiler import get_claim_support_report, get_item_source_summary
+from app.services.source_compiler import (
+    ClaimReviewError,
+    get_claim_support_report,
+    get_item_source_summary,
+    review_decision_claim,
+)
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/palace", tags=["palace"], dependencies=[Depends(verify_api_key)])
 logger = logging.getLogger(__name__)
+
+
+def _serialize_claim_support_summary(claim) -> dict:
+    return {
+        "id": claim.id,
+        "claim_key": claim.claim_key,
+        "claim_text": claim.claim_text,
+        "claim_type": claim.claim_type,
+        "confidence": claim.confidence,
+        "status": claim.status,
+        "support_state": claim.support_state,
+        "warning": claim.warning,
+        "metadata": claim.metadata,
+        "sources": [
+            {
+                "id": source.id,
+                "source_record_id": source.source_record_id,
+                "source_chunk_id": source.source_chunk_id,
+                "source_item_id": source.source_item_id,
+                "source_record_status": source.source_record_status,
+                "support_role": source.support_role,
+                "status": source.status,
+                "source_digest": source.source_digest,
+                "source_span": source.source_span,
+            }
+            for source in claim.sources
+        ],
+    }
 
 
 def _serialize_mcp_client(row) -> McpOAuthClientSummary:
@@ -662,35 +697,32 @@ async def get_palace_claim_support(
     )
     return PalaceClaimSupportReport(
         tenant_id=report.tenant_id,
-        claims=[
-            {
-                "id": claim.id,
-                "claim_key": claim.claim_key,
-                "claim_text": claim.claim_text,
-                "claim_type": claim.claim_type,
-                "confidence": claim.confidence,
-                "status": claim.status,
-                "support_state": claim.support_state,
-                "warning": claim.warning,
-                "metadata": claim.metadata,
-                "sources": [
-                    {
-                        "id": source.id,
-                        "source_record_id": source.source_record_id,
-                        "source_chunk_id": source.source_chunk_id,
-                        "source_item_id": source.source_item_id,
-                        "source_record_status": source.source_record_status,
-                        "support_role": source.support_role,
-                        "status": source.status,
-                        "source_digest": source.source_digest,
-                        "source_span": source.source_span,
-                    }
-                    for source in claim.sources
-                ],
-            }
-            for claim in report.claims
-        ],
+        claims=[_serialize_claim_support_summary(claim) for claim in report.claims],
     )
+
+
+@router.post("/claims/{claim_id}/review", response_model=PalaceClaimSupportSummary)
+async def review_palace_decision_claim(
+    claim_id: uuid.UUID,
+    body: PalaceClaimReviewRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceClaimSupportSummary:
+    try:
+        claim = await review_decision_claim(
+            db,
+            tenant_id=request.state.tenant_id,
+            claim_id=claim_id,
+            action=body.action,
+            reviewed_by=body.reviewed_by,
+            review_role=body.review_role,
+            rationale=body.rationale,
+        )
+    except ClaimReviewError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message}) from exc
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Decision claim not found")
+    return PalaceClaimSupportSummary.model_validate(_serialize_claim_support_summary(claim))
 
 
 @router.patch("/rooms/{room_id}", response_model=PalaceRoomDetail)

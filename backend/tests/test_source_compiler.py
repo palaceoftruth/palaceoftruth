@@ -709,3 +709,272 @@ def test_claim_support_report_defaults_to_decisions_and_redacts_metadata_and_spa
     assert payload.support_state == "source_backed"
     assert payload.metadata == {"review_role": "operator", "task_id": "SAR-936"}
     assert payload.sources[0].source_span == {"source_chunk_digest": "digest-a", "page": 4}
+
+
+def test_review_decision_claim_promotes_only_with_exact_current_source_support() -> None:
+    claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:promotion",
+        claim_text="Use source-backed decisions at wakeup",
+        claim_type="decision",
+        confidence=0.91,
+        status="draft",
+        metadata_={"task_id": "SAR-937"},
+    )
+    claim_source = ClaimSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_id=claim.id,
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={"source_chunk_digest": "digest-a", "text": "do not leak"},
+    )
+    source_item_id = uuid.uuid4()
+    captured = {"updates": []}
+
+    class _ScalarResult:
+        def all(self):
+            return [claim]
+
+    class _ExecuteResult:
+        def __init__(self, *, rows=None) -> None:
+            self._rows = rows or []
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        async def scalar(self, statement):
+            captured["claim_sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return claim
+
+        async def scalars(self, statement):
+            return _ScalarResult()
+
+        async def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if sql.startswith("SELECT claim_sources"):
+                return _ExecuteResult(rows=[(claim_source, source_item_id, "active")])
+            captured["updates"].append(sql)
+            return _ExecuteResult()
+
+        async def commit(self):
+            captured["committed"] = True
+
+    import asyncio
+
+    reviewed = asyncio.run(
+        source_compiler.review_decision_claim(
+            _Session(),
+            tenant_id="tenant-a",
+            claim_id=claim.id,
+            action="promote",
+            reviewed_by="operator-a",
+            rationale="Reviewed source support.",
+        )
+    )
+
+    assert "claims.claim_type = " in captured["claim_sql"]
+    assert captured["committed"] is True
+    assert len(captured["updates"]) == 1
+    assert "UPDATE claims SET" in captured["updates"][0]
+    assert reviewed.status == "active"
+    assert reviewed.support_state == "source_backed"
+    assert reviewed.metadata["reviewed_by"] == "operator-a"
+    assert reviewed.metadata["review_action"] == "promote"
+    assert reviewed.metadata["operator_reviews"][0]["previous_status"] == "draft"
+    assert reviewed.sources[0].source_span == {"source_chunk_digest": "digest-a"}
+
+
+def test_review_decision_claim_blocks_promotion_without_exact_source_support() -> None:
+    claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:weak-support",
+        claim_text="Weak support is not enough to promote",
+        claim_type="decision",
+        confidence=0.7,
+        status="draft",
+        metadata_={},
+    )
+    weak_source = ClaimSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_id=claim.id,
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=None,
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={},
+    )
+
+    class _ExecuteResult:
+        def all(self):
+            return [(weak_source, uuid.uuid4(), "active")]
+
+    class _Session:
+        async def scalar(self, _statement):
+            return claim
+
+        async def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if sql.startswith("UPDATE claims"):
+                raise AssertionError("promotion failure should not update the claim")
+            return _ExecuteResult()
+
+    import asyncio
+
+    try:
+        asyncio.run(
+            source_compiler.review_decision_claim(
+                _Session(),
+                tenant_id="tenant-a",
+                claim_id=claim.id,
+                action="promote",
+                reviewed_by="operator-a",
+            )
+        )
+    except source_compiler.ClaimReviewError as exc:
+        assert exc.code == "source_support_required"
+    else:
+        raise AssertionError("Expected weak source support to block promotion")
+
+
+def test_review_decision_claim_blocks_promotion_with_current_contradiction() -> None:
+    claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:conflicted-support",
+        claim_text="Contradicted claims cannot become authority",
+        claim_type="decision",
+        confidence=0.9,
+        status="draft",
+        metadata_={},
+    )
+    supporting_source = ClaimSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_id=claim.id,
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={},
+    )
+    contradicting_source = ClaimSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_id=claim.id,
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        support_role="contradicts",
+        status="current",
+        source_digest="digest-b",
+        source_span={},
+    )
+
+    class _ExecuteResult:
+        def all(self):
+            return [
+                (supporting_source, uuid.uuid4(), "active"),
+                (contradicting_source, uuid.uuid4(), "active"),
+            ]
+
+    class _Session:
+        async def scalar(self, _statement):
+            return claim
+
+        async def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if sql.startswith("UPDATE claims"):
+                raise AssertionError("conflicted support should block promotion before update")
+            return _ExecuteResult()
+
+    import asyncio
+
+    try:
+        asyncio.run(
+            source_compiler.review_decision_claim(
+                _Session(),
+                tenant_id="tenant-a",
+                claim_id=claim.id,
+                action="promote",
+                reviewed_by="operator-a",
+            )
+        )
+    except source_compiler.ClaimReviewError as exc:
+        assert exc.code == "source_support_required"
+    else:
+        raise AssertionError("Expected current contradiction to block promotion")
+
+
+def test_review_decision_claim_rejects_without_deleting_source_support() -> None:
+    claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:reject",
+        claim_text="Reject this generated decision",
+        claim_type="decision",
+        confidence=0.4,
+        status="draft",
+        metadata_={},
+    )
+    captured = {"updates": []}
+
+    class _ExecuteResult:
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalar(self, _statement):
+            return claim
+
+        async def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if sql.startswith("UPDATE claims"):
+                captured["updates"].append(sql)
+            return _ExecuteResult()
+
+        async def commit(self):
+            captured["committed"] = True
+
+    import asyncio
+
+    reviewed = asyncio.run(
+        source_compiler.review_decision_claim(
+            _Session(),
+            tenant_id="tenant-a",
+            claim_id=claim.id,
+            action="reject",
+            reviewed_by="operator-a",
+            rationale="Generated claim is not reliable.",
+        )
+    )
+
+    assert reviewed.status == "rejected"
+    assert reviewed.support_state == "not_authoritative"
+    assert len(captured["updates"]) == 1
+    assert "claim_sources" not in captured["updates"][0]
+    assert captured["committed"] is True
+
+
+def test_reviewed_claim_metadata_clears_stale_summary_rationale() -> None:
+    metadata = source_compiler._reviewed_claim_metadata(
+        existing_metadata={"review_rationale": "old rationale"},
+        action="demote",
+        previous_status="active",
+        new_status="draft",
+        reviewed_by="operator-a",
+        review_role="operator",
+        rationale=None,
+    )
+
+    assert "review_rationale" not in metadata
+    assert metadata["operator_reviews"][0]["action"] == "demote"
+    assert "rationale" not in metadata["operator_reviews"][0]
