@@ -114,6 +114,82 @@ def test_source_projection_is_idempotent_for_same_item_version() -> None:
     assert first.chunks[0].chunk_digest == second.chunks[0].chunk_digest
 
 
+def test_source_backfill_dry_run_and_live_rerun_are_idempotent() -> None:
+    item = _item(chunks=[{"index": 0, "text": "stable source", "token_count": 2}])
+    source_record_id = uuid.uuid4()
+    source_chunk_id = uuid.uuid4()
+    captured = {"record_upserts": 0, "chunk_upserts": 0, "stale_updates": 0, "commits": 0}
+
+    class _ScalarResult:
+        def all(self):
+            return [item]
+
+    class _ExecuteResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalars(self, statement):
+            return _ScalarResult()
+
+        async def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "INSERT INTO source_records" in sql:
+                captured["record_upserts"] += 1
+                assert "ON CONFLICT ON CONSTRAINT uq_source_records_tenant_item_version" in sql
+                return source_record_id
+            if "INSERT INTO source_chunks" in sql:
+                captured["chunk_upserts"] += 1
+                assert "ON CONFLICT ON CONSTRAINT uq_source_chunks_tenant_record_index" in sql
+                return source_chunk_id
+            raise AssertionError(sql)
+
+        async def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "UPDATE source_records SET status=" in sql
+            captured["stale_updates"] += 1
+            return _ExecuteResult()
+
+        async def commit(self):
+            captured["commits"] += 1
+
+    import asyncio
+
+    dry_run = asyncio.run(
+        source_compiler.backfill_source_records_and_chunks(
+            _Session(),
+            tenant_id="tenant-a",
+            item_ids=[item.id],
+            dry_run=True,
+        )
+    )
+    first_live = asyncio.run(
+        source_compiler.backfill_source_records_and_chunks(
+            _Session(),
+            tenant_id="tenant-a",
+            item_ids=[item.id],
+            dry_run=False,
+        )
+    )
+    second_live = asyncio.run(
+        source_compiler.backfill_source_records_and_chunks(
+            _Session(),
+            tenant_id="tenant-a",
+            item_ids=[item.id],
+            dry_run=False,
+        )
+    )
+
+    assert dry_run.records_upserted == 0
+    assert dry_run.chunks_upserted == 0
+    assert first_live.records_upserted == second_live.records_upserted == 1
+    assert first_live.chunks_upserted == second_live.chunks_upserted == 1
+    assert captured == {"record_upserts": 2, "chunk_upserts": 2, "stale_updates": 2, "commits": 2}
+
+
 def test_source_version_changes_when_chunk_projection_changes() -> None:
     item = _item(content_hash="same-source-content", chunks=[{"index": 0, "text": "alpha"}, {"index": 1, "text": "beta"}])
     original = project_item_source(item)
