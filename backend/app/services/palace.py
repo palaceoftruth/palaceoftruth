@@ -72,6 +72,7 @@ from app.schemas.palace import (
     PalaceRoomUpdate,
     PalaceRunSummary,
     PalaceSectionFreshness,
+    PalaceSourceTrustHealthSummary,
     PalaceStateBanner,
     PalaceTraceStep,
     PalaceTunnelActivationTrace,
@@ -97,6 +98,7 @@ from app.services.retrieval_hints import (
     retrieve_retrieval_hint_rescue_results,
 )
 from app.services.search import SearchService
+from app.services.source_trust_summary import build_source_trust_health_summary
 from app.services.wakeup_briefs import build_wakeup_brief_summary
 from app.utils.crypto import decrypt_secret, encrypt_secret
 from app.utils.hash import compute_content_hash
@@ -1665,10 +1667,35 @@ async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -
                 indexed_generation=state.indexed_generation,
             )
         ),
+        source_trust_health=await _build_control_tower_source_trust_health(db, tenant_id),
         sync_sources=await list_sync_sources(db, tenant_id),
         sync_runs=await list_sync_runs(db, tenant_id, limit=8),
         palace_runs=await list_palace_runs(db, tenant_id, limit=8),
     )
+
+
+async def _build_control_tower_source_trust_health(
+    db: AsyncSession,
+    tenant_id: str,
+) -> PalaceSourceTrustHealthSummary:
+    try:
+        summary = await build_source_trust_health_summary(db, tenant_id=tenant_id)
+        return PalaceSourceTrustHealthSummary(
+            status=summary.status,
+            total_contexts=summary.total_contexts,
+            source_backed=summary.source_backed,
+            generated_unpromoted=summary.generated_unpromoted,
+            stale_missing=summary.stale_missing,
+            policy_limited=summary.policy_limited,
+            unknown=summary.unknown,
+            recent_warnings=[warning.__dict__ for warning in summary.recent_warnings or []],
+        )
+    except Exception:
+        logger.exception("control tower source trust health summary failed")
+        return PalaceSourceTrustHealthSummary(
+            status="error",
+            error_message="Source trust counts failed; MCP wakeup remains usable.",
+        )
 
 
 async def build_room_artifact_health(

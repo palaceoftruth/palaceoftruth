@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -46,9 +47,36 @@ class SourceTrustSummary:
 
 
 @dataclass(frozen=True)
+class SourceTrustHealthWarning:
+    state: SourceTrustState
+    warning: str
+    count: int
+
+
+@dataclass(frozen=True)
+class SourceTrustHealthSummary:
+    status: Literal["ready", "empty"] = "empty"
+    total_contexts: int = 0
+    source_backed: int = 0
+    generated_unpromoted: int = 0
+    stale_missing: int = 0
+    policy_limited: int = 0
+    unknown: int = 0
+    recent_warnings: list[SourceTrustHealthWarning] | None = None
+
+
+@dataclass(frozen=True)
 class _SourceRecordRow:
     record: SourceRecord
     chunk_count: int
+
+
+@dataclass(frozen=True)
+class _ItemTrustProjection:
+    id: uuid.UUID
+    metadata_: dict[str, Any]
+    title: str | None = None
+    source_url: str | None = None
 
 
 def map_retrieval_trust_class(trust_class: RetrievalTrustClass | str | None) -> SourceTrustState:
@@ -93,6 +121,82 @@ async def get_source_trust_summaries(
         )
         for item_id in requested_item_ids
     }
+
+
+async def build_source_trust_health_summary(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+) -> SourceTrustHealthSummary:
+    rows = (await db.execute(source_trust_health_item_statement(tenant_id=tenant_id))).all()
+    items = [
+        _ItemTrustProjection(
+            id=_row_value(row, "id", 0),
+            metadata_=_row_value(row, "metadata_", 1) or {},
+        )
+        for row in rows
+    ]
+    item_ids = [item.id for item in items]
+    if not item_ids:
+        return SourceTrustHealthSummary(status="empty", recent_warnings=[])
+
+    source_records = await _latest_source_records_by_item_id(db, tenant_id=tenant_id, item_ids=tuple(item_ids))
+    summaries = {
+        item.id: _trust_summary_for_item(
+            item_id=item.id,
+            item=item,
+            source_row=source_records.get(item.id),
+        )
+        for item in items
+    }
+    state_counts: Counter[str] = Counter()
+    warning_counts: Counter[tuple[str, str]] = Counter()
+    warning_first_seen: dict[tuple[str, str], int] = {}
+    for index, summary in enumerate(summaries.values()):
+        state_counts[summary.state] += 1
+        if summary.warning:
+            warning_key = (summary.state, summary.warning)
+            warning_counts[warning_key] += 1
+            warning_first_seen.setdefault(warning_key, index)
+
+    recent_warnings = [
+        SourceTrustHealthWarning(state=state, warning=warning, count=count)
+        for (state, warning), count in sorted(
+            warning_counts.items(),
+            key=lambda item: (warning_first_seen[item[0]], item[0][0], item[0][1]),
+        )[:5]
+    ]
+    return SourceTrustHealthSummary(
+        status="ready",
+        total_contexts=len(item_ids),
+        source_backed=state_counts["source_backed"],
+        generated_unpromoted=state_counts["generated_unpromoted"],
+        stale_missing=state_counts["stale_source"] + state_counts["source_missing"],
+        policy_limited=state_counts["policy_limited"],
+        unknown=state_counts["unknown"] + state_counts["curated_memory"],
+        recent_warnings=recent_warnings,
+    )
+
+
+def source_trust_health_item_statement(*, tenant_id: str) -> Select:
+    return (
+        select(Item.id, Item.metadata_)
+        .where(Item.tenant_id == tenant_id)
+        .where(Item.status == "ready")
+        .where(Item.deleted_at.is_(None))
+        .order_by(Item.updated_at.desc())
+    )
+
+
+def _row_value(row: Any, key: str, index: int = 0) -> Any:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and key in mapping:
+        return mapping[key]
+    if hasattr(row, key):
+        return getattr(row, key)
+    if isinstance(row, tuple):
+        return row[index]
+    return row
 
 
 async def _latest_source_records_by_item_id(

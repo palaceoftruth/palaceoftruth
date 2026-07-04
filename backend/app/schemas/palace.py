@@ -559,6 +559,32 @@ class PalaceWakeupBriefSummary(BaseModel):
     recent_briefs: list[PalaceWakeupBriefStatus] = Field(default_factory=list)
 
 
+class PalaceSourceTrustWarning(BaseModel):
+    state: Literal[
+        "source_backed",
+        "curated_memory",
+        "generated_unpromoted",
+        "stale_source",
+        "source_missing",
+        "policy_limited",
+        "unknown",
+    ]
+    warning: str
+    count: int = 0
+
+
+class PalaceSourceTrustHealthSummary(BaseModel):
+    status: Literal["ready", "empty", "error"] = "empty"
+    total_contexts: int = 0
+    source_backed: int = 0
+    generated_unpromoted: int = 0
+    stale_missing: int = 0
+    policy_limited: int = 0
+    unknown: int = 0
+    recent_warnings: list[PalaceSourceTrustWarning] = Field(default_factory=list)
+    error_message: str | None = None
+
+
 class PalaceArtifactSectionHealth(BaseModel):
     fresh: int = 0
     stale: int = 0
@@ -673,6 +699,7 @@ class PalaceControlTower(BaseModel):
     fact_registry: PalaceFactRegistrySummary = Field(default_factory=PalaceFactRegistrySummary)
     diary_rollups: PalaceDiaryRollupSummary = Field(default_factory=PalaceDiaryRollupSummary)
     wakeup_briefs: PalaceWakeupBriefSummary = Field(default_factory=PalaceWakeupBriefSummary)
+    source_trust_health: PalaceSourceTrustHealthSummary = Field(default_factory=PalaceSourceTrustHealthSummary)
     sync_sources: list["SyncSourceSummary"] = Field(default_factory=list)
     sync_runs: list["SyncRunSummary"] = Field(default_factory=list)
     palace_runs: list["PalaceRunSummary"] = Field(default_factory=list)
