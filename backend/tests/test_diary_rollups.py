@@ -2,12 +2,15 @@ import asyncio
 import uuid
 from datetime import date, datetime, timezone
 
+from sqlalchemy.dialects import postgresql
+
 from app.models.item import Item
 from app.services.diary_rollups import (
     DiaryRollupBatchResult,
     DiaryRollupKey,
     build_diary_rollup_summary,
     build_diary_rollup_idempotency_key,
+    diary_rollup_summary_statement,
     generate_memory_diary_rollups,
 )
 from app.workers.palace_tasks import _diary_rollup_target_days, run_diary_rollup_maintenance
@@ -125,6 +128,19 @@ def test_diary_rollup_target_days_replays_two_recent_completed_days() -> None:
         date(2026, 4, 20),
         date(2026, 4, 21),
     )
+
+
+def test_diary_rollup_summary_statement_omits_raw_body_and_chunks() -> None:
+    statement = diary_rollup_summary_statement(tenant_id="tenant-a")
+
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "items.title" in sql
+    assert "items.metadata" in sql
+    assert "items.updated_at" in sql
+    assert "items.raw_content" not in sql
+    assert "items.content_chunks" not in sql
+    assert "items.metadata ? " in sql
 
 
 def test_generate_memory_diary_rollups_creates_new_rollup(monkeypatch) -> None:

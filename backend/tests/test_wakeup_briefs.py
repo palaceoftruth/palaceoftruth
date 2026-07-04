@@ -2,6 +2,8 @@ import asyncio
 import uuid
 from datetime import date, datetime, timezone
 
+from sqlalchemy.dialects import postgresql
+
 from app.models.item import Item
 from app.services.wakeup_briefs import (
     WakeupBriefBatchResult,
@@ -12,6 +14,7 @@ from app.services.wakeup_briefs import (
     build_wakeup_brief_idempotency_key,
     build_wakeup_brief_summary,
     generate_wakeup_briefs,
+    wakeup_brief_summary_statement,
 )
 
 
@@ -87,6 +90,19 @@ def _existing_brief(*, key: WakeupBriefKey, generation: int) -> Item:
             }
         },
     )
+
+
+def test_wakeup_brief_summary_statement_omits_raw_body_and_chunks() -> None:
+    statement = wakeup_brief_summary_statement(tenant_id="tenant-a")
+
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "items.title" in sql
+    assert "items.metadata" in sql
+    assert "items.updated_at" in sql
+    assert "items.raw_content" not in sql
+    assert "items.content_chunks" not in sql
+    assert "items.metadata ? " in sql
 
 
 def test_generate_wakeup_briefs_creates_tenant_and_wing_briefs(monkeypatch) -> None:
