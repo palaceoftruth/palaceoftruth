@@ -368,6 +368,8 @@ class MemoryArtifactAcceptedResponse(BaseModel):
     job_id: uuid.UUID
     status: str
     contract_status: MemoryWriteContractStatus = "accepted"
+    replayed: bool = False
+    source_item_id: uuid.UUID | None = None
     scope: MemoryScope | None = None
     accepted_as: Literal["canonical", "legacy_artifact"] | None = None
     poll_url: str | None = None
@@ -387,7 +389,9 @@ class MemoryEntryBatchResult(BaseModel):
     status: str
     contract_status: MemoryWriteContractStatus
     retryable: bool = False
+    replayed: bool = False
     job_id: uuid.UUID | None = None
+    source_item_id: uuid.UUID | None = None
     poll_url: str | None = None
     poll_after_seconds: int | None = None
     retry_after_seconds: int | None = None

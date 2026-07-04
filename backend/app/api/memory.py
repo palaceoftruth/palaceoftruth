@@ -543,12 +543,32 @@ async def create_memory_entries_batch(
             )
             continue
 
-        result = await accept_canonical_memory_entry(
-            db,
-            body=entry,
-            signing_key=request.state.key_hash,
-            admission_audit=admission.audit,
-        )
+        try:
+            result = await accept_canonical_memory_entry(
+                db,
+                body=entry,
+                signing_key=request.state.key_hash,
+                admission_audit=admission.audit,
+            )
+        except HTTPException as exc:
+            failed_count += 1
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status=cast(MemoryWriteContractStatus, detail.get("contract_status", "rejected")),
+                    retryable=bool(detail.get("retryable", False)),
+                    job_id=uuid.UUID(detail["existing_job_id"]) if isinstance(detail.get("existing_job_id"), str) else None,
+                    source_item_id=(
+                        uuid.UUID(detail["existing_source_item_id"])
+                        if isinstance(detail.get("existing_source_item_id"), str)
+                        else None
+                    ),
+                    error=detail,
+                )
+            )
+            continue
         try:
             if result.enqueue_requested:
                 await _enqueue_memory_job_or_raise(request, db, job=result.job)
@@ -587,7 +607,9 @@ async def create_memory_entries_batch(
                 poll_url=accepted.poll_url,
                 poll_after_seconds=accepted.poll_after_seconds,
                 retry_after_seconds=accepted.retry_after_seconds,
+                replayed=accepted.replayed,
                 accepted_as=accepted.accepted_as,
+                source_item_id=accepted.source_item_id,
                 scope=accepted.scope,
             )
         )

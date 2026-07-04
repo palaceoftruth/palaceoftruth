@@ -3,6 +3,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
+
 from app.models.item import Item
 from app.models.job import Job
 from app.models.palace import PalaceTenantState
@@ -32,6 +35,7 @@ from app.services.memory import (
 )
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.memory_entries import source_project_from_memory_metadata
+from app.services.memory_entries import normalize_legacy_memory_artifact, normalize_memory_entry
 from app.services.palace import _append_search_ranking_trace
 
 
@@ -433,9 +437,144 @@ def test_accept_canonical_memory_entry_uses_canonical_metadata() -> None:
     assert "scope-workspace" in item.tags
     assert job.payload["accepted_as"] == "canonical"
     assert job.payload["relationship_policy"] == "skip"
+    assert isinstance(job.payload["request_fingerprint"], str)
 
 
-def test_accept_memory_artifact_reuses_existing_job() -> None:
+def test_accept_canonical_memory_entry_replays_same_payload_with_existing_pointers() -> None:
+    entry = _entry(idempotency_key="shared-key")
+    existing_item_id = uuid.uuid4()
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=existing_item_id,
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="completed",
+        progress=100,
+        payload={
+            "idempotency_key": "shared-key",
+            "scope_type": "workspace",
+            "scope_key": "launch-pad",
+            "request_fingerprint": normalize_memory_entry(entry).request_fingerprint,
+        },
+    )
+    session = FakeSession(scalar_results=[existing])
+
+    result = asyncio.run(
+        accept_canonical_memory_entry(
+            session,
+            body=entry,
+            signing_key="signing-key",
+        )
+    )
+
+    assert result.enqueue_requested is False
+    assert result.replayed is True
+    assert result.job is existing
+    assert result.source_item_id == existing_item_id
+    assert session.added == []
+
+
+def test_accept_canonical_memory_entry_replays_legacy_job_without_stored_fingerprint() -> None:
+    entry = _entry(idempotency_key="legacy-key")
+    normalized = normalize_memory_entry(entry)
+    existing_item = Item(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        title=entry.title,
+        summary=entry.summary,
+        source_type="note",
+        source_url=entry.source_url,
+        raw_content=entry.body,
+        tags=normalized.tags,
+        status="completed",
+        created_at=entry.created_at,
+        updated_at=entry.created_at,
+        idempotency_key="legacy-key",
+        metadata_=normalized.metadata,
+    )
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=existing_item.id,
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={
+            "idempotency_key": "legacy-key",
+            "scope_type": "workspace",
+            "scope_key": "launch-pad",
+            "accepted_as": "canonical",
+            "relationship_policy": entry.relationship_policy,
+        },
+    )
+    session = FakeSession(scalar_results=[existing], get_results={existing_item.id: existing_item})
+
+    result = asyncio.run(
+        accept_canonical_memory_entry(
+            session,
+            body=entry,
+            signing_key="signing-key",
+        )
+    )
+
+    assert result.replayed is True
+    assert result.job is existing
+    assert result.source_item_id == existing_item.id
+
+
+def test_accept_canonical_memory_entry_rejects_legacy_job_without_matching_payload() -> None:
+    entry = _entry(idempotency_key="legacy-key")
+    normalized = normalize_memory_entry(entry)
+    existing_item = Item(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        title=entry.title,
+        summary=entry.summary,
+        source_type="note",
+        source_url=entry.source_url,
+        raw_content="A different persisted body.",
+        tags=normalized.tags,
+        status="completed",
+        created_at=entry.created_at,
+        updated_at=entry.created_at,
+        idempotency_key="legacy-key",
+        metadata_=normalized.metadata,
+    )
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=existing_item.id,
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={
+            "idempotency_key": "legacy-key",
+            "scope_type": "workspace",
+            "scope_key": "launch-pad",
+            "accepted_as": "canonical",
+            "relationship_policy": entry.relationship_policy,
+        },
+    )
+    session = FakeSession(scalar_results=[existing], get_results={existing_item.id: existing_item})
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=entry,
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["status"] == "duplicate_conflict"
+        assert exc.detail["retryable"] is False
+        assert exc.detail["conflict_kind"] == "payload_mismatch"
+    else:
+        raise AssertionError("legacy same key with mismatched persisted body should conflict")
+
+
+def test_accept_canonical_memory_entry_rejects_same_key_different_payload() -> None:
     existing = Job(
         id=uuid.uuid4(),
         item_id=uuid.uuid4(),
@@ -443,9 +582,136 @@ def test_accept_memory_artifact_reuses_existing_job() -> None:
         tenant_id="tenant-a",
         status="queued",
         progress=0,
-        payload={"idempotency_key": build_memory_idempotency_key(_artifact())},
+        payload={
+            "idempotency_key": "shared-key",
+            "scope_type": "workspace",
+            "scope_key": "launch-pad",
+            "request_fingerprint": normalize_memory_entry(_entry(idempotency_key="shared-key")).request_fingerprint,
+        },
     )
     session = FakeSession(scalar_results=[existing])
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=_entry(idempotency_key="shared-key", body="A different memory body."),
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["status"] == "duplicate_conflict"
+        assert exc.detail["contract_status"] == "rejected"
+        assert exc.detail["retryable"] is False
+        assert exc.detail["conflict_kind"] == "payload_mismatch"
+        assert exc.detail["existing_job_id"] == str(existing.id)
+        assert exc.detail["existing_source_item_id"] == str(existing.item_id)
+    else:
+        raise AssertionError("same idempotency key with different payload should conflict")
+
+
+def test_accept_canonical_memory_entry_rejects_same_key_different_scope() -> None:
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=uuid.uuid4(),
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={
+            "idempotency_key": "shared-key",
+            "scope_type": "workspace",
+            "scope_key": "other-workspace",
+            "request_fingerprint": normalize_memory_entry(_entry(idempotency_key="shared-key")).request_fingerprint,
+        },
+    )
+    session = FakeSession(scalar_results=[existing])
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=_entry(idempotency_key="shared-key"),
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["status"] == "duplicate_conflict"
+        assert exc.detail["retryable"] is False
+        assert exc.detail["conflict_kind"] == "scope_mismatch"
+    else:
+        raise AssertionError("same idempotency key with different scope should conflict")
+
+
+def test_accept_canonical_memory_entry_insert_race_replays_existing_job() -> None:
+    entry = _entry(idempotency_key="race-key")
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=uuid.uuid4(),
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={
+            "idempotency_key": "race-key",
+            "scope_type": "workspace",
+            "scope_key": "launch-pad",
+            "request_fingerprint": normalize_memory_entry(entry).request_fingerprint,
+        },
+    )
+
+    class RaceSession(FakeSession):
+        async def flush(self) -> None:
+            raise IntegrityError("insert", {}, Exception("duplicate"))
+
+    session = RaceSession(scalar_results=[None, existing])
+
+    result = asyncio.run(
+        accept_canonical_memory_entry(
+            session,
+            body=entry,
+            signing_key="signing-key",
+        )
+    )
+
+    assert session.rollbacks == 1
+    assert result.replayed is True
+    assert result.job is existing
+
+
+def test_accept_memory_artifact_reuses_existing_job() -> None:
+    artifact = _artifact()
+    normalized = normalize_legacy_memory_artifact(artifact)
+    item_id = uuid.uuid4()
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title=artifact.title,
+        summary=artifact.summary,
+        source_type="note",
+        status="processing",
+        raw_content=artifact.body,
+        tags=normalized.tags,
+        created_at=artifact.created_at,
+        updated_at=artifact.created_at,
+        metadata_=normalized.metadata,
+        idempotency_key=normalized.idempotency_key,
+    )
+    existing = Job(
+        id=uuid.uuid4(),
+        item_id=item_id,
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={
+            "idempotency_key": build_memory_idempotency_key(artifact),
+            "relationship_policy": artifact.relationship_policy,
+        },
+    )
+    session = FakeSession(scalar_results=[existing], get_results={item_id: item})
 
     result = asyncio.run(
         accept_memory_artifact(
@@ -465,6 +731,8 @@ def test_accept_memory_artifact_reuses_existing_job() -> None:
 
 def test_accept_memory_artifact_requeues_stale_existing_job() -> None:
     item_id = uuid.uuid4()
+    artifact = _artifact()
+    normalized = normalize_legacy_memory_artifact(artifact)
     existing = Job(
         id=uuid.uuid4(),
         item_id=item_id,
@@ -475,15 +743,24 @@ def test_accept_memory_artifact_requeues_stale_existing_job() -> None:
         error_message="worker disappeared",
         created_at=datetime.now(timezone.utc) - timedelta(minutes=25),
         completed_at=datetime.now(timezone.utc),
-        payload={"idempotency_key": build_memory_idempotency_key(_artifact())},
+        payload={
+            "idempotency_key": build_memory_idempotency_key(artifact),
+            "relationship_policy": artifact.relationship_policy,
+        },
     )
     item = Item(
         id=item_id,
         tenant_id="tenant-a",
-        title="Shared launch brief",
+        title=artifact.title,
+        summary=artifact.summary,
         source_type="note",
         status="failed",
-        raw_content="Agents should reuse the same launch brief when they migrate hosts.",
+        raw_content=artifact.body,
+        tags=normalized.tags,
+        created_at=artifact.created_at,
+        updated_at=artifact.created_at,
+        metadata_=normalized.metadata,
+        idempotency_key=normalized.idempotency_key,
     )
     session = FakeSession(scalar_results=[existing], get_results={item_id: item})
 
