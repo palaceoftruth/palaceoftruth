@@ -466,6 +466,14 @@ class MemoryEntryListResponse(BaseModel):
     next_cursor: datetime | None = None
 
 
+class MemorySourceTrustSummaryRequest(BaseModel):
+    item_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+
+
+class MemorySourceTrustSummaryResponse(BaseModel):
+    summaries: list[MemorySourceTrustSummary]
+
+
 class MemoryScopeSummary(BaseModel):
     scope: MemoryScope
     entry_count: int

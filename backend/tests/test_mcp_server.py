@@ -1959,6 +1959,7 @@ def test_palace_context_alias_loads_wakeup_and_recent_memory() -> None:
 def test_get_wakeup_context_returns_compact_session_start_package() -> None:
     seen: list[tuple[str, str, dict[str, str]]] = []
     audit_payload: dict[str, object] = {}
+    entry_item_id = "550e8400-e29b-41d4-a716-446655440011"
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path, dict(request.url.params.multi_items())))
@@ -1971,12 +1972,16 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
                     "freshness": "fresh",
                     "stale": False,
                     "summary": "Ready",
+                    "body": "wakeup body must not leak",
                     "source_trust": {
                         "item_id": "550e8400-e29b-41d4-a716-446655440010",
                         "state": "source_backed",
                         "source_status": "active",
                         "chunk_count": 2,
                         "source_url": "https://example.test/source",
+                        "preview": "trust preview must not leak",
+                        "body": "trust body must not leak",
+                        "chunk_text": "trust chunk text must not leak",
                     },
                 },
             )
@@ -1989,10 +1994,17 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
                     "entries": [
                         {
                             "id": "entry-1",
-                            "item_id": "item-1",
+                            "source_item_id": entry_item_id,
                             "title": "Current local Palace MCP profile",
                             "summary": "Use the repo-owned stdio adapter.",
                             "body": "raw body must not leak",
+                            "preview": "preview must not leak",
+                            "source_trust": {
+                                "state": "source_backed",
+                                "body": "entry trust body must not leak",
+                                "chunk_text": "entry trust chunk must not leak",
+                                "preview": "entry trust preview must not leak",
+                            },
                             "scope": {"type": params["scope_type"], "key": params.get("scope_key")},
                             "source": "codex",
                             "source_url": "https://example.test/source",
@@ -2002,6 +2014,22 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
                     "total": 1,
                     "limit": int(params["limit"]),
                     "next_cursor": None,
+                },
+            )
+        if request.url.path == "/api/v1/memory/source-trust-summaries":
+            payload = json.loads(request.content.decode())
+            assert payload == {"item_ids": [entry_item_id]}
+            return httpx.Response(
+                200,
+                json={
+                    "summaries": [
+                        {
+                            "item_id": entry_item_id,
+                            "state": "generated_unpromoted",
+                            "warning": "generated_artifact_without_promoted_source_support",
+                            "chunk_count": 0,
+                        }
+                    ]
                 },
             )
         if request.url.path == "/api/v1/memory/jobs":
@@ -2051,14 +2079,110 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
     assert result["readiness"]["status"] == "ready"
     assert result["wakeup_brief"]["source_trust"]["state"] == "source_backed"
     assert "preview" not in json.dumps(result["wakeup_brief"]["source_trust"])
+    assert "body" not in json.dumps(result["wakeup_brief"])
     assert result["privacy"]["raw_memory_bodies_included"] is False
-    assert "body" not in json.dumps(result["scope_summaries"])
-    assert result["scope_summaries"][0]["entries"][0]["item_id"] == "item-1"
+    response_json = json.dumps(result)
+    assert "body" not in response_json
+    assert "preview" not in response_json
+    assert "chunk_text" not in response_json
+    assert result["scope_summaries"][0]["entries"][0]["source_item_id"] == entry_item_id
+    assert result["scope_summaries"][0]["entries"][0]["source_trust"]["state"] == "generated_unpromoted"
+    assert result["scope_summaries"][0]["source_trust"] == {
+        "status": "ok",
+        "entry_count": 1,
+        "attached_count": 1,
+    }
     assert result["checkpoint_pointers"][0]["tags"] == ["checkpoint"]
     assert result["follow_up_probes"][0]["tool"] == "palace_search"
     assert audit_payload["operation"] == "get_wakeup_context"
     assert audit_payload["required_scope"] == "read"
     assert seen[-1] == ("POST", "/api/v1/memory/mcp/audit", {})
+
+
+def test_get_wakeup_context_returns_partial_warning_when_source_trust_unavailable() -> None:
+    entry_item_id = "550e8400-e29b-41d4-a716-446655440012"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"})
+        if request.url.path == "/api/v1/memory/wakeup-brief":
+            return httpx.Response(
+                200,
+                json={"freshness": "fresh", "stale": False, "summary": "Ready", "body": "wakeup body must not leak"},
+            )
+        if request.url.path == "/api/v1/memory/entries":
+            params = dict(request.url.params.multi_items())
+            return httpx.Response(
+                200,
+                json={
+                    "entries": [
+                        {
+                            "id": "entry-1",
+                            "source_item_id": entry_item_id,
+                            "title": "Current local Palace MCP profile",
+                            "summary": "Use the repo-owned stdio adapter.",
+                            "body": "raw body must not leak",
+                            "preview": "preview must not leak",
+                            "source_trust": {
+                                "state": "source_backed",
+                                "body": "entry trust body must not leak",
+                                "chunk_text": "entry trust chunk must not leak",
+                                "preview": "entry trust preview must not leak",
+                            },
+                            "scope": {"type": params["scope_type"], "key": params.get("scope_key")},
+                            "source": "codex",
+                            "tags": [],
+                        }
+                    ],
+                    "total": 1,
+                    "limit": int(params["limit"]),
+                    "next_cursor": None,
+                },
+            )
+        if request.url.path == "/api/v1/memory/source-trust-summaries":
+            return httpx.Response(503, json={"detail": "source trust unavailable"})
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            return await get_wakeup_context(ctx=ctx, include_recent_jobs=False)
+
+    result = asyncio.run(scenario())
+
+    response_json = json.dumps(result)
+    assert result["readiness"]["status"] == "partial"
+    assert "source_trust_partial" in result["readiness"]["warnings"]
+    assert result["scope_summaries"][0]["source_trust"]["status"] == "error"
+    assert result["scope_summaries"][0]["entries"][0]["source_item_id"] == entry_item_id
+    assert "source_trust" not in result["scope_summaries"][0]["entries"][0]
+    assert "body" not in response_json
+    assert "preview" not in response_json
+    assert "chunk_text" not in response_json
 
 
 def test_get_wakeup_context_marks_empty_stale_context_partial() -> None:
