@@ -52,6 +52,14 @@ REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
 SKILL_TAG_PREFIX = "skill-"
 SCOPE_TYPES = {"session", "agent", "workspace", "tenant_shared"}
+PALACE_MEMORY_ROUTE_SCOPES = {
+    ("GET", "/api/v1/memory/whoami"): "read",
+    ("GET", "/api/v1/memory/scopes"): "read",
+    ("POST", "/api/v1/memory/retrieve-agent"): "read",
+    ("POST", "/api/v1/memory/retrieve"): "read",
+    ("POST", "/api/v1/memory/entries"): "write",
+    ("POST", "/api/v1/memory/entries:batch"): "write",
+}
 _SELF_NEGATION_PHRASES = (
     "i don't have any stored knowledge",
     "i do not have any stored knowledge",
@@ -261,6 +269,16 @@ def _safe_scope_labels(scopes: list[dict[str, Any]], *, limit: int = 12) -> list
         except KeyError:
             continue
     return labels
+
+
+def _mcp_scope_for_memory_route(method: str, path: str) -> str | None:
+    scope = PALACE_MEMORY_ROUTE_SCOPES.get((method.upper(), path))
+    if scope or not path.startswith("/api/v1/memory/"):
+        return scope
+    raise RuntimeError(
+        "Palace of Truth memory route is missing an explicit MCP scope mapping: "
+        f"{method.upper()} {path}"
+    )
 
 
 def _scope_type_counts(scopes: list[dict[str, Any]]) -> dict[str, int]:
@@ -1638,6 +1656,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "Accept": "application/json",
             "X-API-Key": self._api_key,
         }
+        mcp_scope = _mcp_scope_for_memory_route(method, path)
+        if mcp_scope:
+            headers["X-MCP-Scope"] = mcp_scope
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
