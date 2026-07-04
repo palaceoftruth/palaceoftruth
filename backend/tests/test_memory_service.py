@@ -60,6 +60,12 @@ class FakeSession:
             return _ScalarsResult(self.execute_results.pop(0))
         return _ScalarsResult([])
 
+    async def scalars(self, statement, *_args, **_kwargs):
+        self.executed.append(str(statement.compile(compile_kwargs={"literal_binds": True})))
+        if self.execute_results:
+            return _ScalarsResult(self.execute_results.pop(0))
+        return _ScalarsResult([])
+
     def add(self, value) -> None:
         self.added.append(value)
         key = getattr(value, "id", None)

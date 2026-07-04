@@ -34,6 +34,7 @@ from app.schemas.memory import (
     MemoryRetrieveResponse,
     MemoryScopeListResponse,
     MemoryScopeSummary,
+    MemorySourceTrustSummaryResponse,
     MemoryTrajectoryEntry,
     MemoryTrajectoryResponse,
     MemoryWakeupBriefResponse,
@@ -878,6 +879,32 @@ def test_memory_entries_list_rejects_blank_tags() -> None:
 
     assert response.status_code == 422
     assert "tags must not contain blank values" in response.json()["detail"]
+
+
+def test_memory_source_trust_summaries_uses_authenticated_tenant(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    client = _build_app(FakeSession())
+
+    async def fake_source_trust(db, *, tenant_id: str, item_ids):
+        assert tenant_id == "tenant-a"
+        assert item_ids == [item_id]
+        return {
+            item_id: SourceTrustSummary(
+                item_id=item_id,
+                state="unknown",
+                warning="item_not_found_or_not_visible",
+            )
+        }
+
+    monkeypatch.setattr("app.api.memory.get_source_trust_summaries", fake_source_trust)
+
+    response = client.post("/api/v1/memory/source-trust-summaries", json={"item_ids": [str(item_id)]})
+
+    assert response.status_code == 200
+    payload = MemorySourceTrustSummaryResponse.model_validate(response.json())
+    assert payload.summaries[0].item_id == item_id
+    assert payload.summaries[0].state == "unknown"
+    assert payload.summaries[0].warning == "item_not_found_or_not_visible"
 
 
 def test_memory_scopes_list_uses_authenticated_tenant(monkeypatch) -> None:

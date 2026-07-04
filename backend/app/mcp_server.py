@@ -92,6 +92,7 @@ WRITE_OPERATIONS = {"create_memory_entry", "capture_checkpoint", "backfill_defer
 SESSION_CONTEXT_ENTRY_FIELDS = (
     "id",
     "item_id",
+    "source_item_id",
     "title",
     "summary",
     "scope",
@@ -100,6 +101,24 @@ SESSION_CONTEXT_ENTRY_FIELDS = (
     "created_at",
     "updated_at",
     "tags",
+)
+SESSION_CONTEXT_WAKEUP_BRIEF_FIELDS = (
+    "source_item_id",
+    "title",
+    "summary",
+    "source_url",
+    "day",
+    "scope_type",
+    "scope_key",
+    "generation",
+    "indexed_generation",
+    "freshness",
+    "stale",
+    "room_count",
+    "diary_count",
+    "fact_count",
+    "updated_at",
+    "source_trust",
 )
 SECRET_PARAM_KEYS = {
     "api_key",
@@ -839,6 +858,18 @@ class SecondBrainApiClient:
             params["scope_key"] = scope_key
         return await self._request_json("GET", "/api/v1/memory/wakeup-brief", params=params, required_scope="read")
 
+    async def get_source_trust_summaries(
+        self,
+        *,
+        item_ids: list[str],
+    ) -> dict[str, Any]:
+        return await self._request_json(
+            "POST",
+            "/api/v1/memory/source-trust-summaries",
+            json_body={"item_ids": item_ids},
+            required_scope="read",
+        )
+
     async def retrieve_memory(
         self,
         *,
@@ -1201,6 +1232,118 @@ def _compact_memory_entries(payload: dict[str, Any], *, limit: int) -> dict[str,
     }
 
 
+def _compact_source_trust_summary(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    compact = {
+        key: value
+        for key, value in payload.items()
+        if key
+        in {
+            "item_id",
+            "state",
+            "source_record_id",
+            "source_status",
+            "chunk_count",
+            "stale_reason",
+            "warning",
+            "source_title",
+            "source_url",
+        }
+        and value not in (None, [], {})
+    }
+    return compact or None
+
+
+def _compact_wakeup_brief(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: payload[key]
+        for key in SESSION_CONTEXT_WAKEUP_BRIEF_FIELDS
+        if key in payload and payload[key] not in (None, [], {})
+    }
+    if "source_trust" in compact:
+        source_trust = _compact_source_trust_summary(compact["source_trust"])
+        if source_trust is not None:
+            compact["source_trust"] = source_trust
+        else:
+            compact.pop("source_trust", None)
+    return compact
+
+
+def _entry_item_id(entry: dict[str, Any]) -> str | None:
+    raw_item_id = entry.get("source_item_id") or entry.get("item_id")
+    if not isinstance(raw_item_id, str) or not raw_item_id.strip():
+        return None
+    try:
+        return str(uuid.UUID(raw_item_id.strip()))
+    except ValueError:
+        return None
+
+
+async def _attach_source_trust_to_scope(runtime: SecondBrainMcpRuntime, scope_payload: dict[str, Any]) -> None:
+    entries = scope_payload.get("entries")
+    if not isinstance(entries, list) or not entries:
+        scope_payload["source_trust"] = {"status": "not_applicable", "entry_count": 0}
+        return
+
+    item_ids = list(
+        dict.fromkeys(
+            item_id
+            for entry in entries
+            if isinstance(entry, dict)
+            for item_id in [_entry_item_id(entry)]
+            if item_id is not None
+        )
+    )
+    if not item_ids:
+        scope_payload["source_trust"] = {"status": "not_applicable", "entry_count": 0}
+        return
+
+    try:
+        payload = await runtime.api.get_source_trust_summaries(item_ids=item_ids)
+    except Exception as exc:
+        scope_payload["source_trust"] = {
+            "status": "error",
+            "warning": "source_trust_unavailable",
+            "entry_count": len(item_ids),
+            "error": {"class": type(exc).__name__, "message": str(exc)},
+        }
+        return
+
+    summaries = payload.get("summaries") if isinstance(payload, dict) else None
+    if not isinstance(summaries, list):
+        summaries = []
+    summaries_by_item_id = {
+        str(summary["item_id"]): summary
+        for summary in summaries
+        if isinstance(summary, dict) and isinstance(summary.get("item_id"), str)
+    }
+
+    attached_count = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item_id = _entry_item_id(entry)
+        if item_id is None:
+            continue
+        summary = summaries_by_item_id.get(item_id)
+        if summary is None:
+            continue
+        compact_summary = _compact_source_trust_summary(summary)
+        if compact_summary is None:
+            continue
+        entry["source_trust"] = compact_summary
+        attached_count += 1
+
+    status = "ok" if attached_count == len(item_ids) else "partial"
+    scope_payload["source_trust"] = {
+        "status": status,
+        "entry_count": len(item_ids),
+        "attached_count": attached_count,
+        **({"warning": "source_trust_partial"} if status == "partial" else {}),
+    }
+
+
 async def _list_context_scope(
     runtime: SecondBrainMcpRuntime,
     *,
@@ -1253,18 +1396,27 @@ def _session_context_freshness(wakeup_brief: dict[str, Any], scopes: list[dict[s
     ]
     if failed_scopes:
         warnings.append("partial_scope_context")
+    source_trust_warning_scopes = [
+        f"{scope.get('scope', {}).get('type')}/{scope.get('scope', {}).get('key', '')}".rstrip("/")
+        for scope in scopes
+        if isinstance(scope.get("source_trust"), dict)
+        and scope["source_trust"].get("status") in {"error", "partial"}
+    ]
+    if source_trust_warning_scopes:
+        warnings.append("source_trust_partial")
     empty_scopes = [
         f"{scope.get('scope', {}).get('type')}/{scope.get('scope', {}).get('key', '')}".rstrip("/")
         for scope in scopes
         if scope.get("status") == "ok" and not scope.get("entries")
     ]
     return {
-        "status": "partial" if failed_scopes else "ready",
+        "status": "partial" if failed_scopes or source_trust_warning_scopes else "ready",
         "freshness": freshness,
         "stale": bool(wakeup_brief.get("stale")),
         "warnings": list(dict.fromkeys(warnings)),
         "empty_scopes": list(dict.fromkeys(empty_scopes)),
         "failed_scopes": failed_scopes,
+        "source_trust_warning_scopes": list(dict.fromkeys(source_trust_warning_scopes)),
     }
 
 
@@ -2208,9 +2360,11 @@ async def get_wakeup_context(
 
         runtime = _runtime(ctx)
         tenant = await runtime.api.whoami()
-        wakeup_brief = await runtime.api.get_wakeup_brief(
-            scope_type=wakeup_scope_type,
-            scope_key=wakeup_scope_key,
+        wakeup_brief = _compact_wakeup_brief(
+            await runtime.api.get_wakeup_brief(
+                scope_type=wakeup_scope_type,
+                scope_key=wakeup_scope_key,
+            )
         )
 
         selected_scopes: list[tuple[ScopeType, str | None]] = []
@@ -2246,6 +2400,9 @@ async def get_wakeup_context(
             )
             for scope_type, scope_key in selected_scopes
         ]
+        for scope_payload in [*scope_summaries, *checkpoint_pointers]:
+            if scope_payload.get("status") == "ok":
+                await _attach_source_trust_to_scope(runtime, scope_payload)
         recent_jobs = None
         if include_recent_jobs:
             try:

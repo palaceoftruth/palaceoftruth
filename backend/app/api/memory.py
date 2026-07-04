@@ -27,6 +27,8 @@ from app.schemas.memory import (
     MemoryJobListResponse,
     MemoryQueueHint,
     MemoryJobResponse,
+    MemorySourceTrustSummaryRequest,
+    MemorySourceTrustSummaryResponse,
     MemoryWriteContractStatus,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorRequest,
@@ -66,6 +68,7 @@ from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.job_progress import record_job_progress_event
 from app.services.queue_telemetry import build_memory_queue_hint
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
+from app.services.source_trust_summary import get_source_trust_summaries
 from app.workers.queues import enqueue_singleton_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -645,6 +648,26 @@ async def get_memory_entries(
         tags_mode=cast(TagsMode, tags_mode),
         limit=limit,
         cursor=created_before,
+    )
+
+
+@router.post(
+    "/source-trust-summaries",
+    response_model=MemorySourceTrustSummaryResponse,
+    dependencies=[Depends(require_mcp_scope("read"))],
+)
+async def get_memory_source_trust_summaries(
+    request: Request,
+    body: MemorySourceTrustSummaryRequest,
+    db: AsyncSession = Depends(get_db),
+) -> MemorySourceTrustSummaryResponse:
+    summaries = await get_source_trust_summaries(
+        db,
+        tenant_id=request.state.tenant_id,
+        item_ids=body.item_ids,
+    )
+    return MemorySourceTrustSummaryResponse(
+        summaries=[summary.__dict__ for summary in summaries.values()]
     )
 
 
