@@ -1,0 +1,84 @@
+{
+  "demo_title": "Source-Backed Wakeup for Agent Teams",
+  "tenant": {
+    "id": "demo-tenant-source-backed-wakeup",
+    "name": "Sanitized demo tenant"
+  },
+  "query": "What should a fresh agent trust before planning today's release?",
+  "privacy_contract": {
+    "sanitized_fixture_data_only": true,
+    "raw_production_content": false,
+    "allows_live_cluster_evidence": false,
+    "public_source_domains": [
+      "example.test"
+    ]
+  },
+  "memory_entries": [
+    {
+      "id": "demo-source-backed-001",
+      "scope": {
+        "type": "workspace",
+        "key": "palaceoftruth"
+      },
+      "title": "Release runbook source",
+      "summary": "Current deploy checks come from the reviewed release runbook.",
+      "source_trust": {
+        "state": "source_backed",
+        "source_status": "active",
+        "chunk_count": 3,
+        "source_title": "Release runbook source",
+        "source_url": "https://example.test/palace/source-backed-wakeup/release-runbook"
+      },
+      "safe_use": "Use as trusted context for release-check sequencing."
+    },
+    {
+      "id": "demo-generated-002",
+      "scope": {
+        "type": "agent",
+        "key": "codex"
+      },
+      "title": "Draft release-risk synthesis",
+      "summary": "Generated synthesis says the worker queue is probably the riskiest area.",
+      "source_trust": {
+        "state": "generated_unpromoted",
+        "warning": "generated_artifact_without_promoted_source_support",
+        "chunk_count": 0
+      },
+      "safe_use": "Treat as a hypothesis and verify against source-backed context before acting."
+    },
+    {
+      "id": "demo-stale-003",
+      "scope": {
+        "type": "workspace",
+        "key": "palaceoftruth"
+      },
+      "title": "Old staging rollback note",
+      "summary": "Rollback note references the retired staging namespace.",
+      "source_trust": {
+        "state": "stale_source",
+        "source_status": "stale",
+        "warning": "source_record_stale",
+        "stale_reason": "Namespace ownership changed after the note was captured.",
+        "chunk_count": 1,
+        "source_title": "Old staging rollback note",
+        "source_url": "https://example.test/palace/source-backed-wakeup/old-rollback-note"
+      },
+      "safe_use": "Do not follow this note until a current source-backed rollback path replaces it."
+    },
+    {
+      "id": "demo-policy-004",
+      "scope": {
+        "type": "agent",
+        "key": "security-agent"
+      },
+      "title": "Security agent private finding",
+      "summary": "A permitted cross-agent recall found a private finding, but details are policy-limited.",
+      "source_trust": {
+        "state": "policy_limited",
+        "warning": "source_summary_policy_limited"
+      },
+      "safe_use": "Ask for an authorized summary instead of expanding private details."
+    }
+  ],
+  "safe_next_action": "Plan from the source-backed runbook, verify the generated synthesis before using it, ignore the stale rollback note, and request an authorized summary for policy-limited private findings."
+}
