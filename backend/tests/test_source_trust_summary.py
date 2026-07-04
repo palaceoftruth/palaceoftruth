@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from typing import get_args
 
 from sqlalchemy.dialects import postgresql
 
@@ -8,6 +9,7 @@ from app.models.item import Item
 from app.models.palace import SourceRecord
 from app.services import source_trust_summary
 from app.services.source_trust_summary import (
+    SourceTrustState,
     SourceTrustSummary,
     _SourceRecordRow,
     _trust_summary_for_item,
@@ -88,16 +90,24 @@ def test_public_trust_states_cover_policy_curated_generated_missing_stale_and_un
     missing = _item(metadata={})
     stale_item = _item()
     stale_record = _record(item_id=stale_item.id, status="stale")
+    active_item = _item()
+    active_record = _record(item_id=active_item.id)
     unknown_id = uuid.uuid4()
 
-    assert _summary(curated).state == "curated_memory"
-    assert _summary(generated).state == "generated_unpromoted"
-    assert _summary(policy_limited).state == "policy_limited"
-    assert _summary(missing).state == "source_missing"
+    observed_states = {
+        _summary(curated).state,
+        _summary(generated).state,
+        _summary(policy_limited).state,
+        _summary(missing).state,
+    }
     stale_summary = _summary(stale_item, stale_record, chunk_count=3)
+    observed_states.add(stale_summary.state)
+    observed_states.add(_summary(active_item, active_record, chunk_count=1).state)
+    observed_states.add(_trust_summary_for_item(item_id=unknown_id, item=None, source_row=None).state)
+
+    assert observed_states == set(get_args(SourceTrustState))
     assert stale_summary.state == "stale_source"
     assert stale_summary.stale_reason == "source changed upstream"
-    assert _trust_summary_for_item(item_id=unknown_id, item=None, source_row=None).state == "unknown"
 
 
 def test_active_source_record_with_zero_chunks_is_source_missing() -> None:

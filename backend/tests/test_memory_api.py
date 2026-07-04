@@ -891,8 +891,11 @@ def test_memory_source_trust_summaries_uses_authenticated_tenant(monkeypatch) ->
         return {
             item_id: SourceTrustSummary(
                 item_id=item_id,
-                state="unknown",
-                warning="item_not_found_or_not_visible",
+                state="source_backed",
+                source_status="active",
+                chunk_count=2,
+                source_title="Operator source",
+                source_url="https://example.test/source",
             )
         }
 
@@ -903,8 +906,11 @@ def test_memory_source_trust_summaries_uses_authenticated_tenant(monkeypatch) ->
     assert response.status_code == 200
     payload = MemorySourceTrustSummaryResponse.model_validate(response.json())
     assert payload.summaries[0].item_id == item_id
-    assert payload.summaries[0].state == "unknown"
-    assert payload.summaries[0].warning == "item_not_found_or_not_visible"
+    assert payload.summaries[0].state == "source_backed"
+    response_json = json.dumps(response.json())
+    assert "preview" not in response_json
+    assert "chunk_text" not in response_json
+    assert "raw production content" not in response_json
 
 
 def test_memory_scopes_list_uses_authenticated_tenant(monkeypatch) -> None:
