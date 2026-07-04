@@ -4,9 +4,10 @@ import uuid
 from sqlalchemy.dialects import postgresql
 
 from app.models.item import Item
-from app.models.palace import TemporalFact
+from app.models.palace import Claim, ClaimSource, TemporalFact
 from app.services import source_compiler
 from app.services.source_compiler import (
+    ClaimSourceSupportSummary,
     plan_claim_backfill,
     plan_source_backfill,
     project_claim_from_temporal_fact,
@@ -266,11 +267,11 @@ def test_claim_upsert_uses_claim_key_conflict_constraint() -> None:
 
 
 def test_claim_source_upsert_uses_support_constraint() -> None:
-    captured = {}
+    captured = {"sql": []}
 
     class _Session:
         async def scalar(self, statement):
-            captured["sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            captured["sql"].append(str(statement.compile(dialect=postgresql.dialect())))
             return uuid.uuid4()
 
     projection = project_claim_from_temporal_fact(_fact())
@@ -286,9 +287,53 @@ def test_claim_source_upsert_uses_support_constraint() -> None:
         )
     )
 
-    assert "ON CONFLICT ON CONSTRAINT uq_claim_sources_support" in captured["sql"]
-    assert "status" in captured["sql"]
-    assert "source_span" in captured["sql"]
+    assert len(captured["sql"]) == 1
+    assert "ON CONFLICT ON CONSTRAINT uq_claim_sources_support" in captured["sql"][0]
+    assert "source_chunk_id" in captured["sql"][0]
+    assert "status" in captured["sql"][0]
+    assert "source_span" in captured["sql"][0]
+
+
+def test_claim_source_upsert_resolves_exact_chunk_link_from_span_digest() -> None:
+    captured = {"sql": []}
+    chunk_id = uuid.uuid4()
+    claim_source_id = uuid.uuid4()
+
+    class _Session:
+        async def scalar(self, statement):
+            captured["sql"].append(str(statement.compile(dialect=postgresql.dialect())))
+            return chunk_id if len(captured["sql"]) == 1 else claim_source_id
+
+    fact = _fact()
+    projection = source_compiler.ClaimProjection(
+        tenant_id=fact.tenant_id,
+        temporal_fact_id=fact.id,
+        source_item_id=fact.source_item_id,
+        claim_key="decision:source-backed-wakeup",
+        claim_text="Use source-backed wakeup decisions first",
+        claim_type="decision",
+        confidence=0.9,
+        status="active",
+        support_role="supports",
+        source_digest="chunk-digest-a",
+        source_span={"source_chunk_digest": "chunk-digest-a"},
+        metadata={"compiler": "decision_claim_support_test"},
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        source_compiler._upsert_claim_source(
+            _Session(),
+            projection=projection,
+            claim_id=uuid.uuid4(),
+            source_record_id=uuid.uuid4(),
+        )
+    )
+
+    assert result == claim_source_id
+    assert "source_chunks.chunk_digest = " in captured["sql"][0]
+    assert "source_chunk_id" in captured["sql"][1]
 
 
 def test_claim_source_lookup_excludes_failed_and_deleted_source_records() -> None:
@@ -368,3 +413,171 @@ def test_mark_unsupported_claim_stales_claim_and_current_sources() -> None:
     assert "claim_sources.tenant_id = " in captured["updates"][1]
     assert "claim_sources.claim_id = " in captured["updates"][1]
     assert "claim_sources.status = " in captured["updates"][1]
+
+
+def test_claim_support_state_reports_source_backed_weak_stale_missing_and_unpromoted() -> None:
+    current_source = ClaimSourceSupportSummary(
+        id=uuid.uuid4(),
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        source_item_id=uuid.uuid4(),
+        source_record_status="active",
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={},
+    )
+    weak_source = ClaimSourceSupportSummary(
+        id=uuid.uuid4(),
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=None,
+        source_item_id=uuid.uuid4(),
+        source_record_status="active",
+        support_role="supports",
+        status="current",
+        source_digest="digest-b",
+        source_span={},
+    )
+    stale_source = ClaimSourceSupportSummary(
+        id=uuid.uuid4(),
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        source_item_id=uuid.uuid4(),
+        source_record_status="stale",
+        support_role="supports",
+        status="current",
+        source_digest="digest-c",
+        source_span={},
+    )
+
+    active_claim = Claim(id=uuid.uuid4(), tenant_id="tenant-a", claim_key="decision:a", claim_text="A", claim_type="decision", status="active")
+    draft_claim = Claim(id=uuid.uuid4(), tenant_id="tenant-a", claim_key="decision:b", claim_text="B", claim_type="decision", status="draft")
+
+    assert source_compiler._claim_support_state(active_claim, (current_source,)) == ("source_backed", None)
+    assert source_compiler._claim_support_state(active_claim, (weak_source,)) == (
+        "weak_source_support",
+        "claim_source_lacks_exact_chunk",
+    )
+    assert source_compiler._claim_support_state(active_claim, (stale_source,)) == (
+        "stale_source",
+        "claim_source_not_current",
+    )
+    assert source_compiler._claim_support_state(active_claim, ()) == ("source_missing", "claim_has_no_source_support")
+    assert source_compiler._claim_support_state(draft_claim, (current_source,)) == (
+        "generated_unpromoted",
+        "claim_not_promoted",
+    )
+
+
+def test_claim_support_report_filters_to_decision_claims_and_keeps_empty_sources_visible() -> None:
+    decision_claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:source-backed-wakeup",
+        claim_text="Use source-backed wakeup decisions first",
+        claim_type="decision",
+        confidence=0.9,
+        status="active",
+        metadata_={"review_role": "operator"},
+    )
+    captured = {"claim_sql": "", "source_sql": ""}
+
+    class _ScalarResult:
+        def all(self):
+            return [decision_claim]
+
+    class _ExecuteResult:
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalars(self, statement):
+            captured["claim_sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ScalarResult()
+
+        async def execute(self, statement):
+            captured["source_sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ExecuteResult()
+
+    import asyncio
+
+    report = asyncio.run(
+        source_compiler.get_claim_support_report(
+            _Session(),
+            tenant_id="tenant-a",
+            claim_type="decision",
+            status="active",
+            limit=25,
+        )
+    )
+
+    assert "claims.claim_type = " in captured["claim_sql"]
+    assert "claims.status = " in captured["claim_sql"]
+    assert "claim_sources.tenant_id = " in captured["source_sql"]
+    assert "source_records.tenant_id = " in captured["source_sql"]
+    assert report.claims[0].claim_type == "decision"
+    assert report.claims[0].support_state == "source_missing"
+    assert report.claims[0].warning == "claim_has_no_source_support"
+
+
+def test_claim_support_report_defaults_to_decisions_and_redacts_metadata_and_span() -> None:
+    source_item_id = uuid.uuid4()
+    claim = Claim(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_key="decision:compact-support",
+        claim_text="Expose compact support only",
+        claim_type="decision",
+        confidence=1.0,
+        status="active",
+        metadata_={
+            "review_role": "operator",
+            "task_id": "SAR-936",
+            "body": "raw body must not leak",
+            "chunk_text": "chunk body must not leak",
+        },
+    )
+    claim_source = ClaimSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        claim_id=claim.id,
+        source_record_id=uuid.uuid4(),
+        source_chunk_id=uuid.uuid4(),
+        support_role="supports",
+        status="current",
+        source_digest="digest-a",
+        source_span={
+            "source_chunk_digest": "digest-a",
+            "page": 4,
+            "preview": "source preview must not leak",
+            "text": "raw span text must not leak",
+        },
+    )
+    captured = {"claim_sql": ""}
+
+    class _ScalarResult:
+        def all(self):
+            return [claim]
+
+    class _ExecuteResult:
+        def all(self):
+            return [(claim_source, source_item_id, "active")]
+
+    class _Session:
+        async def scalars(self, statement):
+            captured["claim_sql"] = str(statement.compile(dialect=postgresql.dialect()))
+            return _ScalarResult()
+
+        async def execute(self, statement):
+            return _ExecuteResult()
+
+    import asyncio
+
+    report = asyncio.run(source_compiler.get_claim_support_report(_Session(), tenant_id="tenant-a"))
+
+    payload = report.claims[0]
+    assert "claims.claim_type = " in captured["claim_sql"]
+    assert payload.claim_type == "decision"
+    assert payload.support_state == "source_backed"
+    assert payload.metadata == {"review_role": "operator", "task_id": "SAR-936"}
+    assert payload.sources[0].source_span == {"source_chunk_digest": "digest-a", "page": 4}

@@ -29,6 +29,7 @@ from app.mcp_server import (
     create_memory_entry,
     get_graph,
     get_item_relationships,
+    get_claim_support,
     get_palace_room,
     get_retrieval_doctor,
     get_wakeup_context,
@@ -102,7 +103,14 @@ def test_settings_from_env_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_mcp_surface_exposes_no_destructive_item_or_feed_delete_tools() -> None:
     tool_names = {tool.name for tool in await mcp.list_tools()}
 
-    assert {"palace_search", "palace_remember", "palace_checkpoint", "palace_context", "get_wakeup_context"} <= tool_names
+    assert {
+        "palace_search",
+        "palace_remember",
+        "palace_checkpoint",
+        "palace_context",
+        "get_wakeup_context",
+        "get_claim_support",
+    } <= tool_names
     assert not any("delete" in name or "purge" in name for name in tool_names)
     assert not {"delete_item", "delete_feed", "purge_item"} & tool_names
 

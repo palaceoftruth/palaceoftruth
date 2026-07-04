@@ -826,6 +826,17 @@ class SecondBrainApiClient:
         }
         return await self._request_json("GET", "/api/v1/palace/facts", params=params)
 
+    async def get_claim_support(
+        self,
+        *,
+        status: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        return await self._request_json("GET", "/api/v1/palace/claims/support", params=params, required_scope="read")
+
     async def get_palace_room(self, *, room_id: str) -> dict[str, Any]:
         room_id = _validate_uuid_text("room_id", room_id)
         return await self._request_json("GET", f"/api/v1/palace/rooms/{room_id}")
@@ -1578,8 +1589,8 @@ mcp = FastMCP(
         "get_wakeup_context for compact session-start recall, "
         "list_memory_scopes, retrieve_agent_memory, and retrieve_memory_trajectory for route-aware agent recall, "
         "get_wakeup_brief for startup context, list_memory_jobs for read-only job health, "
-        "get_graph/get_item_relationships/list_temporal_facts/get_palace_room for read-only graph, fact, "
-        "relationship, and room/tunnel inspection, "
+        "get_graph/get_item_relationships/list_temporal_facts/get_claim_support/get_palace_room "
+        "for read-only graph, fact, claim-support, relationship, and room/tunnel inspection, "
         "backfill_deferred_relationships after bulk deferred memory writes, "
         "and search_items/list_items/list_tags for corpus discovery."
     ),
@@ -1991,6 +2002,24 @@ async def list_temporal_facts(
         params=locals(),
         call=lambda: _runtime(ctx).api.list_temporal_facts(
             current_only=current_only,
+            limit=limit,
+        ),
+    )
+
+
+@mcp.tool()
+async def get_claim_support(
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    status: Literal["draft", "active", "stale", "conflicted", "rejected", "superseded"] | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Inspect compact read-only source support for decision claims."""
+    return await _run_mcp_operation(
+        ctx,
+        operation="get_claim_support",
+        params=locals(),
+        call=lambda: _runtime(ctx).api.get_claim_support(
+            status=status,
             limit=limit,
         ),
     )

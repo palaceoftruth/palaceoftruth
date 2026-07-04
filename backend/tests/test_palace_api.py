@@ -286,11 +286,13 @@ def test_get_palace_claim_support_is_tenant_bounded(monkeypatch) -> None:
             claims=(
                 ClaimSupportSummary(
                     id=claim_id,
-                    claim_key="temporal_fact:fact-key",
-                    claim_text="Palace supports claim diagnostics",
-                    claim_type="fact",
+                    claim_key="decision:honor-source-backed-wakeup",
+                    claim_text="Honor source-backed wakeup before generated summaries",
+                    claim_type="decision",
                     confidence=0.8,
                     status="conflicted",
+                    support_state="conflicted",
+                    warning="claim_status_conflicted",
                     metadata={"temporal_fact_status": "active"},
                     sources=(
                         ClaimSourceSupportSummary(
@@ -298,6 +300,7 @@ def test_get_palace_claim_support_is_tenant_bounded(monkeypatch) -> None:
                             source_record_id=source_record_id,
                             source_chunk_id=None,
                             source_item_id=source_item_id,
+                            source_record_status="active",
                             support_role="supports",
                             status="current",
                             source_digest="source-fingerprint",
@@ -315,10 +318,30 @@ def test_get_palace_claim_support_is_tenant_bounded(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["tenant_id"] == "tenant-a"
+    assert payload["claims"][0]["claim_type"] == "decision"
     assert payload["claims"][0]["status"] == "conflicted"
+    assert payload["claims"][0]["support_state"] == "conflicted"
+    assert payload["claims"][0]["warning"] == "claim_status_conflicted"
     assert payload["claims"][0]["sources"][0]["status"] == "current"
+    assert payload["claims"][0]["sources"][0]["source_record_status"] == "active"
     assert payload["claims"][0]["sources"][0]["source_item_id"] == str(source_item_id)
     assert "github_pat" not in payload
+
+
+def test_get_palace_claim_support_ignores_non_decision_claim_type_query(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    captured = {}
+
+    async def fake_get_claim_support_report(db, **kwargs):
+        captured.update(kwargs)
+        return ClaimSupportReport(tenant_id="tenant-a", claims=())
+
+    monkeypatch.setattr("app.api.palace.get_claim_support_report", fake_get_claim_support_report)
+
+    response = client.get("/api/v1/palace/claims/support?claim_type=fact&limit=10")
+
+    assert response.status_code == 200
+    assert captured == {"tenant_id": "tenant-a", "status": None, "limit": 10}
 
 
 def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
