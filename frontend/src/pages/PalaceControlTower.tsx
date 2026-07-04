@@ -1496,7 +1496,7 @@ export default function PalaceControlTowerPage() {
               <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Wakeup trust health</p>
               <p className="text-xs text-zinc-500">
                 {sourceTrustHealth?.status === "ready"
-                  ? `${sourceTrustHealth.total_contexts} context${sourceTrustHealth.total_contexts === 1 ? "" : "s"} classified`
+                  ? `Latest ${sourceTrustHealth.total_contexts} context${sourceTrustHealth.total_contexts === 1 ? "" : "s"} classified`
                   : sourceTrustHealth?.status === "error"
                     ? "Source trust counts failed."
                     : "No source trust counts yet."}
@@ -1534,7 +1534,7 @@ export default function PalaceControlTowerPage() {
                     <p className="mt-2 text-2xl font-semibold text-zinc-100">{sourceTrustHealth?.policy_limited ?? 0}</p>
                   </div>
                   <div className="rounded-2xl border border-sky-900/60 bg-sky-950/20 px-4 py-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-sky-300/80">Total checked</p>
+                    <p className="text-xs uppercase tracking-[0.2em] text-sky-300/80">Latest checked</p>
                     <p className="mt-2 text-2xl font-semibold text-sky-100">{sourceTrustHealth?.total_contexts ?? 0}</p>
                     {sourceTrustHealth?.unknown ? (
                       <p className="mt-1 text-xs text-sky-200/70">{sourceTrustHealth.unknown} unknown</p>

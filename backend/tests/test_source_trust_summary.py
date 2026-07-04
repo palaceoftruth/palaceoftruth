@@ -9,6 +9,7 @@ from app.models.item import Item
 from app.models.palace import SourceRecord
 from app.services import source_trust_summary
 from app.services.source_trust_summary import (
+    DEFAULT_SOURCE_TRUST_HEALTH_ITEM_LIMIT,
     SourceTrustState,
     SourceTrustSummary,
     _SourceRecordRow,
@@ -151,13 +152,23 @@ def test_batch_statement_counts_chunks_without_selecting_chunk_text_or_preview()
 def test_source_trust_health_item_statement_omits_raw_body_and_chunk_json() -> None:
     statement = source_trust_health_item_statement(tenant_id="tenant-a")
 
-    sql = str(statement.compile(dialect=postgresql.dialect()))
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
 
     assert "items.id" in sql
     assert "items.metadata" in sql
     assert "items.raw_content" not in sql
     assert "items.content_chunks" not in sql
     assert "source_chunks.chunk_text" not in sql
+    assert compiled.params["param_1"] == DEFAULT_SOURCE_TRUST_HEALTH_ITEM_LIMIT
+
+
+def test_source_trust_health_item_statement_enforces_positive_limit() -> None:
+    statement = source_trust_health_item_statement(tenant_id="tenant-a", limit=0)
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+
+    assert compiled.params["param_1"] == 1
 
 
 def test_get_source_trust_summaries_uses_one_item_query_and_one_source_record_query() -> None:
@@ -239,7 +250,7 @@ def test_build_source_trust_health_summary_aggregates_counts_and_warning_labels(
 
     summary_session = _Session()
     summary = asyncio.run(
-        source_trust_summary.build_source_trust_health_summary(summary_session, tenant_id="tenant-a")
+        source_trust_summary.build_source_trust_health_summary(summary_session, tenant_id="tenant-a", item_limit=5)
     )
 
     warnings = {warning.warning for warning in summary.recent_warnings or []}

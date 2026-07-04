@@ -1444,6 +1444,8 @@ test.describe("Palace smoke", () => {
     await expect(page.getByText("Generated", { exact: true })).toBeVisible();
     await expect(page.getByText("Stale / missing")).toBeVisible();
     await expect(page.getByText("Policy-limited")).toBeVisible();
+    await expect(page.getByText("Latest checked")).toBeVisible();
+    await expect(page.getByText("Latest 7 contexts classified")).toBeVisible();
     await expect(page.getByText("generated artifact without promoted source support")).toBeVisible();
     await expect(page.getByText("source record missing")).toBeVisible();
     await expect(page.getByText("raw chunk text must not render")).toHaveCount(0);

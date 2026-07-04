@@ -31,6 +31,7 @@ _GENERATED_ARTIFACT_KEYS = {
     "routing_manifest",
     "wakeup_brief",
 }
+DEFAULT_SOURCE_TRUST_HEALTH_ITEM_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -127,8 +128,9 @@ async def build_source_trust_health_summary(
     db: AsyncSession,
     *,
     tenant_id: str,
+    item_limit: int = DEFAULT_SOURCE_TRUST_HEALTH_ITEM_LIMIT,
 ) -> SourceTrustHealthSummary:
-    rows = (await db.execute(source_trust_health_item_statement(tenant_id=tenant_id))).all()
+    rows = (await db.execute(source_trust_health_item_statement(tenant_id=tenant_id, limit=item_limit))).all()
     items = [
         _ItemTrustProjection(
             id=_row_value(row, "id", 0),
@@ -178,13 +180,19 @@ async def build_source_trust_health_summary(
     )
 
 
-def source_trust_health_item_statement(*, tenant_id: str) -> Select:
+def source_trust_health_item_statement(
+    *,
+    tenant_id: str,
+    limit: int = DEFAULT_SOURCE_TRUST_HEALTH_ITEM_LIMIT,
+) -> Select:
+    bounded_limit = max(int(limit), 1)
     return (
         select(Item.id, Item.metadata_)
         .where(Item.tenant_id == tenant_id)
         .where(Item.status == "ready")
         .where(Item.deleted_at.is_(None))
         .order_by(Item.updated_at.desc())
+        .limit(bounded_limit)
     )
 
 
