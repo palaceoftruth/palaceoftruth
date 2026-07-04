@@ -344,6 +344,94 @@ def test_get_palace_claim_support_ignores_non_decision_claim_type_query(monkeypa
     assert captured == {"tenant_id": "tenant-a", "status": None, "limit": 10}
 
 
+def test_review_palace_decision_claim_records_operator_action(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    claim_id = uuid.uuid4()
+    captured = {}
+
+    async def fake_review_decision_claim(db, **kwargs):
+        captured.update(kwargs)
+        return ClaimSupportSummary(
+            id=claim_id,
+            claim_key="decision:promotion",
+            claim_text="Use source-backed decisions at wakeup",
+            claim_type="decision",
+            confidence=0.91,
+            status="active",
+            support_state="source_backed",
+            warning=None,
+            metadata={
+                "reviewed_by": "operator-a",
+                "review_role": "operator",
+                "review_action": "promote",
+            },
+            sources=(),
+        )
+
+    monkeypatch.setattr("app.api.palace.review_decision_claim", fake_review_decision_claim)
+
+    response = client.post(
+        f"/api/v1/palace/claims/{claim_id}/review",
+        json={
+            "action": "promote",
+            "reviewed_by": "operator-a",
+            "rationale": "Source support was inspected.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "tenant_id": "tenant-a",
+        "claim_id": claim_id,
+        "action": "promote",
+        "reviewed_by": "operator-a",
+        "review_role": "operator",
+        "rationale": "Source support was inspected.",
+    }
+    payload = response.json()
+    assert payload["status"] == "active"
+    assert payload["support_state"] == "source_backed"
+    assert payload["metadata"]["review_action"] == "promote"
+
+
+def test_review_palace_decision_claim_reports_support_gate(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    claim_id = uuid.uuid4()
+
+    async def fake_review_decision_claim(db, **kwargs):
+        from app.services.source_compiler import ClaimReviewError
+
+        raise ClaimReviewError("source_support_required", "Decision claims require current exact source support before promotion.")
+
+    monkeypatch.setattr("app.api.palace.review_decision_claim", fake_review_decision_claim)
+
+    response = client.post(
+        f"/api/v1/palace/claims/{claim_id}/review",
+        json={"action": "promote", "reviewed_by": "operator-a"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "source_support_required"
+
+
+def test_review_palace_decision_claim_404s_for_missing_decision_claim(monkeypatch) -> None:
+    client = _build_app(FakeSession(), tenant_id="tenant-a")
+    claim_id = uuid.uuid4()
+
+    async def fake_review_decision_claim(db, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.api.palace.review_decision_claim", fake_review_decision_claim)
+
+    response = client.post(
+        f"/api/v1/palace/claims/{claim_id}/review",
+        json={"action": "reject", "reviewed_by": "operator-a"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Decision claim not found"
+
+
 def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
     client = _build_app(FakeSession())
 

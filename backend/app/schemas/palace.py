@@ -203,6 +203,28 @@ class PalaceClaimSupportReport(BaseModel):
     claims: list[PalaceClaimSupportSummary] = Field(default_factory=list)
 
 
+class PalaceClaimReviewRequest(BaseModel):
+    action: Literal["promote", "reject", "mark_stale", "demote"]
+    reviewed_by: str
+    review_role: str = "operator"
+    rationale: str | None = None
+
+    @field_validator("reviewed_by")
+    @classmethod
+    def validate_reviewed_by(cls, value: str) -> str:
+        return _not_blank(value, "reviewed_by")
+
+    @field_validator("review_role")
+    @classmethod
+    def validate_review_role(cls, value: str) -> str:
+        return _not_blank(value, "review_role")
+
+    @field_validator("rationale")
+    @classmethod
+    def validate_rationale(cls, value: str | None) -> str | None:
+        return _normalize_optional_string(value, "rationale")
+
+
 class PalaceRoomUpdate(BaseModel):
     name: str
 
