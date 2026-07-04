@@ -9,6 +9,7 @@ import types
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -38,6 +39,25 @@ def load_palaceoftruth_plugin():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class FakeJsonResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def request_path(request) -> str:
+    parsed = urlparse(request.full_url)
+    return parsed.path
 
 
 def test_plugin_files_exist() -> None:
@@ -750,6 +770,138 @@ def test_palaceoftruth_request_json_retries_429_retry_after(monkeypatch) -> None
     assert sleeps == [7.0]
 
 
+def test_palaceoftruth_request_json_attaches_read_scope_for_get_memory_routes(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str, str, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        captured.append(
+            (request.get_method(), request_path(request), request.get_header("X-mcp-scope"))
+        )
+        return FakeJsonResponse({"ok": True, "scopes": []})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    provider._request_json("GET", "/api/v1/memory/whoami")
+    provider._request_json("GET", "/api/v1/memory/scopes", params={"limit": 100})
+
+    assert captured == [
+        ("GET", "/api/v1/memory/whoami", "read"),
+        ("GET", "/api/v1/memory/scopes", "read"),
+    ]
+
+
+def test_palaceoftruth_route_aware_search_sends_read_scope_for_post(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="palaceoftruth",
+    )
+
+    captured: list[tuple[str, str, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": [], "total": 0, "limit": 100})
+        if path == "/api/v1/memory/retrieve-agent":
+            return FakeJsonResponse(
+                {
+                    "trace": {"searched_scopes": [{"type": "agent", "key": "orchestrator"}]},
+                    "results": [
+                        {
+                            "item_id": "item-agent",
+                            "title": "Agent memory",
+                            "source_type": "note",
+                            "chunk_text": "Remember route-aware retrieval.",
+                            "score": 0.9,
+                        }
+                    ],
+                    "total": 1,
+                }
+            )
+        raise AssertionError(f"Unexpected request path: {path}")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    text = provider.prefetch("route-aware recall", session_id="session-1")
+
+    assert "Agent memory" in text
+    assert captured == [
+        ("GET", "/api/v1/memory/scopes", "read"),
+        ("POST", "/api/v1/memory/retrieve-agent", "read"),
+    ]
+
+
+def test_palaceoftruth_fallback_retrieval_sends_read_scope_for_post(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str, str, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": [], "total": 0, "limit": 100})
+        if path == "/api/v1/memory/retrieve-agent":
+            return FakeJsonResponse({"trace": {"searched_scopes": []}, "results": [], "total": 0})
+        if path == "/api/v1/memory/retrieve":
+            return FakeJsonResponse(
+                {
+                    "results": [
+                        {
+                            "item_id": "item-fallback",
+                            "title": "Fallback memory",
+                            "source_type": "note",
+                            "chunk_text": "Remember fallback retrieval.",
+                            "score": 0.8,
+                        }
+                    ],
+                    "total": 1,
+                }
+            )
+        raise AssertionError(f"Unexpected request path: {path}")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    text = provider.prefetch("fallback recall", session_id="session-1")
+
+    assert "Fallback memory" in text
+    assert captured == [
+        ("GET", "/api/v1/memory/scopes", "read"),
+        ("POST", "/api/v1/memory/retrieve-agent", "read"),
+        ("POST", "/api/v1/memory/retrieve", "read"),
+    ]
+
+
 def test_palaceoftruth_request_json_honors_retry_after_http_date(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
@@ -949,6 +1101,113 @@ def test_palaceoftruth_remember_bulk_uses_batch_endpoint(monkeypatch) -> None:
         ("GET", "/api/v1/memory/whoami"),
         ("POST", "/api/v1/memory/entries:batch"),
     ]
+
+
+def test_palaceoftruth_write_paths_send_write_scope_for_entries(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str, str, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        if path == "/api/v1/memory/whoami":
+            return FakeJsonResponse({"tenant_id": "tenant-a"})
+        if path == "/api/v1/memory/entries":
+            return FakeJsonResponse({"job_id": "job-1", "status": "queued"})
+        raise AssertionError(f"Unexpected request path: {path}")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    remember_result = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember explicit write."})
+    )
+    provider.sync_turn("User asks for recall.", "Assistant answers from Palace.")
+    provider.shutdown()
+    provider.on_memory_write("add", "memory", "Remember mirrored memory.")
+    provider.shutdown()
+
+    assert remember_result["ok"] is True
+    assert captured == [
+        ("GET", "/api/v1/memory/whoami", "read"),
+        ("POST", "/api/v1/memory/entries", "write"),
+        ("POST", "/api/v1/memory/entries", "write"),
+        ("POST", "/api/v1/memory/entries", "write"),
+    ]
+
+
+def test_palaceoftruth_remember_bulk_sends_write_scope_for_entries_batch(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str, str, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        captured.append((request.get_method(), path, request.get_header("X-mcp-scope")))
+        if path == "/api/v1/memory/whoami":
+            return FakeJsonResponse({"tenant_id": "tenant-a"})
+        if path == "/api/v1/memory/entries:batch":
+            return FakeJsonResponse(
+                {
+                    "status": "accepted",
+                    "accepted": 2,
+                    "failed": 0,
+                    "results": [],
+                }
+            )
+        raise AssertionError(f"Unexpected request path: {path}")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember_bulk",
+            {"contents": ["Remember A.", "Remember B."]},
+        )
+    )
+
+    assert result["ok"] is True
+    assert captured == [
+        ("GET", "/api/v1/memory/whoami", "read"),
+        ("POST", "/api/v1/memory/entries:batch", "write"),
+    ]
+
+
+def test_palaceoftruth_request_json_fails_closed_for_unmapped_memory_route(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    def fake_urlopen(_request, timeout: int):
+        raise AssertionError("unmapped memory route should fail before HTTP")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="missing an explicit MCP scope mapping"):
+        provider._request_json("GET", "/api/v1/memory/future-route")
 
 
 def test_palaceoftruth_plugin_config_schema_includes_write_quota_defaults() -> None:
