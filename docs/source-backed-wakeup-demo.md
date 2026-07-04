@@ -146,3 +146,6 @@ These are not part of the wakeup MVP:
 4. Track synthesis runs and artifact dependencies for stale-source
    invalidation.
 5. Expose answer audit only after claims and dependencies exist.
+
+The research gate is captured in
+[Post-Wakeup Claims, Promotion, And Invalidation Design](post-wakeup-claims-promotion-invalidation-design.md).

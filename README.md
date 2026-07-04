@@ -170,7 +170,8 @@ checkpoint.
 For the first public operator story, see
 [Source-Backed Wakeup for Agent Teams](docs/source-backed-wakeup-demo.md). It
 shows the sanitized quickstart, expected trust-state output, privacy boundary,
-and MVP limits before a fresh agent acts.
+and MVP limits before a fresh agent acts. The follow-on research gate is
+[Post-Wakeup Claims, Promotion, And Invalidation Design](docs/post-wakeup-claims-promotion-invalidation-design.md).
 
 Before improvement planning or DOTODO task selection, generate a report-only
 startup evidence refresh:
@@ -305,6 +306,7 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
 - [DESIGN.md](DESIGN.md): frontend and product design guidance
 - [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
+- [docs/post-wakeup-claims-promotion-invalidation-design.md](docs/post-wakeup-claims-promotion-invalidation-design.md): first post-wakeup decision-claim, promotion, and invalidation design
 - [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](third_party_plugins/agent_clients/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.

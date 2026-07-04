@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = ROOT / "scripts" / "demo_source_backed_wakeup.py"
 FIXTURE_PATH = ROOT / "fixtures" / "source_backed_wakeup_demo.json"
 DOC_PATH = ROOT / "docs" / "source-backed-wakeup-demo.md"
+POST_WAKEUP_DESIGN_PATH = ROOT / "docs" / "post-wakeup-claims-promotion-invalidation-design.md"
 
 spec = importlib.util.spec_from_file_location("demo_source_backed_wakeup", SCRIPT_PATH)
 assert spec is not None
@@ -84,3 +85,34 @@ def test_source_backed_wakeup_docs_page_preserves_public_contract() -> None:
     assert "raw chunks" in page
     assert "source previews" in page
     assert "does not claim full source-backed answers" in page
+    assert "post-wakeup-claims-promotion-invalidation-design.md" in page
+
+
+def test_post_wakeup_claims_design_preserves_research_decision_contract() -> None:
+    page = POST_WAKEUP_DESIGN_PATH.read_text(encoding="utf-8")
+
+    for heading in (
+        "# Post-Wakeup Claims, Promotion, And Invalidation Design",
+        "## Recommendation",
+        "## Rejected First Claim Types",
+        "## Claim Model Boundary",
+        "## Promotion States",
+        "## Minimum Dependency Graph",
+        "## Stale Invalidation Triggers",
+        "## Operator UX Surface",
+        "## Migration And Backfill Risk",
+        "## Test Strategy",
+        "## Out Of Scope",
+        "## Follow-Up Task Updates",
+    ):
+        assert heading in page
+
+    assert "Task: SAR-935" in page
+    assert "Build the first claim slice around `claim_type='decision'`" in page
+    assert "Do not add a parallel" in page
+    assert "`task_state`" in page
+    assert "`preference`" in page
+    assert "`policy`" in page
+    assert "`artifact_summary`" in page
+    assert "No production data mutation" in page
+    assert "No implementation in SAR-935" in page
