@@ -417,8 +417,12 @@ def test_memory_whoami_returns_authenticated_tenant() -> None:
         "status": "ok",
         "tenant_id": "tenant-a",
         "auth_mode": None,
+        "mcp_client_id": None,
         "mcp_client_key": None,
         "allowed_scopes": [],
+        "resource": None,
+        "audience": None,
+        "token_hash_prefix": "key-hash",
     }
 
 
@@ -437,8 +441,12 @@ def test_memory_whoami_returns_mcp_oauth_scope_metadata() -> None:
         "status": "ok",
         "tenant_id": "tenant-a",
         "auth_mode": "mcp_oauth",
+        "mcp_client_id": None,
         "mcp_client_key": "codex-remote",
         "allowed_scopes": ["read", "write"],
+        "resource": None,
+        "audience": None,
+        "token_hash_prefix": "key-hash",
     }
 
 
@@ -3407,8 +3415,12 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         "status": "ok",
         "tenant_id": "tenant-a",
         "auth_mode": None,
+        "mcp_client_id": None,
         "mcp_client_key": None,
         "allowed_scopes": [],
+        "resource": None,
+        "audience": None,
+        "token_hash_prefix": "key-hash",
     }
     assert write_response.status_code == 202
     assert write_response.json()["accepted_as"] == "canonical"

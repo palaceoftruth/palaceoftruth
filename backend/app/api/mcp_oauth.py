@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import base64
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -36,6 +37,30 @@ SUPPORTED_SCOPES = (
 
 def _metadata_url(request: Request, path: str) -> str:
     return str(request.url_for(path))
+
+
+def _canonical_mcp_resource(request: Request) -> str:
+    metadata_url = str(request.url_for("mcp_oauth_protected_resource_metadata"))
+    return metadata_url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
+
+
+def _normalize_resource(value: str | None) -> str | None:
+    if value is None:
+        return None
+    resource = value.strip()
+    if not resource:
+        return None
+    parsed = urlsplit(resource)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.fragment:
+        raise HTTPException(status_code=400, detail="invalid_resource")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", ""))
+
+
+def _split_tenant_qualified_client_id(client_id: str) -> tuple[str | None, str]:
+    tenant_id, separator, client_key = client_id.partition(":")
+    if separator and tenant_id and client_key:
+        return tenant_id, client_key
+    return None, client_id
 
 
 def _parse_scopes(value: object) -> list[str]:
@@ -82,10 +107,12 @@ def _client_credentials_from_request(
 
 @router.post("/token", response_model=McpOAuthTokenResponse)
 async def issue_mcp_access_token(
+    request: Request,
     grant_type: Annotated[str, Form()],
     client_id: Annotated[str | None, Form()] = None,
     client_secret: Annotated[str | None, Form()] = None,
     scope: Annotated[str | None, Form()] = None,
+    resource: Annotated[str | None, Form()] = None,
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> McpOAuthTokenResponse:
     if grant_type != "client_credentials":
@@ -95,6 +122,13 @@ async def issue_mcp_access_token(
         form_client_secret=client_secret,
         authorization=authorization,
     )
+    requested_resource = _normalize_resource(resource)
+    canonical_resource = _canonical_mcp_resource(request)
+    if requested_resource is None:
+        raise HTTPException(status_code=400, detail="invalid_resource")
+    if requested_resource != canonical_resource:
+        raise HTTPException(status_code=400, detail="invalid_resource")
+    tenant_id, client_key = _split_tenant_qualified_client_id(resolved_client_id)
 
     async with async_session() as db:
         result = await db.execute(
@@ -104,12 +138,17 @@ async def issue_mcp_access_token(
                        oauth_revoked_at, oauth_token_ttl_seconds
                 FROM mcp_clients
                 WHERE client_key = :client_key
-                LIMIT 1
+                  AND (:tenant_id IS NULL OR tenant_id = :tenant_id)
+                ORDER BY created_at ASC
+                LIMIT 2
                 """
             ),
-            {"client_key": resolved_client_id},
+            {"client_key": client_key, "tenant_id": tenant_id},
         )
-        row = result.mappings().one_or_none()
+        rows = list(result.mappings().all())
+        if tenant_id is None and len(rows) > 1:
+            raise HTTPException(status_code=401, detail="invalid_client")
+        row = rows[0] if rows else None
         if row is None or row["oauth_revoked_at"] is not None:
             raise HTTPException(status_code=401, detail="invalid_client")
         if not compare_secret(resolved_client_secret, row["oauth_client_secret_hash"]):
@@ -127,9 +166,9 @@ async def issue_mcp_access_token(
             text(
                 """
                 INSERT INTO mcp_oauth_access_tokens
-                    (tenant_id, client_id, token_hash, scopes, expires_at)
+                    (tenant_id, client_id, token_hash, scopes, resource, expires_at)
                 VALUES
-                    (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :expires_at)
+                    (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :resource, :expires_at)
                 """
             ),
             {
@@ -137,12 +176,18 @@ async def issue_mcp_access_token(
                 "client_id": row["id"],
                 "token_hash": hash_secret(access_token),
                 "scopes": json.dumps(token_scopes),
+                "resource": canonical_resource,
                 "expires_at": expires_at,
             },
         )
         await db.commit()
 
-    return McpOAuthTokenResponse(access_token=access_token, expires_in=ttl_seconds, scope=" ".join(token_scopes))
+    return McpOAuthTokenResponse(
+        access_token=access_token,
+        expires_in=ttl_seconds,
+        scope=" ".join(token_scopes),
+        resource=canonical_resource,
+    )
 
 
 @router.post("/revoke", response_model=McpOAuthRevokeResponse)
@@ -162,10 +207,9 @@ async def revoke_mcp_access_token(token: Annotated[str, Form()]) -> McpOAuthRevo
 
 @metadata_router.get("/.well-known/oauth-protected-resource", response_model=McpOAuthProtectedResourceMetadata)
 async def mcp_oauth_protected_resource_metadata(request: Request) -> McpOAuthProtectedResourceMetadata:
-    resource = str(request.url_for("mcp_oauth_protected_resource_metadata"))
     token_url = _metadata_url(request, "issue_mcp_access_token")
     return McpOAuthProtectedResourceMetadata(
-        resource=resource.removesuffix("/.well-known/oauth-protected-resource") + "/mcp",
+        resource=_canonical_mcp_resource(request),
         authorization_servers=[token_url.rsplit("/token", 1)[0]],
         scopes_supported=list(SUPPORTED_SCOPES),  # type: ignore[arg-type]
     )

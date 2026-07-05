@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Literal, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from mcp.server.auth.middleware.auth_context import (
@@ -644,6 +645,13 @@ class SecondBrainApiClient:
         token = await self._active_bearer_token()
         return {"Authorization": f"Bearer {token}"}
 
+    def _oauth_resource(self) -> str:
+        token_url = self.settings.oauth_token_url
+        if not token_url:
+            token_url = f"{self.settings.api_base_url.rstrip('/')}/memory/mcp/oauth/token"
+        parsed = urlsplit(token_url)
+        return urlunsplit((parsed.scheme, parsed.netloc, "/mcp", "", ""))
+
     async def _active_bearer_token(self) -> str:
         if self._bearer_token and (
             self._bearer_expires_at is None or self._bearer_expires_at > datetime.now(timezone.utc) + timedelta(seconds=30)
@@ -658,6 +666,7 @@ class SecondBrainApiClient:
                 "client_id": self.settings.client_key,
                 "client_secret": self.settings.oauth_client_secret,
                 "scope": " ".join(self.settings.client_scopes),
+                "resource": self._oauth_resource(),
             },
         )
         response.raise_for_status()

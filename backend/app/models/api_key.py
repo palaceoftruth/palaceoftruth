@@ -81,6 +81,7 @@ class McpOAuthAccessToken(Base):
     )
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
     issued_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
