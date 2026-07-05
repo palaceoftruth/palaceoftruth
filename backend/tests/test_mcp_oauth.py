@@ -33,6 +33,7 @@ class FakeSession:
         self.rows = rows if rows is not None else ([] if row is None else [row])
         self.tokens = []
         self.revoked = []
+        self.statements = []
         self.commits = 0
 
     async def __aenter__(self):
@@ -44,6 +45,7 @@ class FakeSession:
     async def execute(self, statement, params=None):
         sql = str(statement).lower()
         params = params or {}
+        self.statements.append((str(statement), params))
         if "from mcp_clients" in sql:
             rows = [
                 row
@@ -111,6 +113,8 @@ def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None
     assert session.tokens[0]["scopes"] == '["read"]'
     assert session.tokens[0]["resource"] == "https://testserver/mcp"
     assert session.tokens[0]["expires_at"] > datetime.now(timezone.utc)
+    client_lookup_sql = next(sql for sql, _ in session.statements if "FROM mcp_clients" in sql)
+    assert "CAST(:tenant_id AS text) IS NULL" in client_lookup_sql
 
 
 def test_mcp_oauth_token_endpoint_accepts_tenant_qualified_client_id(monkeypatch) -> None:
@@ -275,5 +279,6 @@ def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) 
 
     assert metadata.status_code == 200
     assert metadata.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"
+    assert metadata.json()["authorization_servers"] == ["https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth"]
     assert token.status_code == 200
     assert token.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"

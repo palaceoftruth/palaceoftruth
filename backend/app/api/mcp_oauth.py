@@ -36,7 +36,8 @@ SUPPORTED_SCOPES = (
 
 
 def _metadata_url(request: Request, path: str) -> str:
-    return str(request.url_for(path))
+    parsed = urlsplit(str(request.url_for(path)))
+    return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
 def _canonical_mcp_resource(request: Request) -> str:
@@ -140,7 +141,7 @@ async def issue_mcp_access_token(
                        oauth_revoked_at, oauth_token_ttl_seconds
                 FROM mcp_clients
                 WHERE client_key = :client_key
-                  AND (:tenant_id IS NULL OR tenant_id = :tenant_id)
+                  AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
                 ORDER BY created_at ASC
                 LIMIT 2
                 """
