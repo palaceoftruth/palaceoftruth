@@ -41,6 +41,14 @@ percentage values must stay strings.
 {{- end -}}
 
 {{/*
+Memory rollout smoke is a Job, and Job pod templates are immutable. Include the
+app image tag in the Job name so Helm replaces it on app/chart upgrades.
+*/}}
+{{- define "palaceoftruth.memoryRolloutSmokeJobName" -}}
+{{- printf "%s-memory-smoke-%s" ((include "palaceoftruth.fullname" .) | trunc 38 | trimSuffix "-") ((include "palaceoftruth.imageTag" .) | trunc 10 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
 Create chart label.
 */}}
 {{- define "palaceoftruth.chart" -}}

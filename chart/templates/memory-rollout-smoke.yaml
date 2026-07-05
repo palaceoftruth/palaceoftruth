@@ -41,7 +41,7 @@ roleRef:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+  name: {{ include "palaceoftruth.memoryRolloutSmokeJobName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
