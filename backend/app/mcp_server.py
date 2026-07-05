@@ -27,6 +27,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, DEFAULT_MCP_CLIENT_SCOPES, McpOperationScope
 from app.services.codex_memory_privacy import scan_codex_memory_privacy
 
 
@@ -69,26 +70,6 @@ PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
     "SECONDBRAIN_MCP_CHECKPOINT_CAPTURE_DISABLED",
 )
 
-McpOperationScope = Literal[
-    "read",
-    "write",
-    "write:agent",
-    "write:workspace",
-    "write:session",
-    "admin",
-    "local_only",
-    "destructive_prohibited",
-]
-ALL_MCP_OPERATION_SCOPES: tuple[McpOperationScope, ...] = (
-    "read",
-    "write",
-    "write:agent",
-    "write:workspace",
-    "write:session",
-    "admin",
-    "local_only",
-    "destructive_prohibited",
-)
 WRITE_OPERATIONS = {"create_memory_entry", "capture_checkpoint", "backfill_deferred_relationships"}
 SESSION_CONTEXT_ENTRY_FIELDS = (
     "id",
@@ -509,7 +490,7 @@ class SecondBrainMcpSettings:
     timeout_seconds: float = 30.0
     client_key: str = "default"
     client_name: str = "Palace MCP adapter"
-    client_scopes: tuple[McpOperationScope, ...] = ALL_MCP_OPERATION_SCOPES
+    client_scopes: tuple[McpOperationScope, ...] = DEFAULT_MCP_CLIENT_SCOPES
     app_version: str | None = None
 
     @classmethod
@@ -542,7 +523,7 @@ class SecondBrainMcpSettings:
             raise RuntimeError(f"{client_name_env or PALACE_MCP_CLIENT_NAME_ENVS[0]} must not be blank")
 
         scope_raw, scope_env = _env_value(PALACE_MCP_CLIENT_SCOPES_ENVS)
-        client_scopes = ALL_MCP_OPERATION_SCOPES
+        client_scopes = DEFAULT_MCP_CLIENT_SCOPES
         if scope_raw is not None:
             cleaned_scopes = tuple(part.strip() for part in scope_raw.split(",") if part.strip())
             invalid = sorted(set(cleaned_scopes) - set(ALL_MCP_OPERATION_SCOPES))

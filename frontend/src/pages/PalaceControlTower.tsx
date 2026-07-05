@@ -9,6 +9,7 @@ import type {
   McpClientConfigSnippets,
   McpOAuthClientRegisterResponse,
   McpOAuthClientSummary,
+  McpOAuthScopeDefinition,
   McpOperationScope,
   PalaceRunSummary,
   PalaceSyncSource,
@@ -158,12 +159,17 @@ function sourceFormFromSource(source: PalaceSyncSource): SourceFormState {
   };
 }
 
-const MCP_SCOPE_OPTIONS: Array<{ value: McpOperationScope; label: string }> = [
-  { value: "read", label: "Read" },
-  { value: "write", label: "Write" },
-  { value: "local_only", label: "Local only" },
-  { value: "destructive_prohibited", label: "No destructive tools" },
-  { value: "admin", label: "Admin" },
+const FALLBACK_MCP_SCOPE_OPTIONS: McpOAuthScopeDefinition[] = [
+  { value: "read", label: "Read", description: "", category: "mcp" },
+  { value: "write", label: "Write", description: "", category: "mcp" },
+  { value: "write:agent", label: "Write agent scope", description: "", category: "mcp" },
+  { value: "write:workspace", label: "Write workspace scope", description: "", category: "mcp" },
+  { value: "write:session", label: "Write session scope", description: "", category: "mcp" },
+  { value: "local_only", label: "Local only", description: "", category: "mcp" },
+  { value: "destructive_prohibited", label: "No destructive tools", description: "", category: "mcp" },
+  { value: "admin", label: "Admin", description: "", category: "mcp" },
+  { value: "capture:write", label: "Capture writes", description: "", category: "mcp" },
+  { value: "capture:job:read", label: "Capture job reads", description: "", category: "mcp" },
 ];
 
 const DEFAULT_MCP_FORM = {
@@ -209,6 +215,7 @@ export default function PalaceControlTowerPage() {
   const [form, setForm] = useState<SourceFormState>(emptySourceForm);
   const [mcpClients, setMcpClients] = useState<McpOAuthClientSummary[]>([]);
   const [mcpSnippets, setMcpSnippets] = useState<McpClientConfigSnippets | null>(null);
+  const [mcpScopeCatalog, setMcpScopeCatalog] = useState<McpOAuthScopeDefinition[]>(FALLBACK_MCP_SCOPE_OPTIONS);
   const [mcpForm, setMcpForm] = useState(DEFAULT_MCP_FORM);
   const [mcpSubmitting, setMcpSubmitting] = useState(false);
   const [mcpRevokingId, setMcpRevokingId] = useState<string | null>(null);
@@ -228,6 +235,7 @@ export default function PalaceControlTowerPage() {
       setTower(controlTower);
       setMcpClients(clients.clients);
       setMcpSnippets(clients.config_snippets);
+      setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
@@ -358,6 +366,7 @@ export default function PalaceControlTowerPage() {
       const clients = await api.listPalaceMcpClients();
       setMcpClients(clients.clients);
       setMcpSnippets(clients.config_snippets);
+      setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -377,6 +386,7 @@ export default function PalaceControlTowerPage() {
       const clients = await api.listPalaceMcpClients();
       setMcpClients(clients.clients);
       setMcpSnippets(clients.config_snippets);
+      setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -1147,7 +1157,7 @@ export default function PalaceControlTowerPage() {
                     className="sb-input"
                   />
                   <div className="grid gap-2 sm:grid-cols-2">
-                    {MCP_SCOPE_OPTIONS.map((scope) => (
+                    {mcpScopeCatalog.map((scope) => (
                       <label key={scope.value} className="flex min-w-0 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-xs text-zinc-300">
                         <input
                           type="checkbox"
@@ -1155,7 +1165,14 @@ export default function PalaceControlTowerPage() {
                           onChange={(event) => handleMcpScopeToggle(scope.value, event.target.checked)}
                           className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 text-sky-500 focus:ring-sky-500"
                         />
-                        <span>{scope.label}</span>
+                        <span className="min-w-0">
+                          <span className="block break-words">{scope.label}</span>
+                          {scope.description ? (
+                            <span className="mt-0.5 block break-words text-[11px] leading-4 text-zinc-500">
+                              {scope.description}
+                            </span>
+                          ) : null}
+                        </span>
                       </label>
                     ))}
                   </div>

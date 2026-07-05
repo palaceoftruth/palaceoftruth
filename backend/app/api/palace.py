@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_secret, verify_api_key
 from app.database import async_session, get_db
+from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
 from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
@@ -271,6 +272,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
         tenant_id=tenant_id,
         clients=[_serialize_mcp_client(row) for row in rows],
         config_snippets=_config_snippets(request),
+        scope_catalog=serialize_mcp_scope_catalog(),
     )
 
 

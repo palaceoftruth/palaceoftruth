@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.mcp_scopes import McpOperationScope
 from app.schemas.palace import PalaceRetrieveTrace
 from app.schemas.search import SearchResult
 from app.services.retrieval_lenses import validate_retrieval_lens_name
@@ -31,18 +32,6 @@ MemoryWriteContractStatus = Literal[
     "dependency_unavailable",
 ]
 MemoryQueueState = Literal["healthy", "backpressure", "saturated", "unknown"]
-McpOperationScope = Literal[
-    "read",
-    "write",
-    "write:agent",
-    "write:workspace",
-    "write:session",
-    "admin",
-    "local_only",
-    "destructive_prohibited",
-    "capture:write",
-    "capture:job:read",
-]
 McpAuditStatus = Literal["success", "error", "denied"]
 
 MEMORY_JOB_TYPE = "memory_artifact"
@@ -182,10 +171,18 @@ class McpOAuthClientRevokeResponse(BaseModel):
     revoked: bool = True
 
 
+class McpOAuthScopeDefinition(BaseModel):
+    value: McpOperationScope
+    label: str
+    description: str
+    category: str
+
+
 class McpOAuthClientListResponse(BaseModel):
     tenant_id: str
     clients: list[McpOAuthClientSummary]
     config_snippets: McpClientConfigSnippets
+    scope_catalog: list[McpOAuthScopeDefinition] = Field(default_factory=list)
 
 
 class McpOAuthTokenResponse(BaseModel):
@@ -228,6 +225,7 @@ class McpOAuthProtectedResourceMetadata(BaseModel):
     authorization_servers: list[str]
     bearer_methods_supported: list[str] = Field(default_factory=lambda: ["header"])
     scopes_supported: list[McpOperationScope]
+    scope_catalog: list[McpOAuthScopeDefinition] = Field(default_factory=list)
 
 
 class MemoryScope(BaseModel):

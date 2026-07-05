@@ -1,5 +1,18 @@
 import { expect, test } from "@playwright/test";
 
+const testScopeCatalog = [
+  { value: "read", label: "Read memory", description: "Read memory and audit surfaces.", category: "memory" },
+  { value: "write", label: "Write memory", description: "Create tenant-shared memory.", category: "memory" },
+  { value: "write:agent", label: "Write agent scope", description: "Create agent-scoped memory.", category: "memory" },
+  { value: "write:workspace", label: "Write workspace scope", description: "Create workspace-scoped memory.", category: "memory" },
+  { value: "write:session", label: "Write session scope", description: "Create session-scoped memory.", category: "memory" },
+  { value: "admin", label: "Admin tools", description: "Call administrative MCP operations.", category: "admin" },
+  { value: "local_only", label: "Local-only client", description: "Marks a local runtime client.", category: "guardrail" },
+  { value: "destructive_prohibited", label: "No destructive tools", description: "Prohibit destructive operations.", category: "guardrail" },
+  { value: "capture:write", label: "Capture writes", description: "Create browser captures.", category: "capture" },
+  { value: "capture:job:read", label: "Capture job reads", description: "Poll browser capture jobs.", category: "capture" },
+];
+
 async function mockPalaceOverview(
   page: Parameters<typeof test>[0]["page"],
   overview: unknown,
@@ -26,6 +39,7 @@ async function mockPalaceControlTower(page: Parameters<typeof test>[0]["page"], 
       json: {
         tenant_id: "default",
         clients: [],
+        scope_catalog: testScopeCatalog,
         config_snippets: {
           codex_stdio_toml: "[mcp_servers.palaceoftruth-memory]\\ncommand = \"uv\"",
           http_oauth_toml: "[mcp_servers.palaceoftruth-memory]\\nbearer_token_env_var = \"PALACEOFTRUTH_MCP_BEARER_TOKEN\"",
@@ -920,6 +934,7 @@ test.describe("Palace smoke", () => {
               legacy_api_key_toml: "X-API-Key = \"set-from-your-secret-manager\"",
               secret_handling_note: "The client_secret is returned once.",
             },
+            scope_catalog: testScopeCatalog,
           },
         });
         return;
@@ -946,6 +961,7 @@ test.describe("Palace smoke", () => {
               revoked_at: null,
             },
           ],
+          scope_catalog: testScopeCatalog,
           config_snippets: {
             codex_stdio_toml: "[mcp_servers.palaceoftruth-memory]\\nPALACEOFTRUTH_API_KEY = \"set-from-your-secret-manager\"",
             http_oauth_toml: "bearer_token_env_var = \"PALACEOFTRUTH_MCP_BEARER_TOKEN\"",
@@ -965,6 +981,10 @@ test.describe("Palace smoke", () => {
     await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
 
     await expect(page.getByText("Register MCP agent")).toBeVisible();
+    await expect(page.getByText("Write workspace scope")).toBeVisible();
+    await expect(page.getByText("Create workspace-scoped memory.")).toBeVisible();
+    await expect(page.getByText("Capture writes")).toBeVisible();
+    await expect(page.getByText("Create browser captures.")).toBeVisible();
     await expect(page.getByText("Codex remote MCP with a long operator label")).toBeVisible();
     await page.getByLabel("MCP client key").fill("codex-remote-long-client-key-that-wraps");
     await page.getByRole("button", { name: "Register agent" }).click();

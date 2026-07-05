@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.api.palace import router
 from app.auth import verify_api_key
 from app.database import get_db
+from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 from app.models.item import Item
 from app.models.palace import PalaceRoomEvent, PalaceRun, Room, SyncSource
 from app.schemas.palace import (
@@ -721,6 +722,8 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
     assert payload["clients"][0]["denied_count"] == 1
     assert "client_secret" not in payload["config_snippets"]["http_oauth_toml"]
     assert "read -rsp" in payload["config_snippets"]["oauth_token_command"]
+    assert [scope["value"] for scope in payload["scope_catalog"]] == list(ALL_MCP_OPERATION_SCOPES)
+    assert any(scope["description"] for scope in payload["scope_catalog"] if scope["value"] == "write:workspace")
 
 
 def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
@@ -761,6 +764,58 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
     assert isinstance(payload["client_secret"], str)
     assert payload["client_secret"] not in payload["config_snippets"]["http_oauth_toml"]
     assert "PALACEOFTRUTH_MCP_BEARER_TOKEN" in payload["config_snippets"]["http_oauth_toml"]
+
+
+def test_register_palace_mcp_client_accepts_full_scope_catalog() -> None:
+    client_id = uuid.uuid4()
+    session = FakeSession(
+        execute_results=[
+            [
+                {
+                    "id": client_id,
+                    "tenant_id": "tenant-a",
+                    "client_key": "full-scope-client",
+                    "display_name": "Full scope client",
+                    "allowed_scopes": list(ALL_MCP_OPERATION_SCOPES),
+                    "metadata": {},
+                    "oauth_revoked_at": None,
+                    "oauth_token_ttl_seconds": 1800,
+                    "created_at": datetime.now(timezone.utc),
+                    "last_seen_at": None,
+                }
+            ]
+        ]
+    )
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "full-scope-client",
+            "display_name": "Full scope client",
+            "allowed_scopes": list(ALL_MCP_OPERATION_SCOPES),
+            "token_ttl_seconds": 1800,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["client"]["allowed_scopes"] == list(ALL_MCP_OPERATION_SCOPES)
+
+
+def test_register_palace_mcp_client_rejects_unknown_scope() -> None:
+    client = _build_app(FakeSession())
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "bad-scope-client",
+            "display_name": "Bad scope client",
+            "allowed_scopes": ["read", "unknown:scope"],
+            "token_ttl_seconds": 1800,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_issue_browser_extension_token_returns_scoped_public_token() -> None:
