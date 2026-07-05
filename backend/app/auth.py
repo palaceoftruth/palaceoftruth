@@ -2,6 +2,9 @@ import hashlib
 import json
 import logging
 import secrets
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -15,6 +18,25 @@ from app.mcp_scopes import VALID_MCP_OPERATION_SCOPES
 logger = logging.getLogger(__name__)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    tenant_id: str
+    auth_mode: str
+    subject_id: str | None = None
+    client_id: Any | None = None
+    client_key: str | None = None
+    client_name: str | None = None
+    scopes: tuple[str, ...] = ()
+    capabilities: frozenset[str] = field(default_factory=frozenset)
+    resource: str | None = None
+    audience: str | None = None
+    token_hash_reference: str | None = None
+    audit_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def has_capability(self, capability: str) -> bool:
+        return capability in self.capabilities or "admin" in self.capabilities
 
 
 def _hash_key(raw: str) -> str:
@@ -71,6 +93,77 @@ def _resource_matches_token(*, token_resource: object, expected_resource: str | 
     return isinstance(token_resource, str) and token_resource == expected_resource
 
 
+def _context_from_scopes(
+    *,
+    tenant_id: str,
+    auth_mode: str,
+    token_hash_reference: str | None,
+    subject_id: str | None = None,
+    client_id: object | None = None,
+    client_key: str | None = None,
+    client_name: str | None = None,
+    scopes: list[str] | tuple[str, ...] | None = None,
+    resource: object | None = None,
+    audit_metadata: Mapping[str, Any] | None = None,
+) -> AuthContext:
+    normalized_scopes = tuple(dict.fromkeys(scopes or ()))
+    resource_value = resource if isinstance(resource, str) else None
+    return AuthContext(
+        tenant_id=tenant_id,
+        auth_mode=auth_mode,
+        subject_id=subject_id,
+        client_id=client_id,
+        client_key=client_key,
+        client_name=client_name,
+        scopes=normalized_scopes,
+        capabilities=frozenset(normalized_scopes),
+        resource=resource_value,
+        audience=resource_value,
+        token_hash_reference=token_hash_reference,
+        audit_metadata=MappingProxyType(dict(audit_metadata or {})),
+    )
+
+
+def _attach_auth_context(request: Request, context: AuthContext) -> AuthContext:
+    request.state.auth_context = context
+    request.state.tenant_id = context.tenant_id
+    request.state.key_hash = context.token_hash_reference
+    request.state.auth_mode = context.auth_mode
+    request.state.mcp_client_id = context.client_id
+    request.state.mcp_client_key = context.client_key
+    request.state.mcp_client_name = context.client_name
+    request.state.mcp_allowed_scopes = list(context.scopes) if context.scopes else None
+    request.state.mcp_token_resource = context.resource
+    return context
+
+
+def get_auth_context(request: Request) -> AuthContext:
+    context = getattr(request.state, "auth_context", None)
+    if isinstance(context, AuthContext):
+        return context
+
+    tenant_id = getattr(request.state, "tenant_id", None)
+    auth_mode = getattr(request.state, "auth_mode", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(status_code=403, detail="Authenticated tenant is missing")
+    if not isinstance(auth_mode, str) or not auth_mode:
+        raise HTTPException(status_code=403, detail="Authenticated principal is missing")
+
+    raw_scopes = getattr(request.state, "mcp_allowed_scopes", None)
+    scopes = tuple(scope for scope in raw_scopes if isinstance(scope, str)) if isinstance(raw_scopes, list) else ()
+    token_resource = getattr(request.state, "mcp_token_resource", None)
+    return _context_from_scopes(
+        tenant_id=tenant_id,
+        auth_mode=auth_mode,
+        token_hash_reference=getattr(request.state, "key_hash", None),
+        client_id=getattr(request.state, "mcp_client_id", None),
+        client_key=getattr(request.state, "mcp_client_key", None),
+        client_name=getattr(request.state, "mcp_client_name", None),
+        scopes=scopes,
+        resource=token_resource,
+    )
+
+
 async def verify_api_key(
     request: Request,
     api_key: str | None = Security(api_key_header),
@@ -104,13 +197,16 @@ async def verify_api_key(
     if result is None:
         raise HTTPException(status_code=403, detail="Invalid or revoked API key")
 
-    request.state.tenant_id = result["tenant_id"]
-    request.state.key_hash = key_hash
-    request.state.auth_mode = "api_key"
-    request.state.mcp_client_id = None
-    request.state.mcp_client_key = None
-    request.state.mcp_allowed_scopes = None
-    request.state.mcp_token_resource = None
+    _attach_auth_context(
+        request,
+        AuthContext(
+            tenant_id=result["tenant_id"],
+            auth_mode="api_key",
+            subject_id=str(result["id"]),
+            token_hash_reference=key_hash,
+            audit_metadata=MappingProxyType({"api_key_id": str(result["id"])}),
+        ),
+    )
     return api_key
 
 
@@ -187,13 +283,20 @@ async def verify_memory_auth(
     if result is None:
         raise HTTPException(status_code=403, detail="Invalid MCP bearer token")
 
-    request.state.tenant_id = result["tenant_id"]
-    request.state.key_hash = token_hash
-    request.state.auth_mode = "mcp_oauth"
-    request.state.mcp_client_id = result["client_id"]
-    request.state.mcp_client_key = result["client_key"]
-    request.state.mcp_allowed_scopes = token_scopes
-    request.state.mcp_token_resource = result.get("token_resource")
+    _attach_auth_context(
+        request,
+        _context_from_scopes(
+            tenant_id=result["tenant_id"],
+            auth_mode="mcp_oauth",
+            token_hash_reference=token_hash,
+            subject_id=str(result["client_id"]),
+            client_id=result["client_id"],
+            client_key=result["client_key"],
+            scopes=token_scopes,
+            resource=result.get("token_resource"),
+            audit_metadata={"token_id": str(result["token_id"])},
+        ),
+    )
     return token.strip()
 
 
@@ -268,14 +371,21 @@ async def _verify_scoped_bearer_token(
     if result is None:
         raise HTTPException(status_code=403, detail=f"Invalid {detail_prefix} bearer token")
 
-    request.state.tenant_id = result["tenant_id"]
-    request.state.key_hash = token_hash
-    request.state.auth_mode = auth_mode
-    request.state.mcp_client_id = result["client_id"]
-    request.state.mcp_client_key = result["client_key"]
-    request.state.mcp_client_name = result["display_name"]
-    request.state.mcp_allowed_scopes = token_scopes
-    request.state.mcp_token_resource = result.get("token_resource")
+    _attach_auth_context(
+        request,
+        _context_from_scopes(
+            tenant_id=result["tenant_id"],
+            auth_mode=auth_mode,
+            token_hash_reference=token_hash,
+            subject_id=str(result["client_id"]),
+            client_id=result["client_id"],
+            client_key=result["client_key"],
+            client_name=result["display_name"],
+            scopes=token_scopes,
+            resource=result.get("token_resource"),
+            audit_metadata={"token_id": str(result["token_id"])},
+        ),
+    )
     return token.strip()
 
 
@@ -355,6 +465,10 @@ async def record_oauth_client_audit_event(
 
 
 def require_mcp_scope(required_scope: str):
+    return require_capability(required_scope)
+
+
+def require_capability(required_capability: str):
     async def dependency(
         request: Request,
         _: str = Depends(verify_memory_auth),
@@ -363,15 +477,17 @@ def require_mcp_scope(required_scope: str):
     ) -> None:
         auth_mode = getattr(request.state, "auth_mode", None)
         if auth_mode == "api_key":
-            _require_api_key_scope_header(request, required_scope, mcp_scope, mcp_scopes)
+            _require_api_key_scope_header(request, required_capability, mcp_scope, mcp_scopes)
             return
-        if auth_mode != "mcp_oauth":
+        if auth_mode is None:
             return
-        allowed_scopes = getattr(request.state, "mcp_allowed_scopes", None)
-        if not isinstance(allowed_scopes, list):
+        context = get_auth_context(request)
+        if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
+            return
+        if not context.scopes:
             raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
-        if required_scope not in allowed_scopes:
-            raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_scope} scope")
+        if not context.has_capability(required_capability):
+            raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_capability} scope")
 
     return dependency
 
@@ -386,6 +502,22 @@ def _require_api_key_scope_header(
     if required_scope not in api_key_scopes and "admin" not in api_key_scopes:
         raise HTTPException(status_code=403, detail=f"API key missing {required_scope} MCP scope header")
     request.state.mcp_allowed_scopes = api_key_scopes
+    context = get_auth_context(request)
+    _attach_auth_context(
+        request,
+        _context_from_scopes(
+            tenant_id=context.tenant_id,
+            auth_mode=context.auth_mode,
+            token_hash_reference=context.token_hash_reference,
+            subject_id=context.subject_id,
+            client_id=context.client_id,
+            client_key=context.client_key,
+            client_name=context.client_name,
+            scopes=api_key_scopes,
+            resource=context.resource,
+            audit_metadata=context.audit_metadata,
+        ),
+    )
 
 
 def require_api_key_scope_header(required_scope: str):
