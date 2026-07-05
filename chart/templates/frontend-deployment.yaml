@@ -7,6 +7,11 @@ metadata:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
 spec:
   replicas: {{ include "palaceoftruth.frontendReplicas" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.frontend.rollingUpdate.maxUnavailable | quote }}
+      maxSurge: {{ .Values.frontend.rollingUpdate.maxSurge | quote }}
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.fullname" . }}-frontend

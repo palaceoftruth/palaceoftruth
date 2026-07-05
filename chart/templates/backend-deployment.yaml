@@ -5,8 +5,15 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: {{ include "palaceoftruth.backendReplicas" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.backend.rollingUpdate.maxUnavailable | quote }}
+      maxSurge: {{ .Values.backend.rollingUpdate.maxSurge | quote }}
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.fullname" . }}-backend
@@ -20,18 +27,32 @@ spec:
     spec:
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
+      {{- if .Values.migrations.enabled }}
       initContainers:
-        - name: migrate
+        - name: wait-for-migrations
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["alembic", "upgrade", "head"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              for attempt in $(seq 1 {{ .Values.migrations.wait.maxAttempts }}); do
+                if alembic current 2>&1 | tee /tmp/alembic-current | grep -q "(head)"; then
+                  echo "Database migrations are at Alembic head."
+                  exit 0
+                fi
+                echo "Waiting for migration Job {{ include "palaceoftruth.migrationJobName" . }} to bring the database to Alembic head (${attempt}/{{ .Values.migrations.wait.maxAttempts }})."
+                cat /tmp/alembic-current || true
+                sleep {{ .Values.migrations.wait.sleepSeconds }}
+              done
+              echo "Timed out waiting for database migrations to reach Alembic head." >&2
+              exit 1
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
-            - name: REDIS_URL
-              value: {{ include "palaceoftruth.redisUrl" . | quote }}
           envFrom:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+      {{- end }}
       containers:
         - name: backend
           image: {{ include "palaceoftruth.backendImage" . }}

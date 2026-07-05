@@ -257,6 +257,16 @@ MCP service name.
 {{- end }}
 
 {{/*
+Migration Job name.
+The suffix changes when the chart version or image tag changes, so GitOps and
+plain Helm installs get one immutable Job per rendered app release.
+*/}}
+{{- define "palaceoftruth.migrationJobName" -}}
+{{- $suffix := printf "%s-%s" .Chart.Version (include "palaceoftruth.imageTag" .) | sha256sum | trunc 10 -}}
+{{- printf "%s-migrate-%s" (include "palaceoftruth.fullname" . | trunc 44 | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Local embedding service name.
 */}}
 {{- define "palaceoftruth.localEmbeddingServiceName" -}}

@@ -6,8 +6,15 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: {{ include "palaceoftruth.mcpReplicas" . }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.mcp.rollingUpdate.maxUnavailable | quote }}
+      maxSurge: {{ .Values.mcp.rollingUpdate.maxSurge | quote }}
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.mcpServiceName" . }}
