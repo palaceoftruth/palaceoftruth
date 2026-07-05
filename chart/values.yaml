@@ -325,7 +325,7 @@ mcp:
   apiBaseUrl: ""
   clientKey: "helm-mcp"
   clientName: "Palace Helm MCP"
-  clientScopes: "read,write,admin,local_only,destructive_prohibited"
+  clientScopes: "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
   # Optional keys in the app secret. When oauthClientSecretKey is set, the
   # adapter mints short-lived bearer tokens with client_credentials. API_KEY
   # remains mounted as a compatibility fallback.
