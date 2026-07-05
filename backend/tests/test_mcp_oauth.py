@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api import mcp_oauth
 from app.auth import hash_secret
+from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 
 
 class _MappingRows:
@@ -234,6 +235,24 @@ def test_mcp_oauth_token_endpoint_fails_closed_on_malformed_scope_row(monkeypatc
     assert session.tokens == []
 
 
+def test_mcp_oauth_token_endpoint_fails_closed_on_unsupported_scope_row(monkeypatch) -> None:
+    session = FakeSession(_client_row(allowed_scopes=["read", "unknown:scope"]))
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 403
+    assert session.tokens == []
+
+
 def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
     session = FakeSession(_client_row())
     client = _client(session, monkeypatch)
@@ -255,7 +274,9 @@ def test_mcp_oauth_protected_resource_metadata_lists_scopes(monkeypatch) -> None
     body = response.json()
     assert body["resource"].endswith("/mcp")
     assert body["bearer_methods_supported"] == ["header"]
-    assert "read" in body["scopes_supported"]
+    assert body["scopes_supported"] == list(ALL_MCP_OPERATION_SCOPES)
+    assert {scope["value"] for scope in body["scope_catalog"]} == set(ALL_MCP_OPERATION_SCOPES)
+    assert any(scope["description"] for scope in body["scope_catalog"] if scope["value"] == "capture:write")
 
 
 def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) -> None:

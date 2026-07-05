@@ -3,7 +3,6 @@ import json
 import logging
 import secrets
 from datetime import datetime, timezone
-from typing import get_args
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, Header, HTTPException, Request, Security
@@ -11,12 +10,11 @@ from fastapi.security import APIKeyHeader
 from sqlalchemy import text
 
 from app.database import async_session
-from app.schemas.memory import McpOperationScope
+from app.mcp_scopes import VALID_MCP_OPERATION_SCOPES
 
 logger = logging.getLogger(__name__)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-VALID_MCP_OPERATION_SCOPES = set(get_args(McpOperationScope))
 
 
 def _hash_key(raw: str) -> str:
@@ -30,7 +28,11 @@ def hash_secret(raw: str) -> str:
 def _parse_json_list(value: object) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise HTTPException(status_code=403, detail="MCP client scopes are invalid")
-    return [item for item in value if item.strip()]
+    scopes = [item for item in value if item.strip()]
+    invalid = sorted(set(scopes) - VALID_MCP_OPERATION_SCOPES)
+    if invalid:
+        raise HTTPException(status_code=403, detail=f"MCP client scopes include unsupported scope: {', '.join(invalid)}")
+    return scopes
 
 
 def _parse_scope_header(*values: str | None) -> list[str]:

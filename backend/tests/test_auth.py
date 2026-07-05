@@ -205,6 +205,30 @@ async def test_verify_memory_auth_fails_closed_on_malformed_mcp_scopes(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_verify_memory_auth_fails_closed_on_unsupported_mcp_scope(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["read", "unknown:scope"],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "codex-remote",
+            "allowed_scopes": ["read", "unknown:scope"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_memory_auth(_request(), api_key=None, authorization="Bearer raw-token")
+
+    assert exc_info.value.status_code == 403
+    assert "unsupported scope" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_verify_memory_auth_rejects_expired_mcp_bearer_token(monkeypatch) -> None:
     session = FakeSession(
         {

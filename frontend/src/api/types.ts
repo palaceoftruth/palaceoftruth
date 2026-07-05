@@ -747,7 +747,24 @@ export interface PalaceMcpActivitySummary {
   recent_events: PalaceMcpActivityEvent[];
 }
 
-export type McpOperationScope = "read" | "write" | "admin" | "local_only" | "destructive_prohibited";
+export type McpOperationScope =
+  | "read"
+  | "write"
+  | "write:agent"
+  | "write:workspace"
+  | "write:session"
+  | "admin"
+  | "local_only"
+  | "destructive_prohibited"
+  | "capture:write"
+  | "capture:job:read";
+
+export interface McpOAuthScopeDefinition {
+  value: McpOperationScope;
+  label: string;
+  description: string;
+  category: string;
+}
 
 export interface McpOAuthClientSummary {
   id: string;
@@ -779,6 +796,7 @@ export interface McpOAuthClientListResponse {
   tenant_id: string;
   clients: McpOAuthClientSummary[];
   config_snippets: McpClientConfigSnippets;
+  scope_catalog: McpOAuthScopeDefinition[];
 }
 
 export interface McpOAuthClientRegisterResponse {

@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.auth import compare_secret, hash_secret
 from app.database import async_session
+from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
     McpOAuthProtectedResourceMetadata,
     McpOAuthRevokeResponse,
@@ -20,20 +21,6 @@ from app.schemas.memory import (
 
 router = APIRouter(prefix="/memory/mcp/oauth", tags=["mcp-oauth"])
 metadata_router = APIRouter(tags=["mcp-oauth"])
-
-SUPPORTED_SCOPES = (
-    "read",
-    "write",
-    "write:agent",
-    "write:workspace",
-    "write:session",
-    "admin",
-    "local_only",
-    "destructive_prohibited",
-    "capture:write",
-    "capture:job:read",
-)
-
 
 def _metadata_url(request: Request, path: str) -> str:
     parsed = urlsplit(str(request.url_for(path)))
@@ -69,7 +56,10 @@ def _split_tenant_qualified_client_id(client_id: str) -> tuple[str | None, str]:
 def _parse_scopes(value: object) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise HTTPException(status_code=403, detail="MCP client scopes are invalid")
-    scopes = [item for item in value if item in SUPPORTED_SCOPES]
+    scopes = [item for item in value if item.strip()]
+    invalid = sorted(set(scopes) - set(ALL_MCP_OPERATION_SCOPES))
+    if invalid:
+        raise HTTPException(status_code=403, detail=f"MCP client scopes include unsupported scope: {', '.join(invalid)}")
     if not scopes:
         raise HTTPException(status_code=403, detail="MCP client has no usable scopes")
     return scopes
@@ -214,5 +204,6 @@ async def mcp_oauth_protected_resource_metadata(request: Request) -> McpOAuthPro
     return McpOAuthProtectedResourceMetadata(
         resource=_canonical_mcp_resource(request),
         authorization_servers=[token_url.rsplit("/token", 1)[0]],
-        scopes_supported=list(SUPPORTED_SCOPES),  # type: ignore[arg-type]
+        scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
+        scope_catalog=serialize_mcp_scope_catalog(),
     )
