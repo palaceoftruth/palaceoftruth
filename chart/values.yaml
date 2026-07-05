@@ -293,8 +293,31 @@ podDisruptionBudgets:
   valkeySentinel:
     minAvailable: 2
 
+migrations:
+  # Runs Alembic once per rendered app release. Backend pods wait for the
+  # database to reach Alembic head instead of running migrations themselves,
+  # which keeps multi-replica backends from racing on startup.
+  enabled: true
+  command: ["alembic", "upgrade", "head"]
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  wait:
+    maxAttempts: 60
+    sleepSeconds: 5
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
 backend:
   replicas: 1
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
   resources:
     requests:
       memory: "256Mi"
@@ -319,6 +342,9 @@ metrics:
 mcp:
   enabled: true
   replicas: 1
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
   port: 8765
   path: /mcp
   # Leave blank to route the adapter to the in-cluster backend Service.
@@ -406,6 +432,9 @@ palaceWorker:
 
 frontend:
   replicas: 1
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
   resources:
     requests:
       memory: "64Mi"

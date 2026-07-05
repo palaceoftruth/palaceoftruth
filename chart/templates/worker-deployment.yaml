@@ -5,6 +5,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: {{ include "palaceoftruth.workerReplicas" . }}
   selector:
@@ -48,6 +50,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: {{ include "palaceoftruth.mediaWorkerReplicas" . }}
   selector:
@@ -96,6 +100,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: {{ include "palaceoftruth.palaceWorkerReplicas" . }}
   selector:
