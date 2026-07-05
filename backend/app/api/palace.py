@@ -191,6 +191,7 @@ def _config_snippets(request: Request, *, client_key: str = "<client_key>", scop
             f"--data-urlencode client_id={client_key!r} "
             '"--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" '
             f"--data-urlencode scope={scope_arg!r} "
+            f"--data-urlencode resource={mcp_url!r} "
             "| python3 -c 'import json,sys; print(json.load(sys.stdin)[\"access_token\"])')"
         ),
         legacy_api_key_toml=(

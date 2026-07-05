@@ -362,11 +362,17 @@ def _log_retrieval_diagnostics(
 @router.get("/whoami", response_model=MemoryWhoAmIResponse, dependencies=[Depends(require_mcp_scope("read"))])
 async def whoami(request: Request) -> MemoryWhoAmIResponse:
     allowed_scopes = getattr(request.state, "mcp_allowed_scopes", None)
+    token_resource = getattr(request.state, "mcp_token_resource", None)
+    key_hash = getattr(request.state, "key_hash", None)
     return MemoryWhoAmIResponse(
         tenant_id=request.state.tenant_id,
         auth_mode=getattr(request.state, "auth_mode", None),
+        mcp_client_id=getattr(request.state, "mcp_client_id", None),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
         allowed_scopes=list(allowed_scopes) if isinstance(allowed_scopes, list) else [],
+        resource=token_resource if isinstance(token_resource, str) else None,
+        audience=token_resource if isinstance(token_resource, str) else None,
+        token_hash_prefix=key_hash[:12] if isinstance(key_hash, str) else None,
     )
 
 

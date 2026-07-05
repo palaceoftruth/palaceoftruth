@@ -47,6 +47,25 @@ def _parse_scope_header(*values: str | None) -> list[str]:
     return list(dict.fromkeys(scopes))
 
 
+def _canonical_mcp_resource(request: Request) -> str:
+    try:
+        url = str(request.url_for("mcp_oauth_protected_resource_metadata"))
+        return url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
+    except Exception:
+        base_url = str(request.base_url).rstrip("/")
+        return f"{base_url}/mcp"
+
+
+def _resource_matches_token(*, token_resource: object, expected_resource: str | None) -> bool:
+    if expected_resource is None:
+        return True
+    if token_resource is None:
+        # Legacy tokens minted before SAR-984 did not persist an audience. Keep
+        # them valid only for the MCP resource while clients rotate tokens.
+        return True
+    return isinstance(token_resource, str) and token_resource == expected_resource
+
+
 async def verify_api_key(
     request: Request,
     api_key: str | None = Security(api_key_header),
@@ -86,6 +105,7 @@ async def verify_api_key(
     request.state.mcp_client_id = None
     request.state.mcp_client_key = None
     request.state.mcp_allowed_scopes = None
+    request.state.mcp_token_resource = None
     return api_key
 
 
@@ -112,6 +132,7 @@ async def verify_memory_auth(
                     t.id AS token_id,
                     t.tenant_id,
                     t.scopes AS token_scopes,
+                    t.resource AS token_resource,
                     t.expires_at,
                     t.revoked_at AS token_revoked_at,
                     c.id AS client_id,
@@ -119,7 +140,7 @@ async def verify_memory_auth(
                     c.allowed_scopes,
                     c.oauth_revoked_at AS client_revoked_at
                 FROM mcp_oauth_access_tokens t
-                JOIN mcp_clients c ON c.id = t.client_id
+                JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
                 WHERE t.token_hash = :token_hash
                 LIMIT 1
                 """
@@ -141,6 +162,9 @@ async def verify_memory_auth(
             token_scopes = _parse_json_list(result["token_scopes"])
             if any(scope not in allowed_scopes for scope in token_scopes):
                 raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
+            token_resource = result.get("token_resource")
+            if not _resource_matches_token(token_resource=token_resource, expected_resource=_canonical_mcp_resource(request)):
+                raise HTTPException(status_code=403, detail="MCP bearer token resource is invalid")
             await db.execute(
                 text(
                     "UPDATE mcp_oauth_access_tokens "
@@ -164,6 +188,7 @@ async def verify_memory_auth(
     request.state.mcp_client_id = result["client_id"]
     request.state.mcp_client_key = result["client_key"]
     request.state.mcp_allowed_scopes = token_scopes
+    request.state.mcp_token_resource = result.get("token_resource")
     return token.strip()
 
 
@@ -190,6 +215,7 @@ async def _verify_scoped_bearer_token(
                     t.id AS token_id,
                     t.tenant_id,
                     t.scopes AS token_scopes,
+                    t.resource AS token_resource,
                     t.expires_at,
                     t.revoked_at AS token_revoked_at,
                     c.id AS client_id,
@@ -198,7 +224,7 @@ async def _verify_scoped_bearer_token(
                     c.allowed_scopes,
                     c.oauth_revoked_at AS client_revoked_at
                 FROM mcp_oauth_access_tokens t
-                JOIN mcp_clients c ON c.id = t.client_id
+                JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
                 WHERE t.token_hash = :token_hash
                 LIMIT 1
                 """
@@ -244,6 +270,7 @@ async def _verify_scoped_bearer_token(
     request.state.mcp_client_key = result["client_key"]
     request.state.mcp_client_name = result["display_name"]
     request.state.mcp_allowed_scopes = token_scopes
+    request.state.mcp_token_resource = result.get("token_resource")
     return token.strip()
 
 

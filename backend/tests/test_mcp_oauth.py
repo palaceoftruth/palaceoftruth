@@ -16,6 +16,9 @@ class _MappingRows:
     def one_or_none(self):
         return self._rows[0] if self._rows else None
 
+    def all(self):
+        return self._rows
+
 
 class _Result:
     def __init__(self, rows) -> None:
@@ -26,8 +29,8 @@ class _Result:
 
 
 class FakeSession:
-    def __init__(self, row=None) -> None:
-        self.row = row
+    def __init__(self, row=None, rows=None) -> None:
+        self.rows = rows if rows is not None else ([] if row is None else [row])
         self.tokens = []
         self.revoked = []
         self.commits = 0
@@ -42,9 +45,13 @@ class FakeSession:
         sql = str(statement).lower()
         params = params or {}
         if "from mcp_clients" in sql:
-            if self.row is None or self.row["client_key"] != params["client_key"]:
-                return _Result([])
-            return _Result([self.row])
+            rows = [
+                row
+                for row in self.rows
+                if row["client_key"] == params["client_key"]
+                and (params.get("tenant_id") is None or row["tenant_id"] == params["tenant_id"])
+            ]
+            return _Result(rows[:2])
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
@@ -62,7 +69,7 @@ def _client(session: FakeSession, monkeypatch) -> TestClient:
     app.include_router(mcp_oauth.router, prefix="/api/v1")
     app.include_router(mcp_oauth.metadata_router)
     monkeypatch.setattr(mcp_oauth, "async_session", lambda: session)
-    return TestClient(app)
+    return TestClient(app, base_url="https://testserver")
 
 
 def _client_row(**overrides) -> dict:
@@ -90,6 +97,7 @@ def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None
             "client_id": "codex-remote",
             "client_secret": "client-secret",
             "scope": "read",
+            "resource": "https://testserver/mcp",
         },
     )
 
@@ -98,9 +106,77 @@ def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None
     assert body["token_type"] == "Bearer"
     assert body["expires_in"] == 3600
     assert body["scope"] == "read"
+    assert body["resource"] == "https://testserver/mcp"
     assert session.tokens[0]["tenant_id"] == "tenant-a"
     assert session.tokens[0]["scopes"] == '["read"]'
+    assert session.tokens[0]["resource"] == "https://testserver/mcp"
     assert session.tokens[0]["expires_at"] > datetime.now(timezone.utc)
+
+
+def test_mcp_oauth_token_endpoint_accepts_tenant_qualified_client_id(monkeypatch) -> None:
+    tenant_a = _client_row(tenant_id="tenant-a", oauth_client_secret_hash=hash_secret("wrong-secret"))
+    tenant_b = _client_row(tenant_id="tenant-b", oauth_client_secret_hash=hash_secret("client-secret"))
+    session = FakeSession(rows=[tenant_a, tenant_b])
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "tenant-b:codex-remote",
+            "client_secret": "client-secret",
+            "scope": "read",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 200
+    assert session.tokens[0]["tenant_id"] == "tenant-b"
+
+
+def test_mcp_oauth_token_endpoint_rejects_ambiguous_bare_client_id(monkeypatch) -> None:
+    session = FakeSession(rows=[_client_row(tenant_id="tenant-a"), _client_row(tenant_id="tenant-b")])
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 401
+    assert session.tokens == []
+
+
+def test_mcp_oauth_token_endpoint_rejects_missing_or_wrong_resource(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    missing = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+        },
+    )
+    wrong = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/api/v1",
+        },
+    )
+
+    assert missing.status_code == 400
+    assert wrong.status_code == 400
+    assert session.tokens == []
 
 
 def test_mcp_oauth_token_endpoint_rejects_invalid_secret(monkeypatch) -> None:
@@ -113,6 +189,7 @@ def test_mcp_oauth_token_endpoint_rejects_invalid_secret(monkeypatch) -> None:
             "grant_type": "client_credentials",
             "client_id": "codex-remote",
             "client_secret": "wrong",
+            "resource": "https://testserver/mcp",
         },
     )
 
@@ -128,7 +205,7 @@ def test_mcp_oauth_token_endpoint_accepts_http_basic_client_auth(monkeypatch) ->
     response = client.post(
         "/api/v1/memory/mcp/oauth/token",
         headers={"Authorization": f"Basic {basic}"},
-        data={"grant_type": "client_credentials"},
+        data={"grant_type": "client_credentials", "resource": "https://testserver/mcp"},
     )
 
     assert response.status_code == 200
@@ -145,6 +222,7 @@ def test_mcp_oauth_token_endpoint_fails_closed_on_malformed_scope_row(monkeypatc
             "grant_type": "client_credentials",
             "client_id": "codex-remote",
             "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
         },
     )
 

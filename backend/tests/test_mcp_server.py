@@ -303,6 +303,7 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
             body = request.content.decode()
             assert "grant_type=client_credentials" in body
             assert "client_id=codex-remote" in body
+            assert "resource=https%3A%2F%2Fapi.test%2Fmcp" in body
             return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 3600})
         return httpx.Response(200, json={"tenant_id": "tenant-a"})
 

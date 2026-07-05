@@ -80,8 +80,12 @@ class MemoryWhoAmIResponse(BaseModel):
     status: Literal["ok"] = "ok"
     tenant_id: str
     auth_mode: str | None = None
+    mcp_client_id: uuid.UUID | None = None
     mcp_client_key: str | None = None
     allowed_scopes: list[str] = Field(default_factory=list)
+    resource: str | None = None
+    audience: str | None = None
+    token_hash_prefix: str | None = None
 
 
 class McpClientInfo(BaseModel):
@@ -189,6 +193,7 @@ class McpOAuthTokenResponse(BaseModel):
     token_type: Literal["Bearer"] = "Bearer"
     expires_in: int
     scope: str
+    resource: str
 
 
 class McpOAuthRevokeResponse(BaseModel):
