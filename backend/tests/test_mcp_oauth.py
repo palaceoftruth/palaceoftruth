@@ -252,3 +252,28 @@ def test_mcp_oauth_protected_resource_metadata_lists_scopes(monkeypatch) -> None
     assert body["resource"].endswith("/mcp")
     assert body["bearer_methods_supported"] == ["header"]
     assert "read" in body["scopes_supported"]
+
+
+def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    app = FastAPI()
+    app.include_router(mcp_oauth.router, prefix="/api/v1")
+    app.include_router(mcp_oauth.metadata_router)
+    monkeypatch.setattr(mcp_oauth, "async_session", lambda: session)
+    client = TestClient(app, base_url="http://api.palace.sarvent.cloud")
+
+    metadata = client.get("/.well-known/oauth-protected-resource")
+    token = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://api.palace.sarvent.cloud/mcp",
+        },
+    )
+
+    assert metadata.status_code == 200
+    assert metadata.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"
+    assert token.status_code == 200
+    assert token.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"

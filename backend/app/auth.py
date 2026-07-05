@@ -4,6 +4,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import get_args
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
@@ -50,10 +51,12 @@ def _parse_scope_header(*values: str | None) -> list[str]:
 def _canonical_mcp_resource(request: Request) -> str:
     try:
         url = str(request.url_for("mcp_oauth_protected_resource_metadata"))
-        return url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
+        resource_url = url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
     except Exception:
         base_url = str(request.base_url).rstrip("/")
-        return f"{base_url}/mcp"
+        resource_url = f"{base_url}/mcp"
+    parsed = urlsplit(resource_url)
+    return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
 def _resource_matches_token(*, token_resource: object, expected_resource: str | None) -> bool:
