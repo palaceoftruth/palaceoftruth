@@ -24,6 +24,23 @@ Truncate at 63 chars because some Kubernetes name fields are limited to this
 {{- end }}
 
 {{/*
+Render Kubernetes IntOrString fields. Plain integers must stay unquoted, while
+percentage values must stay strings.
+*/}}
+{{- define "palaceoftruth.intOrPercentString" -}}
+{{- $value := . -}}
+{{- if kindIs "string" $value -}}
+{{- if regexMatch "^[0-9]+$" $value -}}
+{{- $value -}}
+{{- else -}}
+{{- $value | quote -}}
+{{- end -}}
+{{- else -}}
+{{- $value -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Create chart label.
 */}}
 {{- define "palaceoftruth.chart" -}}

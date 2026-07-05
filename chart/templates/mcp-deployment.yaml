@@ -13,8 +13,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: {{ .Values.mcp.rollingUpdate.maxUnavailable | quote }}
-      maxSurge: {{ .Values.mcp.rollingUpdate.maxSurge | quote }}
+      maxUnavailable: {{ include "palaceoftruth.intOrPercentString" .Values.mcp.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ include "palaceoftruth.intOrPercentString" .Values.mcp.rollingUpdate.maxSurge }}
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.mcpServiceName" . }}
