@@ -1,13 +1,14 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from app import auth
 from app.api.items import _encode_items_cursor, router
-from app.auth import verify_api_key
+from app.auth import AuthContext, verify_memory_auth
 from app.database import get_db
 from app.models.item import Item
 
@@ -137,6 +138,63 @@ class FakeArqPool:
         self.enqueued.append((name, kwargs))
 
 
+class _AuthMappingResult:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def one_or_none(self):
+        return self._row
+
+
+class _AuthResult:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def mappings(self):
+        return _AuthMappingResult(self._row)
+
+
+class AuthSession:
+    def __init__(self, row) -> None:
+        self.row = row
+        self.updates: list[dict] = []
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def execute(self, statement, params=None):
+        sql = str(statement).lower()
+        params = params or {}
+        if "from mcp_oauth_access_tokens" in sql:
+            return _AuthResult(self.row)
+        if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
+            self.updates.append(params)
+            return _AuthResult(None)
+        raise AssertionError(f"Unexpected auth SQL: {sql}")
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://testserver/mcp"):
+    return {
+        "token_id": uuid.uuid4(),
+        "tenant_id": "tenant-a",
+        "token_scopes": scopes,
+        "token_resource": resource,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "token_revoked_at": None,
+        "client_id": uuid.uuid4(),
+        "client_key": "codex-remote",
+        "allowed_scopes": ["read", "write", "admin"],
+        "client_revoked_at": None,
+    }
+
+
 def _client(session: FakeSession, *, arq_pool: FakeArqPool | None = None) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -146,13 +204,48 @@ def _client(session: FakeSession, *, arq_pool: FakeArqPool | None = None) -> Tes
         yield session
 
     async def override_verify(request: Request):
+        request.state.auth_context = AuthContext(
+            tenant_id="tenant-a",
+            auth_mode="api_key",
+            token_hash_reference="key-hash",
+        )
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
         return "raw-key"
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[verify_api_key] = override_verify
+    app.dependency_overrides[verify_memory_auth] = override_verify
     return TestClient(app)
+
+
+def _oauth_client(monkeypatch, auth_session: AuthSession) -> TestClient:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+
+    async def override_get_db():
+        raise AssertionError("items write handler should not receive a DB session when auth fails")
+        yield
+
+    monkeypatch.setattr(auth, "async_session", lambda: auth_session)
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
+def test_create_item_rejects_oauth_read_token_before_write_handler(monkeypatch) -> None:
+    auth_session = AuthSession(_oauth_token_row(scopes=["read"]))
+    client = _oauth_client(monkeypatch, auth_session)
+
+    response = client.post(
+        "/api/v1/items",
+        json={"title": "Launch brief", "source_type": "note", "raw_content": "draft"},
+        headers={"Authorization": "Bearer raw-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "MCP bearer token missing write scope"
+    assert auth_session.commits == 1
 
 
 def test_related_items_query_scopes_joined_rows_to_authenticated_tenant() -> None:

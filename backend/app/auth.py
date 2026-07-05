@@ -492,6 +492,26 @@ def require_capability(required_capability: str):
     return dependency
 
 
+def require_api_capability(required_capability: str):
+    async def dependency(
+        request: Request,
+        _: str = Depends(verify_memory_auth),
+    ) -> None:
+        context = get_auth_context(request)
+        # Tenant API keys are still the legacy broad REST API credential. Memory
+        # MCP routes keep their stricter X-MCP-Scope gate via require_capability.
+        if context.auth_mode == "api_key":
+            return
+        if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
+            return
+        if not context.scopes:
+            raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
+        if not context.has_capability(required_capability):
+            raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_capability} scope")
+
+    return dependency
+
+
 def _require_api_key_scope_header(
     request: Request,
     required_scope: str,

@@ -129,6 +129,43 @@ async def test_require_capability_accepts_admin_api_key_scope_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_require_api_capability_preserves_legacy_api_key_access() -> None:
+    request = _request()
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+    )
+    request.state.tenant_id = "tenant-a"
+    request.state.auth_mode = "api_key"
+    request.state.key_hash = "key-hash"
+
+    dependency = auth.require_api_capability("write")
+    await dependency(request, _="raw-key")
+
+
+@pytest.mark.asyncio
+async def test_require_api_capability_rejects_bearer_missing_scope() -> None:
+    request = _request()
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="mcp_oauth",
+        token_hash_reference=auth.hash_secret("raw-token"),
+        scopes=("read",),
+        capabilities=frozenset({"read"}),
+    )
+    request.state.tenant_id = "tenant-a"
+    request.state.auth_mode = "mcp_oauth"
+
+    dependency = auth.require_api_capability("write")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-token")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "MCP bearer token missing write scope"
+
+
+@pytest.mark.asyncio
 async def test_require_mcp_scope_rejects_unknown_api_key_scope_header() -> None:
     request = _request()
     request.state.auth_mode = "api_key"
