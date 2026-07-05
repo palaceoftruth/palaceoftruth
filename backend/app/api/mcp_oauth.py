@@ -41,7 +41,9 @@ def _metadata_url(request: Request, path: str) -> str:
 
 def _canonical_mcp_resource(request: Request) -> str:
     metadata_url = str(request.url_for("mcp_oauth_protected_resource_metadata"))
-    return metadata_url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
+    resource_url = metadata_url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
+    parsed = urlsplit(resource_url)
+    return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
 def _normalize_resource(value: str | None) -> str | None:
