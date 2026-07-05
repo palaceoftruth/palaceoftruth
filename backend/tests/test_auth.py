@@ -64,9 +64,18 @@ async def test_verify_api_key_sets_tenant_and_updates_last_used(monkeypatch) -> 
     session = FakeSession({"id": key_id, "tenant_id": "tenant-a"})
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
-    result = await auth.verify_api_key(_request(), api_key="raw-key")
+    request = _request()
+    result = await auth.verify_api_key(request, api_key="raw-key")
 
     assert result == "raw-key"
+    assert request.state.auth_context == auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        subject_id=str(key_id),
+        token_hash_reference=auth.hash_secret("raw-key"),
+        audit_metadata={"api_key_id": str(key_id)},
+    )
+    assert request.state.auth_context.capabilities == frozenset()
     assert session.updates == [key_id]
     assert session.commits == 1
 
@@ -88,12 +97,35 @@ async def test_require_mcp_scope_requires_scope_header_for_api_key() -> None:
 @pytest.mark.asyncio
 async def test_require_mcp_scope_accepts_api_key_scope_header() -> None:
     request = _request()
+    request.state.tenant_id = "tenant-a"
+    request.state.key_hash = "key-hash"
     request.state.auth_mode = "api_key"
 
     dependency = auth.require_mcp_scope("write")
     await dependency(request, _="raw-key", mcp_scope="write", mcp_scopes="write:workspace,read")
 
     assert request.state.mcp_allowed_scopes == ["write", "write:workspace", "read"]
+    assert request.state.auth_context.scopes == ("write", "write:workspace", "read")
+    assert request.state.auth_context.has_capability("write")
+
+
+@pytest.mark.asyncio
+async def test_require_capability_accepts_admin_api_key_scope_header() -> None:
+    request = _request()
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+    )
+    request.state.tenant_id = "tenant-a"
+    request.state.auth_mode = "api_key"
+    request.state.key_hash = "key-hash"
+
+    dependency = auth.require_capability("write:workspace")
+    await dependency(request, _="raw-key", mcp_scope="admin", mcp_scopes=None)
+
+    assert request.state.auth_context.scopes == ("admin",)
+    assert request.state.auth_context.has_capability("write:workspace")
 
 
 @pytest.mark.asyncio
@@ -150,6 +182,13 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
     assert request.state.mcp_client_key == "codex-remote"
     assert request.state.mcp_allowed_scopes == ["read"]
     assert request.state.mcp_token_resource is None
+    assert request.state.auth_context.tenant_id == "tenant-a"
+    assert request.state.auth_context.auth_mode == "mcp_oauth"
+    assert request.state.auth_context.client_id == client_id
+    assert request.state.auth_context.client_key == "codex-remote"
+    assert request.state.auth_context.scopes == ("read",)
+    assert request.state.auth_context.capabilities == frozenset({"read"})
+    assert request.state.auth_context.token_hash_reference == auth.hash_secret("raw-token")
     assert session.commits == 1
 
 
@@ -309,6 +348,10 @@ async def test_verify_capture_write_auth_accepts_scoped_extension_token(monkeypa
     assert request.state.mcp_client_key == "browser-extension:abc"
     assert request.state.mcp_client_name == "Palace Capture Extension"
     assert request.state.mcp_allowed_scopes == ["capture:write", "capture:job:read"]
+    assert request.state.auth_context.auth_mode == "browser_extension"
+    assert request.state.auth_context.client_id == client_id
+    assert request.state.auth_context.client_name == "Palace Capture Extension"
+    assert request.state.auth_context.has_capability("capture:write")
     assert session.commits == 1
 
 
