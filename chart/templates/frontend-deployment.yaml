@@ -10,8 +10,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: {{ .Values.frontend.rollingUpdate.maxUnavailable | quote }}
-      maxSurge: {{ .Values.frontend.rollingUpdate.maxSurge | quote }}
+      maxUnavailable: {{ include "palaceoftruth.intOrPercentString" .Values.frontend.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ include "palaceoftruth.intOrPercentString" .Values.frontend.rollingUpdate.maxSurge }}
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.fullname" . }}-frontend
