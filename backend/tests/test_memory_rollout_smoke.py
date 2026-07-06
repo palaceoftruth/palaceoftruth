@@ -25,6 +25,22 @@ def test_script_path_execution_can_resolve_sibling_script_imports() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _http_client(**overrides: Any) -> rollout_smoke.HttpClient:
+    options = {
+        "base_url": "https://api.example/api/v1",
+        "api_key": None,
+        "bearer_token": None,
+        "oauth_client_secret": None,
+        "oauth_token_url": None,
+        "oauth_resource": None,
+        "client_key": "rollout-smoke",
+        "client_scopes": ["read", "write", "write:workspace"],
+        "timeout": 12,
+    }
+    options.update(overrides)
+    return rollout_smoke.HttpClient(**options)
+
+
 def test_http_client_sends_static_api_key_and_mcp_scope_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 
@@ -46,7 +62,7 @@ def test_http_client_sends_static_api_key_and_mcp_scope_headers(monkeypatch: pyt
         return FakeResponse()
 
     monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
-    client = rollout_smoke.HttpClient(base_url="https://api.example/api/v1", api_key="static-key", timeout=12)
+    client = _http_client(api_key="static-key")
 
     result = client.request("POST", "/memory/entries", body={"scope": {"type": "workspace", "key": "rollout-smoke"}})
 
@@ -56,6 +72,78 @@ def test_http_client_sends_static_api_key_and_mcp_scope_headers(monkeypatch: pyt
     assert captured["headers"]["X-mcp-scopes"] == "write,write:workspace"
     assert "Authorization" not in captured["headers"]
     assert captured["timeout"] == 12
+
+
+def test_http_client_sends_static_bearer_without_api_key_scope_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, *, timeout: float):
+        captured["headers"] = dict(request.header_items())
+        return FakeResponse()
+
+    monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
+    client = _http_client(api_key="legacy-api-key", bearer_token="bearer-token")
+
+    result = client.request("GET", "/memory/whoami")
+
+    assert result.status == 200
+    assert captured["headers"]["Authorization"] == "Bearer bearer-token"
+    assert "X-api-key" not in captured["headers"]
+    assert "X-mcp-scopes" not in captured["headers"]
+
+
+def test_http_client_mints_oauth_token_with_configured_resource(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_urlopen(request, *, timeout: float):
+        body = request.data.decode("utf-8") if request.data else None
+        seen.append((request.full_url, request.get_method(), body))
+        if request.full_url.endswith("/oauth/token"):
+            return FakeResponse(b'{"access_token": "minted-token", "expires_in": 3600}')
+        return FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
+    client = _http_client(
+        api_key="legacy-api-key",
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.example/api/v1/memory/mcp/oauth/token",
+        oauth_resource="https://mcp.example/mcp",
+        client_key="helm-mcp",
+    )
+
+    result = client.request("GET", "/memory/whoami")
+
+    assert result.status == 200
+    assert seen[0][0] == "https://api.example/api/v1/memory/mcp/oauth/token"
+    assert "client_id=helm-mcp" in (seen[0][2] or "")
+    assert "resource=https%3A%2F%2Fmcp.example%2Fmcp" in (seen[0][2] or "")
 
 
 class FakeHttpClient:
@@ -114,6 +202,35 @@ def test_memory_write_smoke_reports_completed_job() -> None:
     write_request = next(request for request in client.requests if request[0:2] == ("POST", "/memory/entries"))
     assert write_request[2]["metadata"]["target"] == "example-staging"
     assert write_request[2]["idempotency_key"] == "palace-rollout-smoke:example-staging:20260527T180000Z"
+
+
+def test_resolve_tenant_identity_checks_expected_oauth_identity() -> None:
+    client = FakeHttpClient(
+        {
+            ("GET", "/memory/whoami"): {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "mcp_client_key": "helm-mcp",
+                "allowed_scopes": ["read", "write"],
+            }
+        }
+    )
+    report = {"target": "palaceoftruth", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        expected_tenant_id="tenant-a",
+        expected_auth_mode="mcp_oauth",
+        expected_client_key="helm-mcp",
+        expected_scope=["read", "write"],
+    )
+
+    tenant_id = rollout_smoke.resolve_tenant_identity(client, report, args)
+
+    assert tenant_id == "tenant-a"
+    assert report["alerts"] == []
+    assert {check["name"]: check["status"] for check in report["checks"]} == {
+        "tenant_identity_expectations": "passed",
+        "tenant_identity": "passed",
+    }
 
 
 def test_memory_write_smoke_alerts_when_accepted_job_never_completes() -> None:
@@ -326,7 +443,7 @@ def test_build_report_combines_checks(monkeypatch: pytest.MonkeyPatch) -> None:
         rollout_smoke._record_check(report, "sentinel_valkey", "passed", master="valkey-primary:6379")
 
     class FakeClient:
-        def __init__(self, *, base_url: str, api_key: str | None, timeout: float) -> None:
+        def __init__(self, *, base_url: str, api_key: str | None, timeout: float, **_: Any) -> None:
             assert base_url == "http://api/api/v1"
 
         def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:

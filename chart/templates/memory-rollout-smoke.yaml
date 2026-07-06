@@ -93,16 +93,64 @@ spec:
             - {{ .Values.memoryRolloutSmoke.jobTimeoutSeconds | quote }}
             - --job-interval-seconds
             - {{ .Values.memoryRolloutSmoke.jobIntervalSeconds | quote }}
+            {{- if .Values.memoryRolloutSmoke.expectedAuthMode }}
+            - --expected-auth-mode
+            - {{ .Values.memoryRolloutSmoke.expectedAuthMode | quote }}
+            {{- end }}
+            {{- if .Values.memoryRolloutSmoke.expectedTenantId }}
+            - --expected-tenant-id
+            - {{ .Values.memoryRolloutSmoke.expectedTenantId | quote }}
+            {{- end }}
+            {{- if .Values.memoryRolloutSmoke.expectedClientKey }}
+            - --expected-client-key
+            - {{ .Values.memoryRolloutSmoke.expectedClientKey | quote }}
+            {{- end }}
+            {{- range .Values.memoryRolloutSmoke.expectedScopes }}
+            - --expected-scope
+            - {{ . | quote }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if .Values.mcp.legacyApiKeyAuthEnabled }}
             - name: PALACEOFTRUTH_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "palaceoftruth.appSecretName" . }}
                   key: API_KEY
+            {{- end }}
+            {{- if .Values.mcp.bearerTokenSecretKey }}
+            - name: PALACEOFTRUTH_MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: {{ .Values.mcp.bearerTokenSecretKey | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthClientSecretKey }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.appSecretName" . }}
+                  key: {{ .Values.mcp.oauthClientSecretKey | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthTokenUrl }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL
+              value: {{ .Values.mcp.oauthTokenUrl | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthResource }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_RESOURCE
+              value: {{ .Values.mcp.oauthResource | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthAudience }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_AUDIENCE
+              value: {{ .Values.mcp.oauthAudience | quote }}
+            {{- end }}
+            - name: PALACEOFTRUTH_MCP_CLIENT_KEY
+              value: {{ .Values.mcp.clientKey | quote }}
+            - name: PALACEOFTRUTH_MCP_CLIENT_SCOPES
+              value: {{ .Values.mcp.clientScopes | quote }}
             - name: REDIS_SENTINEL_EXPECTED_REPLICAS
               value: {{ include "palaceoftruth.valkeyReplicaCount" . | quote }}
           envFrom:

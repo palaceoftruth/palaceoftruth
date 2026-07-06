@@ -35,9 +35,27 @@ class HttpResult:
 
 
 class HttpClient:
-    def __init__(self, *, base_url: str, api_key: str | None, timeout: float) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None,
+        bearer_token: str | None,
+        oauth_client_secret: str | None,
+        oauth_token_url: str | None,
+        oauth_resource: str | None,
+        client_key: str,
+        client_scopes: list[str],
+        timeout: float,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.bearer_token = bearer_token
+        self.oauth_client_secret = oauth_client_secret
+        self.oauth_token_url = oauth_token_url
+        self.oauth_resource = oauth_resource
+        self.client_key = client_key
+        self.client_scopes = client_scopes
         self.timeout = timeout
 
     def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
@@ -72,7 +90,14 @@ class HttpClient:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self.api_key:
+        if self.bearer_token or self.oauth_client_secret:
+            try:
+                token = self._active_bearer_token()
+            except Exception as exc:
+                return HttpResult(599, {"error": "oauth_token_unavailable", "detail": str(exc)})
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        elif self.api_key:
             headers["X-API-Key"] = self.api_key
             headers.update(self._mcp_scope_headers(method, path, body))
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -82,6 +107,40 @@ class HttpClient:
                 return HttpResult(response.status, _decode_payload(payload))
         except urllib.error.HTTPError as exc:
             return HttpResult(exc.code, _decode_payload(exc.read()))
+
+    def _active_bearer_token(self) -> str | None:
+        if self.bearer_token:
+            return self.bearer_token
+        if not self.oauth_client_secret:
+            return None
+        token_url = self.oauth_token_url or f"{self.base_url}/memory/mcp/oauth/token"
+        data = urllib.parse.urlencode(
+            {
+                "grant_type": "client_credentials",
+                "client_id": self.client_key,
+                "client_secret": self.oauth_client_secret,
+                "scope": " ".join(self.client_scopes),
+                "resource": self.oauth_resource or _oauth_resource_from_token_url(token_url),
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            token_url,
+            data=data,
+            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = _decode_payload(response.read())
+        except urllib.error.HTTPError as exc:
+            payload = _decode_payload(exc.read())
+            raise RuntimeError(f"Palace OAuth token endpoint returned HTTP {exc.code}: {payload}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Palace OAuth token endpoint was unreachable: {exc.reason}") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("access_token"), str):
+            raise RuntimeError("Palace OAuth token endpoint did not return access_token")
+        self.bearer_token = payload["access_token"].strip()
+        return self.bearer_token
 
 
 class KubernetesClient:
@@ -148,6 +207,11 @@ def _write_scope_grant(entry: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _oauth_resource_from_token_url(token_url: str) -> str:
+    parsed = urllib.parse.urlsplit(token_url)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/mcp", "", ""))
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -159,6 +223,45 @@ def _api_key() -> str:
         or os.getenv("API_KEY")
         or ""
     ).strip()
+
+
+def _bearer_token() -> str:
+    return (os.getenv("PALACEOFTRUTH_MCP_BEARER_TOKEN") or os.getenv("SECONDBRAIN_MCP_BEARER_TOKEN") or "").strip()
+
+
+def _oauth_client_secret() -> str:
+    return (
+        os.getenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET")
+        or os.getenv("SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET")
+        or ""
+    ).strip()
+
+
+def _oauth_token_url() -> str:
+    return (
+        os.getenv("PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL")
+        or os.getenv("SECONDBRAIN_MCP_OAUTH_TOKEN_URL")
+        or ""
+    ).strip()
+
+
+def _oauth_resource() -> str:
+    return (
+        os.getenv("PALACEOFTRUTH_MCP_OAUTH_RESOURCE")
+        or os.getenv("SECONDBRAIN_MCP_OAUTH_RESOURCE")
+        or os.getenv("PALACEOFTRUTH_MCP_OAUTH_AUDIENCE")
+        or os.getenv("SECONDBRAIN_MCP_OAUTH_AUDIENCE")
+        or ""
+    ).strip()
+
+
+def _client_key() -> str:
+    return (os.getenv("PALACEOFTRUTH_MCP_CLIENT_KEY") or os.getenv("SECONDBRAIN_MCP_CLIENT_KEY") or "rollout-smoke").strip()
+
+
+def _client_scopes() -> list[str]:
+    raw = os.getenv("PALACEOFTRUTH_MCP_CLIENT_SCOPES") or os.getenv("SECONDBRAIN_MCP_CLIENT_SCOPES") or "read,write,write:workspace"
+    return [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
 
 
 def _memory_entry(*, tenant_id: str, target_name: str, run_id: str, scope_key: str) -> dict[str, Any]:
@@ -246,7 +349,7 @@ async def check_sentinel(report: dict[str, Any]) -> None:
     )
 
 
-def resolve_tenant_identity(client: HttpClient, report: dict[str, Any]) -> str | None:
+def resolve_tenant_identity(client: HttpClient, report: dict[str, Any], args: argparse.Namespace | None = None) -> str | None:
     whoami = client.request("GET", "/memory/whoami")
     if whoami.status >= 400 or not isinstance(whoami.payload, dict) or not whoami.payload.get("tenant_id"):
         _alert(report, "tenant_identity_failed", f"whoami returned HTTP {whoami.status}", response=whoami.payload)
@@ -254,14 +357,40 @@ def resolve_tenant_identity(client: HttpClient, report: dict[str, Any]) -> str |
         return None
     tenant_id = str(whoami.payload["tenant_id"])
     report["tenant_id"] = tenant_id
+    if args is not None:
+        _check_expected_whoami(whoami.payload, report, args)
     _record_check(report, "tenant_identity", "passed", tenant_id=tenant_id)
     return tenant_id
+
+
+def _check_expected_whoami(payload: dict[str, Any], report: dict[str, Any], args: argparse.Namespace) -> None:
+    mismatches: dict[str, Any] = {}
+    expected = {
+        "tenant_id": getattr(args, "expected_tenant_id", ""),
+        "auth_mode": getattr(args, "expected_auth_mode", ""),
+        "mcp_client_key": getattr(args, "expected_client_key", ""),
+    }
+    for field, expected_value in expected.items():
+        if expected_value and payload.get(field) != expected_value:
+            mismatches[field] = {"expected": expected_value, "actual": payload.get(field)}
+    granted_scopes = payload.get("allowed_scopes") or payload.get("scopes") or []
+    expected_scopes = getattr(args, "expected_scope", [])
+    if expected_scopes:
+        missing = sorted(set(expected_scopes) - {str(scope) for scope in granted_scopes})
+        if missing:
+            mismatches["scopes"] = {"missing": missing, "actual": granted_scopes}
+    if mismatches:
+        _alert(report, "tenant_identity_mismatch", "whoami did not match expected OAuth identity", mismatches=mismatches)
+        _record_check(report, "tenant_identity_expectations", "failed", mismatches=mismatches)
+        return
+    if any(expected.values()) or expected_scopes:
+        _record_check(report, "tenant_identity_expectations", "passed")
 
 
 def check_memory_write(client: HttpClient, report: dict[str, Any], args: argparse.Namespace) -> None:
     tenant_id = report.get("tenant_id")
     if not isinstance(tenant_id, str) or not tenant_id:
-        tenant_id = resolve_tenant_identity(client, report)
+        tenant_id = resolve_tenant_identity(client, report, args)
     if tenant_id is None:
         _record_check(report, "memory_write", "skipped", reason="tenant identity unavailable")
         return
@@ -429,9 +558,19 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
         "checks": [],
         "alerts": [],
     }
-    client = HttpClient(base_url=args.api_base_url.rstrip("/"), api_key=_api_key(), timeout=args.request_timeout)
+    client = HttpClient(
+        base_url=args.api_base_url.rstrip("/"),
+        api_key=_api_key(),
+        bearer_token=_bearer_token(),
+        oauth_client_secret=_oauth_client_secret(),
+        oauth_token_url=_oauth_token_url(),
+        oauth_resource=_oauth_resource(),
+        client_key=_client_key(),
+        client_scopes=_client_scopes(),
+        timeout=args.request_timeout,
+    )
     check_api_health(client, report)
-    resolve_tenant_identity(client, report)
+    resolve_tenant_identity(client, report, args)
     check_memory_write(client, report, args)
     asyncio.run(check_sentinel(report))
     check_mcp_reachable(args.mcp_url, report, timeout=args.request_timeout)
@@ -453,6 +592,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--job-interval-seconds", type=float, default=5.0)
     parser.add_argument("--job-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--job-list-limit", type=int, default=20)
+    parser.add_argument("--expected-auth-mode", default="")
+    parser.add_argument("--expected-tenant-id", default="")
+    parser.add_argument("--expected-client-key", default="")
+    parser.add_argument("--expected-scope", action="append", default=[])
     parser.add_argument("--pod-label-selector", default="app.kubernetes.io/name=palaceoftruth")
     parser.add_argument("--worker-name-fragment", default="worker")
     parser.add_argument("--restart-alert-threshold", type=int, default=3)

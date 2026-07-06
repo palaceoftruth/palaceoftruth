@@ -46,12 +46,14 @@ spec:
           env:
             - name: PALACEOFTRUTH_API_BASE_URL
               value: {{ include "palaceoftruth.mcpApiBaseUrl" . | quote }}
+            {{- if .Values.mcp.legacyApiKeyAuthEnabled }}
             - name: PALACEOFTRUTH_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "palaceoftruth.appSecretName" . }}
                   key: API_KEY
                   optional: true
+            {{- end }}
             {{- if .Values.mcp.bearerTokenSecretKey }}
             - name: PALACEOFTRUTH_MCP_BEARER_TOKEN
               valueFrom:
@@ -69,6 +71,14 @@ spec:
             {{- if .Values.mcp.oauthTokenUrl }}
             - name: PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL
               value: {{ .Values.mcp.oauthTokenUrl | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthResource }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_RESOURCE
+              value: {{ .Values.mcp.oauthResource | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauthAudience }}
+            - name: PALACEOFTRUTH_MCP_OAUTH_AUDIENCE
+              value: {{ .Values.mcp.oauthAudience | quote }}
             {{- end }}
             - name: PALACEOFTRUTH_MCP_CLIENT_KEY
               value: {{ .Values.mcp.clientKey | quote }}
