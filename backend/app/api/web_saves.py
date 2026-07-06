@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key, verify_capture_job_read_auth
+from app.auth import require_api_capability, verify_capture_job_read_auth
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -123,7 +123,7 @@ async def list_web_saves(
     )
 
 
-@router.patch("/{web_save_id}", response_model=WebSaveResponse, dependencies=[Depends(verify_api_key)])
+@router.patch("/{web_save_id}", response_model=WebSaveResponse, dependencies=[Depends(require_api_capability("write"))])
 async def update_web_save(
     web_save_id: uuid.UUID,
     body: WebSaveUpdate,

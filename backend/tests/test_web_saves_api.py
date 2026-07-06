@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api.web_saves import router as web_saves_router
-from app.auth import verify_api_key, verify_capture_job_read_auth
+from app.auth import AuthContext, verify_capture_job_read_auth, verify_memory_auth
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -55,11 +55,14 @@ def _client(session: FakeSession) -> TestClient:
         yield session
 
     async def override_verify(request: Request):
+        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash")
         request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
         return "raw-key"
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[verify_api_key] = override_verify
+    app.dependency_overrides[verify_memory_auth] = override_verify
     app.dependency_overrides[verify_capture_job_read_auth] = override_verify
     return TestClient(app)
 

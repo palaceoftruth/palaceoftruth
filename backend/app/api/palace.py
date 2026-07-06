@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import hash_secret, verify_api_key
+from app.auth import hash_secret, require_api_capability
 from app.database import async_session, get_db
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
@@ -75,7 +75,7 @@ from app.services.source_compiler import (
 )
 from app.workers.queues import enqueue_palace_job
 
-router = APIRouter(prefix="/palace", tags=["palace"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/palace", tags=["palace"])
 logger = logging.getLogger(__name__)
 
 
@@ -233,17 +233,17 @@ async def _run_sync_inline(app, sync_run_id: uuid.UUID) -> None:
             await run_palace_run(db, run_id=palace_run.id)
 
 
-@router.get("", response_model=PalaceOverview)
+@router.get("", response_model=PalaceOverview, dependencies=[Depends(require_api_capability("read"))])
 async def palace_overview(request: Request, db: AsyncSession = Depends(get_db)) -> PalaceOverview:
     return await build_overview(db, request.state.tenant_id)
 
 
-@router.get("/control-tower", response_model=PalaceControlTower)
+@router.get("/control-tower", response_model=PalaceControlTower, dependencies=[Depends(require_api_capability("read"))])
 async def palace_control_tower(request: Request, db: AsyncSession = Depends(get_db)) -> PalaceControlTower:
     return await build_control_tower(db, request.state.tenant_id, arq_pool=request.app.state.arq_pool)
 
 
-@router.get("/mcp-clients", response_model=McpOAuthClientListResponse)
+@router.get("/mcp-clients", response_model=McpOAuthClientListResponse, dependencies=[Depends(require_api_capability("admin"))])
 async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(get_db)) -> McpOAuthClientListResponse:
     tenant_id = request.state.tenant_id
     rows = (
@@ -276,7 +276,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
     )
 
 
-@router.post("/mcp-clients/register", response_model=McpOAuthClientRegisterResponse, status_code=201)
+@router.post("/mcp-clients/register", response_model=McpOAuthClientRegisterResponse, status_code=201, dependencies=[Depends(require_api_capability("admin"))])
 async def register_palace_mcp_client(
     body: McpOAuthClientRegisterRequest,
     request: Request,
@@ -324,7 +324,7 @@ async def register_palace_mcp_client(
     )
 
 
-@router.post("/mcp-clients/{client_id}/revoke", response_model=McpOAuthClientRevokeResponse)
+@router.post("/mcp-clients/{client_id}/revoke", response_model=McpOAuthClientRevokeResponse, dependencies=[Depends(require_api_capability("admin"))])
 async def revoke_palace_mcp_client(
     client_id: uuid.UUID,
     request: Request,
@@ -358,7 +358,7 @@ async def revoke_palace_mcp_client(
     return McpOAuthClientRevokeResponse(tenant_id=tenant_id, client=_serialize_mcp_client(row))
 
 
-@router.post("/browser-extension-tokens", response_model=BrowserExtensionTokenIssueResponse, status_code=201)
+@router.post("/browser-extension-tokens", response_model=BrowserExtensionTokenIssueResponse, status_code=201, dependencies=[Depends(require_api_capability("admin"))])
 async def issue_browser_extension_token(
     body: BrowserExtensionTokenIssueRequest,
     request: Request,
@@ -450,7 +450,7 @@ async def issue_browser_extension_token(
     )
 
 
-@router.get("/facts", response_model=list[PalaceTemporalFactSummary])
+@router.get("/facts", response_model=list[PalaceTemporalFactSummary], dependencies=[Depends(require_api_capability("read"))])
 async def palace_facts(
     request: Request,
     current_only: bool = True,
@@ -466,7 +466,7 @@ async def palace_facts(
     return [PalaceTemporalFactSummary.model_validate(row) for row in rows]
 
 
-@router.get("/sync-sources", response_model=list[SyncSourceSummary])
+@router.get("/sync-sources", response_model=list[SyncSourceSummary], dependencies=[Depends(require_api_capability("read"))])
 async def get_sync_sources(
     request: Request,
     include_disabled: bool = False,
@@ -475,7 +475,7 @@ async def get_sync_sources(
     return await list_sync_sources(db, request.state.tenant_id, include_disabled=include_disabled)
 
 
-@router.post("/sync-sources", response_model=SyncSourceSummary, status_code=201)
+@router.post("/sync-sources", response_model=SyncSourceSummary, status_code=201, dependencies=[Depends(require_api_capability("write"))])
 async def post_sync_source(
     body: SyncSourceCreate,
     request: Request,
@@ -485,7 +485,7 @@ async def post_sync_source(
     return _sync_source_response(source)
 
 
-@router.patch("/sync-sources/{source_id}", response_model=SyncSourceSummary)
+@router.patch("/sync-sources/{source_id}", response_model=SyncSourceSummary, dependencies=[Depends(require_api_capability("write"))])
 async def patch_sync_source(
     source_id: uuid.UUID,
     body: SyncSourceUpdate,
@@ -499,7 +499,7 @@ async def patch_sync_source(
     return _sync_source_response(updated)
 
 
-@router.delete("/sync-sources/{source_id}", response_model=SyncSourceDeleteResponse)
+@router.delete("/sync-sources/{source_id}", response_model=SyncSourceDeleteResponse, dependencies=[Depends(require_api_capability("write"))])
 async def remove_sync_source(
     source_id: uuid.UUID,
     request: Request,
@@ -512,7 +512,7 @@ async def remove_sync_source(
         db,
         tenant_id=request.state.tenant_id,
         source=source,
-        actor_type="api_key",
+        actor_type=getattr(request.state, "auth_mode", "api"),
         actor_id=getattr(request.state, "key_hash", None),
     )
     if items_deactivated:
@@ -532,7 +532,7 @@ async def remove_sync_source(
     )
 
 
-@router.post("/sync-sources/{source_id}/restore", response_model=SyncSourceSummary)
+@router.post("/sync-sources/{source_id}/restore", response_model=SyncSourceSummary, dependencies=[Depends(require_api_capability("write"))])
 async def post_restore_sync_source(
     source_id: uuid.UUID,
     request: Request,
@@ -545,7 +545,7 @@ async def post_restore_sync_source(
         db,
         tenant_id=request.state.tenant_id,
         source=source,
-        actor_type="api_key",
+        actor_type=getattr(request.state, "auth_mode", "api"),
         actor_id=getattr(request.state, "key_hash", None),
     )
     return _sync_source_response(restored)
@@ -574,7 +574,7 @@ def _sync_source_response(source: SyncSource) -> SyncSourceSummary:
     )
 
 
-@router.post("/sync-sources/{source_id}/sync", response_model=SyncRunSummary, status_code=202)
+@router.post("/sync-sources/{source_id}/sync", response_model=SyncRunSummary, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def start_sync_source(
     source_id: uuid.UUID,
     request: Request,
@@ -600,17 +600,17 @@ async def start_sync_source(
     return next(row for row in rows if row.id == run.id)
 
 
-@router.get("/sync-runs", response_model=list[SyncRunSummary])
+@router.get("/sync-runs", response_model=list[SyncRunSummary], dependencies=[Depends(require_api_capability("read"))])
 async def get_sync_runs(request: Request, db: AsyncSession = Depends(get_db)) -> list[SyncRunSummary]:
     return await list_sync_runs(db, request.state.tenant_id)
 
 
-@router.get("/runs", response_model=list[PalaceRunSummary])
+@router.get("/runs", response_model=list[PalaceRunSummary], dependencies=[Depends(require_api_capability("read"))])
 async def get_palace_runs(request: Request, db: AsyncSession = Depends(get_db)) -> list[PalaceRunSummary]:
     return await list_palace_runs(db, request.state.tenant_id)
 
 
-@router.post("/runs", response_model=PalaceRunSummary, status_code=202)
+@router.post("/runs", response_model=PalaceRunSummary, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def start_palace_run(request: Request, db: AsyncSession = Depends(get_db)) -> PalaceRunSummary:
     run, created = await create_or_get_palace_run(
         db,
@@ -631,7 +631,7 @@ async def start_palace_run(request: Request, db: AsyncSession = Depends(get_db))
     return next(row for row in rows if row.id == run.id)
 
 
-@router.post("/runs/{run_id}/retry", response_model=PalaceRunSummary, status_code=202)
+@router.post("/runs/{run_id}/retry", response_model=PalaceRunSummary, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def retry_palace_run(
     run_id: uuid.UUID,
     request: Request,
@@ -668,7 +668,7 @@ async def retry_palace_run(
     return next(row for row in rows if row.id == retry_run.id)
 
 
-@router.get("/rooms/{room_id}", response_model=PalaceRoomDetail)
+@router.get("/rooms/{room_id}", response_model=PalaceRoomDetail, dependencies=[Depends(require_api_capability("read"))])
 async def get_palace_room(
     room_id: uuid.UUID,
     request: Request,
@@ -677,7 +677,7 @@ async def get_palace_room(
     return await get_room_detail(db, request.state.tenant_id, room_id)
 
 
-@router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary)
+@router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary, dependencies=[Depends(require_api_capability("read"))])
 async def get_palace_item_sources(
     item_id: uuid.UUID,
     request: Request,
@@ -717,7 +717,7 @@ async def get_palace_item_sources(
     )
 
 
-@router.get("/claims/support", response_model=PalaceClaimSupportReport)
+@router.get("/claims/support", response_model=PalaceClaimSupportReport, dependencies=[Depends(require_api_capability("read"))])
 async def get_palace_claim_support(
     request: Request,
     status: str | None = Query(None, pattern="^(draft|active|stale|conflicted|rejected|superseded)$"),
@@ -736,7 +736,7 @@ async def get_palace_claim_support(
     )
 
 
-@router.get("/answers/audit", response_model=PalaceAnswerAuditReport)
+@router.get("/answers/audit", response_model=PalaceAnswerAuditReport, dependencies=[Depends(require_api_capability("read"))])
 async def get_palace_answer_audit(
     request: Request,
     claim_id: uuid.UUID | None = None,
@@ -758,7 +758,7 @@ async def get_palace_answer_audit(
     )
 
 
-@router.post("/claims/{claim_id}/review", response_model=PalaceClaimSupportSummary)
+@router.post("/claims/{claim_id}/review", response_model=PalaceClaimSupportSummary, dependencies=[Depends(require_api_capability("write"))])
 async def review_palace_decision_claim(
     claim_id: uuid.UUID,
     body: PalaceClaimReviewRequest,
@@ -782,7 +782,7 @@ async def review_palace_decision_claim(
     return PalaceClaimSupportSummary.model_validate(_serialize_claim_support_summary(claim))
 
 
-@router.patch("/rooms/{room_id}", response_model=PalaceRoomDetail)
+@router.patch("/rooms/{room_id}", response_model=PalaceRoomDetail, dependencies=[Depends(require_api_capability("write"))])
 async def patch_palace_room(
     room_id: uuid.UUID,
     body: PalaceRoomUpdate,
@@ -792,7 +792,7 @@ async def patch_palace_room(
     return await update_room(db, tenant_id=request.state.tenant_id, room_id=room_id, body=body)
 
 
-@router.post("/retrieve", response_model=PalaceRetrieveResponse)
+@router.post("/retrieve", response_model=PalaceRetrieveResponse, dependencies=[Depends(require_api_capability("read"))])
 async def retrieve_in_palace(
     body: PalaceRetrieveRequest,
     request: Request,
@@ -806,7 +806,7 @@ async def retrieve_in_palace(
     )
 
 
-@router.post("/rooms/{room_id}/pins", status_code=204)
+@router.post("/rooms/{room_id}/pins", status_code=204, dependencies=[Depends(require_api_capability("write"))])
 async def pin_item(
     room_id: uuid.UUID,
     body: PalacePinRequest,
@@ -820,7 +820,7 @@ async def pin_item(
     return Response(status_code=204)
 
 
-@router.delete("/rooms/{room_id}/pins/{item_id}", status_code=204)
+@router.delete("/rooms/{room_id}/pins/{item_id}", status_code=204, dependencies=[Depends(require_api_capability("write"))])
 async def unpin_item(
     room_id: uuid.UUID,
     item_id: uuid.UUID,
