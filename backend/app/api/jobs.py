@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key, verify_capture_job_read_auth
+from app.auth import require_api_capability, verify_capture_job_read_auth
 from app.database import get_db
 from app.models.item import Item
 from app.models.job import Job, JobProgressEvent
@@ -227,7 +227,7 @@ async def get_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Depend
     return await _job_response(db, row, request.state.tenant_id)
 
 
-@router.delete("/{job_id}", dependencies=[Depends(verify_api_key)])
+@router.delete("/{job_id}", dependencies=[Depends(require_api_capability("write"))])
 async def cancel_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     job = _ensure_visible_job(await db.get(Job, job_id))
     if job.tenant_id != request.state.tenant_id:
@@ -257,7 +257,7 @@ async def cancel_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Dep
     return {"cancelled": True, "job_id": job_id_str}
 
 
-@router.post("/{job_id}/retry", response_model=JobResponse, dependencies=[Depends(verify_api_key)])
+@router.post("/{job_id}/retry", response_model=JobResponse, dependencies=[Depends(require_api_capability("write"))])
 async def retry_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     job = _ensure_visible_job(await db.get(Job, job_id))
     if job.tenant_id != request.state.tenant_id:

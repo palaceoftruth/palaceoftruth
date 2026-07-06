@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api.chat import _get_service, chat_stream, router
-from app.auth import verify_api_key
+from app.auth import AuthContext, verify_memory_auth
 from app.schemas.artifact_citation import ArtifactCitation
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.retrieval_provenance import RetrievalProvenance
@@ -73,11 +73,13 @@ def _client(service: object) -> TestClient:
     app.include_router(router, prefix="/api/v1")
 
     async def override_verify(request: Request):
+        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash")
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
         return "raw-key"
 
-    app.dependency_overrides[verify_api_key] = override_verify
+    app.dependency_overrides[verify_memory_auth] = override_verify
     app.dependency_overrides[_get_service] = lambda: service
     return TestClient(app)
 

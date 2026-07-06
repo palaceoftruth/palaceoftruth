@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.conversation import (
     ConversationCreateRequest,
@@ -17,11 +17,10 @@ from app.schemas.conversation import (
 router = APIRouter(
     prefix="/conversations",
     tags=["conversations"],
-    dependencies=[Depends(verify_api_key)],
 )
 
 
-@router.get("", response_model=list[ConversationOut])
+@router.get("", response_model=list[ConversationOut], dependencies=[Depends(require_api_capability("read"))])
 async def list_conversations(request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -35,7 +34,7 @@ async def list_conversations(request: Request, db: AsyncSession = Depends(get_db
     return [ConversationOut.model_validate(dict(row)) for row in rows]
 
 
-@router.post("", response_model=ConversationOut, status_code=201)
+@router.post("", response_model=ConversationOut, status_code=201, dependencies=[Depends(require_api_capability("write"))])
 async def create_conversation(
     body: ConversationCreateRequest,
     request: Request,
@@ -54,7 +53,7 @@ async def create_conversation(
     return ConversationOut.model_validate(dict(row))
 
 
-@router.get("/{conv_id}", response_model=ConversationWithMessages)
+@router.get("/{conv_id}", response_model=ConversationWithMessages, dependencies=[Depends(require_api_capability("read"))])
 async def get_conversation(conv_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     conv_result = await db.execute(
@@ -88,7 +87,7 @@ async def get_conversation(conv_id: uuid.UUID, request: Request, db: AsyncSessio
     )
 
 
-@router.delete("/{conv_id}", status_code=204)
+@router.delete("/{conv_id}", status_code=204, dependencies=[Depends(require_api_capability("write"))])
 async def delete_conversation(conv_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -100,7 +99,7 @@ async def delete_conversation(conv_id: uuid.UUID, request: Request, db: AsyncSes
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-@router.post("/{conv_id}/messages", response_model=ConversationWithMessages)
+@router.post("/{conv_id}/messages", response_model=ConversationWithMessages, dependencies=[Depends(require_api_capability("write"))])
 async def append_messages(
     conv_id: uuid.UUID,
     body: AppendMessagesRequest,
@@ -141,7 +140,7 @@ async def append_messages(
     return await get_conversation(conv_id, request, db)
 
 
-@router.patch("/{conv_id}", response_model=ConversationOut)
+@router.patch("/{conv_id}", response_model=ConversationOut, dependencies=[Depends(require_api_capability("write"))])
 async def update_title(
     conv_id: uuid.UUID,
     body: UpdateTitleRequest,

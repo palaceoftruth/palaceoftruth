@@ -5,12 +5,12 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat import ChatService, persist_streamed_messages_background
 
-router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_api_capability("write"))])
 
 
 def _get_service(request: Request, db: AsyncSession = Depends(get_db)) -> ChatService:

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File, R
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import record_oauth_client_audit_event, verify_api_key, verify_capture_write_auth
+from app.auth import record_oauth_client_audit_event, require_api_capability, verify_capture_write_auth
 from app.database import get_db
 from app.models.item import Item
 from app.models.job import Job
@@ -418,7 +418,7 @@ def _extract_doc_from_path(path: str, filename: str) -> tuple[str, dict[str, Any
 
 
 
-@router.post("/doc", response_model=IngestResponse, status_code=202, dependencies=[Depends(verify_api_key)])
+@router.post("/doc", response_model=IngestResponse, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def ingest_doc(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -528,7 +528,7 @@ async def ingest_doc(
             os.unlink(tmp_path)
 
 
-@router.post("/pdf", response_model=IngestResponse, status_code=202, include_in_schema=False, dependencies=[Depends(verify_api_key)])
+@router.post("/pdf", response_model=IngestResponse, status_code=202, include_in_schema=False, dependencies=[Depends(require_api_capability("write"))])
 async def ingest_pdf(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -541,7 +541,7 @@ async def ingest_pdf(
     return await ingest_doc(request, db, file, webhook_url)
 
 
-@router.post("/image", response_model=IngestResponse, status_code=202, dependencies=[Depends(verify_api_key)])
+@router.post("/image", response_model=IngestResponse, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def ingest_image(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -738,7 +738,7 @@ def _build_batch_task_payload(
     return source_type, task_name, title, task_kwargs
 
 
-@router.post("/batch", response_model=BatchIngestResponse, status_code=202, dependencies=[Depends(verify_api_key)])
+@router.post("/batch", response_model=BatchIngestResponse, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def ingest_batch(
     body: BatchIngestRequest,
     request: Request,

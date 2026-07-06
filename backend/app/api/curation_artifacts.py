@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.curation_artifact import (
     CandidateCurationArtifactCreate,
@@ -29,7 +29,6 @@ from app.services.curation_artifacts import (
 router = APIRouter(
     prefix="/curation-artifacts",
     tags=["curation-artifacts"],
-    dependencies=[Depends(verify_api_key)],
 )
 
 
@@ -37,7 +36,7 @@ def _validation_error(exc: CandidateCurationArtifactError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
 
 
-@router.get("", response_model=CandidateCurationArtifactListResponse)
+@router.get("", response_model=CandidateCurationArtifactListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_curation_artifacts(
     request: Request,
     status_filter: str | None = Query(None, alias="status"),
@@ -59,7 +58,7 @@ async def list_curation_artifacts(
     )
 
 
-@router.post("", response_model=CandidateCurationArtifactOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=CandidateCurationArtifactOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_api_capability("write"))])
 async def post_curation_artifact(
     body: CandidateCurationArtifactCreate,
     request: Request,
@@ -78,7 +77,7 @@ async def post_curation_artifact(
     return CandidateCurationArtifactOut.model_validate(artifact)
 
 
-@router.get("/review-inbox", response_model=ReviewInboxResponse)
+@router.get("/review-inbox", response_model=ReviewInboxResponse, dependencies=[Depends(require_api_capability("read"))])
 async def get_review_inbox(
     request: Request,
     include_deferred: bool = False,
@@ -93,7 +92,7 @@ async def get_review_inbox(
     )
 
 
-@router.post("/review-inbox/actions", response_model=ReviewInboxActionResponse)
+@router.post("/review-inbox/actions", response_model=ReviewInboxActionResponse, dependencies=[Depends(require_api_capability("write"))])
 async def post_review_inbox_action(
     body: ReviewInboxActionRequest,
     request: Request,
@@ -112,7 +111,7 @@ async def post_review_inbox_action(
     )
 
 
-@router.get("/{artifact_id}", response_model=CandidateCurationArtifactOut)
+@router.get("/{artifact_id}", response_model=CandidateCurationArtifactOut, dependencies=[Depends(require_api_capability("read"))])
 async def get_curation_artifact(
     artifact_id: uuid.UUID,
     request: Request,
@@ -128,7 +127,7 @@ async def get_curation_artifact(
     return CandidateCurationArtifactOut.model_validate(artifact)
 
 
-@router.get("/{artifact_id}/promotion-handoff", response_model=CandidatePromotionHandoffOut)
+@router.get("/{artifact_id}/promotion-handoff", response_model=CandidatePromotionHandoffOut, dependencies=[Depends(require_api_capability("read"))])
 async def get_curation_artifact_promotion_handoff(
     artifact_id: uuid.UUID,
     request: Request,
@@ -147,7 +146,7 @@ async def get_curation_artifact_promotion_handoff(
         raise _validation_error(exc) from exc
 
 
-@router.patch("/{artifact_id}", response_model=CandidateCurationArtifactOut)
+@router.patch("/{artifact_id}", response_model=CandidateCurationArtifactOut, dependencies=[Depends(require_api_capability("write"))])
 async def patch_curation_artifact(
     artifact_id: uuid.UUID,
     body: CandidateCurationArtifactUpdate,

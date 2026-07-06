@@ -3,7 +3,7 @@ from sqlalchemy import text
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.models.item import Item
@@ -76,7 +76,7 @@ async def prometheus_metrics(request: Request, db: AsyncSession = Depends(get_db
     return Response(content=body, media_type=prometheus_content_type())
 
 
-@router.get("/stats", dependencies=[Depends(verify_api_key)])
+@router.get("/stats", dependencies=[Depends(require_api_capability("read"))])
 async def stats(request: Request, db: AsyncSession = Depends(get_db)):
     tid = request.state.tenant_id
 
