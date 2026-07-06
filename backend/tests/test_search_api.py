@@ -238,7 +238,7 @@ def test_search_get_rejects_oauth_bearer_missing_read_scope(monkeypatch) -> None
 
 def test_search_get_rejects_oauth_bearer_wrong_resource(monkeypatch) -> None:
     ExplodingSearchService.init_calls = 0
-    auth_session = AuthSession(_oauth_token_row(scopes=["read"], resource="https://testserver/api/v1"))
+    auth_session = AuthSession(_oauth_token_row(scopes=["read"], resource="https://wrong.example/api/v1"))
     client = _oauth_client(monkeypatch, auth_session, service_cls=ExplodingSearchService)
 
     response = client.get(

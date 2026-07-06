@@ -14,6 +14,8 @@ from app.auth import compare_secret, hash_secret
 from app.database import async_session
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
+    McpOAuthAuthorizationServerMetadata,
+    McpOAuthIntrospectionResponse,
     McpOAuthProtectedResourceMetadata,
     McpOAuthRevokeResponse,
     McpOAuthTokenResponse,
@@ -32,6 +34,20 @@ def _canonical_mcp_resource(request: Request) -> str:
     resource_url = metadata_url.removesuffix("/.well-known/oauth-protected-resource") + "/mcp"
     parsed = urlsplit(resource_url)
     return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+
+
+def _canonical_api_resource(request: Request) -> str:
+    token_url = _metadata_url(request, "issue_mcp_access_token")
+    parsed = urlsplit(token_url)
+    return urlunsplit(("https", parsed.netloc, "/api/v1", "", ""))
+
+
+def _authorization_server_issuer(request: Request) -> str:
+    return _metadata_url(request, "issue_mcp_access_token").rsplit("/token", 1)[0]
+
+
+def _supported_resources(request: Request) -> set[str]:
+    return {_canonical_mcp_resource(request), _canonical_api_resource(request)}
 
 
 def _normalize_resource(value: str | None) -> str | None:
@@ -63,6 +79,12 @@ def _parse_scopes(value: object) -> list[str]:
     if not scopes:
         raise HTTPException(status_code=403, detail="MCP client has no usable scopes")
     return scopes
+
+
+def _unix_timestamp(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return int(value.timestamp())
 
 
 def _requested_scopes(raw_scope: str | None, allowed_scopes: list[str]) -> list[str]:
@@ -98,31 +120,18 @@ def _client_credentials_from_request(
     return client_id, client_secret
 
 
-@router.post("/token", response_model=McpOAuthTokenResponse)
-async def issue_mcp_access_token(
-    request: Request,
-    grant_type: Annotated[str, Form()],
-    client_id: Annotated[str | None, Form()] = None,
-    client_secret: Annotated[str | None, Form()] = None,
-    scope: Annotated[str | None, Form()] = None,
-    resource: Annotated[str | None, Form()] = None,
-    authorization: str | None = Header(None, alias="Authorization"),
-) -> McpOAuthTokenResponse:
-    if grant_type != "client_credentials":
-        raise HTTPException(status_code=400, detail="unsupported_grant_type")
+async def _authenticate_oauth_client(
+    *,
+    form_client_id: str | None,
+    form_client_secret: str | None,
+    authorization: str | None,
+):
     resolved_client_id, resolved_client_secret = _client_credentials_from_request(
-        form_client_id=client_id,
-        form_client_secret=client_secret,
+        form_client_id=form_client_id,
+        form_client_secret=form_client_secret,
         authorization=authorization,
     )
-    requested_resource = _normalize_resource(resource)
-    canonical_resource = _canonical_mcp_resource(request)
-    if requested_resource is None:
-        raise HTTPException(status_code=400, detail="invalid_resource")
-    if requested_resource != canonical_resource:
-        raise HTTPException(status_code=400, detail="invalid_resource")
     tenant_id, client_key = _split_tenant_qualified_client_id(resolved_client_id)
-
     async with async_session() as db:
         result = await db.execute(
             text(
@@ -139,14 +148,40 @@ async def issue_mcp_access_token(
             {"client_key": client_key, "tenant_id": tenant_id},
         )
         rows = list(result.mappings().all())
-        if tenant_id is None and len(rows) > 1:
-            raise HTTPException(status_code=401, detail="invalid_client")
-        row = rows[0] if rows else None
-        if row is None or row["oauth_revoked_at"] is not None:
-            raise HTTPException(status_code=401, detail="invalid_client")
-        if not compare_secret(resolved_client_secret, row["oauth_client_secret_hash"]):
-            raise HTTPException(status_code=401, detail="invalid_client")
+    if tenant_id is None and len(rows) > 1:
+        raise HTTPException(status_code=401, detail="invalid_client")
+    row = rows[0] if rows else None
+    if row is None or row["oauth_revoked_at"] is not None:
+        raise HTTPException(status_code=401, detail="invalid_client")
+    if not compare_secret(resolved_client_secret, row["oauth_client_secret_hash"]):
+        raise HTTPException(status_code=401, detail="invalid_client")
+    return row
 
+
+@router.post("/token", response_model=McpOAuthTokenResponse)
+async def issue_mcp_access_token(
+    request: Request,
+    grant_type: Annotated[str, Form()],
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+    scope: Annotated[str | None, Form()] = None,
+    resource: Annotated[str | None, Form()] = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> McpOAuthTokenResponse:
+    if grant_type != "client_credentials":
+        raise HTTPException(status_code=400, detail="unsupported_grant_type")
+    row = await _authenticate_oauth_client(
+        form_client_id=client_id,
+        form_client_secret=client_secret,
+        authorization=authorization,
+    )
+    requested_resource = _normalize_resource(resource)
+    if requested_resource is None:
+        raise HTTPException(status_code=400, detail="invalid_resource")
+    if requested_resource not in _supported_resources(request):
+        raise HTTPException(status_code=400, detail="invalid_resource")
+
+    async with async_session() as db:
         allowed_scopes = _parse_scopes(row["allowed_scopes"])
         token_scopes = _requested_scopes(scope, allowed_scopes)
         ttl_seconds = int(row["oauth_token_ttl_seconds"] or 3600)
@@ -169,7 +204,7 @@ async def issue_mcp_access_token(
                 "client_id": row["id"],
                 "token_hash": hash_secret(access_token),
                 "scopes": json.dumps(token_scopes),
-                "resource": canonical_resource,
+                "resource": requested_resource,
                 "expires_at": expires_at,
             },
         )
@@ -179,12 +214,22 @@ async def issue_mcp_access_token(
         access_token=access_token,
         expires_in=ttl_seconds,
         scope=" ".join(token_scopes),
-        resource=canonical_resource,
+        resource=requested_resource,
     )
 
 
 @router.post("/revoke", response_model=McpOAuthRevokeResponse)
-async def revoke_mcp_access_token(token: Annotated[str, Form()]) -> McpOAuthRevokeResponse:
+async def revoke_mcp_access_token(
+    token: Annotated[str, Form()],
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> McpOAuthRevokeResponse:
+    await _authenticate_oauth_client(
+        form_client_id=client_id,
+        form_client_secret=client_secret,
+        authorization=authorization,
+    )
     async with async_session() as db:
         await db.execute(
             text(
@@ -198,12 +243,124 @@ async def revoke_mcp_access_token(token: Annotated[str, Form()]) -> McpOAuthRevo
     return McpOAuthRevokeResponse()
 
 
-@metadata_router.get("/.well-known/oauth-protected-resource", response_model=McpOAuthProtectedResourceMetadata)
-async def mcp_oauth_protected_resource_metadata(request: Request) -> McpOAuthProtectedResourceMetadata:
-    token_url = _metadata_url(request, "issue_mcp_access_token")
+@router.post("/introspect", response_model=McpOAuthIntrospectionResponse)
+async def introspect_mcp_access_token(
+    request: Request,
+    token: Annotated[str, Form()],
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> McpOAuthIntrospectionResponse:
+    caller = await _authenticate_oauth_client(
+        form_client_id=client_id,
+        form_client_secret=client_secret,
+        authorization=authorization,
+    )
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT
+                    t.scopes AS token_scopes,
+                    t.resource AS token_resource,
+                    t.issued_at,
+                    t.expires_at,
+                    t.revoked_at AS token_revoked_at,
+                    c.client_key,
+                    c.oauth_revoked_at AS client_revoked_at
+                FROM mcp_oauth_access_tokens t
+                JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
+                WHERE t.token_hash = :token_hash
+                  AND t.tenant_id = :tenant_id
+                LIMIT 1
+                """
+            ),
+            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"]},
+        )
+        row = result.mappings().one_or_none()
+
+    if row is None:
+        return McpOAuthIntrospectionResponse(active=False)
+    expires_at = row["expires_at"]
+    issued_at = row["issued_at"]
+    active = (
+        isinstance(expires_at, datetime)
+        and expires_at.tzinfo is not None
+        and expires_at > datetime.now(timezone.utc)
+        and row["token_revoked_at"] is None
+        and row["client_revoked_at"] is None
+    )
+    if not active:
+        return McpOAuthIntrospectionResponse(active=False)
+    token_scopes = _parse_scopes(row["token_scopes"])
+    return McpOAuthIntrospectionResponse(
+        active=True,
+        client_id=row["client_key"],
+        scope=" ".join(token_scopes),
+        token_type="Bearer",
+        exp=_unix_timestamp(expires_at),
+        iat=_unix_timestamp(issued_at) if isinstance(issued_at, datetime) else None,
+        aud=row["token_resource"],
+        iss=_authorization_server_issuer(request),
+    )
+
+
+def _mcp_oauth_protected_resource_metadata_response(request: Request) -> McpOAuthProtectedResourceMetadata:
     return McpOAuthProtectedResourceMetadata(
         resource=_canonical_mcp_resource(request),
-        authorization_servers=[token_url.rsplit("/token", 1)[0]],
+        authorization_servers=[_authorization_server_issuer(request)],
         scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
+        resource_name="Palace MCP",
         scope_catalog=serialize_mcp_scope_catalog(),
     )
+
+
+@metadata_router.get("/.well-known/oauth-protected-resource", response_model=McpOAuthProtectedResourceMetadata)
+async def mcp_oauth_protected_resource_metadata(request: Request) -> McpOAuthProtectedResourceMetadata:
+    return _mcp_oauth_protected_resource_metadata_response(request)
+
+
+@metadata_router.get("/.well-known/oauth-protected-resource/mcp", response_model=McpOAuthProtectedResourceMetadata)
+async def mcp_oauth_protected_resource_metadata_for_mcp_path(request: Request) -> McpOAuthProtectedResourceMetadata:
+    return _mcp_oauth_protected_resource_metadata_response(request)
+
+
+@metadata_router.get("/.well-known/oauth-protected-resource/api/v1", response_model=McpOAuthProtectedResourceMetadata)
+async def palace_api_oauth_protected_resource_metadata(request: Request) -> McpOAuthProtectedResourceMetadata:
+    return McpOAuthProtectedResourceMetadata(
+        resource=_canonical_api_resource(request),
+        authorization_servers=[_authorization_server_issuer(request)],
+        scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
+        resource_name="Palace API",
+        scope_catalog=serialize_mcp_scope_catalog(),
+    )
+
+
+def _mcp_oauth_authorization_server_metadata_response(request: Request) -> McpOAuthAuthorizationServerMetadata:
+    token_url = _metadata_url(request, "issue_mcp_access_token")
+    return McpOAuthAuthorizationServerMetadata(
+        issuer=_authorization_server_issuer(request),
+        token_endpoint=token_url,
+        revocation_endpoint=_metadata_url(request, "revoke_mcp_access_token"),
+        introspection_endpoint=_metadata_url(request, "introspect_mcp_access_token"),
+        grant_types_supported=["client_credentials"],
+        scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
+        token_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
+        revocation_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
+        introspection_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
+    )
+
+
+@metadata_router.get("/.well-known/oauth-authorization-server", response_model=McpOAuthAuthorizationServerMetadata)
+async def mcp_oauth_authorization_server_metadata(request: Request) -> McpOAuthAuthorizationServerMetadata:
+    return _mcp_oauth_authorization_server_metadata_response(request)
+
+
+@metadata_router.get(
+    "/.well-known/oauth-authorization-server/api/v1/memory/mcp/oauth",
+    response_model=McpOAuthAuthorizationServerMetadata,
+)
+async def mcp_oauth_authorization_server_metadata_for_issuer_path(
+    request: Request,
+) -> McpOAuthAuthorizationServerMetadata:
+    return _mcp_oauth_authorization_server_metadata_response(request)
