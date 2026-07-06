@@ -1,6 +1,6 @@
 import uuid
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,8 +30,9 @@ class _Result:
 
 
 class FakeSession:
-    def __init__(self, row=None, rows=None) -> None:
+    def __init__(self, row=None, rows=None, token_rows=None) -> None:
         self.rows = rows if rows is not None else ([] if row is None else [row])
+        self.token_rows = token_rows or []
         self.tokens = []
         self.revoked = []
         self.statements = []
@@ -58,6 +59,13 @@ class FakeSession:
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
+        if "from mcp_oauth_access_tokens" in sql:
+            rows = [
+                row
+                for row in self.token_rows
+                if row["token_hash"] == params["token_hash"] and row["tenant_id"] == params["tenant_id"]
+            ]
+            return _Result(rows[:1])
         if "update mcp_oauth_access_tokens" in sql:
             self.revoked.append(params)
             return _Result([])
@@ -175,7 +183,7 @@ def test_mcp_oauth_token_endpoint_rejects_missing_or_wrong_resource(monkeypatch)
             "grant_type": "client_credentials",
             "client_id": "codex-remote",
             "client_secret": "client-secret",
-            "resource": "https://testserver/api/v1",
+            "resource": "https://testserver/wrong",
         },
     )
 
@@ -257,11 +265,76 @@ def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
     session = FakeSession(_client_row())
     client = _client(session, monkeypatch)
 
-    response = client.post("/api/v1/memory/mcp/oauth/revoke", data={"token": "raw-token"})
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/revoke",
+        data={"token": "raw-token", "client_id": "codex-remote", "client_secret": "client-secret"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {"revoked": True}
     assert session.revoked == [{"token_hash": hash_secret("raw-token")}]
+
+
+def test_mcp_oauth_introspection_reports_active_token(monkeypatch) -> None:
+    issued_at = datetime.now(timezone.utc)
+    expires_at = issued_at + timedelta(days=1)
+    session = FakeSession(
+        _client_row(),
+        token_rows=[
+            {
+                "tenant_id": "tenant-a",
+                "token_hash": hash_secret("raw-token"),
+                "token_scopes": ["read", "write"],
+                "token_resource": "https://testserver/api/v1",
+                "issued_at": issued_at,
+                "expires_at": expires_at,
+                "token_revoked_at": None,
+                "client_key": "codex-remote",
+                "client_revoked_at": None,
+            }
+        ],
+    )
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/introspect",
+        data={"token": "raw-token", "client_id": "codex-remote", "client_secret": "client-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "active": True,
+        "client_id": "codex-remote",
+        "scope": "read write",
+        "token_type": "Bearer",
+        "exp": int(expires_at.timestamp()),
+        "iat": int(issued_at.timestamp()),
+        "aud": "https://testserver/api/v1",
+        "iss": "https://testserver/api/v1/memory/mcp/oauth",
+    }
+
+
+def test_mcp_oauth_introspection_hides_inactive_token_details(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/introspect",
+        data={"token": "missing-token", "client_id": "codex-remote", "client_secret": "client-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "active": False,
+        "client_id": None,
+        "scope": None,
+        "token_type": None,
+        "exp": None,
+        "iat": None,
+        "aud": None,
+        "iss": None,
+    }
 
 
 def test_mcp_oauth_protected_resource_metadata_lists_scopes(monkeypatch) -> None:
@@ -273,10 +346,62 @@ def test_mcp_oauth_protected_resource_metadata_lists_scopes(monkeypatch) -> None
     assert response.status_code == 200
     body = response.json()
     assert body["resource"].endswith("/mcp")
+    assert body["resource_name"] == "Palace MCP"
     assert body["bearer_methods_supported"] == ["header"]
     assert body["scopes_supported"] == list(ALL_MCP_OPERATION_SCOPES)
     assert {scope["value"] for scope in body["scope_catalog"]} == set(ALL_MCP_OPERATION_SCOPES)
     assert any(scope["description"] for scope in body["scope_catalog"] if scope["value"] == "capture:write")
+
+
+def test_mcp_oauth_protected_resource_metadata_supports_rfc_path(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.get("/.well-known/oauth-protected-resource/mcp")
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == "https://testserver/mcp"
+
+
+def test_palace_api_oauth_protected_resource_metadata_lists_api_resource(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.get("/.well-known/oauth-protected-resource/api/v1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["resource"] == "https://testserver/api/v1"
+    assert body["resource_name"] == "Palace API"
+    assert body["authorization_servers"] == ["https://testserver/api/v1/memory/mcp/oauth"]
+    assert body["scopes_supported"] == list(ALL_MCP_OPERATION_SCOPES)
+
+
+def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.get("/.well-known/oauth-authorization-server")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["issuer"] == "https://testserver/api/v1/memory/mcp/oauth"
+    assert body["token_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/token"
+    assert body["revocation_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/revoke"
+    assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
+    assert body["grant_types_supported"] == ["client_credentials"]
+    assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
+    assert body["code_challenge_methods_supported"] == []
+
+
+def test_mcp_oauth_authorization_server_metadata_supports_issuer_well_known_path(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.get("/.well-known/oauth-authorization-server/api/v1/memory/mcp/oauth")
+
+    assert response.status_code == 200
+    assert response.json()["issuer"] == "https://testserver/api/v1/memory/mcp/oauth"
 
 
 def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) -> None:
@@ -303,3 +428,18 @@ def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) 
     assert metadata.json()["authorization_servers"] == ["https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth"]
     assert token.status_code == 200
     assert token.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"
+
+    api_metadata = client.get("/.well-known/oauth-protected-resource/api/v1")
+    api_token = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://api.palace.sarvent.cloud/api/v1",
+        },
+    )
+    assert api_metadata.status_code == 200
+    assert api_metadata.json()["resource"] == "https://api.palace.sarvent.cloud/api/v1"
+    assert api_token.status_code == 200
+    assert api_token.json()["resource"] == "https://api.palace.sarvent.cloud/api/v1"

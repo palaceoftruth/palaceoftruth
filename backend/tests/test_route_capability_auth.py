@@ -198,6 +198,10 @@ def test_route_capability_auth_rejects_invalid_oauth_token_before_handlers(
 
     assert response.status_code == 403
     assert response.json()["detail"] == expected_detail
+    assert (
+        'resource_metadata="https://testserver/.well-known/oauth-protected-resource/api/v1"'
+        in response.headers["WWW-Authenticate"]
+    )
 
 
 def test_conversations_accepts_oauth_read_token(monkeypatch) -> None:

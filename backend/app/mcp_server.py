@@ -408,8 +408,9 @@ class McpHttpAuthVerifier:
         client: httpx.AsyncClient,
         headers: dict[str, str],
     ) -> McpHttpAuthResult:
+        validation_headers = {**headers, "X-Palace-Expected-Resource": "mcp"}
         try:
-            response = await client.get("/api/v1/memory/whoami", headers=headers)
+            response = await client.get("/api/v1/memory/whoami", headers=validation_headers)
         except httpx.HTTPError as exc:
             raise McpHttpAuthError(
                 status_code=503,
@@ -471,7 +472,16 @@ class McpHttpAuthMiddleware:
         send: Send,
         exc: McpHttpAuthError,
     ) -> None:
-        headers = {"WWW-Authenticate": f'Bearer error="{exc.error}", error_description="{exc.detail}"'}
+        headers_obj = Headers(scope=scope)
+        host = headers_obj.get("host", "localhost")
+        resource_metadata = f"https://{host}/.well-known/oauth-protected-resource/mcp"
+        headers = {
+            "WWW-Authenticate": (
+                f'Bearer error="{exc.error}", '
+                f'error_description="{exc.detail}", '
+                f'resource_metadata="{resource_metadata}"'
+            )
+        }
         response = JSONResponse(
             {"error": exc.error, "error_description": exc.detail},
             status_code=exc.status_code,

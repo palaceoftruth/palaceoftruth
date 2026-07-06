@@ -83,14 +83,49 @@ def _canonical_mcp_resource(request: Request) -> str:
     return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
-def _resource_matches_token(*, token_resource: object, expected_resource: str | None) -> bool:
-    if expected_resource is None:
+def _resource_metadata_url(request: Request) -> str:
+    parsed_base = urlsplit(str(request.base_url))
+    path = "/.well-known/oauth-protected-resource"
+    if request.url.path.startswith("/api/v1"):
+        path = f"{path}/api/v1"
+    elif request.url.path.startswith("/mcp"):
+        path = f"{path}/mcp"
+    return urlunsplit(("https", parsed_base.netloc, path, "", ""))
+
+
+def _bearer_auth_headers(request: Request, *, error: str | None = None) -> dict[str, str]:
+    params = [f'resource_metadata="{_resource_metadata_url(request)}"']
+    if error:
+        params.insert(0, f'error="{error}"')
+    return {"WWW-Authenticate": "Bearer " + ", ".join(params)}
+
+
+def _auth_exception(request: Request, status_code: int, detail: str, *, error: str | None = None) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail=detail,
+        headers=_bearer_auth_headers(request, error=error),
+    )
+
+
+def _expected_token_resources(request: Request, expected_resource: str | None = None) -> set[str]:
+    resources = {_canonical_mcp_resource(request)}
+    if expected_resource == "mcp":
+        return resources
+    if request.url.path.startswith("/api/v1"):
+        parsed = urlsplit(str(request.base_url))
+        resources.add(urlunsplit(("https", parsed.netloc, "/api/v1", "", "")))
+    return resources
+
+
+def _resource_matches_token(*, token_resource: object, expected_resources: set[str] | None) -> bool:
+    if expected_resources is None:
         return True
     if token_resource is None:
         # Legacy tokens minted before SAR-984 did not persist an audience. Keep
         # them valid only for the MCP resource while clients rotate tokens.
         return True
-    return isinstance(token_resource, str) and token_resource == expected_resource
+    return isinstance(token_resource, str) and token_resource in expected_resources
 
 
 def _context_from_scopes(
@@ -173,7 +208,7 @@ async def verify_api_key(
     Sets request.state.tenant_id on success. Raises HTTP 403 on failure.
     """
     if not api_key:
-        raise HTTPException(status_code=403, detail="Missing API key")
+        raise _auth_exception(request, 403, "Missing API key", error="invalid_token")
 
     key_hash = _hash_key(api_key)
 
@@ -195,7 +230,7 @@ async def verify_api_key(
             await db.commit()
 
     if result is None:
-        raise HTTPException(status_code=403, detail="Invalid or revoked API key")
+        raise _auth_exception(request, 403, "Invalid or revoked API key", error="invalid_token")
 
     _attach_auth_context(
         request,
@@ -214,15 +249,16 @@ async def verify_memory_auth(
     request: Request,
     api_key: str | None = Security(api_key_header),
     authorization: str | None = Header(None, alias="Authorization"),
+    expected_resource: str | None = Header(None, alias="X-Palace-Expected-Resource"),
 ) -> str:
     if api_key:
         return await verify_api_key(request, api_key)
 
     if authorization is None:
-        raise HTTPException(status_code=403, detail="Missing API key or bearer token")
+        raise _auth_exception(request, 403, "Missing API key or bearer token", error="invalid_token")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
-        raise HTTPException(status_code=403, detail="Invalid Authorization header")
+        raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
     token_hash = hash_secret(token.strip())
     async with async_session() as db:
@@ -252,20 +288,21 @@ async def verify_memory_auth(
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime):
-                raise HTTPException(status_code=403, detail="MCP bearer token expiry is invalid")
+                raise _auth_exception(request, 403, "MCP bearer token expiry is invalid", error="invalid_token")
             if expires_at.tzinfo is None:
-                raise HTTPException(status_code=403, detail="MCP bearer token expiry is invalid")
+                raise _auth_exception(request, 403, "MCP bearer token expiry is invalid", error="invalid_token")
             if expires_at <= datetime.now(timezone.utc):
-                raise HTTPException(status_code=403, detail="MCP bearer token expired")
+                raise _auth_exception(request, 403, "MCP bearer token expired", error="invalid_token")
             if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
-                raise HTTPException(status_code=403, detail="MCP bearer token revoked")
+                raise _auth_exception(request, 403, "MCP bearer token revoked", error="invalid_token")
             allowed_scopes = _parse_json_list(result["allowed_scopes"])
             token_scopes = _parse_json_list(result["token_scopes"])
             if any(scope not in allowed_scopes for scope in token_scopes):
                 raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
             token_resource = result.get("token_resource")
-            if not _resource_matches_token(token_resource=token_resource, expected_resource=_canonical_mcp_resource(request)):
-                raise HTTPException(status_code=403, detail="MCP bearer token resource is invalid")
+            expected_resources = _expected_token_resources(request, expected_resource=expected_resource)
+            if not _resource_matches_token(token_resource=token_resource, expected_resources=expected_resources):
+                raise _auth_exception(request, 403, "MCP bearer token resource is invalid", error="invalid_token")
             await db.execute(
                 text(
                     "UPDATE mcp_oauth_access_tokens "
@@ -281,7 +318,7 @@ async def verify_memory_auth(
             await db.commit()
 
     if result is None:
-        raise HTTPException(status_code=403, detail="Invalid MCP bearer token")
+        raise _auth_exception(request, 403, "Invalid MCP bearer token", error="invalid_token")
 
     _attach_auth_context(
         request,
@@ -309,10 +346,10 @@ async def _verify_scoped_bearer_token(
     detail_prefix: str,
 ) -> str:
     if authorization is None:
-        raise HTTPException(status_code=403, detail=f"Missing API key or {detail_prefix} bearer token")
+        raise _auth_exception(request, 403, f"Missing API key or {detail_prefix} bearer token", error="invalid_token")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
-        raise HTTPException(status_code=403, detail="Invalid Authorization header")
+        raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
     token_hash = hash_secret(token.strip())
     async with async_session() as db:
@@ -343,11 +380,11 @@ async def _verify_scoped_bearer_token(
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
-                raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token expiry is invalid")
+                raise _auth_exception(request, 403, f"{detail_prefix} bearer token expiry is invalid", error="invalid_token")
             if expires_at <= datetime.now(timezone.utc):
-                raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token expired")
+                raise _auth_exception(request, 403, f"{detail_prefix} bearer token expired", error="invalid_token")
             if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
-                raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token revoked")
+                raise _auth_exception(request, 403, f"{detail_prefix} bearer token revoked", error="invalid_token")
             allowed_scopes = _parse_json_list(result["allowed_scopes"])
             token_scopes = _parse_json_list(result["token_scopes"])
             if any(scope not in allowed_scopes for scope in token_scopes):
@@ -369,7 +406,7 @@ async def _verify_scoped_bearer_token(
             await db.commit()
 
     if result is None:
-        raise HTTPException(status_code=403, detail=f"Invalid {detail_prefix} bearer token")
+        raise _auth_exception(request, 403, f"Invalid {detail_prefix} bearer token", error="invalid_token")
 
     _attach_auth_context(
         request,
@@ -485,9 +522,14 @@ def require_capability(required_capability: str):
         if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
             return
         if not context.scopes:
-            raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
+            raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
-            raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_capability} scope")
+            raise _auth_exception(
+                request,
+                403,
+                f"MCP bearer token missing {required_capability} scope",
+                error="insufficient_scope",
+            )
 
     return dependency
 
@@ -505,9 +547,14 @@ def require_api_capability(required_capability: str):
         if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
             return
         if not context.scopes:
-            raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
+            raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
-            raise HTTPException(status_code=403, detail=f"MCP bearer token missing {required_capability} scope")
+            raise _auth_exception(
+                request,
+                403,
+                f"MCP bearer token missing {required_capability} scope",
+                error="insufficient_scope",
+            )
 
     return dependency
 

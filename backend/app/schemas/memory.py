@@ -197,6 +197,31 @@ class McpOAuthRevokeResponse(BaseModel):
     revoked: bool = True
 
 
+class McpOAuthIntrospectionResponse(BaseModel):
+    active: bool
+    client_id: str | None = None
+    scope: str | None = None
+    token_type: Literal["Bearer"] | None = None
+    exp: int | None = None
+    iat: int | None = None
+    aud: str | None = None
+    iss: str | None = None
+
+
+class McpOAuthAuthorizationServerMetadata(BaseModel):
+    issuer: str
+    token_endpoint: str
+    revocation_endpoint: str
+    introspection_endpoint: str
+    response_types_supported: list[str] = Field(default_factory=list)
+    grant_types_supported: list[str]
+    scopes_supported: list[McpOperationScope]
+    token_endpoint_auth_methods_supported: list[str]
+    revocation_endpoint_auth_methods_supported: list[str]
+    introspection_endpoint_auth_methods_supported: list[str]
+    code_challenge_methods_supported: list[str] = Field(default_factory=list)
+
+
 class BrowserExtensionTokenIssueRequest(BaseModel):
     display_name: str = "Palace Capture Extension"
     extension_version: str | None = None
@@ -225,6 +250,7 @@ class McpOAuthProtectedResourceMetadata(BaseModel):
     authorization_servers: list[str]
     bearer_methods_supported: list[str] = Field(default_factory=lambda: ["header"])
     scopes_supported: list[McpOperationScope]
+    resource_name: str | None = None
     scope_catalog: list[McpOAuthScopeDefinition] = Field(default_factory=list)
 
 
