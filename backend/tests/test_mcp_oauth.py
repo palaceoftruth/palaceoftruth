@@ -35,6 +35,7 @@ class FakeSession:
         self.token_rows = token_rows or []
         self.tokens = []
         self.revoked = []
+        self.audit_events = []
         self.statements = []
         self.commits = 0
 
@@ -58,6 +59,9 @@ class FakeSession:
             return _Result(rows[:2])
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
+            return _Result([])
+        if "insert into mcp_request_audit_events" in sql:
+            self.audit_events.append(params)
             return _Result([])
         if "from mcp_oauth_access_tokens" in sql:
             rows = [
@@ -88,6 +92,7 @@ def _client_row(**overrides) -> dict:
         "id": uuid.uuid4(),
         "tenant_id": "tenant-a",
         "client_key": "codex-remote",
+        "display_name": "Codex Remote",
         "allowed_scopes": ["read", "write"],
         "oauth_client_secret_hash": hash_secret("client-secret"),
         "oauth_revoked_at": None,
@@ -122,6 +127,13 @@ def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None
     assert session.tokens[0]["scopes"] == '["read"]'
     assert session.tokens[0]["resource"] == "https://testserver/mcp"
     assert session.tokens[0]["expires_at"] > datetime.now(timezone.utc)
+    assert session.audit_events[0]["operation"] == "oauth.token_issue"
+    assert session.audit_events[0]["status"] == "success"
+    assert session.audit_events[0]["client_name"] == "Codex Remote"
+    params_summary = session.audit_events[0]["params_summary"]
+    assert "client-secret" not in params_summary
+    assert "raw-token" not in params_summary
+    assert '"resource_kind": "mcp"' in params_summary
     client_lookup_sql = next(sql for sql, _ in session.statements if "FROM mcp_clients" in sql)
     assert "CAST(:tenant_id AS text) IS NULL" in client_lookup_sql
 
@@ -190,6 +202,11 @@ def test_mcp_oauth_token_endpoint_rejects_missing_or_wrong_resource(monkeypatch)
     assert missing.status_code == 400
     assert wrong.status_code == 400
     assert session.tokens == []
+    assert [event["status"] for event in session.audit_events] == ["denied", "denied"]
+    assert [event["error_class"] for event in session.audit_events] == ["invalid_resource", "invalid_resource"]
+    assert all(event["operation"] == "oauth.token_issue" for event in session.audit_events)
+    assert "client-secret" not in session.audit_events[0]["params_summary"]
+    assert "client-secret" not in session.audit_events[1]["params_summary"]
 
 
 def test_mcp_oauth_token_endpoint_rejects_invalid_secret(monkeypatch) -> None:
@@ -241,6 +258,9 @@ def test_mcp_oauth_token_endpoint_fails_closed_on_malformed_scope_row(monkeypatc
 
     assert response.status_code == 403
     assert session.tokens == []
+    assert session.audit_events[0]["operation"] == "oauth.token_issue"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_scope"
 
 
 def test_mcp_oauth_token_endpoint_fails_closed_on_unsupported_scope_row(monkeypatch) -> None:
@@ -259,6 +279,54 @@ def test_mcp_oauth_token_endpoint_fails_closed_on_unsupported_scope_row(monkeypa
 
     assert response.status_code == 403
     assert session.tokens == []
+    assert session.audit_events[0]["operation"] == "oauth.token_issue"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_scope"
+
+
+def test_mcp_oauth_token_endpoint_audits_unsupported_requested_scope(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "scope": "admin",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 400
+    assert session.tokens == []
+    assert session.audit_events[0]["operation"] == "oauth.token_issue"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_scope"
+    assert "client-secret" not in session.audit_events[0]["params_summary"]
+
+
+def test_mcp_oauth_token_endpoint_audits_invalid_ttl(monkeypatch) -> None:
+    session = FakeSession(_client_row(oauth_token_ttl_seconds=0))
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 403
+    assert session.tokens == []
+    assert session.audit_events[0]["operation"] == "oauth.token_issue"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_ttl"
+    assert "client-secret" not in session.audit_events[0]["params_summary"]
 
 
 def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
@@ -283,6 +351,9 @@ def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
     revoke_sql = next(sql for sql, _ in session.statements if "UPDATE mcp_oauth_access_tokens" in sql)
     assert "tenant_id = :tenant_id" in revoke_sql
     assert "client_id = :client_id" in revoke_sql
+    assert session.audit_events[0]["operation"] == "oauth.token_revoke"
+    assert session.audit_events[0]["status"] == "success"
+    assert "raw-token" not in session.audit_events[0]["params_summary"]
 
 
 def test_mcp_oauth_revoke_scopes_to_authenticated_tenant_client(monkeypatch) -> None:
@@ -344,6 +415,10 @@ def test_mcp_oauth_introspection_reports_active_token(monkeypatch) -> None:
         "aud": "https://testserver/api/v1",
         "iss": "https://testserver/api/v1/memory/mcp/oauth",
     }
+    assert session.audit_events[0]["operation"] == "oauth.token_introspect"
+    assert session.audit_events[0]["status"] == "success"
+    assert "raw-token" not in session.audit_events[0]["params_summary"]
+    assert '"active": true' in session.audit_events[0]["params_summary"]
 
 
 def test_mcp_oauth_introspection_hides_inactive_token_details(monkeypatch) -> None:
@@ -366,6 +441,10 @@ def test_mcp_oauth_introspection_hides_inactive_token_details(monkeypatch) -> No
         "aud": None,
         "iss": None,
     }
+    assert session.audit_events[0]["operation"] == "oauth.token_introspect"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "inactive_token"
+    assert "missing-token" not in session.audit_events[0]["params_summary"]
 
 
 def test_mcp_oauth_protected_resource_metadata_lists_scopes(monkeypatch) -> None:

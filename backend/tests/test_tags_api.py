@@ -58,6 +58,8 @@ class AuthSession:
         sql = str(statement).lower()
         if "from mcp_oauth_access_tokens" in sql:
             return _AuthResult(self.row)
+        if "insert into mcp_request_audit_events" in sql:
+            return _AuthResult(None)
         if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
             return _AuthResult(None)
         raise AssertionError(f"Unexpected auth SQL: {sql}")

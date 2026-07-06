@@ -171,6 +171,8 @@ class AuthSession:
         params = params or {}
         if "from mcp_oauth_access_tokens" in sql:
             return _AuthResult(self.row)
+        if "insert into mcp_request_audit_events" in sql:
+            return _AuthResult(None)
         if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
             self.updates.append(params)
             return _AuthResult(None)
@@ -245,7 +247,7 @@ def test_create_item_rejects_oauth_read_token_before_write_handler(monkeypatch) 
 
     assert response.status_code == 403
     assert response.json()["detail"] == "MCP bearer token missing write scope"
-    assert auth_session.commits == 1
+    assert auth_session.commits == 2
 
 
 def test_related_items_query_scopes_joined_rows_to_authenticated_tenant() -> None:

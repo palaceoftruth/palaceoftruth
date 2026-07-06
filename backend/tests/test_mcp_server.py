@@ -339,6 +339,93 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_client_audit_metadata_reports_oauth_auth_mode() -> None:
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth/token"):
+            return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 3600})
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.test") as http_client:
+        api = SecondBrainApiClient(
+            SecondBrainMcpSettings(
+                api_base_url="https://api.test",
+                api_key="legacy-api-key",
+                oauth_client_secret="client-secret",
+                oauth_token_url="https://api.test/api/v1/memory/mcp/oauth/token",
+                client_key="codex-remote",
+            ),
+            client=http_client,
+        )
+        await api.record_mcp_request_audit(
+            operation="get_wakeup_context",
+            required_scope="read",
+            params_summary={},
+            status="success",
+            latency_ms=12,
+            error_class=None,
+        )
+
+    assert audit_payload["client"]["metadata"]["auth_mode"] == "oauth_client_credentials"
+
+
+@pytest.mark.asyncio
+async def test_api_client_audit_metadata_reports_static_bearer_when_mixed_credentials() -> None:
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth/token"):
+            raise AssertionError("static bearer should be used before minting OAuth")
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.test") as http_client:
+        api = SecondBrainApiClient(
+            SecondBrainMcpSettings(
+                api_base_url="https://api.test",
+                api_key="legacy-api-key",
+                bearer_token="bearer-token",
+                oauth_client_secret="client-secret",
+                oauth_token_url="https://api.test/api/v1/memory/mcp/oauth/token",
+                client_key="codex-remote",
+            ),
+            client=http_client,
+        )
+        await api.record_mcp_request_audit(
+            operation="get_wakeup_context",
+            required_scope="read",
+            params_summary={},
+            status="success",
+            latency_ms=12,
+            error_class=None,
+        )
+
+    assert audit_payload["client"]["metadata"]["auth_mode"] == "static_bearer"
+
+
+@pytest.mark.asyncio
 async def test_api_client_ignores_legacy_mcp_oauth_resource_for_backend_calls() -> None:
     seen_bodies: list[str] = []
 
@@ -1172,6 +1259,7 @@ def test_mcp_tool_records_redacted_audit_after_success() -> None:
     assert len(seen) == 1
     payload = seen[0][1]
     assert payload["client"]["client_key"] == "codex-local"
+    assert payload["client"]["metadata"]["auth_mode"] == "api_key"
     assert payload["operation"] == "create_memory_entry"
     assert payload["required_scope"] == "write"
     assert payload["status"] == "success"

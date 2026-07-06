@@ -39,6 +39,7 @@ class AuthSession:
         self.row = row
         self.commits = 0
         self.updates: list[dict] = []
+        self.audit_events: list[dict] = []
 
     async def __aenter__(self):
         return self
@@ -51,6 +52,9 @@ class AuthSession:
         params = params or {}
         if "from mcp_oauth_access_tokens" in sql:
             return _AuthResult(self.row)
+        if "insert into mcp_request_audit_events" in sql:
+            self.audit_events.append(params)
+            return _AuthResult(None)
         if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
             self.updates.append(params)
             return _AuthResult(None)
