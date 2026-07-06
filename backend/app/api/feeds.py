@@ -9,16 +9,12 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.schemas.feed import FeedCreate, FeedUpdate, FeedOut, FeedListResponse, OPMLImportResponse
 
-router = APIRouter(
-    prefix="/feeds",
-    tags=["feeds"],
-    dependencies=[Depends(verify_api_key)],
-)
+router = APIRouter(prefix="/feeds", tags=["feeds"])
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,7 +41,7 @@ def _row_to_feed_out(row: dict) -> FeedOut:
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("", response_model=FeedListResponse)
+@router.get("", response_model=FeedListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_feeds(request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -57,7 +53,7 @@ async def list_feeds(request: Request, db: AsyncSession = Depends(get_db)):
     return {"feeds": feeds, "total": len(feeds)}
 
 
-@router.post("", response_model=FeedOut, status_code=201)
+@router.post("", response_model=FeedOut, status_code=201, dependencies=[Depends(require_api_capability("write"))])
 async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     poll_interval = max(body.poll_interval, settings.feed_poll_min_interval)
@@ -97,7 +93,7 @@ async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Dep
     return _row_to_feed_out(feed_row)
 
 
-@router.get("/{feed_id}", response_model=FeedOut)
+@router.get("/{feed_id}", response_model=FeedOut, dependencies=[Depends(require_api_capability("read"))])
 async def get_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -110,7 +106,7 @@ async def get_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depe
     return _row_to_feed_out(row)
 
 
-@router.patch("/{feed_id}", response_model=FeedOut)
+@router.patch("/{feed_id}", response_model=FeedOut, dependencies=[Depends(require_api_capability("write"))])
 async def update_feed(feed_id: uuid.UUID, body: FeedUpdate, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     # Build dynamic SET clause from provided fields
@@ -148,7 +144,7 @@ async def update_feed(feed_id: uuid.UUID, body: FeedUpdate, request: Request, db
     return await get_feed(feed_id, request, db)
 
 
-@router.delete("/{feed_id}", status_code=204)
+@router.delete("/{feed_id}", status_code=204, dependencies=[Depends(require_api_capability("write"))])
 async def delete_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -172,7 +168,7 @@ async def delete_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = D
         raise HTTPException(status_code=404, detail="Feed not found")
 
 
-@router.post("/{feed_id}/restore", response_model=FeedOut)
+@router.post("/{feed_id}/restore", response_model=FeedOut, dependencies=[Depends(require_api_capability("write"))])
 async def restore_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -196,7 +192,7 @@ async def restore_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = 
     return await get_feed(feed_id, request, db)
 
 
-@router.post("/{feed_id}/poll", status_code=202)
+@router.post("/{feed_id}/poll", status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def force_poll(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     # Verify feed exists and belongs to this tenant
@@ -211,7 +207,7 @@ async def force_poll(feed_id: uuid.UUID, request: Request, db: AsyncSession = De
     return {"status": "queued", "feed_id": str(feed_id)}
 
 
-@router.post("/{feed_id}/enable", response_model=FeedOut)
+@router.post("/{feed_id}/enable", response_model=FeedOut, dependencies=[Depends(require_api_capability("write"))])
 async def enable_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -228,7 +224,7 @@ async def enable_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = D
     return await get_feed(feed_id, request, db)
 
 
-@router.post("/{feed_id}/disable", response_model=FeedOut)
+@router.post("/{feed_id}/disable", response_model=FeedOut, dependencies=[Depends(require_api_capability("write"))])
 async def disable_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     result = await db.execute(
@@ -244,7 +240,7 @@ async def disable_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = 
     return await get_feed(feed_id, request, db)
 
 
-@router.get("/{feed_id}/items")
+@router.get("/{feed_id}/items", dependencies=[Depends(require_api_capability("read"))])
 async def list_feed_items(
     feed_id: uuid.UUID,
     request: Request,
@@ -283,7 +279,7 @@ async def list_feed_items(
     return {"total": total, "items": [dict(row) for row in rows]}
 
 
-@router.post("/import_opml", response_model=OPMLImportResponse, status_code=202)
+@router.post("/import_opml", response_model=OPMLImportResponse, status_code=202, dependencies=[Depends(require_api_capability("write"))])
 async def import_opml(
     request: Request,
     file: UploadFile = File(...),

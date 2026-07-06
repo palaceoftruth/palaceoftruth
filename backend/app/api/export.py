@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select, text as sa_text
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import async_session
 from app.models.item import Item
 from app.services.bundle import build_bundle_archive
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/export",
     tags=["export"],
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(require_api_capability("read"))],
 )
 
 

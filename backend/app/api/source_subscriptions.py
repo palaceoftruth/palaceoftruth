@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.models.source_subscription import SourceSubscription, SourceSubscriptionEntry
@@ -36,11 +36,7 @@ from app.services.source_subscriptions import (
     sanitize_source_subscription_error,
 )
 
-router = APIRouter(
-    prefix="/source-subscriptions",
-    tags=["source-subscriptions"],
-    dependencies=[Depends(verify_api_key)],
-)
+router = APIRouter(prefix="/source-subscriptions", tags=["source-subscriptions"])
 
 
 async def _get_subscription_or_404(
@@ -65,7 +61,7 @@ def _validate_youtube_channel_provider(provider_type: str) -> None:
         raise HTTPException(status_code=422, detail="Only youtube_channel subscriptions are supported in v1")
 
 
-@router.get("", response_model=SourceSubscriptionListResponse)
+@router.get("", response_model=SourceSubscriptionListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_source_subscriptions(
     request: Request,
     include_deleted: bool = Query(False),
@@ -79,7 +75,7 @@ async def list_source_subscriptions(
     return SourceSubscriptionListResponse(subscriptions=subscriptions, total=len(subscriptions))
 
 
-@router.post("/preview", response_model=SourceSubscriptionPreview)
+@router.post("/preview", response_model=SourceSubscriptionPreview, dependencies=[Depends(require_api_capability("write"))])
 async def preview_source_subscription(
     body: SourceSubscriptionCreate,
     request: Request,
@@ -112,7 +108,7 @@ async def preview_source_subscription(
     )
 
 
-@router.post("", response_model=SourceSubscriptionOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=SourceSubscriptionOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_api_capability("write"))])
 async def post_source_subscription(
     body: SourceSubscriptionCreate,
     request: Request,
@@ -142,7 +138,7 @@ async def post_source_subscription(
     return SourceSubscriptionOut.model_validate(subscription)
 
 
-@router.get("/entries", response_model=SourceSubscriptionEntryListResponse)
+@router.get("/entries", response_model=SourceSubscriptionEntryListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_recent_source_subscription_entries(
     request: Request,
     limit: int = Query(50, ge=1, le=200),
@@ -160,7 +156,7 @@ async def list_recent_source_subscription_entries(
     return SourceSubscriptionEntryListResponse(entries=entries, total=len(entries))
 
 
-@router.post("/entries/{entry_id}/retry", response_model=SourceSubscriptionEntryRetryResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/entries/{entry_id}/retry", response_model=SourceSubscriptionEntryRetryResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_capability("write"))])
 async def retry_source_subscription_entry(
     entry_id: uuid.UUID,
     request: Request,
@@ -191,7 +187,7 @@ async def retry_source_subscription_entry(
     )
 
 
-@router.get("/{subscription_id}", response_model=SourceSubscriptionOut)
+@router.get("/{subscription_id}", response_model=SourceSubscriptionOut, dependencies=[Depends(require_api_capability("read"))])
 async def get_source_subscription(
     subscription_id: uuid.UUID,
     request: Request,
@@ -205,7 +201,7 @@ async def get_source_subscription(
     return SourceSubscriptionOut.model_validate(subscription)
 
 
-@router.patch("/{subscription_id}", response_model=SourceSubscriptionOut)
+@router.patch("/{subscription_id}", response_model=SourceSubscriptionOut, dependencies=[Depends(require_api_capability("write"))])
 async def patch_source_subscription(
     subscription_id: uuid.UUID,
     body: SourceSubscriptionUpdate,
@@ -232,7 +228,7 @@ async def patch_source_subscription(
     return SourceSubscriptionOut.model_validate(subscription)
 
 
-@router.post("/{subscription_id}/pause", response_model=SourceSubscriptionOut)
+@router.post("/{subscription_id}/pause", response_model=SourceSubscriptionOut, dependencies=[Depends(require_api_capability("write"))])
 async def pause_source_subscription(
     subscription_id: uuid.UUID,
     request: Request,
@@ -249,7 +245,7 @@ async def pause_source_subscription(
     return SourceSubscriptionOut.model_validate(subscription)
 
 
-@router.post("/{subscription_id}/resume", response_model=SourceSubscriptionOut)
+@router.post("/{subscription_id}/resume", response_model=SourceSubscriptionOut, dependencies=[Depends(require_api_capability("write"))])
 async def resume_source_subscription(
     subscription_id: uuid.UUID,
     request: Request,
@@ -267,7 +263,7 @@ async def resume_source_subscription(
     return SourceSubscriptionOut.model_validate(subscription)
 
 
-@router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_api_capability("write"))])
 async def delete_source_subscription(
     subscription_id: uuid.UUID,
     request: Request,
@@ -284,7 +280,7 @@ async def delete_source_subscription(
     await db.commit()
 
 
-@router.post("/{subscription_id}/sync", response_model=SourceSubscriptionSyncResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/{subscription_id}/sync", response_model=SourceSubscriptionSyncResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_capability("write"))])
 async def manual_sync_source_subscription(
     subscription_id: uuid.UUID,
     request: Request,
@@ -319,7 +315,7 @@ async def manual_sync_source_subscription(
     return SourceSubscriptionSyncResponse(status="queued", subscription_id=subscription.id)
 
 
-@router.get("/{subscription_id}/entries", response_model=SourceSubscriptionEntryListResponse)
+@router.get("/{subscription_id}/entries", response_model=SourceSubscriptionEntryListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_source_subscription_entries(
     subscription_id: uuid.UUID,
     request: Request,

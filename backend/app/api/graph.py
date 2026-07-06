@@ -5,14 +5,14 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.models.item import Item
 from app.models.relationship import ItemRelationship
 from app.schemas.relationship import GraphResponse, GraphMeta, GraphNode, GraphEdge
 from app.services.graph_telemetry import ready_tenant_relationships_query
 
-router = APIRouter(prefix="/graph", tags=["graph"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/graph", tags=["graph"], dependencies=[Depends(require_api_capability("read"))])
 
 
 @router.get("", response_model=GraphResponse)
