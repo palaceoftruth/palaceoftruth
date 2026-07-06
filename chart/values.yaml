@@ -132,6 +132,9 @@ externalSecrets:
   # Optional Firecrawl API key property. Cloud mode requires this; self-hosted
   # deployments may leave it blank when private networking handles access.
   firecrawlApiKeyProperty: ""
+  # Optional MCP OAuth client secret property. When set, this property is
+  # synced into the app secret key named by mcp.oauthClientSecretKey.
+  mcpOauthClientSecretProperty: ""
 
 # Used when externalSecrets.enabled=false — caller must pre-create these secrets.
 # existingSecret must contain: OPENAI_API_KEY, OPENROUTER_API_KEY, API_KEY,
@@ -142,7 +145,8 @@ externalSecrets:
 #   EMBEDDING_LOCAL_HTTP_API_KEY for authenticated local embedding proxies, and
 #   ASSEMBLYAI_API_KEY when config.transcriptionProvider=assemblyai, and
 #   FIRECRAWL_API_KEY when config.webpageScraperProvider=firecrawl-cloud or an
-#   authenticated self-hosted Firecrawl deployment requires bearer auth.
+#   authenticated self-hosted Firecrawl deployment requires bearer auth, and
+#   the secret key named by mcp.oauthClientSecretKey when MCP OAuth is enabled.
 existingSecret: ""
 # existingRegistrySecret must be a kubernetes.io/dockerconfigjson type secret
 existingRegistrySecret: ""
