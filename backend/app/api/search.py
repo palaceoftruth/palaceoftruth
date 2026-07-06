@@ -4,14 +4,14 @@ from time import perf_counter
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.search import SearchRequest, SearchResponse, TagsMode
 from app.services.retrieval_capture import build_capture_record, capture_retrieval
 from app.services.search import SearchService
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
-router = APIRouter(prefix="/search", tags=["search"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/search", tags=["search"], dependencies=[Depends(require_api_capability("read"))])
 
 
 @router.get("", response_model=SearchResponse)

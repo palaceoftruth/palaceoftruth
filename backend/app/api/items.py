@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, select, func, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.models.embedding import Embedding
@@ -21,7 +21,7 @@ from app.schemas.relationship import RelatedItemResponse, RelatedItemsResponse
 from app.services.item_dates import apply_effective_date
 from app.workers.queues import enqueue_palace_job
 
-router = APIRouter(prefix="/items", tags=["items"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/items", tags=["items"])
 
 _SORT_FIELDS = {
     "created_at": Item.created_at,
@@ -118,7 +118,7 @@ async def _schedule_palace_dirty(request: Request, item_ids: list[uuid.UUID], re
     )
 
 
-@router.get("", response_model=ItemListResponse)
+@router.get("", response_model=ItemListResponse, dependencies=[Depends(require_api_capability("read"))])
 async def list_items(
     request: Request,
     page: int = Query(1, ge=1),
@@ -200,7 +200,7 @@ async def list_items(
     )
 
 
-@router.post("", response_model=ItemCreateResponse, status_code=201)
+@router.post("", response_model=ItemCreateResponse, status_code=201, dependencies=[Depends(require_api_capability("write"))])
 async def create_item(
     body: ItemCreate,
     request: Request,
@@ -243,7 +243,7 @@ async def create_item(
     )
 
 
-@router.post("/batch", response_model=BatchActionResponse)
+@router.post("/batch", response_model=BatchActionResponse, dependencies=[Depends(require_api_capability("write"))])
 async def batch_items(
     body: BatchActionRequest,
     request: Request,
@@ -302,7 +302,7 @@ async def batch_items(
     return BatchActionResponse(affected=result.rowcount, action=body.action)
 
 
-@router.get("/{item_id}", response_model=ItemResponse)
+@router.get("/{item_id}", response_model=ItemResponse, dependencies=[Depends(require_api_capability("read"))])
 async def get_item(
     item_id: uuid.UUID,
     request: Request,
@@ -316,7 +316,7 @@ async def get_item(
     return ItemResponse.model_validate(row)
 
 
-@router.get("/{item_id}/artifact")
+@router.get("/{item_id}/artifact", dependencies=[Depends(require_api_capability("read"))])
 async def get_item_artifact(
     item_id: uuid.UUID,
     request: Request,
@@ -344,7 +344,7 @@ async def get_item_artifact(
     )
 
 
-@router.patch("/{item_id}", response_model=ItemResponse)
+@router.patch("/{item_id}", response_model=ItemResponse, dependencies=[Depends(require_api_capability("write"))])
 async def update_item(
     item_id: uuid.UUID,
     body: ItemUpdate,
@@ -407,7 +407,7 @@ async def update_item(
     return ItemResponse.model_validate(row)
 
 
-@router.delete("/{item_id}", response_model=ItemDeleteResponse)
+@router.delete("/{item_id}", response_model=ItemDeleteResponse, dependencies=[Depends(require_api_capability("write"))])
 async def delete_item(
     item_id: uuid.UUID,
     request: Request,
@@ -424,7 +424,7 @@ async def delete_item(
     return ItemDeleteResponse(deleted=True, item_id=row.id, status=row.status, deleted_at=deleted_at)
 
 
-@router.post("/{item_id}/restore", response_model=ItemRestoreResponse)
+@router.post("/{item_id}/restore", response_model=ItemRestoreResponse, dependencies=[Depends(require_api_capability("write"))])
 async def restore_item(
     item_id: uuid.UUID,
     request: Request,
@@ -443,7 +443,7 @@ async def restore_item(
     return ItemRestoreResponse(restored=True, item=ItemResponse.model_validate(row))
 
 
-@router.get("/{item_id}/related", response_model=RelatedItemsResponse)
+@router.get("/{item_id}/related", response_model=RelatedItemsResponse, dependencies=[Depends(require_api_capability("read"))])
 async def get_related(
     item_id: uuid.UUID,
     request: Request,

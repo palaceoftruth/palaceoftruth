@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_api_key
+from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.tag import TagListResponse
 
-router = APIRouter(prefix="/tags", tags=["tags"], dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/tags", tags=["tags"], dependencies=[Depends(require_api_capability("read"))])
 
 
 @router.get("", response_model=TagListResponse)
