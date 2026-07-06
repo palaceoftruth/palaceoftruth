@@ -2,8 +2,8 @@ apiVersion: v2
 name: palaceoftruth
 description: Palace of Truth knowledge base, retrieval service, and agent-memory control plane
 type: application
-version: 0.1.439
-appVersion: "b1de1292"
+version: 0.1.440
+appVersion: "58a1ecd2"
 keywords:
   - palaceoftruth
   - knowledge-base
