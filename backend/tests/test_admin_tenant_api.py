@@ -37,10 +37,11 @@ class _Result:
 
 
 class FakeSession:
-    def __init__(self, api_keys=None, audit_events=None) -> None:
+    def __init__(self, api_keys=None, audit_events=None, mcp_clients=None, mcp_events=None) -> None:
         self.api_keys = list(api_keys or [])
         self.audit_events = list(audit_events or [])
-        self.mcp_clients = []
+        self.mcp_clients = list(mcp_clients or [])
+        self.mcp_events = list(mcp_events or [])
         self.revoked_tokens = []
         self.commit_count = 0
 
@@ -97,6 +98,16 @@ class FakeSession:
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return _Result(rows)
 
+        if "from mcp_clients" in sql and "order by created_at desc" in sql:
+            rows = [row for row in self.mcp_clients if row["tenant_id"] == params["tenant_id"]]
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+            return _Result(rows)
+
+        if "from mcp_request_audit_events" in sql:
+            rows = [row for row in self.mcp_events if row["tenant_id"] == params["tenant_id"]]
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+            return _Result(rows[: params["limit"]])
+
         if "insert into mcp_clients" in sql:
             row = next(
                 (
@@ -118,6 +129,8 @@ class FakeSession:
                     "oauth_client_secret_hash": params["secret_hash"],
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": params["token_ttl_seconds"],
+                    "created_at": datetime.now(timezone.utc),
+                    "last_seen_at": None,
                 }
                 self.mcp_clients.append(row)
             else:
@@ -184,6 +197,56 @@ def _api_key_row(*, tenant_id: str, description: str | None, revoked: bool = Fal
         "revoked_at": datetime.now(timezone.utc) if revoked else None,
         "last_used_at": None,
         "key_hash": "existing-hash",
+    }
+
+
+def _mcp_client_row(
+    *,
+    tenant_id: str,
+    client_key: str = "helm-mcp",
+    revoked: bool = False,
+    oauth_client_secret_hash: str | None = "hash",
+    last_seen_at: datetime | None = None,
+) -> dict:
+    return {
+        "id": uuid.uuid4(),
+        "tenant_id": tenant_id,
+        "client_key": client_key,
+        "display_name": "Helm MCP",
+        "allowed_scopes": ["read", "write"],
+        "metadata": {"runtime": "mcp"},
+        "oauth_client_secret_hash": oauth_client_secret_hash,
+        "oauth_revoked_at": datetime.now(timezone.utc) if revoked else None,
+        "oauth_token_ttl_seconds": 3600,
+        "created_at": datetime.now(timezone.utc),
+        "last_seen_at": last_seen_at,
+    }
+
+
+def _mcp_event_row(
+    *,
+    tenant_id: str,
+    client_id: uuid.UUID | None,
+    client_key: str = "helm-mcp",
+    status: str = "success",
+    operation: str = "mcp.create_memory_entry",
+    params_summary: dict | None = None,
+    created_at: datetime | None = None,
+) -> dict:
+    return {
+        "id": uuid.uuid4(),
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "client_key": client_key,
+        "client_name": "Helm MCP",
+        "operation": operation,
+        "required_scope": None,
+        "params_summary": params_summary
+        or {"metadata": {"transport": "mcp", "auth_mode": "oauth_client_credentials"}},
+        "status": status,
+        "error_class": None,
+        "app_version": "test",
+        "created_at": created_at or datetime.now(timezone.utc),
     }
 
 
@@ -311,6 +374,159 @@ def test_list_tenant_api_key_audit_events_returns_secret_safe_events() -> None:
     assert body["events"][0]["api_key_id"] == str(key_id)
     assert body["events"][0]["event_type"] == "rotate"
     assert "api_key" not in body["events"][0]["details"]
+
+
+def test_api_key_retirement_readiness_allows_oauth_only_mcp_with_break_glass_key() -> None:
+    old_key = _api_key_row(tenant_id="tenant-a", description="Break-glass")
+    old_key["last_used_at"] = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    oauth_client = _mcp_client_row(tenant_id="tenant-a", last_seen_at=datetime.now(timezone.utc))
+    session = FakeSession(
+        api_keys=[old_key],
+        mcp_clients=[oauth_client],
+        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=oauth_client["id"])],
+    )
+    client = _client(session)
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is True
+    assert body["active_key_count"] == 1
+    assert body["recent_api_key_use_detected"] is False
+    assert body["recent_oauth_activity_detected"] is True
+    assert {item["id"]: item["status"] for item in body["checklist"]} == {
+        "oauth-client-registered": "pass",
+        "oauth-client-observed": "pass",
+        "api-key-recent-use": "pass",
+        "active-api-keys-retained": "warn",
+        "break-glass": "pass",
+    }
+    assert "api_key" not in json.dumps(body["recent_oauth_events"])
+
+
+def test_api_key_retirement_readiness_blocks_recent_api_key_use() -> None:
+    active = _api_key_row(tenant_id="tenant-a", description="Recently used")
+    active["last_used_at"] = datetime.now(timezone.utc)
+    oauth_client = _mcp_client_row(tenant_id="tenant-a", last_seen_at=datetime.now(timezone.utc))
+    session = FakeSession(
+        api_keys=[active],
+        mcp_clients=[oauth_client],
+        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=oauth_client["id"])],
+    )
+    client = _client(session)
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness?lookback_days=30",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["recent_api_key_use_detected"] is True
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["api-key-recent-use"] == "block"
+    assert "human approval" in body["break_glass_procedure"]
+
+
+def test_api_key_retirement_readiness_ignores_legacy_non_oauth_clients() -> None:
+    legacy_client = _mcp_client_row(
+        tenant_id="tenant-a",
+        oauth_client_secret_hash=None,
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    session = FakeSession(
+        mcp_clients=[legacy_client],
+        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=legacy_client["id"])],
+    )
+    client = _client(session)
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["active_oauth_client_count"] == 0
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["oauth-client-registered"] == "block"
+    assert statuses["oauth-client-observed"] == "block"
+
+
+def test_api_key_retirement_readiness_requires_activity_from_active_oauth_client() -> None:
+    stale_active = _mcp_client_row(tenant_id="tenant-a", client_key="helm-mcp", last_seen_at=None)
+    revoked_recent = _mcp_client_row(
+        tenant_id="tenant-a",
+        client_key="old-mcp",
+        revoked=True,
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    session = FakeSession(
+        mcp_clients=[stale_active, revoked_recent],
+        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=revoked_recent["id"], client_key="old-mcp")],
+    )
+    client = _client(session)
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["active_oauth_client_count"] == 1
+    assert body["recent_oauth_activity_detected"] is False
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["oauth-client-registered"] == "pass"
+    assert statuses["oauth-client-observed"] == "block"
+
+
+def test_api_key_retirement_readiness_requires_mcp_specific_oauth_activity() -> None:
+    oauth_client = _mcp_client_row(tenant_id="tenant-a", last_seen_at=datetime.now(timezone.utc))
+    session = FakeSession(
+        mcp_clients=[oauth_client],
+        mcp_events=[
+            _mcp_event_row(
+                tenant_id="tenant-a",
+                client_id=oauth_client["id"],
+                operation="oauth.token_issue",
+                params_summary={"resource_kind": "api"},
+            )
+        ],
+    )
+    client = _client(session)
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["recent_oauth_activity_detected"] is False
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["oauth-client-registered"] == "pass"
+    assert statuses["oauth-client-observed"] == "block"
+
+
+def test_api_key_retirement_readiness_rejects_invalid_lookback() -> None:
+    client = _client(FakeSession())
+
+    response = client.get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness?lookback_days=0",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "lookback_days must be between 1 and 365"
 
 
 def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> None:
