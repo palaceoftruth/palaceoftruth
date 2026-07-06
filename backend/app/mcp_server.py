@@ -53,6 +53,8 @@ PALACE_MCP_OAUTH_CLIENT_SECRET_ENVS = (
     "SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET",
 )
 PALACE_MCP_OAUTH_TOKEN_URL_ENVS = ("PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL", "SECONDBRAIN_MCP_OAUTH_TOKEN_URL")
+PALACE_MCP_OAUTH_RESOURCE_ENVS = ("PALACEOFTRUTH_MCP_OAUTH_RESOURCE", "SECONDBRAIN_MCP_OAUTH_RESOURCE")
+PALACE_MCP_OAUTH_AUDIENCE_ENVS = ("PALACEOFTRUTH_MCP_OAUTH_AUDIENCE", "SECONDBRAIN_MCP_OAUTH_AUDIENCE")
 PALACE_API_BASE_URL_ENVS = ("PALACEOFTRUTH_API_BASE_URL", "SECONDBRAIN_API_BASE_URL")
 PALACE_MCP_TIMEOUT_ENVS = ("PALACEOFTRUTH_MCP_TIMEOUT_SECONDS", "SECONDBRAIN_MCP_TIMEOUT_SECONDS")
 PALACE_MCP_TRANSPORT_ENVS = ("PALACEOFTRUTH_MCP_TRANSPORT", "SECONDBRAIN_MCP_TRANSPORT")
@@ -497,6 +499,8 @@ class SecondBrainMcpSettings:
     bearer_token: str | None = None
     oauth_client_secret: str | None = None
     oauth_token_url: str | None = None
+    oauth_resource: str | None = None
+    oauth_audience: str | None = None
     timeout_seconds: float = 30.0
     client_key: str = "default"
     client_name: str = "Palace MCP adapter"
@@ -546,6 +550,8 @@ class SecondBrainMcpSettings:
         oauth_token_url, _ = _env_value(PALACE_MCP_OAUTH_TOKEN_URL_ENVS)
         if oauth_token_url is None:
             oauth_token_url = f"{api_base_url.rstrip('/')}/api/v1/memory/mcp/oauth/token"
+        oauth_resource, _ = _env_value(PALACE_MCP_OAUTH_RESOURCE_ENVS)
+        oauth_audience, _ = _env_value(PALACE_MCP_OAUTH_AUDIENCE_ENVS)
         if not api_key and not bearer_token and not oauth_client_secret:
             raise RuntimeError(
                 f"{_env_names_for_error(PALACE_API_KEY_ENVS)}, "
@@ -558,6 +564,8 @@ class SecondBrainMcpSettings:
             bearer_token=bearer_token or None,
             oauth_client_secret=oauth_client_secret or None,
             oauth_token_url=oauth_token_url or None,
+            oauth_resource=oauth_resource or None,
+            oauth_audience=oauth_audience or None,
             timeout_seconds=timeout_seconds,
             client_key=client_key.strip(),
             client_name=client_name.strip(),
@@ -627,16 +635,21 @@ class SecondBrainApiClient:
             ) from exc
 
     async def _auth_headers(self, *, required_scope: McpOperationScope | None = None) -> dict[str, str]:
+        if self.settings.bearer_token or self.settings.oauth_client_secret:
+            token = await self._active_bearer_token()
+            return {"Authorization": f"Bearer {token}"}
         if self.settings.api_key:
             headers = {"X-API-Key": self.settings.api_key}
             if required_scope is not None:
                 headers["X-MCP-Scope"] = required_scope
                 headers["X-MCP-Scopes"] = ",".join(self.settings.client_scopes)
             return headers
-        token = await self._active_bearer_token()
-        return {"Authorization": f"Bearer {token}"}
+        raise RuntimeError("MCP API key, bearer token, or OAuth client secret is required")
 
     def _oauth_resource(self) -> str:
+        configured_resource = self.settings.oauth_resource or self.settings.oauth_audience
+        if configured_resource:
+            return configured_resource
         token_url = self.settings.oauth_token_url
         if not token_url:
             token_url = f"{self.settings.api_base_url.rstrip('/')}/memory/mcp/oauth/token"

@@ -44,6 +44,14 @@ def _manifest_by_kind_name(manifests: list[dict[str, Any]], kind: str, name: str
     raise AssertionError(f"{kind} {name} was not rendered")
 
 
+def _manifest_by_kind_name_prefix(manifests: list[dict[str, Any]], kind: str, prefix: str) -> dict[str, Any]:
+    for manifest in manifests:
+        name = manifest.get("metadata", {}).get("name")
+        if manifest.get("kind") == kind and isinstance(name, str) and name.startswith(prefix):
+            return manifest
+    raise AssertionError(f"{kind} with name prefix {prefix} was not rendered")
+
+
 def _temp_volume(deployment: dict[str, Any]) -> dict[str, Any]:
     volumes = deployment["spec"]["template"]["spec"].get("volumes", [])
     for volume in volumes:
@@ -59,6 +67,10 @@ def _temp_mount(deployment: dict[str, Any]) -> dict[str, Any]:
         if mount.get("name") == "temp-files":
             return mount
     raise AssertionError(f"{deployment['metadata']['name']} did not render temp-files mount")
+
+
+def _container_env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {entry["name"]: entry for entry in container.get("env", [])}
 
 
 def _upload_artifacts_mounts(deployment: dict[str, Any]) -> list[dict[str, Any]]:
@@ -236,6 +248,57 @@ def test_backend_cors_uses_explicit_allowlist() -> None:
 
     assert config_map["data"]["CORS_ALLOWED_ORIGINS"] == "https://palace.example.com,https://api.palace.example.com"
     assert config_map["data"]["CORS_ALLOWED_ORIGINS"] != "*"
+
+
+def test_mcp_deployment_defaults_to_explicit_legacy_api_key_fallback() -> None:
+    manifests = _render_chart()
+    deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
+    env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+
+    assert env["PALACEOFTRUTH_API_KEY"]["valueFrom"]["secretKeyRef"]["key"] == "API_KEY"
+    assert env["PALACEOFTRUTH_MCP_CLIENT_KEY"]["value"] == "helm-mcp"
+
+
+def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> None:
+    manifests = _render_chart(
+        "mcp.legacyApiKeyAuthEnabled=false",
+        "mcp.oauthClientSecretKey=MCP_CLIENT_SECRET",
+        "mcp.oauthTokenUrl=https://api.palace.example/api/v1/memory/mcp/oauth/token",
+        "mcp.oauthResource=https://mcp.palace.example/mcp",
+        "mcp.oauthAudience=https://mcp.palace.example/mcp",
+    )
+    deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
+    env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+
+    assert "PALACEOFTRUTH_API_KEY" not in env
+    assert env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
+    assert env["PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL"]["value"] == "https://api.palace.example/api/v1/memory/mcp/oauth/token"
+    assert env["PALACEOFTRUTH_MCP_OAUTH_RESOURCE"]["value"] == "https://mcp.palace.example/mcp"
+    assert env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://mcp.palace.example/mcp"
+
+
+def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key() -> None:
+    manifests = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "mcp.legacyApiKeyAuthEnabled=false",
+        "mcp.oauthClientSecretKey=MCP_CLIENT_SECRET",
+        "mcp.oauthTokenUrl=https://api.palace.example/api/v1/memory/mcp/oauth/token",
+        "mcp.oauthResource=https://mcp.palace.example/mcp",
+        "memoryRolloutSmoke.expectedAuthMode=mcp_oauth",
+        "memoryRolloutSmoke.expectedTenantId=tenant-a",
+        "memoryRolloutSmoke.expectedClientKey=helm-mcp",
+        "memoryRolloutSmoke.expectedScopes[0]=read",
+        "memoryRolloutSmoke.expectedScopes[1]=write",
+    )
+    job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    env = _container_env(container)
+
+    assert "PALACEOFTRUTH_API_KEY" not in env
+    assert env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
+    assert "--expected-auth-mode" in container["args"]
+    assert "mcp_oauth" in container["args"]
+    assert container["args"].count("--expected-scope") == 2
 
 
 def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:

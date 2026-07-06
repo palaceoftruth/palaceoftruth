@@ -144,6 +144,20 @@ def test_settings_from_env_accepts_oauth_client_secret_without_api_key(monkeypat
     assert settings.oauth_token_url == "https://api.palaceoftruth.test/api/v1/memory/mcp/oauth/token"
 
 
+def test_settings_from_env_accepts_explicit_oauth_resource_and_audience(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.delenv("SECONDBRAIN_API_KEY", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_RESOURCE", "https://mcp.palace.sarvent.cloud/mcp")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_AUDIENCE", "https://mcp.palace.sarvent.cloud/mcp")
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.oauth_resource == "https://mcp.palace.sarvent.cloud/mcp"
+    assert settings.oauth_audience == "https://mcp.palace.sarvent.cloud/mcp"
+
+
 def test_settings_from_env_prefers_palace_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "palace-secret")
     monkeypatch.setenv("SECONDBRAIN_API_KEY", "secondbrain-secret")
@@ -282,7 +296,7 @@ async def test_api_client_uses_static_mcp_bearer_token() -> None:
         api = SecondBrainApiClient(
             SecondBrainMcpSettings(
                 api_base_url="https://api.test",
-                api_key=None,
+                api_key="legacy-api-key",
                 bearer_token="bearer-token",
             ),
             client=http_client,
@@ -311,7 +325,7 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
         api = SecondBrainApiClient(
             SecondBrainMcpSettings(
                 api_base_url="https://api.test",
-                api_key=None,
+                api_key="legacy-api-key",
                 oauth_client_secret="client-secret",
                 oauth_token_url="https://api.test/api/v1/memory/mcp/oauth/token",
                 client_key="codex-remote",
