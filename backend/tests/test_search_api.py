@@ -51,6 +51,8 @@ class AuthSession:
         params = params or {}
         if "from mcp_oauth_access_tokens" in sql:
             return _AuthResult(self.row)
+        if "insert into mcp_request_audit_events" in sql:
+            return _AuthResult(None)
         if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
             self.updates.append(params)
             return _AuthResult(None)
@@ -233,7 +235,7 @@ def test_search_get_rejects_oauth_bearer_missing_read_scope(monkeypatch) -> None
     assert response.status_code == 403
     assert response.json()["detail"] == "MCP bearer token missing read scope"
     assert ExplodingSearchService.init_calls == 0
-    assert auth_session.commits == 1
+    assert auth_session.commits == 2
 
 
 def test_search_get_rejects_oauth_bearer_wrong_resource(monkeypatch) -> None:
@@ -251,7 +253,7 @@ def test_search_get_rejects_oauth_bearer_wrong_resource(monkeypatch) -> None:
     assert response.json()["detail"] == "MCP bearer token resource is invalid"
     assert ExplodingSearchService.init_calls == 0
     assert auth_session.updates == []
-    assert auth_session.commits == 0
+    assert auth_session.commits == 1
 
 
 def test_search_get_accepts_any_and_all_tags_mode_values(monkeypatch) -> None:

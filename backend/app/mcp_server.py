@@ -649,6 +649,15 @@ class SecondBrainApiClient:
             return headers
         raise RuntimeError("MCP API key, bearer token, or OAuth client secret is required")
 
+    def _selected_auth_mode(self) -> str:
+        if self.settings.bearer_token:
+            return "static_bearer"
+        if self.settings.oauth_client_secret:
+            return "oauth_client_credentials"
+        if self.settings.api_key:
+            return "api_key"
+        return "missing"
+
     def _oauth_resource(self) -> str:
         token_url = self.settings.oauth_token_url
         if not token_url:
@@ -706,7 +715,7 @@ class SecondBrainApiClient:
                 "client_key": self.settings.client_key,
                 "display_name": self.settings.client_name,
                 "allowed_scopes": list(self.settings.client_scopes),
-                "metadata": {"transport": "mcp"},
+                "metadata": {"transport": "mcp", "auth_mode": self._selected_auth_mode()},
             },
             "operation": operation,
             "required_scope": required_scope,

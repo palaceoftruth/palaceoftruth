@@ -136,6 +136,53 @@ def _resource_matches_token(*, token_resource: object, expected_resources: set[s
     return isinstance(token_resource, str) and token_resource in expected_resources
 
 
+def _request_route(request: Request) -> str:
+    return request.url.path
+
+
+async def _record_token_validation_audit_event(
+    db,
+    *,
+    request: Request,
+    token_row,
+    operation: str,
+    required_scope: str | None,
+    status: str,
+    error_class: str | None = None,
+    params_summary: dict[str, Any] | None = None,
+) -> None:
+    await db.execute(
+        text(
+            """
+            INSERT INTO mcp_request_audit_events
+                (tenant_id, client_id, client_key, client_name, operation, required_scope,
+                 params_summary, status, error_class)
+            VALUES
+                (:tenant_id, :client_id, :client_key, :client_name, :operation, :required_scope,
+                 CAST(:params_summary AS jsonb), :status, :error_class)
+            """
+        ),
+        {
+            "tenant_id": token_row["tenant_id"],
+            "client_id": token_row["client_id"],
+            "client_key": token_row["client_key"],
+            "client_name": token_row.get("display_name") or token_row["client_key"],
+            "operation": operation,
+            "required_scope": required_scope,
+            "params_summary": json.dumps(
+                {
+                    "route": _request_route(request),
+                    "resource": token_row.get("token_resource"),
+                    "scopes": token_row.get("token_scopes") if isinstance(token_row.get("token_scopes"), list) else None,
+                    **(params_summary or {}),
+                }
+            ),
+            "status": status,
+            "error_class": error_class,
+        },
+    )
+
+
 def _context_from_scopes(
     *,
     tenant_id: str,
@@ -282,6 +329,7 @@ async def verify_memory_auth(
                     t.revoked_at AS token_revoked_at,
                     c.id AS client_id,
                     c.client_key,
+                    c.display_name,
                     c.allowed_scopes,
                     c.oauth_revoked_at AS client_revoked_at
                 FROM mcp_oauth_access_tokens t
@@ -296,12 +344,52 @@ async def verify_memory_auth(
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime):
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=None,
+                    status="denied",
+                    error_class="invalid_expiry",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token expiry is invalid", error="invalid_token")
             if expires_at.tzinfo is None:
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=None,
+                    status="denied",
+                    error_class="invalid_expiry",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token expiry is invalid", error="invalid_token")
             if expires_at <= datetime.now(timezone.utc):
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=None,
+                    status="denied",
+                    error_class="expired_token",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token expired", error="invalid_token")
             if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=None,
+                    status="denied",
+                    error_class="revoked_token",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token revoked", error="invalid_token")
             allowed_scopes = _parse_json_list(result["allowed_scopes"])
             token_scopes = _parse_json_list(result["token_scopes"])
@@ -310,6 +398,17 @@ async def verify_memory_auth(
             token_resource = result.get("token_resource")
             expected_resources = _expected_token_resources(request, expected_resource=expected_resource)
             if not _resource_matches_token(token_resource=token_resource, expected_resources=expected_resources):
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=None,
+                    status="denied",
+                    error_class="invalid_resource",
+                    params_summary={"expected_resources": sorted(expected_resources)},
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token resource is invalid", error="invalid_token")
             await db.execute(
                 text(
@@ -322,6 +421,15 @@ async def verify_memory_auth(
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),
                 {"client_id": result["client_id"]},
+            )
+            await _record_token_validation_audit_event(
+                db,
+                request=request,
+                token_row=result,
+                operation="oauth.token_use",
+                required_scope=None,
+                status="success",
+                params_summary={"expected_resources": sorted(expected_resources)},
             )
             await db.commit()
 
@@ -337,6 +445,7 @@ async def verify_memory_auth(
             subject_id=str(result["client_id"]),
             client_id=result["client_id"],
             client_key=result["client_key"],
+            client_name=result.get("display_name") or result["client_key"],
             scopes=token_scopes,
             resource=result.get("token_resource"),
             audit_metadata={"token_id": str(result["token_id"])},
@@ -388,16 +497,56 @@ async def _verify_scoped_bearer_token(
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=required_scope,
+                    status="denied",
+                    error_class="invalid_expiry",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, f"{detail_prefix} bearer token expiry is invalid", error="invalid_token")
             if expires_at <= datetime.now(timezone.utc):
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=required_scope,
+                    status="denied",
+                    error_class="expired_token",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, f"{detail_prefix} bearer token expired", error="invalid_token")
             if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=required_scope,
+                    status="denied",
+                    error_class="revoked_token",
+                )
+                await db.commit()
                 raise _auth_exception(request, 403, f"{detail_prefix} bearer token revoked", error="invalid_token")
             allowed_scopes = _parse_json_list(result["allowed_scopes"])
             token_scopes = _parse_json_list(result["token_scopes"])
             if any(scope not in allowed_scopes for scope in token_scopes):
                 raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token scopes are invalid")
             if required_scope not in token_scopes:
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=required_scope,
+                    status="denied",
+                    error_class="insufficient_scope",
+                )
+                await db.commit()
                 raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token missing {required_scope} scope")
             await db.execute(
                 text(
@@ -410,6 +559,14 @@ async def _verify_scoped_bearer_token(
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),
                 {"client_id": result["client_id"]},
+            )
+            await _record_token_validation_audit_event(
+                db,
+                request=request,
+                token_row=result,
+                operation="oauth.token_use",
+                required_scope=required_scope,
+                status="success",
             )
             await db.commit()
 
@@ -425,7 +582,7 @@ async def _verify_scoped_bearer_token(
             subject_id=str(result["client_id"]),
             client_id=result["client_id"],
             client_key=result["client_key"],
-            client_name=result["display_name"],
+            client_name=result.get("display_name") or result["client_key"],
             scopes=token_scopes,
             resource=result.get("token_resource"),
             audit_metadata={"token_id": str(result["token_id"])},
@@ -497,7 +654,7 @@ async def record_oauth_client_audit_event(
                 "tenant_id": request.state.tenant_id,
                 "client_id": client_id,
                 "client_key": getattr(request.state, "mcp_client_key", "unknown"),
-                "client_name": getattr(request.state, "mcp_client_name", "Unknown client"),
+                "client_name": getattr(request.state, "mcp_client_name", None) or "Unknown client",
                 "operation": operation,
                 "required_scope": required_scope,
                 "params_summary": json.dumps(params_summary or {}),
@@ -532,6 +689,18 @@ def require_capability(required_capability: str):
         if not context.scopes:
             raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
+            await record_oauth_client_audit_event(
+                request,
+                operation="oauth.route_capability",
+                required_scope=required_capability,
+                status="denied",
+                params_summary={
+                    "route": _request_route(request),
+                    "resource": context.resource,
+                    "scopes": list(context.scopes),
+                },
+                error_class="insufficient_scope",
+            )
             raise _auth_exception(
                 request,
                 403,
@@ -557,6 +726,18 @@ def require_api_capability(required_capability: str):
         if not context.scopes:
             raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
+            await record_oauth_client_audit_event(
+                request,
+                operation="oauth.route_capability",
+                required_scope=required_capability,
+                status="denied",
+                params_summary={
+                    "route": _request_route(request),
+                    "resource": context.resource,
+                    "scopes": list(context.scopes),
+                },
+                error_class="insufficient_scope",
+            )
             raise _auth_exception(
                 request,
                 403,

@@ -137,7 +137,7 @@ async def _authenticate_oauth_client(
             text(
                 """
                 SELECT id, tenant_id, client_key, allowed_scopes, oauth_client_secret_hash,
-                       oauth_revoked_at, oauth_token_ttl_seconds
+                       oauth_revoked_at, oauth_token_ttl_seconds, display_name
                 FROM mcp_clients
                 WHERE client_key = :client_key
                   AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
@@ -158,6 +158,68 @@ async def _authenticate_oauth_client(
     return row
 
 
+def _resource_kind(resource: str | None) -> str | None:
+    if resource is None:
+        return None
+    return "api" if urlsplit(resource).path.rstrip("/") == "/api/v1" else "mcp"
+
+
+async def _record_oauth_endpoint_audit_event(
+    db,
+    *,
+    client_row,
+    operation: str,
+    status: str,
+    params_summary: dict,
+    required_scope: str | None = None,
+    error_class: str | None = None,
+) -> None:
+    await db.execute(
+        text(
+            """
+            INSERT INTO mcp_request_audit_events
+                (tenant_id, client_id, client_key, client_name, operation, required_scope,
+                 params_summary, status, error_class)
+            VALUES
+                (:tenant_id, :client_id, :client_key, :client_name, :operation, :required_scope,
+                 CAST(:params_summary AS jsonb), :status, :error_class)
+            """
+        ),
+        {
+            "tenant_id": client_row["tenant_id"],
+            "client_id": client_row["id"],
+            "client_key": client_row["client_key"],
+            "client_name": client_row.get("display_name") or client_row["client_key"],
+            "operation": operation,
+            "required_scope": required_scope,
+            "params_summary": json.dumps(params_summary),
+            "status": status,
+            "error_class": error_class,
+        },
+    )
+
+
+async def _deny_token_issue(
+    db,
+    *,
+    client_row,
+    status_code: int,
+    detail: str,
+    params_summary: dict,
+    error_class: str,
+) -> None:
+    await _record_oauth_endpoint_audit_event(
+        db,
+        client_row=client_row,
+        operation="oauth.token_issue",
+        status="denied",
+        params_summary=params_summary,
+        error_class=error_class,
+    )
+    await db.commit()
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 @router.post("/token", response_model=McpOAuthTokenResponse)
 async def issue_mcp_access_token(
     request: Request,
@@ -175,18 +237,91 @@ async def issue_mcp_access_token(
         form_client_secret=client_secret,
         authorization=authorization,
     )
-    requested_resource = _normalize_resource(resource)
+    try:
+        requested_resource = _normalize_resource(resource)
+    except HTTPException:
+        async with async_session() as db:
+            await _deny_token_issue(
+                db,
+                client_row=row,
+                status_code=400,
+                detail="invalid_resource",
+                params_summary={
+                    "grant_type": "client_credentials",
+                    "requested_resource": resource,
+                    "resource_kind": None,
+                    "denial_reason": "invalid_resource",
+                },
+                error_class="invalid_resource",
+            )
     if requested_resource is None:
-        raise HTTPException(status_code=400, detail="invalid_resource")
+        async with async_session() as db:
+            await _deny_token_issue(
+                db,
+                client_row=row,
+                status_code=400,
+                detail="invalid_resource",
+                params_summary={
+                    "grant_type": "client_credentials",
+                    "requested_resource": None,
+                    "resource_kind": None,
+                    "denial_reason": "missing_resource",
+                },
+                error_class="invalid_resource",
+            )
     if requested_resource not in _supported_resources(request):
-        raise HTTPException(status_code=400, detail="invalid_resource")
+        async with async_session() as db:
+            await _deny_token_issue(
+                db,
+                client_row=row,
+                status_code=400,
+                detail="invalid_resource",
+                params_summary={
+                    "grant_type": "client_credentials",
+                    "requested_resource": requested_resource,
+                    "resource_kind": _resource_kind(requested_resource),
+                    "denial_reason": "unsupported_resource",
+                },
+                error_class="invalid_resource",
+            )
 
     async with async_session() as db:
-        allowed_scopes = _parse_scopes(row["allowed_scopes"])
-        token_scopes = _requested_scopes(scope, allowed_scopes)
-        ttl_seconds = int(row["oauth_token_ttl_seconds"] or 3600)
+        try:
+            allowed_scopes = _parse_scopes(row["allowed_scopes"])
+            token_scopes = _requested_scopes(scope, allowed_scopes)
+        except HTTPException as exc:
+            await _deny_token_issue(
+                db,
+                client_row=row,
+                status_code=exc.status_code,
+                detail=str(exc.detail),
+                params_summary={
+                    "grant_type": "client_credentials",
+                    "requested_scopes": scope,
+                    "requested_resource": requested_resource,
+                    "resource_kind": _resource_kind(requested_resource),
+                    "denial_reason": "invalid_scope",
+                },
+                error_class="invalid_scope",
+            )
+        ttl_raw = row["oauth_token_ttl_seconds"]
+        ttl_seconds = int(ttl_raw if ttl_raw is not None else 3600)
         if ttl_seconds <= 0:
-            raise HTTPException(status_code=403, detail="MCP client token TTL is invalid")
+            await _deny_token_issue(
+                db,
+                client_row=row,
+                status_code=403,
+                detail="MCP client token TTL is invalid",
+                params_summary={
+                    "grant_type": "client_credentials",
+                    "requested_scopes": token_scopes,
+                    "requested_resource": requested_resource,
+                    "resource_kind": _resource_kind(requested_resource),
+                    "ttl_seconds": ttl_seconds,
+                    "denial_reason": "invalid_ttl",
+                },
+                error_class="invalid_ttl",
+            )
 
         access_token = secrets.token_urlsafe(48)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
@@ -206,6 +341,19 @@ async def issue_mcp_access_token(
                 "scopes": json.dumps(token_scopes),
                 "resource": requested_resource,
                 "expires_at": expires_at,
+            },
+        )
+        await _record_oauth_endpoint_audit_event(
+            db,
+            client_row=row,
+            operation="oauth.token_issue",
+            status="success",
+            params_summary={
+                "grant_type": "client_credentials",
+                "requested_scopes": token_scopes,
+                "requested_resource": requested_resource,
+                "resource_kind": _resource_kind(requested_resource),
+                "ttl_seconds": ttl_seconds,
             },
         )
         await db.commit()
@@ -244,6 +392,13 @@ async def revoke_mcp_access_token(
                 "tenant_id": caller["tenant_id"],
                 "client_id": caller["id"],
             },
+        )
+        await _record_oauth_endpoint_audit_event(
+            db,
+            client_row=caller,
+            operation="oauth.token_revoke",
+            status="success",
+            params_summary={"token": {"redacted": True, "present": True}},
         )
         await db.commit()
     return McpOAuthRevokeResponse()
@@ -284,6 +439,20 @@ async def introspect_mcp_access_token(
             {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"]},
         )
         row = result.mappings().one_or_none()
+        if row is None:
+            await _record_oauth_endpoint_audit_event(
+                db,
+                client_row=caller,
+                operation="oauth.token_introspect",
+                status="denied",
+                params_summary={
+                    "token": {"redacted": True, "present": True},
+                    "active": False,
+                    "denial_reason": "not_found_for_client",
+                },
+                error_class="inactive_token",
+            )
+            await db.commit()
 
     if row is None:
         return McpOAuthIntrospectionResponse(active=False)
@@ -297,8 +466,37 @@ async def introspect_mcp_access_token(
         and row["client_revoked_at"] is None
     )
     if not active:
+        async with async_session() as db:
+            await _record_oauth_endpoint_audit_event(
+                db,
+                client_row=caller,
+                operation="oauth.token_introspect",
+                status="denied",
+                params_summary={
+                    "token": {"redacted": True, "present": True},
+                    "active": False,
+                    "denial_reason": "inactive",
+                },
+                error_class="inactive_token",
+            )
+            await db.commit()
         return McpOAuthIntrospectionResponse(active=False)
     token_scopes = _parse_scopes(row["token_scopes"])
+    async with async_session() as db:
+        await _record_oauth_endpoint_audit_event(
+            db,
+            client_row=caller,
+            operation="oauth.token_introspect",
+            status="success",
+            params_summary={
+                "token": {"redacted": True, "present": True},
+                "active": True,
+                "resource": row["token_resource"],
+                "resource_kind": _resource_kind(row["token_resource"]),
+                "scopes": token_scopes,
+            },
+        )
+        await db.commit()
     return McpOAuthIntrospectionResponse(
         active=True,
         client_id=row["client_key"],

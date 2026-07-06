@@ -27,6 +27,7 @@ class FakeSession:
     def __init__(self, row) -> None:
         self.row = row
         self.updates = []
+        self.audit_events = []
         self.commits = 0
 
     async def __aenter__(self):
@@ -45,6 +46,9 @@ class FakeSession:
             return _Result(None)
         if "from mcp_oauth_access_tokens" in sql:
             return _Result(self.row)
+        if "insert into mcp_request_audit_events" in sql:
+            self.audit_events.append(params)
+            return _Result(None)
         if "update mcp_oauth_access_tokens" in sql or "update mcp_clients" in sql:
             self.updates.append(params)
             return _Result(None)
@@ -155,23 +159,39 @@ async def test_require_api_capability_preserves_legacy_api_key_access() -> None:
 
 @pytest.mark.asyncio
 async def test_require_api_capability_rejects_bearer_missing_scope() -> None:
+    client_id = uuid.uuid4()
+    session = FakeSession(None)
     request = _request()
     request.state.auth_context = auth.AuthContext(
         tenant_id="tenant-a",
         auth_mode="mcp_oauth",
+        client_id=client_id,
+        client_key="codex-remote",
         token_hash_reference=auth.hash_secret("raw-token"),
         scopes=("read",),
         capabilities=frozenset({"read"}),
+        resource="https://testserver/api/v1",
     )
     request.state.tenant_id = "tenant-a"
     request.state.auth_mode = "mcp_oauth"
+    request.state.mcp_client_id = client_id
+    request.state.mcp_client_key = "codex-remote"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(auth, "async_session", lambda: session)
 
-    dependency = auth.require_api_capability("write")
-    with pytest.raises(HTTPException) as exc_info:
-        await dependency(request, _="raw-token")
+    try:
+        dependency = auth.require_api_capability("write")
+        with pytest.raises(HTTPException) as exc_info:
+            await dependency(request, _="raw-token")
+    finally:
+        monkeypatch.undo()
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail == "MCP bearer token missing write scope"
+    assert session.audit_events[0]["operation"] == "oauth.route_capability"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["required_scope"] == "write"
+    assert session.audit_events[0]["error_class"] == "insufficient_scope"
 
 
 @pytest.mark.asyncio
@@ -214,6 +234,7 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
             "token_revoked_at": None,
             "client_id": client_id,
             "client_key": "codex-remote",
+            "display_name": "Codex Remote",
             "allowed_scopes": ["read", "write"],
             "client_revoked_at": None,
         }
@@ -233,9 +254,15 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
     assert request.state.auth_context.auth_mode == "mcp_oauth"
     assert request.state.auth_context.client_id == client_id
     assert request.state.auth_context.client_key == "codex-remote"
+    assert request.state.auth_context.client_name == "Codex Remote"
+    assert request.state.mcp_client_name == "Codex Remote"
     assert request.state.auth_context.scopes == ("read",)
     assert request.state.auth_context.capabilities == frozenset({"read"})
     assert request.state.auth_context.token_hash_reference == auth.hash_secret("raw-token")
+    assert session.audit_events[0]["operation"] == "oauth.token_use"
+    assert session.audit_events[0]["status"] == "success"
+    assert session.audit_events[0]["client_name"] == "Codex Remote"
+    assert "raw-token" not in session.audit_events[0]["params_summary"]
     assert session.commits == 1
 
 
@@ -251,6 +278,7 @@ async def test_verify_memory_auth_rejects_null_resource_for_rest_api(monkeypatch
             "token_revoked_at": None,
             "client_id": uuid.uuid4(),
             "client_key": "codex-remote",
+            "display_name": "Codex Remote",
             "allowed_scopes": ["read"],
             "client_revoked_at": None,
         }
@@ -263,7 +291,11 @@ async def test_verify_memory_auth_rejects_null_resource_for_rest_api(monkeypatch
     assert exc_info.value.status_code == 403
     assert "resource" in exc_info.value.detail
     assert session.updates == []
-    assert session.commits == 0
+    assert session.audit_events[0]["operation"] == "oauth.token_use"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_resource"
+    assert "raw-token" not in session.audit_events[0]["params_summary"]
+    assert session.commits == 1
 
 
 @pytest.mark.asyncio
@@ -278,6 +310,7 @@ async def test_verify_memory_auth_allows_null_resource_only_for_mcp_validation(m
             "token_revoked_at": None,
             "client_id": uuid.uuid4(),
             "client_key": "codex-remote",
+            "display_name": "Codex Remote",
             "allowed_scopes": ["read"],
             "client_revoked_at": None,
         }
@@ -309,6 +342,7 @@ async def test_verify_memory_auth_rejects_wrong_mcp_resource(monkeypatch) -> Non
             "token_revoked_at": None,
             "client_id": uuid.uuid4(),
             "client_key": "codex-remote",
+            "display_name": "Codex Remote",
             "allowed_scopes": ["read"],
             "client_revoked_at": None,
         }
@@ -321,7 +355,9 @@ async def test_verify_memory_auth_rejects_wrong_mcp_resource(monkeypatch) -> Non
     assert exc_info.value.status_code == 403
     assert "resource" in exc_info.value.detail
     assert session.updates == []
-    assert session.commits == 0
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_resource"
+    assert session.commits == 1
 
 
 @pytest.mark.asyncio
@@ -353,7 +389,9 @@ async def test_verify_memory_auth_rejects_api_resource_when_mcp_expected(monkeyp
     assert exc_info.value.status_code == 403
     assert "resource" in exc_info.value.detail
     assert session.updates == []
-    assert session.commits == 0
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "invalid_resource"
+    assert session.commits == 1
 
 
 @pytest.mark.asyncio
@@ -489,6 +527,9 @@ async def test_verify_capture_write_auth_accepts_scoped_extension_token(monkeypa
     assert request.state.auth_context.client_id == client_id
     assert request.state.auth_context.client_name == "Palace Capture Extension"
     assert request.state.auth_context.has_capability("capture:write")
+    assert session.audit_events[0]["operation"] == "oauth.token_use"
+    assert session.audit_events[0]["required_scope"] == "capture:write"
+    assert session.audit_events[0]["status"] == "success"
     assert session.commits == 1
 
 
@@ -519,3 +560,7 @@ async def test_verify_capture_write_auth_rejects_job_read_only_extension_token(m
 
     assert exc_info.value.status_code == 403
     assert "capture:write" in exc_info.value.detail
+    assert session.audit_events[0]["operation"] == "oauth.token_use"
+    assert session.audit_events[0]["required_scope"] == "capture:write"
+    assert session.audit_events[0]["status"] == "denied"
+    assert session.audit_events[0]["error_class"] == "insufficient_scope"
