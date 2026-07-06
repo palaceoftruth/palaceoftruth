@@ -15,8 +15,8 @@ mcp:
   legacyApiKeyAuthEnabled: true
   oauthClientSecretKey: MCP_CLIENT_SECRET
   oauthTokenUrl: https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth/token
-  oauthResource: https://mcp.palace.sarvent.cloud/mcp
-  oauthAudience: https://mcp.palace.sarvent.cloud/mcp
+  oauthResource: https://api.palace.sarvent.cloud/api/v1
+  oauthAudience: https://api.palace.sarvent.cloud/api/v1
 
 memoryRolloutSmoke:
   expectedAuthMode: mcp_oauth
@@ -53,7 +53,7 @@ helm template palaceoftruth chart \
   --set mcp.legacyApiKeyAuthEnabled=false \
   --set mcp.oauthClientSecretKey=MCP_CLIENT_SECRET \
   --set mcp.oauthTokenUrl=https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth/token \
-  --set mcp.oauthResource=https://mcp.palace.sarvent.cloud/mcp \
+  --set mcp.oauthResource=https://api.palace.sarvent.cloud/api/v1 \
   --set memoryRolloutSmoke.expectedAuthMode=mcp_oauth \
   --set memoryRolloutSmoke.expectedClientKey=helm-mcp \
   --set memoryRolloutSmoke.expectedScopes[0]=read \

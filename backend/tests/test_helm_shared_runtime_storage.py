@@ -264,8 +264,8 @@ def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> No
         "mcp.legacyApiKeyAuthEnabled=false",
         "mcp.oauthClientSecretKey=MCP_CLIENT_SECRET",
         "mcp.oauthTokenUrl=https://api.palace.example/api/v1/memory/mcp/oauth/token",
-        "mcp.oauthResource=https://mcp.palace.example/mcp",
-        "mcp.oauthAudience=https://mcp.palace.example/mcp",
+        "mcp.oauthResource=https://api.palace.example/api/v1",
+        "mcp.oauthAudience=https://api.palace.example/api/v1",
     )
     deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
     env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
@@ -273,8 +273,8 @@ def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> No
     assert "PALACEOFTRUTH_API_KEY" not in env
     assert env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
     assert env["PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL"]["value"] == "https://api.palace.example/api/v1/memory/mcp/oauth/token"
-    assert env["PALACEOFTRUTH_MCP_OAUTH_RESOURCE"]["value"] == "https://mcp.palace.example/mcp"
-    assert env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://mcp.palace.example/mcp"
+    assert env["PALACEOFTRUTH_MCP_OAUTH_RESOURCE"]["value"] == "https://api.palace.example/api/v1"
+    assert env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://api.palace.example/api/v1"
 
 
 def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key() -> None:
@@ -283,7 +283,7 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
         "mcp.legacyApiKeyAuthEnabled=false",
         "mcp.oauthClientSecretKey=MCP_CLIENT_SECRET",
         "mcp.oauthTokenUrl=https://api.palace.example/api/v1/memory/mcp/oauth/token",
-        "mcp.oauthResource=https://mcp.palace.example/mcp",
+        "mcp.oauthResource=https://api.palace.example/api/v1",
         "memoryRolloutSmoke.expectedAuthMode=mcp_oauth",
         "memoryRolloutSmoke.expectedTenantId=tenant-a",
         "memoryRolloutSmoke.expectedClientKey=helm-mcp",

@@ -80,7 +80,7 @@ class AuthSession:
         self.commits += 1
 
 
-def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://testserver/mcp"):
+def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://testserver/api/v1"):
     return {
         "token_id": uuid.uuid4(),
         "tenant_id": "tenant-a",

@@ -93,7 +93,7 @@ class FakeChatService:
 def _oauth_token_row(
     *,
     scopes: list[str],
-    resource: str | None = "https://testserver/mcp",
+    resource: str | None = "https://testserver/api/v1",
     expires_at: datetime | None = None,
     revoked: bool = False,
 ):
@@ -169,6 +169,12 @@ def _client(monkeypatch, auth_session: AuthSession, db_session=object()) -> Test
             "GET",
             "/api/v1/palace",
             _oauth_token_row(scopes=["read"], resource="https://wrong.example/mcp"),
+            "MCP bearer token resource is invalid",
+        ),
+        (
+            "GET",
+            "/api/v1/palace",
+            _oauth_token_row(scopes=["read"], resource=None),
             "MCP bearer token resource is invalid",
         ),
         (

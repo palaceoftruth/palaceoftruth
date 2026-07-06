@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -30,6 +31,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, DEFAULT_MCP_CLIENT_SCOPES, McpOperationScope
 from app.services.codex_memory_privacy import scan_codex_memory_privacy
 
+
+logger = logging.getLogger(__name__)
 
 ScopeType = Literal["session", "agent", "workspace", "tenant_shared"]
 WakeupBriefScopeType = Literal["tenant", "wing"]
@@ -647,14 +650,17 @@ class SecondBrainApiClient:
         raise RuntimeError("MCP API key, bearer token, or OAuth client secret is required")
 
     def _oauth_resource(self) -> str:
-        configured_resource = self.settings.oauth_resource or self.settings.oauth_audience
-        if configured_resource:
-            return configured_resource
         token_url = self.settings.oauth_token_url
         if not token_url:
             token_url = f"{self.settings.api_base_url.rstrip('/')}/memory/mcp/oauth/token"
         parsed = urlsplit(token_url)
-        return urlunsplit((parsed.scheme, parsed.netloc, "/mcp", "", ""))
+        configured_resource = self.settings.oauth_resource or self.settings.oauth_audience
+        if configured_resource:
+            configured = urlsplit(configured_resource)
+            if configured.path.rstrip("/") != "/mcp":
+                return configured_resource
+            logger.warning("Ignoring legacy MCP OAuth resource %s for backend API calls", configured_resource)
+        return urlunsplit((parsed.scheme, parsed.netloc, "/api/v1", "", ""))
 
     async def _active_bearer_token(self) -> str:
         if self._bearer_token and (
