@@ -44,6 +44,14 @@ The report is read-only and secret-safe. It must show:
 * no active tenant API key use inside the chosen lookback window
 * any retained active API keys marked only as human-controlled break-glass
 
+Current `palace-sarvent` evidence captured for SAR-992 is recorded in
+`docs/research/sar-992-api-key-retirement-readiness-evidence.md`. As of
+2026-07-06 20:45 UTC, live MCP pods still expose only the legacy API-key
+runtime path and the rollout smoke is disabled, so
+`mcp.legacyApiKeyAuthEnabled=false` is not yet safe for that deployment.
+Stage OAuth credentials and smoke assertions first, then recapture the readiness
+report with the human-held admin secret.
+
 Only then set this to stop mounting the broad `API_KEY` into MCP runtime pods
 and smoke jobs:
 
