@@ -301,6 +301,79 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
     assert container["args"].count("--expected-scope") == 2
 
 
+def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_identity() -> None:
+    manifests = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "externalSecrets.enabled=true",
+        "externalSecrets.secretStoreName=bitwarden-fields",
+        "externalSecrets.appSecretItemId=app-secret-item",
+        "externalSecrets.registrySecretItemId=registry-secret-item",
+        "externalSecrets.mcpOauthClientSecretProperty=mcp-oauth-client-secret",
+        "mcp.apiBaseUrl=https://api.palace.sarvent.cloud",
+        "mcp.legacyApiKeyAuthEnabled=true",
+        "mcp.oauthClientSecretKey=MCP_CLIENT_SECRET",
+        "mcp.oauthTokenUrl=https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth/token",
+        "mcp.oauthResource=https://api.palace.sarvent.cloud/api/v1",
+        "mcp.oauthAudience=https://api.palace.sarvent.cloud/api/v1",
+        "memoryRolloutSmoke.expectedAuthMode=mcp_oauth",
+        "memoryRolloutSmoke.expectedTenantId=default",
+        "memoryRolloutSmoke.expectedClientKey=helm-mcp",
+        "memoryRolloutSmoke.expectedScopes[0]=read",
+        "memoryRolloutSmoke.expectedScopes[1]=write",
+    )
+    deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
+    deployment_env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+    job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
+    job_container = job["spec"]["template"]["spec"]["containers"][0]
+    job_env = _container_env(job_container)
+    external_secret = _manifest_by_kind_name(manifests, "ExternalSecret", "palaceoftruth-app-secrets")
+
+    assert deployment_env["PALACEOFTRUTH_API_KEY"]["valueFrom"]["secretKeyRef"]["key"] == "API_KEY"
+    assert deployment_env["PALACEOFTRUTH_API_BASE_URL"]["value"] == "https://api.palace.sarvent.cloud"
+    assert deployment_env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
+    assert deployment_env["PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL"]["value"].endswith("/api/v1/memory/mcp/oauth/token")
+    assert deployment_env["PALACEOFTRUTH_MCP_OAUTH_RESOURCE"]["value"] == "https://api.palace.sarvent.cloud/api/v1"
+    assert deployment_env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://api.palace.sarvent.cloud/api/v1"
+
+    assert job_env["PALACEOFTRUTH_API_KEY"]["valueFrom"]["secretKeyRef"]["key"] == "API_KEY"
+    assert job_env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
+    assert "--expected-auth-mode" in job_container["args"]
+    assert "mcp_oauth" in job_container["args"]
+    assert "--expected-tenant-id" in job_container["args"]
+    assert "default" in job_container["args"]
+    assert "--expected-client-key" in job_container["args"]
+    assert "helm-mcp" in job_container["args"]
+    assert job_container["args"].count("--expected-scope") == 2
+
+    assert {
+        "secretKey": "MCP_CLIENT_SECRET",
+        "remoteRef": {"key": "app-secret-item", "property": "mcp-oauth-client-secret"},
+    } in external_secret["spec"]["data"]
+
+
+def test_mcp_oauth_external_secret_uses_configured_secret_key() -> None:
+    manifests = _render_chart(
+        "externalSecrets.enabled=true",
+        "externalSecrets.secretStoreName=bitwarden-fields",
+        "externalSecrets.appSecretItemId=app-secret-item",
+        "externalSecrets.registrySecretItemId=registry-secret-item",
+        "externalSecrets.mcpOauthClientSecretProperty=mcp-oauth-client-secret",
+        "mcp.oauthClientSecretKey=CUSTOM_MCP_OAUTH_SECRET",
+    )
+    deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
+    deployment_env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+    external_secret = _manifest_by_kind_name(manifests, "ExternalSecret", "palaceoftruth-app-secrets")
+
+    assert (
+        deployment_env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"]
+        == "CUSTOM_MCP_OAUTH_SECRET"
+    )
+    assert {
+        "secretKey": "CUSTOM_MCP_OAUTH_SECRET",
+        "remoteRef": {"key": "app-secret-item", "property": "mcp-oauth-client-secret"},
+    } in external_secret["spec"]["data"]
+
+
 def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:
     manifests = _render_chart(
         "externalSecrets.enabled=true",

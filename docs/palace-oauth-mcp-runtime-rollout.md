@@ -10,8 +10,18 @@ OAuth client credentials are configured, MCP runtimes and the rollout smoke use
 OAuth first so the staged smoke verifies the replacement path instead of the
 broad API key path:
 
+These are deployment-owned values. Keep the environment-specific overlay in the
+deployment/config repo, not in this portable chart repo.
+
+Set `mcp.apiBaseUrl` to the same API origin used by `oauthResource`; otherwise
+the runtime may mint a token for one resource and call a different backend host.
+
 ```yaml
+externalSecrets:
+  mcpOauthClientSecretProperty: mcp-oauth-client-secret
+
 mcp:
+  apiBaseUrl: https://api.palace.sarvent.cloud
   legacyApiKeyAuthEnabled: true
   oauthClientSecretKey: MCP_CLIENT_SECRET
   oauthTokenUrl: https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth/token
