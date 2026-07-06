@@ -262,7 +262,8 @@ def test_mcp_oauth_token_endpoint_fails_closed_on_unsupported_scope_row(monkeypa
 
 
 def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
-    session = FakeSession(_client_row())
+    client_row = _client_row()
+    session = FakeSession(client_row)
     client = _client(session, monkeypatch)
 
     response = client.post(
@@ -272,7 +273,37 @@ def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"revoked": True}
-    assert session.revoked == [{"token_hash": hash_secret("raw-token")}]
+    assert session.revoked == [
+        {
+            "token_hash": hash_secret("raw-token"),
+            "tenant_id": "tenant-a",
+            "client_id": client_row["id"],
+        }
+    ]
+    revoke_sql = next(sql for sql, _ in session.statements if "UPDATE mcp_oauth_access_tokens" in sql)
+    assert "tenant_id = :tenant_id" in revoke_sql
+    assert "client_id = :client_id" in revoke_sql
+
+
+def test_mcp_oauth_revoke_scopes_to_authenticated_tenant_client(monkeypatch) -> None:
+    tenant_a = _client_row(tenant_id="tenant-a", oauth_client_secret_hash=hash_secret("wrong-secret"))
+    tenant_b = _client_row(tenant_id="tenant-b", oauth_client_secret_hash=hash_secret("client-secret"))
+    session = FakeSession(rows=[tenant_a, tenant_b])
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/revoke",
+        data={"token": "raw-token", "client_id": "tenant-b:codex-remote", "client_secret": "client-secret"},
+    )
+
+    assert response.status_code == 200
+    assert session.revoked == [
+        {
+            "token_hash": hash_secret("raw-token"),
+            "tenant_id": "tenant-b",
+            "client_id": tenant_b["id"],
+        }
+    ]
 
 
 def test_mcp_oauth_introspection_reports_active_token(monkeypatch) -> None:

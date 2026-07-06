@@ -317,7 +317,7 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
             body = request.content.decode()
             assert "grant_type=client_credentials" in body
             assert "client_id=codex-remote" in body
-            assert "resource=https%3A%2F%2Fapi.test%2Fmcp" in body
+            assert "resource=https%3A%2F%2Fapi.test%2Fapi%2Fv1" in body
             return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 3600})
         return httpx.Response(200, json={"tenant_id": "tenant-a"})
 
@@ -336,6 +336,35 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
 
     assert seen_requests[0][1].endswith("/api/v1/memory/mcp/oauth/token")
     assert seen_requests[1][2] == "Bearer minted-token"
+
+
+@pytest.mark.asyncio
+async def test_api_client_ignores_legacy_mcp_oauth_resource_for_backend_calls() -> None:
+    seen_bodies: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth/token"):
+            body = request.content.decode()
+            seen_bodies.append(body)
+            return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 3600})
+        return httpx.Response(200, json={"tenant_id": "tenant-a"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.test") as http_client:
+        api = SecondBrainApiClient(
+            SecondBrainMcpSettings(
+                api_base_url="https://api.test",
+                api_key="legacy-api-key",
+                oauth_client_secret="client-secret",
+                oauth_token_url="https://api.test/api/v1/memory/mcp/oauth/token",
+                oauth_resource="https://mcp.test/mcp",
+                client_key="codex-remote",
+            ),
+            client=http_client,
+        )
+        await api.whoami()
+
+    assert "resource=https%3A%2F%2Fapi.test%2Fapi%2Fv1" in seen_bodies[0]
+    assert "resource=https%3A%2F%2Fmcp.test%2Fmcp" not in seen_bodies[0]
 
 
 def test_build_scope_validates_scope_shape() -> None:

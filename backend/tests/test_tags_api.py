@@ -71,7 +71,7 @@ def _oauth_token_row(*, scopes: list[str]):
         "token_id": uuid.uuid4(),
         "tenant_id": "tenant-a",
         "token_scopes": scopes,
-        "token_resource": "https://testserver/mcp",
+        "token_resource": "https://testserver/api/v1",
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
         "token_revoked_at": None,
         "client_id": uuid.uuid4(),

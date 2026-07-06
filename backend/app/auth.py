@@ -83,6 +83,11 @@ def _canonical_mcp_resource(request: Request) -> str:
     return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
+def _canonical_api_resource(request: Request) -> str:
+    parsed = urlsplit(str(request.base_url))
+    return urlunsplit(("https", parsed.netloc, "/api/v1", "", ""))
+
+
 def _resource_metadata_url(request: Request) -> str:
     parsed_base = urlsplit(str(request.base_url))
     path = "/.well-known/oauth-protected-resource"
@@ -108,14 +113,17 @@ def _auth_exception(request: Request, status_code: int, detail: str, *, error: s
     )
 
 
+def _is_mcp_resource_validation_request(request: Request) -> bool:
+    return request.url.path == "/api/v1/memory/whoami" or request.url.path.startswith("/mcp")
+
+
 def _expected_token_resources(request: Request, expected_resource: str | None = None) -> set[str]:
-    resources = {_canonical_mcp_resource(request)}
-    if expected_resource == "mcp":
-        return resources
+    mcp_resource = _canonical_mcp_resource(request)
+    if expected_resource == "mcp" and _is_mcp_resource_validation_request(request):
+        return {mcp_resource}
     if request.url.path.startswith("/api/v1"):
-        parsed = urlsplit(str(request.base_url))
-        resources.add(urlunsplit(("https", parsed.netloc, "/api/v1", "", "")))
-    return resources
+        return {_canonical_api_resource(request)}
+    return {mcp_resource}
 
 
 def _resource_matches_token(*, token_resource: object, expected_resources: set[str] | None) -> bool:
@@ -124,7 +132,7 @@ def _resource_matches_token(*, token_resource: object, expected_resources: set[s
     if token_resource is None:
         # Legacy tokens minted before SAR-984 did not persist an audience. Keep
         # them valid only for the MCP resource while clients rotate tokens.
-        return True
+        return any(resource.endswith("/mcp") for resource in expected_resources)
     return isinstance(token_resource, str) and token_resource in expected_resources
 
 

@@ -141,7 +141,7 @@ def _oauth_client(monkeypatch, auth_session: AuthSession, service_cls=RecordingS
     return TestClient(app)
 
 
-def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://testserver/mcp"):
+def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://testserver/api/v1"):
     return {
         "token_id": uuid.uuid4(),
         "tenant_id": "tenant-a",

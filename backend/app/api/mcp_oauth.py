@@ -225,7 +225,7 @@ async def revoke_mcp_access_token(
     client_secret: Annotated[str | None, Form()] = None,
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> McpOAuthRevokeResponse:
-    await _authenticate_oauth_client(
+    caller = await _authenticate_oauth_client(
         form_client_id=client_id,
         form_client_secret=client_secret,
         authorization=authorization,
@@ -235,9 +235,15 @@ async def revoke_mcp_access_token(
             text(
                 "UPDATE mcp_oauth_access_tokens "
                 "SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) "
-                "WHERE token_hash = :token_hash"
+                "WHERE token_hash = :token_hash "
+                "  AND tenant_id = :tenant_id "
+                "  AND client_id = :client_id"
             ),
-            {"token_hash": hash_secret(token)},
+            {
+                "token_hash": hash_secret(token),
+                "tenant_id": caller["tenant_id"],
+                "client_id": caller["id"],
+            },
         )
         await db.commit()
     return McpOAuthRevokeResponse()

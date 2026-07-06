@@ -55,7 +55,16 @@ class FakeSession:
 
 
 def _request() -> Request:
-    return Request({"type": "http", "method": "GET", "path": "/api/v1/memory/whoami", "headers": []})
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "server": ("testserver", 443),
+            "path": "/api/v1/memory/whoami",
+            "headers": [],
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -200,6 +209,7 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
             "token_id": token_id,
             "tenant_id": "tenant-a",
             "token_scopes": ["read"],
+            "token_resource": "https://testserver/api/v1",
             "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
             "token_revoked_at": None,
             "client_id": client_id,
@@ -218,7 +228,7 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
     assert request.state.auth_mode == "mcp_oauth"
     assert request.state.mcp_client_key == "codex-remote"
     assert request.state.mcp_allowed_scopes == ["read"]
-    assert request.state.mcp_token_resource is None
+    assert request.state.mcp_token_resource == "https://testserver/api/v1"
     assert request.state.auth_context.tenant_id == "tenant-a"
     assert request.state.auth_context.auth_mode == "mcp_oauth"
     assert request.state.auth_context.client_id == client_id
@@ -226,6 +236,64 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
     assert request.state.auth_context.scopes == ("read",)
     assert request.state.auth_context.capabilities == frozenset({"read"})
     assert request.state.auth_context.token_hash_reference == auth.hash_secret("raw-token")
+    assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_memory_auth_rejects_null_resource_for_rest_api(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["read"],
+            "token_resource": None,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "codex-remote",
+            "allowed_scopes": ["read"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_memory_auth(_request(), api_key=None, authorization="Bearer raw-token")
+
+    assert exc_info.value.status_code == 403
+    assert "resource" in exc_info.value.detail
+    assert session.updates == []
+    assert session.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_verify_memory_auth_allows_null_resource_only_for_mcp_validation(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["read"],
+            "token_resource": None,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "codex-remote",
+            "allowed_scopes": ["read"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    request = _request()
+    result = await auth.verify_memory_auth(
+        request,
+        api_key=None,
+        authorization="Bearer raw-token",
+        expected_resource="mcp",
+    )
+
+    assert result == "raw-token"
+    assert request.state.auth_context.resource is None
     assert session.commits == 1
 
 

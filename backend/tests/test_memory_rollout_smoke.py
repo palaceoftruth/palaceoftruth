@@ -134,7 +134,7 @@ def test_http_client_mints_oauth_token_with_configured_resource(monkeypatch: pyt
         api_key="legacy-api-key",
         oauth_client_secret="client-secret",
         oauth_token_url="https://api.example/api/v1/memory/mcp/oauth/token",
-        oauth_resource="https://mcp.example/mcp",
+        oauth_resource="https://api.example/api/v1",
         client_key="helm-mcp",
     )
 
@@ -143,7 +143,85 @@ def test_http_client_mints_oauth_token_with_configured_resource(monkeypatch: pyt
     assert result.status == 200
     assert seen[0][0] == "https://api.example/api/v1/memory/mcp/oauth/token"
     assert "client_id=helm-mcp" in (seen[0][2] or "")
-    assert "resource=https%3A%2F%2Fmcp.example%2Fmcp" in (seen[0][2] or "")
+    assert "resource=https%3A%2F%2Fapi.example%2Fapi%2Fv1" in (seen[0][2] or "")
+
+
+def test_http_client_defaults_oauth_resource_to_backend_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_urlopen(request, *, timeout: float):
+        body = request.data.decode("utf-8") if request.data else None
+        seen.append((request.full_url, request.get_method(), body))
+        if request.full_url.endswith("/oauth/token"):
+            return FakeResponse(b'{"access_token": "minted-token", "expires_in": 3600}')
+        return FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
+    client = _http_client(
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.example/api/v1/memory/mcp/oauth/token",
+        client_key="helm-mcp",
+    )
+
+    result = client.request("GET", "/memory/whoami")
+
+    assert result.status == 200
+    assert "resource=https%3A%2F%2Fapi.example%2Fapi%2Fv1" in (seen[0][2] or "")
+
+
+def test_http_client_ignores_legacy_mcp_oauth_resource_for_backend_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_urlopen(request, *, timeout: float):
+        body = request.data.decode("utf-8") if request.data else None
+        seen.append((request.full_url, request.get_method(), body))
+        if request.full_url.endswith("/oauth/token"):
+            return FakeResponse(b'{"access_token": "minted-token", "expires_in": 3600}')
+        return FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr(rollout_smoke.urllib.request, "urlopen", fake_urlopen)
+    client = _http_client(
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.example/api/v1/memory/mcp/oauth/token",
+        oauth_resource="https://mcp.example/mcp",
+        client_key="helm-mcp",
+    )
+
+    result = client.request("GET", "/memory/whoami")
+
+    assert result.status == 200
+    assert "resource=https%3A%2F%2Fapi.example%2Fapi%2Fv1" in (seen[0][2] or "")
+    assert "resource=https%3A%2F%2Fmcp.example%2Fmcp" not in (seen[0][2] or "")
 
 
 class FakeHttpClient:

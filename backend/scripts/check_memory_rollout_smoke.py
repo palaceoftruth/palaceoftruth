@@ -114,13 +114,14 @@ class HttpClient:
         if not self.oauth_client_secret:
             return None
         token_url = self.oauth_token_url or f"{self.base_url}/memory/mcp/oauth/token"
+        oauth_resource = _oauth_backend_resource(self.oauth_resource, token_url)
         data = urllib.parse.urlencode(
             {
                 "grant_type": "client_credentials",
                 "client_id": self.client_key,
                 "client_secret": self.oauth_client_secret,
                 "scope": " ".join(self.client_scopes),
-                "resource": self.oauth_resource or _oauth_resource_from_token_url(token_url),
+                "resource": oauth_resource,
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -209,7 +210,15 @@ def _write_scope_grant(entry: dict[str, Any] | None) -> str | None:
 
 def _oauth_resource_from_token_url(token_url: str) -> str:
     parsed = urllib.parse.urlsplit(token_url)
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/mcp", "", ""))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/api/v1", "", ""))
+
+
+def _oauth_backend_resource(configured_resource: str | None, token_url: str) -> str:
+    if configured_resource:
+        configured = urllib.parse.urlsplit(configured_resource)
+        if configured.path.rstrip("/") != "/mcp":
+            return configured_resource
+    return _oauth_resource_from_token_url(token_url)
 
 
 def utc_now() -> datetime:
