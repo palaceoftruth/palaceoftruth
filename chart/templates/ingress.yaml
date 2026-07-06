@@ -45,6 +45,27 @@ spec:
     - host: {{ include "palaceoftruth.mcpHost" . | quote }}
       http:
         paths:
+          - path: "/.well-known/oauth-protected-resource"
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-backend
+                port:
+                  number: 8000
+          - path: "/.well-known/oauth-authorization-server"
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-backend
+                port:
+                  number: 8000
+          - path: "/api/v1/memory/mcp/oauth"
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "palaceoftruth.fullname" . }}-backend
+                port:
+                  number: 8000
           - path: {{ .Values.mcp.path | quote }}
             pathType: Prefix
             backend:
