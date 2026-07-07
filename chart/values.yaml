@@ -356,6 +356,8 @@ mcp:
   clientKey: "helm-mcp"
   clientName: "Palace Helm MCP"
   clientScopes: "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
+  defaultScopeType: ""
+  defaultScopeKey: ""
   # Keep legacy API-key auth explicit during OAuth migration. Set false only
   # after OAuth client credentials or a bearer token are available.
   legacyApiKeyAuthEnabled: true
@@ -390,6 +392,7 @@ memoryRolloutSmoke:
   logTailLines: 500
   jobTimeoutSeconds: 180
   jobIntervalSeconds: 5
+  requestTimeoutSeconds: 10
   # Optional OAuth assertions for the rollout smoke. Leave blank for legacy
   # API-key smoke; set these when the smoke authenticates as an MCP OAuth client.
   expectedAuthMode: ""

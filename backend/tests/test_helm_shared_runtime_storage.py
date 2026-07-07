@@ -73,6 +73,17 @@ def _container_env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {entry["name"]: entry for entry in container.get("env", [])}
 
 
+def _arg_value(args: list[str], name: str) -> str:
+    try:
+        index = args.index(name)
+    except ValueError as exc:
+        raise AssertionError(f"{name} was not rendered in args") from exc
+    try:
+        return args[index + 1]
+    except IndexError as exc:
+        raise AssertionError(f"{name} did not render a value") from exc
+
+
 def _upload_artifacts_mounts(deployment: dict[str, Any]) -> list[dict[str, Any]]:
     containers = deployment["spec"]["template"]["spec"]["containers"]
     return [
@@ -277,6 +288,18 @@ def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> No
     assert env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://api.palace.example/api/v1"
 
 
+def test_mcp_deployment_renders_default_memory_scope_env() -> None:
+    manifests = _render_chart(
+        "mcp.defaultScopeType=agent",
+        "mcp.defaultScopeKey=karen",
+    )
+    deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
+    env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+
+    assert env["PALACEOFTRUTH_DEFAULT_SCOPE_TYPE"]["value"] == "agent"
+    assert env["PALACEOFTRUTH_DEFAULT_SCOPE_KEY"]["value"] == "karen"
+
+
 def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key() -> None:
     manifests = _render_chart(
         "valkey.sentinel.enabled=true",
@@ -289,6 +312,7 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
         "memoryRolloutSmoke.expectedClientKey=helm-mcp",
         "memoryRolloutSmoke.expectedScopes[0]=read",
         "memoryRolloutSmoke.expectedScopes[1]=write",
+        "memoryRolloutSmoke.requestTimeoutSeconds=60",
     )
     job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
     container = job["spec"]["template"]["spec"]["containers"][0]
@@ -299,6 +323,7 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
     assert "--expected-auth-mode" in container["args"]
     assert "mcp_oauth" in container["args"]
     assert container["args"].count("--expected-scope") == 2
+    assert _arg_value(container["args"], "--request-timeout") == "60"
 
 
 def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_identity() -> None:
@@ -320,6 +345,7 @@ def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_iden
         "memoryRolloutSmoke.expectedClientKey=helm-mcp",
         "memoryRolloutSmoke.expectedScopes[0]=read",
         "memoryRolloutSmoke.expectedScopes[1]=write",
+        "memoryRolloutSmoke.requestTimeoutSeconds=60",
     )
     deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
     deployment_env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
@@ -344,6 +370,7 @@ def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_iden
     assert "--expected-client-key" in job_container["args"]
     assert "helm-mcp" in job_container["args"]
     assert job_container["args"].count("--expected-scope") == 2
+    assert _arg_value(job_container["args"], "--request-timeout") == "60"
 
     assert {
         "secretKey": "MCP_CLIENT_SECRET",

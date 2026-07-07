@@ -86,6 +86,14 @@ spec:
               value: {{ .Values.mcp.clientName | quote }}
             - name: PALACEOFTRUTH_MCP_CLIENT_SCOPES
               value: {{ .Values.mcp.clientScopes | quote }}
+            {{- if .Values.mcp.defaultScopeType }}
+            - name: PALACEOFTRUTH_DEFAULT_SCOPE_TYPE
+              value: {{ .Values.mcp.defaultScopeType | quote }}
+            {{- end }}
+            {{- if .Values.mcp.defaultScopeKey }}
+            - name: PALACEOFTRUTH_DEFAULT_SCOPE_KEY
+              value: {{ .Values.mcp.defaultScopeKey | quote }}
+            {{- end }}
           readinessProbe:
             exec:
               command:
