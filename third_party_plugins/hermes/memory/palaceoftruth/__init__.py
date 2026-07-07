@@ -17,13 +17,13 @@ import json
 import logging
 import os
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from agent.memory_provider import MemoryProvider
@@ -47,6 +47,14 @@ DEFAULT_MAX_WRITES_PER_TURN = 5
 DEFAULT_MAX_WRITES_PER_SESSION = 100
 DEFAULT_MAX_BULK_CALLS_PER_TURN = 2
 DEFAULT_DEDUP_CACHE_TTL_SECONDS = 300
+DEFAULT_OAUTH_CLIENT_KEY = "default"
+DEFAULT_OAUTH_CLIENT_SCOPES = (
+    "read",
+    "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
+)
 SEARCH_TOOL_NAME = "palace_search"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
@@ -152,6 +160,21 @@ def _split_patterns(value: Any) -> list[str]:
         if pattern and pattern not in patterns:
             patterns.append(pattern)
     return patterns
+
+
+def _split_scopes(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple, set)):
+        raw_values = value
+    elif isinstance(value, str):
+        raw_values = value.replace(",", " ").split()
+    else:
+        return DEFAULT_OAUTH_CLIENT_SCOPES
+    scopes: list[str] = []
+    for raw in raw_values:
+        scope = str(raw).strip()
+        if scope and scope not in scopes:
+            scopes.append(scope)
+    return tuple(scopes) or DEFAULT_OAUTH_CLIENT_SCOPES
 
 
 def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
@@ -688,6 +711,31 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
     config = {
         "base_url": os.environ.get("PALACEOFTRUTH_BASE_URL", "").strip(),
         "api_key": os.environ.get("PALACEOFTRUTH_API_KEY", "").strip(),
+        "oauth_client_secret": os.environ.get(
+            "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET",
+            os.environ.get("SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET", ""),
+        ).strip(),
+        "oauth_token_url": os.environ.get(
+            "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL",
+            os.environ.get("SECONDBRAIN_MCP_OAUTH_TOKEN_URL", ""),
+        ).strip(),
+        "oauth_resource": os.environ.get(
+            "PALACEOFTRUTH_MCP_OAUTH_RESOURCE",
+            os.environ.get("SECONDBRAIN_MCP_OAUTH_RESOURCE", ""),
+        ).strip(),
+        "oauth_audience": os.environ.get(
+            "PALACEOFTRUTH_MCP_OAUTH_AUDIENCE",
+            os.environ.get("SECONDBRAIN_MCP_OAUTH_AUDIENCE", ""),
+        ).strip(),
+        "oauth_client_key": os.environ.get(
+            "PALACEOFTRUTH_MCP_CLIENT_KEY",
+            os.environ.get("SECONDBRAIN_MCP_CLIENT_KEY", DEFAULT_OAUTH_CLIENT_KEY),
+        ).strip()
+        or DEFAULT_OAUTH_CLIENT_KEY,
+        "oauth_client_scopes": os.environ.get(
+            "PALACEOFTRUTH_MCP_CLIENT_SCOPES",
+            os.environ.get("SECONDBRAIN_MCP_CLIENT_SCOPES", " ".join(DEFAULT_OAUTH_CLIENT_SCOPES)),
+        ).strip(),
         "scope_type": os.environ.get("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent").strip()
         or "agent",
         "scope_key": os.environ.get("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "").strip(),
@@ -777,6 +825,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._config: dict[str, Any] = {}
         self._base_url = ""
         self._api_key = ""
+        self._oauth_client_secret = ""
+        self._oauth_token_url = ""
+        self._oauth_resource = ""
+        self._oauth_audience = ""
+        self._oauth_client_key = DEFAULT_OAUTH_CLIENT_KEY
+        self._oauth_client_scopes: tuple[str, ...] = DEFAULT_OAUTH_CLIENT_SCOPES
+        self._bearer_token = ""
+        self._bearer_expires_at: datetime | None = None
+        self._bearer_lock = threading.Lock()
         self._scope_type = "agent"
         self._scope_key = ""
         self._retrieve_limit = DEFAULT_RETRIEVE_LIMIT
@@ -835,7 +892,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         config = _load_config(_default_hermes_home())
         base_url = str(config.get("base_url", "")).strip()
         api_key = str(config.get("api_key", "")).strip()
-        return bool(base_url.startswith(("http://", "https://")) and api_key)
+        oauth_client_secret = str(config.get("oauth_client_secret", "")).strip()
+        return bool(base_url.startswith(("http://", "https://")) and (api_key or oauth_client_secret))
 
     def get_config_schema(self):
         return [
@@ -849,8 +907,44 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "key": "api_key",
                 "description": "Palace of Truth tenant API key",
                 "secret": True,
-                "required": True,
+                "required": False,
                 "env_var": "PALACEOFTRUTH_API_KEY",
+            },
+            {
+                "key": "oauth_client_secret",
+                "description": "Palace MCP OAuth client secret; preferred over api_key when present",
+                "secret": True,
+                "required": False,
+                "env_var": "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET",
+            },
+            {
+                "key": "oauth_token_url",
+                "description": "Palace MCP OAuth token endpoint",
+                "default": "<base_url>/api/v1/memory/mcp/oauth/token",
+                "env_var": "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL",
+            },
+            {
+                "key": "oauth_resource",
+                "description": "OAuth resource for Palace backend API calls",
+                "default": "<token_endpoint_origin>/api/v1",
+                "env_var": "PALACEOFTRUTH_MCP_OAUTH_RESOURCE",
+            },
+            {
+                "key": "oauth_audience",
+                "description": "OAuth audience fallback when oauth_resource is unset",
+                "env_var": "PALACEOFTRUTH_MCP_OAUTH_AUDIENCE",
+            },
+            {
+                "key": "oauth_client_key",
+                "description": "Palace MCP OAuth client id",
+                "default": DEFAULT_OAUTH_CLIENT_KEY,
+                "env_var": "PALACEOFTRUTH_MCP_CLIENT_KEY",
+            },
+            {
+                "key": "oauth_client_scopes",
+                "description": "Space or comma separated OAuth client-credentials scopes",
+                "default": " ".join(DEFAULT_OAUTH_CLIENT_SCOPES),
+                "env_var": "PALACEOFTRUTH_MCP_CLIENT_SCOPES",
             },
             {
                 "key": "scope_type",
@@ -980,6 +1074,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._config = _load_config(hermes_home)
         self._base_url = str(self._config.get("base_url", "")).strip().rstrip("/")
         self._api_key = str(self._config.get("api_key", "")).strip()
+        self._oauth_client_secret = str(self._config.get("oauth_client_secret", "")).strip()
+        self._oauth_token_url = str(self._config.get("oauth_token_url", "")).strip()
+        if not self._oauth_token_url and self._base_url:
+            self._oauth_token_url = f"{self._base_url}/api/v1/memory/mcp/oauth/token"
+        self._oauth_resource = str(self._config.get("oauth_resource", "")).strip()
+        self._oauth_audience = str(self._config.get("oauth_audience", "")).strip()
+        self._oauth_client_key = (
+            str(self._config.get("oauth_client_key", DEFAULT_OAUTH_CLIENT_KEY)).strip()
+            or DEFAULT_OAUTH_CLIENT_KEY
+        )
+        self._oauth_client_scopes = _split_scopes(self._config.get("oauth_client_scopes"))
+        self._bearer_token = ""
+        self._bearer_expires_at = None
         self._scope_type = str(self._config.get("scope_type", "agent")).strip() or "agent"
         if self._scope_type not in SCOPE_TYPES:
             logger.warning(
@@ -1450,7 +1557,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         query = (query or "").strip()
         active_session = session_id or self._session_id
         active_workspace = self._agent_workspace
-        if not query or not self._base_url or not self._api_key:
+        if not query or not self._has_api_auth():
             return ""
         with self._prefetch_lock:
             if (
@@ -1473,7 +1580,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         query = (query or "").strip()
         active_session = session_id or self._session_id
         active_workspace = self._agent_workspace
-        if not query or not self._base_url or not self._api_key:
+        if not query or not self._has_api_auth():
             return
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             return
@@ -1494,7 +1601,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
     ) -> None:
-        if self._writes_disabled or not self._base_url or not self._api_key:
+        if self._writes_disabled or not self._has_api_auth():
             return
         user_text = (user_content or "").strip()
         assistant_text = (assistant_content or "").strip()
@@ -1546,7 +1653,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        if self._writes_disabled or not self._base_url or not self._api_key:
+        if self._writes_disabled or not self._has_api_auth():
             return
         normalized_action = (action or "").strip().lower()
         normalized_target = (target or "").strip().lower()
@@ -1700,14 +1807,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     ) -> dict[str, Any]:
         self._raise_if_circuit_open()
         body = None
-        headers = {
-            "Accept": "application/json",
-            "X-API-Key": self._api_key,
-        }
         mcp_scopes = _mcp_scopes_for_memory_route(method, path, payload)
-        if mcp_scopes:
-            headers["X-MCP-Scope"] = mcp_scopes[0]
-            headers["X-MCP-Scopes"] = ",".join(mcp_scopes)
+        headers = self._auth_headers(mcp_scopes)
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -1779,6 +1880,90 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if not isinstance(parsed, dict):
             raise RuntimeError(f"Palace of Truth {method} {path} returned non-object JSON")
         return parsed
+
+    def _has_api_auth(self) -> bool:
+        return bool(self._base_url and (self._oauth_client_secret or self._api_key))
+
+    def _auth_headers(self, mcp_scopes: list[str]) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        if self._oauth_client_secret:
+            headers["Authorization"] = f"Bearer {self._active_bearer_token()}"
+            return headers
+        if self._api_key:
+            headers["X-API-Key"] = self._api_key
+            if mcp_scopes:
+                headers["X-MCP-Scope"] = mcp_scopes[0]
+                headers["X-MCP-Scopes"] = ",".join(mcp_scopes)
+            return headers
+        raise RuntimeError("Palace of Truth API key or OAuth client secret is required")
+
+    def _active_bearer_token(self) -> str:
+        with self._bearer_lock:
+            if self._bearer_token and self._bearer_expires_at:
+                if self._bearer_expires_at > datetime.now(tz=UTC) + timedelta(seconds=30):
+                    return self._bearer_token
+            return self._mint_oauth_token()
+
+    def _oauth_resource_for_backend_api(self) -> str:
+        configured_resource = self._oauth_resource or self._oauth_audience
+        if configured_resource:
+            parsed = urlsplit(configured_resource)
+            if parsed.path.rstrip("/") != "/mcp":
+                return configured_resource
+            logger.warning(
+                "Ignoring legacy MCP OAuth resource %s for Hermes backend API calls",
+                configured_resource,
+            )
+        token_url = self._oauth_token_url or f"{self._base_url}/api/v1/memory/mcp/oauth/token"
+        parsed_token_url = urlsplit(token_url)
+        return urlunsplit(("https", parsed_token_url.netloc, "/api/v1", "", ""))
+
+    def _mint_oauth_token(self) -> str:
+        if not self._oauth_client_secret or not self._oauth_token_url:
+            raise RuntimeError("Palace OAuth client secret and token URL are required")
+        form_body = urlencode(
+            {
+                "grant_type": "client_credentials",
+                "client_id": self._oauth_client_key,
+                "client_secret": self._oauth_client_secret,
+                "scope": " ".join(self._oauth_client_scopes),
+                "resource": self._oauth_resource_for_backend_api(),
+            }
+        ).encode("utf-8")
+        request = Request(
+            self._oauth_token_url,
+            data=form_body,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            exc.read()
+            raise RuntimeError(
+                f"Palace OAuth token endpoint failed with HTTP {exc.code}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError("Palace OAuth token endpoint network failure") from exc
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Palace OAuth token endpoint returned non-JSON response") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Palace OAuth token endpoint returned non-object JSON")
+        access_token = payload.get("access_token")
+        expires_in = payload.get("expires_in")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise RuntimeError("Palace OAuth token endpoint did not return access_token")
+        if not isinstance(expires_in, int) or expires_in <= 0:
+            raise RuntimeError("Palace OAuth token endpoint did not return a valid expires_in")
+        self._bearer_token = access_token.strip()
+        self._bearer_expires_at = datetime.now(tz=UTC) + timedelta(seconds=expires_in)
+        return self._bearer_token
 
     def _raise_if_circuit_open(self) -> None:
         with self._circuit_lock:

@@ -44,7 +44,7 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
     ).read_text(encoding="utf-8")
 
     assert codex_manifest["version"] == "0.1.0"
-    assert "version: 1.0.21" in hermes_plugin_yaml
+    assert "version: 1.0.22" in hermes_plugin_yaml
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
     assert "tracks the Codex/Claude\nclient install surface only" in codex_readme

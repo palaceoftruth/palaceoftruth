@@ -95,6 +95,170 @@ def test_palaceoftruth_provider_is_available_uses_palaceoftruth_json(
     assert provider.is_available() is True
 
 
+def test_palaceoftruth_provider_is_available_accepts_oauth_without_api_key(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = module.PalaceOfTruthMemoryProvider()
+
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+
+    assert provider.is_available() is True
+
+
+def test_palaceoftruth_provider_mints_oauth_token_and_sends_bearer(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "helm-mcp")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_SCOPES", "read,write,write:agent")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    seen: list[tuple[str, str, bytes | None, dict[str, str]]] = []
+
+    def fake_urlopen(request, timeout: int):
+        seen.append((request.get_method(), request_path(request), request.data, dict(request.headers)))
+        if request_path(request).endswith("/oauth/token"):
+            return FakeJsonResponse({"access_token": "minted-token", "expires_in": 3600})
+        return FakeJsonResponse({"tenant_id": "tenant-a", "auth_mode": "mcp_oauth"})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = provider._request_json("GET", "/api/v1/memory/whoami")
+
+    assert result["auth_mode"] == "mcp_oauth"
+    assert [path for _, path, _, _ in seen] == [
+        "/api/v1/memory/mcp/oauth/token",
+        "/api/v1/memory/whoami",
+    ]
+    token_body = seen[0][2].decode("utf-8") if seen[0][2] else ""
+    assert "grant_type=client_credentials" in token_body
+    assert "client_id=helm-mcp" in token_body
+    assert "client_secret=client-secret" in token_body
+    assert "scope=read+write+write%3Aagent" in token_body
+    assert "resource=https%3A%2F%2Fapi.palace.test%2Fapi%2Fv1" in token_body
+    assert seen[1][3]["Authorization"] == "Bearer minted-token"
+    assert "x-api-key" not in {key.lower(): value for key, value in seen[1][3].items()}
+
+
+def test_palaceoftruth_provider_uses_oauth_resource_env_for_backend_api(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_RESOURCE", "https://api.palace.test/api/v1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    bodies: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        if request_path(request).endswith("/oauth/token"):
+            bodies.append(request.data.decode("utf-8"))
+            return FakeJsonResponse({"access_token": "minted-token", "expires_in": 3600})
+        return FakeJsonResponse({"tenant_id": "tenant-a"})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    provider._request_json("GET", "/api/v1/memory/whoami")
+
+    assert bodies == [
+        "grant_type=client_credentials&client_id=default&client_secret=client-secret"
+        "&scope=read+write+write%3Aagent+write%3Aworkspace+write%3Asession"
+        "&resource=https%3A%2F%2Fapi.palace.test%2Fapi%2Fv1"
+    ]
+
+
+def test_palaceoftruth_provider_derives_https_oauth_resource_for_internal_http_base_url(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    bodies: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        if request_path(request).endswith("/oauth/token"):
+            bodies.append(request.data.decode("utf-8"))
+            return FakeJsonResponse({"access_token": "minted-token", "expires_in": 3600})
+        return FakeJsonResponse({"tenant_id": "tenant-a"})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    provider._request_json("GET", "/api/v1/memory/whoami")
+
+    assert "resource=https%3A%2F%2Fpalaceoftruth-backend%3A8000%2Fapi%2Fv1" in bodies[0]
+
+
+def test_palaceoftruth_provider_ignores_legacy_mcp_oauth_resource(
+    monkeypatch,
+    caplog,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_RESOURCE", "https://mcp.palace.test/mcp")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    bodies: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        if request_path(request).endswith("/oauth/token"):
+            bodies.append(request.data.decode("utf-8"))
+            return FakeJsonResponse({"access_token": "minted-token", "expires_in": 3600})
+        return FakeJsonResponse({"tenant_id": "tenant-a"})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    caplog.set_level(logging.WARNING)
+
+    provider._request_json("GET", "/api/v1/memory/whoami")
+
+    assert "resource=https%3A%2F%2Fapi.palace.test%2Fapi%2Fv1" in bodies[0]
+    assert "client-secret" not in caplog.text
+    assert "Ignoring legacy MCP OAuth resource" in caplog.text
+
+
+def test_palaceoftruth_provider_oauth_token_failure_is_secret_safe(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    def fake_urlopen(request, timeout: int):
+        raise module.URLError("client-secret should not leak")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        provider._request_json("GET", "/api/v1/memory/whoami")
+
+    assert str(exc_info.value) == "Palace OAuth token endpoint network failure"
+    assert "client-secret" not in str(exc_info.value)
+
+
 def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypatch, caplog) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
