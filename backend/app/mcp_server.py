@@ -70,6 +70,8 @@ PALACE_MCP_CLIENT_KEY_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_KEY", "SECONDBRAIN_MCP_C
 PALACE_MCP_CLIENT_NAME_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_NAME", "SECONDBRAIN_MCP_CLIENT_NAME")
 PALACE_MCP_CLIENT_SCOPES_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_SCOPES", "SECONDBRAIN_MCP_CLIENT_SCOPES")
 PALACE_MCP_APP_VERSION_ENVS = ("PALACEOFTRUTH_MCP_APP_VERSION", "SECONDBRAIN_MCP_APP_VERSION")
+PALACE_DEFAULT_SCOPE_TYPE_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "SECONDBRAIN_DEFAULT_SCOPE_TYPE")
+PALACE_DEFAULT_SCOPE_KEY_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "SECONDBRAIN_DEFAULT_SCOPE_KEY")
 PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
     "PALACEOFTRUTH_MCP_CHECKPOINT_CAPTURE_DISABLED",
     "SECONDBRAIN_MCP_CHECKPOINT_CAPTURE_DISABLED",
@@ -172,6 +174,52 @@ def _build_scope(scope_type: ScopeType, scope_key: str | None) -> dict[str, str]
     if scope_key is None or not scope_key.strip():
         raise ValueError(f"scope_key is required when scope_type is {scope_type}")
     return {"type": scope_type, "key": scope_key.strip()}
+
+
+def _normalize_default_scope(
+    *,
+    scope_type: str | None,
+    scope_type_env: str | None,
+    scope_key: str | None,
+    scope_key_env: str | None,
+) -> tuple[ScopeType | None, str | None]:
+    if scope_type is None and scope_key is None:
+        return None, None
+    label = scope_type_env or PALACE_DEFAULT_SCOPE_TYPE_ENVS[0]
+    if scope_type is None or not scope_type.strip():
+        raise RuntimeError(f"{label} is required when {scope_key_env or PALACE_DEFAULT_SCOPE_KEY_ENVS[0]} is set")
+    cleaned_type = scope_type.strip()
+    if cleaned_type not in {"agent", "workspace", "session", "tenant_shared"}:
+        raise RuntimeError(f"{label} must be one of agent, workspace, session, or tenant_shared")
+    typed_scope = cast(ScopeType, cleaned_type)
+    cleaned_key = scope_key.strip() if scope_key is not None else None
+    try:
+        _build_scope(typed_scope, cleaned_key)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return typed_scope, cleaned_key
+
+
+def _resolve_write_scope(
+    settings: "SecondBrainMcpSettings",
+    *,
+    scope_type: ScopeType | None,
+    scope_key: str | None,
+    fallback_scope_type: ScopeType,
+    fallback_scope_key: str | None,
+) -> tuple[ScopeType, str | None]:
+    if scope_type is not None:
+        _build_scope(scope_type, scope_key)
+        return scope_type, scope_key
+    resolved_type = settings.default_scope_type or fallback_scope_type
+    if scope_key is not None:
+        resolved_key = scope_key
+    elif settings.default_scope_type is not None:
+        resolved_key = settings.default_scope_key
+    else:
+        resolved_key = fallback_scope_key
+    _build_scope(resolved_type, resolved_key)
+    return resolved_type, resolved_key
 
 
 def _env_truthy(names: tuple[str, ...]) -> bool:
@@ -509,6 +557,8 @@ class SecondBrainMcpSettings:
     client_name: str = "Palace MCP adapter"
     client_scopes: tuple[McpOperationScope, ...] = DEFAULT_MCP_CLIENT_SCOPES
     app_version: str | None = None
+    default_scope_type: ScopeType | None = None
+    default_scope_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "SecondBrainMcpSettings":
@@ -550,6 +600,14 @@ class SecondBrainMcpSettings:
             client_scopes = cleaned_scopes or ALL_MCP_OPERATION_SCOPES
 
         app_version, _ = _env_value(PALACE_MCP_APP_VERSION_ENVS)
+        default_scope_type_raw, default_scope_type_env = _env_value(PALACE_DEFAULT_SCOPE_TYPE_ENVS)
+        default_scope_key, default_scope_key_env = _env_value(PALACE_DEFAULT_SCOPE_KEY_ENVS)
+        default_scope_type, default_scope_key = _normalize_default_scope(
+            scope_type=default_scope_type_raw,
+            scope_type_env=default_scope_type_env,
+            scope_key=default_scope_key,
+            scope_key_env=default_scope_key_env,
+        )
         oauth_token_url, _ = _env_value(PALACE_MCP_OAUTH_TOKEN_URL_ENVS)
         if oauth_token_url is None:
             oauth_token_url = f"{api_base_url.rstrip('/')}/api/v1/memory/mcp/oauth/token"
@@ -574,6 +632,8 @@ class SecondBrainMcpSettings:
             client_name=client_name.strip(),
             client_scopes=client_scopes,  # type: ignore[arg-type]
             app_version=app_version or None,
+            default_scope_type=default_scope_type,
+            default_scope_key=default_scope_key,
         )
 
 
@@ -1708,7 +1768,7 @@ async def create_memory_entry(
     created_at: str | None = None,
     summary: str | None = None,
     tags: list[str] | None = None,
-    scope_type: ScopeType = "tenant_shared",
+    scope_type: ScopeType | None = None,
     scope_key: str | None = None,
     source_url: str | None = None,
     created_by_role: str | None = None,
@@ -1719,19 +1779,44 @@ async def create_memory_entry(
     relationship_policy: str = "immediate",
 ) -> dict[str, Any]:
     """Store durable agent memory in Palace without requiring the caller to provide tenant_id."""
+    runtime = _runtime(ctx)
+    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+        runtime.settings,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        fallback_scope_type="tenant_shared",
+        fallback_scope_key=None,
+    )
+    params = {
+        "title": title,
+        "body": body,
+        "source": source,
+        "created_at": created_at,
+        "summary": summary,
+        "tags": tags,
+        "scope_type": resolved_scope_type,
+        "scope_key": resolved_scope_key,
+        "source_url": source_url,
+        "created_by_role": created_by_role,
+        "metadata": metadata,
+        "idempotency_key": idempotency_key,
+        "webhook_url": webhook_url,
+        "enable_ai_enrichment": enable_ai_enrichment,
+        "relationship_policy": relationship_policy,
+    }
     return await _run_mcp_operation(
         ctx,
         operation="create_memory_entry",
-        params={key: value for key, value in locals().items() if key != "call"},
-        call=lambda: _runtime(ctx).api.create_memory_entry(
+        params=params,
+        call=lambda: runtime.api.create_memory_entry(
             title=title,
             body=body,
             source=source,
             created_at=created_at,
             summary=summary,
             tags=tags,
-            scope_type=scope_type,
-            scope_key=scope_key,
+            scope_type=resolved_scope_type,
+            scope_key=resolved_scope_key,
             source_url=source_url,
             created_by_role=created_by_role,
             metadata=metadata,
@@ -2391,8 +2476,8 @@ async def palace_remember(
     created_at: str | None = None,
     summary: str | None = None,
     tags: list[str] | None = None,
-    scope_type: ScopeType = "agent",
-    scope_key: str | None = "codex",
+    scope_type: ScopeType | None = None,
+    scope_key: str | None = None,
     source_url: str | None = None,
     created_by_role: str | None = "agent",
     metadata: dict[str, Any] | None = None,
@@ -2402,6 +2487,14 @@ async def palace_remember(
     relationship_policy: str = "immediate",
 ) -> dict[str, Any]:
     """Codex-friendly alias for durable Palace memory write-back."""
+    runtime = _runtime(ctx)
+    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+        runtime.settings,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        fallback_scope_type="agent",
+        fallback_scope_key="codex",
+    )
     return await create_memory_entry(
         title=title,
         body=body,
@@ -2410,8 +2503,8 @@ async def palace_remember(
         created_at=created_at,
         summary=summary,
         tags=tags,
-        scope_type=scope_type,
-        scope_key=scope_key,
+        scope_type=resolved_scope_type,
+        scope_key=resolved_scope_key,
         source_url=source_url,
         created_by_role=created_by_role,
         metadata=metadata,

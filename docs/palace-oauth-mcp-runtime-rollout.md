@@ -27,8 +27,13 @@ mcp:
   oauthTokenUrl: https://api.palace.sarvent.cloud/api/v1/memory/mcp/oauth/token
   oauthResource: https://api.palace.sarvent.cloud/api/v1
   oauthAudience: https://api.palace.sarvent.cloud/api/v1
+  # Set per runtime, for example agent/karen or agent/andrew. Explicit MCP tool
+  # scope_type/scope_key arguments still override these defaults.
+  defaultScopeType: agent
+  defaultScopeKey: <agent-name>
 
 memoryRolloutSmoke:
+  requestTimeoutSeconds: 60
   expectedAuthMode: mcp_oauth
   expectedTenantId: default
   expectedClientKey: helm-mcp
@@ -98,6 +103,10 @@ helm template palaceoftruth chart \
 The rollout smoke checks `/memory/whoami` and fails when the observed
 `auth_mode`, tenant, MCP client key, or required scopes do not match the
 expected values.
+
+Set `memoryRolloutSmoke.requestTimeoutSeconds: 60` for OAuth staging. The
+SAR-1007 landing proved the OAuth path with a manual 60-second smoke after the
+default 10-second request timeout was too short for the write/job path.
 
 ## Per-Tenant Retirement Checklist
 

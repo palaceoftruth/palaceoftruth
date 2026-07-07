@@ -93,6 +93,8 @@ spec:
             - {{ .Values.memoryRolloutSmoke.jobTimeoutSeconds | quote }}
             - --job-interval-seconds
             - {{ .Values.memoryRolloutSmoke.jobIntervalSeconds | quote }}
+            - --request-timeout
+            - {{ .Values.memoryRolloutSmoke.requestTimeoutSeconds | quote }}
             {{- if .Values.memoryRolloutSmoke.expectedAuthMode }}
             - --expected-auth-mode
             - {{ .Values.memoryRolloutSmoke.expectedAuthMode | quote }}

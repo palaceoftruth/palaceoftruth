@@ -464,6 +464,24 @@ def test_build_scope_validates_scope_shape() -> None:
         _build_scope("tenant_shared", "launch-pad")
 
 
+def test_settings_from_env_validates_default_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "karen")
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "agent"
+    assert settings.default_scope_key == "karen"
+
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "workspace")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY")
+    with pytest.raises(RuntimeError, match="scope_key is required"):
+        SecondBrainMcpSettings.from_env()
+
+
 def test_normalize_created_at_defaults_to_utc_z_suffix() -> None:
     created_at = _normalize_created_at(None)
     assert created_at.endswith("Z")
@@ -1445,6 +1463,124 @@ def test_palace_remember_alias_uses_create_memory_entry_defaults() -> None:
     assert seen_entry["relationship_policy"] == "immediate"
     assert audit_payload["operation"] == "create_memory_entry"
     assert "Use Palace as the primary memory path" not in json.dumps(audit_payload)
+
+
+def test_create_memory_entry_uses_configured_default_scope_when_omitted() -> None:
+    seen_entries: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            payload = json.loads(request.content.decode())
+            seen_entries.append(payload)
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "queued",
+                    "scope": payload["scope"],
+                    "accepted_as": "canonical",
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="karen",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await create_memory_entry(title="Defaulted", body="Uses adapter defaults.", ctx=ctx)
+            await create_memory_entry(
+                title="Shared",
+                body="Explicit tenant_shared remains shared.",
+                ctx=ctx,
+                scope_type="tenant_shared",
+            )
+
+    asyncio.run(scenario())
+
+    assert [entry["scope"] for entry in seen_entries] == [
+        {"type": "agent", "key": "karen"},
+        {"type": "tenant_shared"},
+    ]
+
+
+def test_create_memory_entry_requires_scope_type_when_only_scope_key_is_provided() -> None:
+    async def scenario() -> None:
+        api = SecondBrainApiClient(
+            SecondBrainMcpSettings(api_base_url="https://api.palaceoftruth.test", api_key="secret"),
+            client=httpx.AsyncClient(
+                base_url="https://api.palaceoftruth.test",
+                transport=httpx.MockTransport(lambda request: httpx.Response(500)),
+            ),
+        )
+        ctx = SimpleNamespace(
+            request_context=SimpleNamespace(lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api))
+        )
+        with pytest.raises(ValueError, match="scope_key must be omitted"):
+            await create_memory_entry(title="Invalid", body="missing scope type", ctx=ctx, scope_key="karen")
+        await api.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_palace_remember_preserves_scope_key_only_agent_fallback() -> None:
+    seen_entry: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            seen_entry.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "queued",
+                    "scope": {"type": "agent", "key": "alice"},
+                    "accepted_as": "canonical",
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(api_base_url="https://api.palaceoftruth.test", api_key="secret"),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember(title="Agent note", body="Scope key only.", ctx=ctx, scope_key="alice")
+
+    asyncio.run(scenario())
+
+    assert seen_entry["scope"] == {"type": "agent", "key": "alice"}
 
 
 def test_get_wakeup_brief_calls_memory_facade_with_scope() -> None:
