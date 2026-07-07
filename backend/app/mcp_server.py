@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -130,6 +131,53 @@ def _env_value(names: tuple[str, ...], default: str | None = None) -> tuple[str 
 
 def _env_names_for_error(names: tuple[str, ...]) -> str:
     return ", ".join(names[:-1]) + f", or {names[-1]}"
+
+
+def _default_palace_config_path() -> Path:
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return Path(hermes_home).expanduser() / "palaceoftruth.json"
+    return Path.home() / ".hermes" / "palaceoftruth.json"
+
+
+def _load_palace_config_defaults() -> dict[str, str]:
+    config_path = _default_palace_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Palace MCP config load failed from %s: %s", config_path, exc)
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("Palace MCP config at %s is not a JSON object", config_path)
+        return {}
+    defaults: dict[str, str] = {}
+    for key in ("scope_type", "scope_key"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            defaults[key] = value.strip()
+    if "scope_key" in defaults and "scope_type" not in defaults:
+        defaults["scope_type"] = "agent"
+    scope_type = defaults.get("scope_type")
+    scope_key = defaults.get("scope_key")
+    if scope_type and scope_type not in {"agent", "workspace", "session", "tenant_shared"}:
+        logger.warning(
+            "Palace MCP config at %s has unsupported scope_type=%s; ignoring configured default scope",
+            config_path,
+            scope_type,
+        )
+        return {}
+    if scope_type == "tenant_shared" and scope_key:
+        defaults.pop("scope_key", None)
+    if scope_type and scope_type != "tenant_shared" and not scope_key:
+        logger.warning(
+            "Palace MCP config at %s has scope_type=%s without scope_key; ignoring configured default scope",
+            config_path,
+            scope_type,
+        )
+        return {}
+    return defaults
 
 
 def _validate_iso8601(value: str, field_name: str) -> str:
@@ -600,8 +648,16 @@ class SecondBrainMcpSettings:
             client_scopes = cleaned_scopes or ALL_MCP_OPERATION_SCOPES
 
         app_version, _ = _env_value(PALACE_MCP_APP_VERSION_ENVS)
-        default_scope_type_raw, default_scope_type_env = _env_value(PALACE_DEFAULT_SCOPE_TYPE_ENVS)
-        default_scope_key, default_scope_key_env = _env_value(PALACE_DEFAULT_SCOPE_KEY_ENVS)
+        config_defaults = _load_palace_config_defaults()
+        default_scope_type_raw, default_scope_type_env = _env_value(
+            PALACE_DEFAULT_SCOPE_TYPE_ENVS,
+            config_defaults.get("scope_type"),
+        )
+        scope_key_default = None if default_scope_type_env is not None else config_defaults.get("scope_key")
+        default_scope_key, default_scope_key_env = _env_value(
+            PALACE_DEFAULT_SCOPE_KEY_ENVS,
+            scope_key_default,
+        )
         default_scope_type, default_scope_key = _normalize_default_scope(
             scope_type=default_scope_type_raw,
             scope_type_env=default_scope_type_env,
@@ -2486,14 +2542,14 @@ async def palace_remember(
     enable_ai_enrichment: bool = False,
     relationship_policy: str = "immediate",
 ) -> dict[str, Any]:
-    """Codex-friendly alias for durable Palace memory write-back."""
+    """Convenience alias for durable Palace memory write-back."""
     runtime = _runtime(ctx)
     resolved_scope_type, resolved_scope_key = _resolve_write_scope(
         runtime.settings,
         scope_type=scope_type,
         scope_key=scope_key,
-        fallback_scope_type="agent",
-        fallback_scope_key="codex",
+        fallback_scope_type="agent" if scope_key is not None else "tenant_shared",
+        fallback_scope_key=None,
     )
     return await create_memory_entry(
         title=title,

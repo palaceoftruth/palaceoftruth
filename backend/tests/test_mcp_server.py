@@ -482,6 +482,138 @@ def test_settings_from_env_validates_default_scope(
         SecondBrainMcpSettings.from_env()
 
 
+def test_settings_from_env_loads_default_scope_from_hermes_palace_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_type": "agent", "scope_key": "iris", "api_key": "do-not-read"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "agent"
+    assert settings.default_scope_key == "iris"
+
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "andrew")
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "agent"
+    assert settings.default_scope_key == "andrew"
+
+
+def test_settings_from_env_ignores_incomplete_hermes_palace_config_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_type": "agent"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type is None
+    assert settings.default_scope_key is None
+
+
+def test_settings_from_env_ignores_invalid_hermes_palace_config_scope_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_type": "bogus", "scope_key": "iris"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type is None
+    assert settings.default_scope_key is None
+
+
+def test_settings_from_env_drops_stale_scope_key_for_tenant_shared_hermes_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_type": "tenant_shared", "scope_key": "old-agent"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "tenant_shared"
+    assert settings.default_scope_key is None
+
+
+def test_settings_from_env_defaults_key_only_hermes_config_to_agent_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_key": "iris"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "agent"
+    assert settings.default_scope_key == "iris"
+
+
+def test_settings_from_env_scope_type_override_does_not_reuse_hermes_scope_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "palaceoftruth.json").write_text(
+        json.dumps({"scope_type": "agent", "scope_key": "iris"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "tenant_shared")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.default_scope_type == "tenant_shared"
+    assert settings.default_scope_key is None
+
+
 def test_normalize_created_at_defaults_to_utc_z_suffix() -> None:
     created_at = _normalize_created_at(None)
     assert created_at.endswith("Z")
@@ -888,6 +1020,8 @@ def test_palace_remember_alias_returns_duplicate_replay_metadata() -> None:
                 title="Duplicate replay",
                 body="Same safe memory body.",
                 ctx=ctx,
+                scope_type="agent",
+                scope_key="codex",
                 idempotency_key="same-request",
             )
 
@@ -1393,7 +1527,7 @@ def test_mcp_tool_denies_http_caller_missing_write_scope_and_records_audit() -> 
     assert audit_payload["error_class"] == "PermissionError"
 
 
-def test_palace_remember_alias_uses_create_memory_entry_defaults() -> None:
+def test_palace_remember_alias_uses_configured_default_scope() -> None:
     seen: list[tuple[str, str]] = []
     seen_entry: dict[str, object] = {}
     audit_payload: dict[str, object] = {}
@@ -1435,6 +1569,8 @@ def test_palace_remember_alias_uses_create_memory_entry_defaults() -> None:
                 SecondBrainMcpSettings(
                     api_base_url="https://api.palaceoftruth.test",
                     api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="iris",
                 ),
                 client=client,
             )
@@ -1458,11 +1594,61 @@ def test_palace_remember_alias_uses_create_memory_entry_defaults() -> None:
         ("POST", "/api/v1/memory/mcp/audit"),
     ]
     assert seen_entry["source"] == "codex"
-    assert seen_entry["scope"] == {"type": "agent", "key": "codex"}
+    assert seen_entry["scope"] == {"type": "agent", "key": "iris"}
     assert seen_entry["created_by_role"] == "agent"
     assert seen_entry["relationship_policy"] == "immediate"
     assert audit_payload["operation"] == "create_memory_entry"
     assert "Use Palace as the primary memory path" not in json.dumps(audit_payload)
+
+
+def test_palace_remember_alias_without_configured_scope_defaults_to_tenant_shared() -> None:
+    seen_entry: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries":
+            payload = json.loads(request.content.decode())
+            seen_entry.update(payload)
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "status": "queued",
+                    "scope": payload["scope"],
+                    "accepted_as": "canonical",
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(201, json={"status": "recorded"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember(
+                title="Shared note",
+                body="No adapter default means tenant_shared.",
+                ctx=ctx,
+            )
+
+    asyncio.run(scenario())
+
+    assert seen_entry["scope"] == {"type": "tenant_shared"}
 
 
 def test_create_memory_entry_uses_configured_default_scope_when_omitted() -> None:
