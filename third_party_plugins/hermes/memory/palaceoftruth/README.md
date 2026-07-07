@@ -13,7 +13,10 @@ Why this lives here:
 - The plugin implements the Hermes-facing contract for Palace of Truth.
 - Palace of Truth developers need to be able to evolve that integration without hand-editing the deployment repo first.
 - Keeping the canonical plugin here lets this repo own the integration semantics while deployment repos own runtime image assembly and Kubernetes deployment.
-- The plugin validates its tenant key with `/api/v1/memory/whoami` and mirrors the returned `tenant_id` into durable write payloads.
+- The plugin can authenticate with either the legacy tenant API key or Palace MCP OAuth client credentials. When
+  `PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` is present, OAuth is preferred and API calls use a bearer token minted from
+  `/api/v1/memory/mcp/oauth/token`; `PALACEOFTRUTH_API_KEY` remains a legacy fallback for hosts that have not cut over.
+- The plugin validates its tenant identity with `/api/v1/memory/whoami` and mirrors the returned `tenant_id` into durable write payloads.
 - Recall is route-aware: the plugin first asks `/api/v1/memory/scopes` for
   content-free scope metadata, then uses `/api/v1/memory/retrieve-agent` to
   search its own agent scope, discovered workspace scopes, `tenant_shared`, and
