@@ -1305,6 +1305,19 @@ def _runtime(ctx: Context[ServerSession, SecondBrainMcpRuntime]) -> SecondBrainM
     return ctx.request_context.lifespan_context
 
 
+def _resolve_default_agent_scope_key(
+    runtime: SecondBrainMcpRuntime,
+    agent_scope_key: str | None,
+    *,
+    fallback: str = "codex",
+) -> str | None:
+    if agent_scope_key:
+        return agent_scope_key
+    if runtime.settings.default_scope_type == "agent" and runtime.settings.default_scope_key:
+        return runtime.settings.default_scope_key
+    return fallback
+
+
 def _operation_scope(operation: str) -> McpOperationScope:
     if operation in WRITE_OPERATIONS:
         return "write"
@@ -2374,13 +2387,21 @@ async def retrieve_agent_memory(
     date_to: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve agent context across allowed own-agent, selected workspace, shared, and public corpus routes."""
+    runtime = _runtime(ctx)
+    resolved_agent_scope_key = _resolve_default_agent_scope_key(runtime, agent_scope_key)
+    params = {
+        key: value
+        for key, value in locals().items()
+        if key not in {"runtime", "resolved_agent_scope_key", "params"}
+    }
+    params["agent_scope_key"] = resolved_agent_scope_key
     return await _run_mcp_operation(
         ctx,
         operation="retrieve_agent_memory",
-        params=locals(),
-        call=lambda: _runtime(ctx).api.retrieve_agent_memory(
+        params=params,
+        call=lambda: runtime.api.retrieve_agent_memory(
             query=query,
-            agent_scope_key=agent_scope_key,
+            agent_scope_key=resolved_agent_scope_key,
             include_agent_scope_keys=include_agent_scope_keys,
             include_agent_scope_patterns=include_agent_scope_patterns,
             agent_scope_pattern_limit=agent_scope_pattern_limit,
@@ -2469,7 +2490,7 @@ async def retrieve_memory_trajectory(
 async def palace_search(
     query: str,
     ctx: Context[ServerSession, SecondBrainMcpRuntime],
-    agent_scope_key: str | None = "codex",
+    agent_scope_key: str | None = None,
     include_agent_scope_keys: list[str] | None = None,
     include_agent_scope_patterns: list[str] | None = None,
     agent_scope_pattern_limit: int = 5,
