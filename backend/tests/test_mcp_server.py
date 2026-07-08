@@ -2665,6 +2665,141 @@ def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() ->
     assert "secret summary" not in json.dumps(audit_payload)
 
 
+def test_palace_search_alias_uses_configured_default_agent_scope() -> None:
+    seen_payload: dict[str, object] = {}
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/retrieve-agent":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "scopes": [
+                        {"type": "agent", "key": "clara"},
+                        {"type": "workspace", "key": "hermes"},
+                    ],
+                    "trace": {
+                        "searched_scopes": [
+                            {"type": "agent", "key": "clara"},
+                            {"type": "workspace", "key": "hermes"},
+                        ],
+                        "caller_agent_scope_key": "clara",
+                        "broad_corpus_searched": False,
+                    },
+                    "results": [],
+                    "total": 0,
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="clara",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_search(
+                query="clara-memory-mcp-canary-20260707T234902Z",
+                ctx=ctx,
+                workspace_scope_keys=["hermes"],
+                include_tenant_shared=True,
+            )
+
+    asyncio.run(scenario())
+
+    assert seen_payload["agent_scope_key"] == "clara"
+    assert seen_payload["workspace_scope_keys"] == ["hermes"]
+    assert seen_payload["include_tenant_shared"] is True
+    assert audit_payload["params_summary"]["agent_scope_key"] == "clara"
+
+
+def test_palace_search_alias_explicit_agent_scope_overrides_configured_default() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/retrieve-agent":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "scopes": [{"type": "agent", "key": "karen"}],
+                    "trace": {
+                        "searched_scopes": [{"type": "agent", "key": "karen"}],
+                        "caller_agent_scope_key": "karen",
+                    },
+                    "results": [],
+                    "total": 0,
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="clara",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_search(
+                query="karen-memory-mcp-canary-20260707T234902Z",
+                ctx=ctx,
+                agent_scope_key="karen",
+                workspace_scope_keys=["hermes"],
+            )
+
+    asyncio.run(scenario())
+
+    assert seen_payload["agent_scope_key"] == "karen"
+    assert seen_payload["workspace_scope_keys"] == ["hermes"]
+
+
 def test_palace_search_alias_can_request_strict_workspace_memory() -> None:
     seen_payload: dict[str, object] = {}
 
