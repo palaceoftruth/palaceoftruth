@@ -37,6 +37,7 @@ from app.schemas.memory import (
     MemoryScopeProfile,
     MemoryScopeSummary,
     MemorySourceTrustSummaryResponse,
+    SemanticRecallResponse,
     MemoryTrajectoryEntry,
     MemoryTrajectoryResponse,
     MemoryWakeupBriefResponse,
@@ -1078,6 +1079,91 @@ def test_memory_source_trust_summaries_uses_authenticated_tenant(monkeypatch) ->
     assert "preview" not in response_json
     assert "chunk_text" not in response_json
     assert "raw production content" not in response_json
+
+
+def test_semantic_recall_rest_uses_authenticated_tenant_and_read_scope(monkeypatch) -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["read"])
+    entry_id = uuid.uuid4()
+    source_item_id = uuid.uuid4()
+
+    async def fake_semantic_recall(db, *, tenant_id: str, body):
+        assert tenant_id == "tenant-a"
+        assert body.scope_type == "agent"
+        assert body.scope_key == "iris"
+        assert body.top_k == 3
+        assert body.score_threshold == 0.4
+        assert body.valid_at.isoformat() == "2026-07-09T12:00:00+00:00"
+        assert body.fact_kind_filter == ["world", "observation"]
+        return SemanticRecallResponse(
+            scope={"type": "agent", "key": "iris"},
+            items=[
+                {
+                    "entry_id": entry_id,
+                    "source_item_id": source_item_id,
+                    "title": "Iris deployed Palace semantic recall",
+                    "summary": "Source-backed deployment fact.",
+                    "body": "Iris can retrieve current semantic memories.",
+                    "source": "codex",
+                    "source_url": "https://example.test/source",
+                    "scope": {"type": "agent", "key": "iris"},
+                    "tags": ["semantic-memory"],
+                    "system_tags": ["scope-agent"],
+                    "semantic_tags": ["palace"],
+                    "created_at": datetime(2026, 7, 9, 11, 0, tzinfo=timezone.utc),
+                    "valid_from": datetime(2026, 7, 9, 10, 0, tzinfo=timezone.utc),
+                    "fact_kind": "world",
+                    "score": 0.91,
+                    "temporal_status": "current",
+                }
+            ],
+            total=1,
+            total_considered=2,
+            trace={
+                "searched_scope": {"type": "agent", "key": "iris"},
+                "valid_at": datetime(2026, 7, 9, 12, 0, tzinfo=timezone.utc),
+                "fact_kind_filter": ["world", "observation"],
+                "total_considered": 2,
+                "candidate_limit": 10,
+                "display_limit": 3,
+                "score_threshold": 0.4,
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.semantic_recall_memory", fake_semantic_recall)
+
+    response = client.post(
+        "/api/v1/memory/semantic-recall",
+        json={
+            "scope_type": "agent",
+            "scope_key": "iris",
+            "query": "semantic recall",
+            "top_k": 3,
+            "candidate_limit": 10,
+            "score_threshold": 0.4,
+            "valid_at": "2026-07-09T12:00:00Z",
+            "fact_kind_filter": ["world", "observation", "world"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == {"type": "agent", "key": "iris"}
+    assert payload["items"][0]["entry_id"] == str(entry_id)
+    assert payload["items"][0]["source_item_id"] == str(source_item_id)
+    assert payload["items"][0]["fact_kind"] == "world"
+    assert payload["items"][0]["temporal_status"] == "current"
+    assert payload["trace"]["fact_kind_filter"] == ["world", "observation"]
+
+
+def test_semantic_recall_rest_requires_read_scope() -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["write"])
+
+    response = client.post(
+        "/api/v1/memory/semantic-recall",
+        json={"query": "blocked", "scope_type": "tenant_shared"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_memory_scopes_list_uses_authenticated_tenant(monkeypatch) -> None:
