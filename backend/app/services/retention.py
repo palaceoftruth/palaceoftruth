@@ -5,13 +5,15 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.schemas.curation_artifact import CandidateCurationArtifactCreate
 from app.schemas.memory import MemoryEntryFactKind, MemoryEntryRequest, MemoryScope
+from app.services.curation_artifacts import create_candidate_curation_artifact
 from app.services.codex_memory_privacy import redact_codex_memory_preview, scan_codex_memory_privacy
 from app.services.llm import LLMService
 from app.services.memory import MemoryArtifactAcceptanceResult, accept_canonical_memory_entry
@@ -21,11 +23,15 @@ from app.services.semantic_scope_profiles import SemanticScopeProfileService
 
 logger = logging.getLogger(__name__)
 
-RetentionExtractionMode = Literal["raw_write", "extracted_write"]
+RetentionExtractionMode = Literal["raw_write", "extracted_write", "reflection_candidate"]
 
 _DEFAULT_RETAIN_MISSION = (
     "Retain durable facts, decisions, task state, operational lessons, and source-backed context. "
     "Do not retain greetings, banter, transient debug noise, or sensitive raw secret values."
+)
+_DEFAULT_REFLECT_MISSION = (
+    "Propose concise observation memories only when the supplied source memories support them. "
+    "Keep conflicts visible for operator review. Do not promote conclusions or hide raw evidence."
 )
 _MAX_EXTRACTION_INPUT_CHARS = 8000
 _SECRET_PLACEHOLDER = "[redacted]"
@@ -75,6 +81,7 @@ class RetentionWriteResult:
     rejected_count: int
     skipped_count: int
     acceptance_results: list[MemoryArtifactAcceptanceResult]
+    candidate_artifact_ids: list[str]
     extraction_confidences: list[float]
     retain_mission: str
 
@@ -128,11 +135,30 @@ class RetentionService:
                 rejected_count=0,
                 skipped_count=0,
                 acceptance_results=[result],
+                candidate_artifact_ids=[],
                 extraction_confidences=[],
                 retain_mission="",
             )
 
         profile = await self.profile_service.get_profile(body.scope)
+        if mode == "reflection_candidate":
+            if not profile.reflection_enabled:
+                return RetentionWriteResult(
+                    mode=mode,
+                    created_count=0,
+                    rejected_count=0,
+                    skipped_count=1,
+                    acceptance_results=[],
+                    candidate_artifact_ids=[],
+                    extraction_confidences=[],
+                    retain_mission="",
+                )
+            reflect_mission = profile.reflect_mission.strip() or _DEFAULT_REFLECT_MISSION
+            return await self._create_reflection_candidates(
+                body,
+                reflect_mission=reflect_mission,
+            )
+
         retain_mission = profile.retain_mission.strip() or _DEFAULT_RETAIN_MISSION
         try:
             extracted = await self.extract(body, retain_mission=retain_mission)
@@ -147,6 +173,7 @@ class RetentionService:
                 rejected_count=0,
                 skipped_count=0,
                 acceptance_results=[],
+                candidate_artifact_ids=[],
                 extraction_confidences=[],
                 retain_mission=retain_mission,
             )
@@ -190,6 +217,7 @@ class RetentionService:
             rejected_count=rejected_count,
             skipped_count=len(extracted.entries) - len(accepted_candidates),
             acceptance_results=results,
+            candidate_artifact_ids=[],
             extraction_confidences=[entry.confidence for _candidate, entry, _audit in accepted_candidates],
             retain_mission=retain_mission,
         )
@@ -237,6 +265,118 @@ class RetentionService:
         if not isinstance(output, RetentionExtractionOutput):
             raise RuntimeError("Retention extraction returned an unexpected response type")
         return output
+
+    async def _create_reflection_candidates(
+        self,
+        source: MemoryEntryRequest,
+        *,
+        reflect_mission: str,
+    ) -> RetentionWriteResult:
+        try:
+            extracted = await self.extract(source, retain_mission=reflect_mission)
+        except Exception:
+            record_retention_extraction(status="error", mode="reflection_candidate")
+            raise
+        if not extracted.entries:
+            record_retention_extraction(status="empty", mode="reflection_candidate")
+            return RetentionWriteResult(
+                mode="reflection_candidate",
+                created_count=0,
+                rejected_count=0,
+                skipped_count=0,
+                acceptance_results=[],
+                candidate_artifact_ids=[],
+                extraction_confidences=[],
+                retain_mission=reflect_mission,
+            )
+
+        source_memory_ids = _metadata_string_list(source.metadata, "source_memory_ids")
+        contradicts_memory_ids = _metadata_string_list(source.metadata, "contradicts_memory_ids")
+        source_digests = {
+            source_id: hashlib.sha256(
+                json.dumps(
+                    {
+                        "source_id": source_id,
+                        "source_idempotency_key": source.idempotency_key,
+                        "source_created_at": source.created_at.astimezone(timezone.utc).isoformat(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            for source_id in source_memory_ids
+        }
+        status = "reviewable" if source_memory_ids else "needs_source"
+        artifact_ids: list[str] = []
+        rejected_count = 0
+        for extracted_entry in extracted.entries:
+            candidate_body = self._reflection_candidate_body(extracted_entry)
+            if scan_codex_memory_privacy(candidate_body).has_findings:
+                candidate_body = redact_codex_memory_preview(candidate_body, placeholder=_SECRET_PLACEHOLDER)
+            metadata = {
+                **dict(source.metadata or {}),
+                "semantic_memory_reflection": {
+                    "schema_version": 1,
+                    "provenance_state": "generated_unpromoted",
+                    "source_memory_ids": source_memory_ids,
+                    "contradicts_memory_ids": contradicts_memory_ids,
+                    "reflect_mission_sha256": hashlib.sha256(reflect_mission.encode()).hexdigest(),
+                    "source_idempotency_key": source.idempotency_key,
+                    "scope": source.scope.model_dump(mode="json"),
+                    "fact_kind": extracted_entry.fact_kind,
+                },
+                "source_conflicts": bool(contradicts_memory_ids),
+            }
+            try:
+                artifact = await create_candidate_curation_artifact(
+                    self.db,
+                    tenant_id=self.tenant_id,
+                    body=CandidateCurationArtifactCreate(
+                        artifact_kind="candidate_memory_reflection",
+                        target_runtime="palace-memory",
+                        target_surface=_scope_surface(source.scope),
+                        status=status,
+                        source_item_ids=source_memory_ids,
+                        source_digests=source_digests,
+                        candidate_body=candidate_body,
+                        privacy_review={
+                            "safe_for_review": True,
+                            "raw_sensitive_content_excluded": True,
+                            "contains_sensitive_content": False,
+                        },
+                        eval_summary={
+                            "confidence": extracted_entry.confidence,
+                            "fact_kind": extracted_entry.fact_kind,
+                            "source_count": len(source_memory_ids),
+                            "blocks_promotion_until_conflict_reviewed": bool(contradicts_memory_ids),
+                        },
+                        approval={},
+                        metadata=metadata,
+                    ),
+                )
+            except Exception:
+                rejected_count += 1
+                logger.info("reflection candidate rejected before review artifact creation", exc_info=True)
+                continue
+            artifact_ids.append(str(artifact.id))
+
+        record_retention_extraction(status="written" if artifact_ids else "rejected", mode="reflection_candidate")
+        return RetentionWriteResult(
+            mode="reflection_candidate",
+            created_count=0,
+            rejected_count=rejected_count,
+            skipped_count=len(extracted.entries) - len(artifact_ids) - rejected_count,
+            acceptance_results=[],
+            candidate_artifact_ids=artifact_ids,
+            extraction_confidences=[entry.confidence for entry in extracted.entries],
+            retain_mission=reflect_mission,
+        )
+
+    @staticmethod
+    def _reflection_candidate_body(extracted: RetentionExtractedEntry) -> str:
+        return "\n".join(
+            part for part in (extracted.title, extracted.summary or "", extracted.body) if part
+        )
 
     def _entry_request_from_extraction(
         self,
@@ -327,3 +467,23 @@ def _sanitize_retention_tags(tags: list[str]) -> list[str]:
             seen.add(cleaned)
             sanitized.append(cleaned)
     return sanitized
+
+
+def _metadata_string_list(metadata: dict[str, Any] | None, key: str) -> list[str]:
+    value = (metadata or {}).get(key)
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        stripped = item.strip()
+        if stripped and stripped not in cleaned:
+            cleaned.append(stripped)
+    return cleaned
+
+
+def _scope_surface(scope: MemoryScope) -> str:
+    if scope.type == "tenant_shared":
+        return "tenant_shared"
+    return f"{scope.type}/{scope.key}"

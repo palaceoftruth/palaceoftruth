@@ -1890,14 +1890,20 @@ def test_list_memory_scopes_summarizes_without_raw_content() -> None:
     assert response.scopes[0].tags == ["codex-memory", "migration-staging"]
     assert response.scopes[0].sources == ["codex"]
     assert response.scopes[0].profile.retain_mission == "Keep operator deployment facts."
+    assert response.scopes[0].profile.reflect_mission == ""
+    assert response.scopes[0].profile.reflection_enabled is False
     assert response.scopes[0].profile.quiet_recall is True
     assert response.scopes[1].scope.type == "tenant_shared"
     assert response.scopes[1].scope.key is None
     assert response.scopes[1].profile.retain_mission == ""
+    assert response.scopes[1].profile.reflect_mission == ""
+    assert response.scopes[1].profile.reflection_enabled is False
     assert response.scopes[1].profile.quiet_recall is False
     compiled = "\n".join(session.executed)
     assert "i.raw_content" not in compiled
     assert "memory_scope_profiles" in compiled
+    assert "reflect_mission" in compiled
+    assert "reflection_enabled" in compiled
     assert "i.tenant_id =" in compiled
 
 
@@ -1915,6 +1921,8 @@ def test_get_memory_scope_profile_defaults_when_profile_missing() -> None:
     assert profile.scope.type == "agent"
     assert profile.scope.key == "codex"
     assert profile.retain_mission == ""
+    assert profile.reflect_mission == ""
+    assert profile.reflection_enabled is False
     assert profile.quiet_recall is False
     assert "memory_scope_profiles" in "\n".join(session.executed)
 
@@ -1928,6 +1936,8 @@ def test_upsert_memory_scope_profile_persists_shared_runtime_fields() -> None:
                     "scope_type": "workspace",
                     "scope_key": "hermes",
                     "retain_mission": "Retain durable Hermes routing decisions.",
+                    "reflect_mission": "Reflect only promoted Hermes observations.",
+                    "reflection_enabled": True,
                     "quiet_recall": True,
                     "profile_created_at": updated_at,
                     "profile_updated_at": updated_at,
@@ -1945,6 +1955,8 @@ def test_upsert_memory_scope_profile_persists_shared_runtime_fields() -> None:
             body=MemoryScopeProfileUpsertRequest(
                 scope=MemoryScope(type="workspace", key="hermes"),
                 retain_mission=" Retain durable Hermes routing decisions. ",
+                reflect_mission=" Reflect only promoted Hermes observations. ",
+                reflection_enabled=True,
                 quiet_recall=True,
                 updated_by="codex",
             ),
@@ -1954,11 +1966,15 @@ def test_upsert_memory_scope_profile_persists_shared_runtime_fields() -> None:
     assert profile.scope.type == "workspace"
     assert profile.scope.key == "hermes"
     assert profile.retain_mission == "Retain durable Hermes routing decisions."
+    assert profile.reflect_mission == "Reflect only promoted Hermes observations."
+    assert profile.reflection_enabled is True
     assert profile.quiet_recall is True
     assert session.commits == 1
     compiled = "\n".join(session.executed)
     assert "ON CONFLICT" in compiled
     assert "retain_mission" in compiled
+    assert "reflect_mission" in compiled
+    assert "reflection_enabled" in compiled
 
 
 def test_retrieve_agent_memory_searches_policy_scopes_and_excludes_private_broad_corpus(monkeypatch) -> None:

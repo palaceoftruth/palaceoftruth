@@ -1216,6 +1216,8 @@ def test_memory_scope_profile_get_uses_authenticated_tenant(monkeypatch) -> None
         return MemoryScopeProfile(
             scope={"type": "agent", "key": "iris"},
             retain_mission="Retain Iris operator handoffs.",
+            reflect_mission="Reflect source-backed Iris patterns.",
+            reflection_enabled=True,
             quiet_recall=True,
         )
 
@@ -1227,6 +1229,8 @@ def test_memory_scope_profile_get_uses_authenticated_tenant(monkeypatch) -> None
     payload = response.json()
     assert payload["scope"] == {"type": "agent", "key": "iris"}
     assert payload["retain_mission"] == "Retain Iris operator handoffs."
+    assert payload["reflect_mission"] == "Reflect source-backed Iris patterns."
+    assert payload["reflection_enabled"] is True
     assert payload["quiet_recall"] is True
 
 
@@ -1263,10 +1267,14 @@ def test_memory_scope_profile_put_updates_authenticated_tenant(monkeypatch) -> N
         assert body.scope.type == "workspace"
         assert body.scope.key == "hermes"
         assert body.retain_mission == "Retain Hermes routing facts."
+        assert body.reflect_mission == "Reflect only reviewed Hermes observations."
+        assert body.reflection_enabled is True
         assert body.quiet_recall is False
         return MemoryScopeProfile(
             scope=body.scope,
             retain_mission=body.retain_mission,
+            reflect_mission=body.reflect_mission,
+            reflection_enabled=body.reflection_enabled,
             quiet_recall=body.quiet_recall,
             updated_by=body.updated_by,
         )
@@ -1278,6 +1286,8 @@ def test_memory_scope_profile_put_updates_authenticated_tenant(monkeypatch) -> N
         json={
             "scope": {"type": "workspace", "key": "hermes"},
             "retain_mission": " Retain Hermes routing facts. ",
+            "reflect_mission": " Reflect only reviewed Hermes observations. ",
+            "reflection_enabled": True,
             "quiet_recall": False,
             "updated_by": "codex",
         },
@@ -1287,6 +1297,8 @@ def test_memory_scope_profile_put_updates_authenticated_tenant(monkeypatch) -> N
     payload = response.json()
     assert payload["scope"] == {"type": "workspace", "key": "hermes"}
     assert payload["retain_mission"] == "Retain Hermes routing facts."
+    assert payload["reflect_mission"] == "Reflect only reviewed Hermes observations."
+    assert payload["reflection_enabled"] is True
     assert payload["quiet_recall"] is False
 
 

@@ -3,6 +3,9 @@ from pathlib import Path
 
 MIGRATION = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "035_source_records_and_chunks.py"
 CLAIMS_MIGRATION = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "036_claims_and_claim_sources.py"
+REFLECTION_MIGRATION = (
+    Path(__file__).resolve().parents[1] / "alembic" / "versions" / "040_semantic_memory_reflection_profile.py"
+)
 
 
 def test_source_compiler_migration_declares_required_constraints() -> None:
@@ -29,3 +32,12 @@ def test_claim_compiler_migration_declares_required_constraints() -> None:
     assert "ck_claim_sources_status" in contents
     assert "ix_claim_sources_tenant_source_record" in contents
     assert "ondelete=\"CASCADE\"" in contents
+
+
+def test_reflection_migration_adds_profile_opt_in_and_candidate_kind() -> None:
+    contents = REFLECTION_MIGRATION.read_text()
+
+    assert "reflect_mission" in contents
+    assert "reflection_enabled" in contents
+    assert "candidate_memory_reflection" in contents
+    assert "ck_candidate_curation_artifact_kind" in contents

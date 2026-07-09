@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.models.item import Item
+from app.models.palace import CandidateCurationArtifact, CandidateCurationArtifactEvent
 from app.schemas.memory import MemoryEntryRequest, MemoryScope, MemoryScopeProfile
 from app.services.retention import (
     RetentionExtractedEntry,
@@ -51,13 +52,26 @@ class FakeSession:
 
 
 class FakeProfileService:
-    def __init__(self, retain_mission: str) -> None:
+    def __init__(
+        self,
+        retain_mission: str,
+        *,
+        reflect_mission: str = "",
+        reflection_enabled: bool = False,
+    ) -> None:
         self.retain_mission = retain_mission
+        self.reflect_mission = reflect_mission
+        self.reflection_enabled = reflection_enabled
         self.scopes = []
 
     async def get_profile(self, scope: MemoryScope) -> MemoryScopeProfile:
         self.scopes.append(scope)
-        return MemoryScopeProfile(scope=scope, retain_mission=self.retain_mission)
+        return MemoryScopeProfile(
+            scope=scope,
+            retain_mission=self.retain_mission,
+            reflect_mission=self.reflect_mission,
+            reflection_enabled=self.reflection_enabled,
+        )
 
 
 class FakeLLM:
@@ -230,3 +244,129 @@ async def test_retention_service_extraction_failure_writes_nothing() -> None:
 
     assert db.added == []
     assert memory_telemetry_snapshot()["retention_extraction"] == [(("error", "extracted_write"), 1)]
+
+
+@pytest.mark.asyncio
+async def test_reflection_candidate_mode_is_disabled_by_default() -> None:
+    db = FakeSession()
+    llm = FakeLLM(RuntimeError("reflection must not call LLM when disabled"))
+    service = RetentionService(
+        db,
+        tenant_id="tenant-a",
+        llm=llm,
+        profile_service=FakeProfileService("Retain SAR transitions."),
+    )
+
+    result = await service.retain(_entry(), mode="reflection_candidate")
+
+    assert result.created_count == 0
+    assert result.skipped_count == 1
+    assert result.candidate_artifact_ids == []
+    assert db.added == []
+    assert llm.messages is None
+
+
+@pytest.mark.asyncio
+async def test_reflection_candidate_mode_creates_reviewable_source_backed_artifacts() -> None:
+    db = FakeSession()
+    llm = FakeLLM(
+        RetentionExtractionOutput(
+            entries=[
+                RetentionExtractedEntry(
+                    title="SAR-1015 weekly reflection",
+                    body="Iris should keep SAR weekly ticket transitions visible in startup context.",
+                    summary="Reflects a recurring SAR handoff pattern.",
+                    confidence=0.88,
+                    fact_kind="observation",
+                    tags=["sar", "reflection"],
+                )
+            ]
+        )
+    )
+    service = RetentionService(
+        db,
+        tenant_id="tenant-a",
+        llm=llm,
+        profile_service=FakeProfileService(
+            "unused retain mission",
+            reflect_mission="Reflect only source-backed operational observations.",
+            reflection_enabled=True,
+        ),
+    )
+
+    result = await service.retain(
+        _entry(
+            metadata={
+                "source_memory_ids": [
+                    "4b7310c1-c2fd-43b0-bb2e-c589f5f1e8a7",
+                    "d0af056a-ffec-4b98-8d1b-27fbf786929a",
+                ],
+            }
+        ),
+        mode="reflection_candidate",
+    )
+
+    assert result.created_count == 0
+    assert result.candidate_artifact_ids
+    assert result.retain_mission == "Reflect only source-backed operational observations."
+    assert "Reflect only source-backed" in llm.messages[1]["content"]
+    assert "unused retain mission" not in llm.messages[1]["content"]
+    artifact = next(value for value in db.added if isinstance(value, CandidateCurationArtifact))
+    assert artifact.artifact_kind == "candidate_memory_reflection"
+    assert artifact.status == "reviewable"
+    assert artifact.source_item_ids == [
+        "4b7310c1-c2fd-43b0-bb2e-c589f5f1e8a7",
+        "d0af056a-ffec-4b98-8d1b-27fbf786929a",
+    ]
+    assert set(artifact.source_digests) == set(artifact.source_item_ids)
+    assert artifact.metadata_["semantic_memory_reflection"]["provenance_state"] == "generated_unpromoted"
+    assert artifact.metadata_["semantic_memory_reflection"]["fact_kind"] == "observation"
+    assert artifact.metadata_["source_conflicts"] is False
+    event = next(value for value in db.added if isinstance(value, CandidateCurationArtifactEvent))
+    assert event.event_type == "created"
+    assert event.next_status == "reviewable"
+
+
+@pytest.mark.asyncio
+async def test_reflection_candidate_mode_marks_contradictions_for_promotion_gate() -> None:
+    db = FakeSession()
+    llm = FakeLLM(
+        RetentionExtractionOutput(
+            entries=[
+                RetentionExtractedEntry(
+                    title="Conflicting owner note",
+                    body="Same-time task owner claims conflict and need operator review.",
+                    confidence=0.75,
+                    fact_kind="observation",
+                    tags=["conflict"],
+                )
+            ]
+        )
+    )
+    service = RetentionService(
+        db,
+        tenant_id="tenant-a",
+        llm=llm,
+        profile_service=FakeProfileService(
+            "unused",
+            reflect_mission="Reflect contradictions without resolving them.",
+            reflection_enabled=True,
+        ),
+    )
+
+    result = await service.retain(
+        _entry(
+            metadata={
+                "source_memory_ids": ["source-a"],
+                "contradicts_memory_ids": ["source-b"],
+            }
+        ),
+        mode="reflection_candidate",
+    )
+
+    assert result.candidate_artifact_ids
+    artifact = next(value for value in db.added if isinstance(value, CandidateCurationArtifact))
+    assert artifact.status == "reviewable"
+    assert artifact.metadata_["source_conflicts"] is True
+    assert artifact.eval_summary["blocks_promotion_until_conflict_reviewed"] is True
+    assert artifact.metadata_["semantic_memory_reflection"]["contradicts_memory_ids"] == ["source-b"]
