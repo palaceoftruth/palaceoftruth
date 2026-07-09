@@ -41,6 +41,7 @@ from app.services.memory import (
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.memory_entries import source_project_from_memory_metadata
 from app.services.memory_entries import normalize_legacy_memory_artifact, normalize_memory_entry
+from app.services.memory_telemetry import memory_telemetry_snapshot, reset_memory_telemetry_for_tests
 from app.services.palace import _append_search_ranking_trace
 
 
@@ -523,6 +524,77 @@ def test_accept_canonical_memory_entry_rolls_back_invalid_supersession() -> None
         assert exc.detail["status"] == "invalid_supersession"
     else:
         raise AssertionError("invalid supersedes_entry_id should fail closed")
+
+    assert session.rollbacks == 1
+
+
+def test_accept_canonical_memory_entry_rejects_already_superseded_entry() -> None:
+    previous = MemoryEntry(
+        id=uuid.uuid4(),
+        item_id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        scope_type="agent",
+        scope_key="iris",
+        source="hermes",
+        superseded_by_entry_id=uuid.uuid4(),
+    )
+    session = FakeSession(scalar_results=[None, previous])
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=_entry(supersedes_entry_id=previous.id),
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["status"] == "invalid_supersession"
+        assert exc.detail["superseded_by_entry_id"] == str(previous.superseded_by_entry_id)
+    else:
+        raise AssertionError("already superseded lineage should fail closed")
+
+    assert session.rollbacks == 1
+
+
+def test_accept_canonical_memory_entry_rejects_supersession_cycle() -> None:
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    first = MemoryEntry(
+        id=first_id,
+        item_id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        scope_type="agent",
+        scope_key="iris",
+        source="hermes",
+        supersedes_entry_id=second_id,
+    )
+    second = MemoryEntry(
+        id=second_id,
+        item_id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        scope_type="agent",
+        scope_key="iris",
+        source="hermes",
+        supersedes_entry_id=first_id,
+    )
+    session = FakeSession(scalar_results=[None, first, second])
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=_entry(supersedes_entry_id=first.id),
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["status"] == "invalid_supersession"
+        assert exc.detail["cycle_entry_id"] == str(first.id)
+    else:
+        raise AssertionError("supersession cycles should fail closed")
 
     assert session.rollbacks == 1
 
@@ -1432,6 +1504,7 @@ def test_semantic_recall_filters_fact_kind_and_keeps_date_filters_distinct() -> 
 
 
 def test_semantic_recall_empty_result_returns_success_trace() -> None:
+    reset_memory_telemetry_for_tests()
     session = FakeSession(execute_results=[0, []])
 
     response = asyncio.run(
@@ -1454,6 +1527,7 @@ def test_semantic_recall_empty_result_returns_success_trace() -> None:
     assert response.trace.status == "ok"
     assert response.trace.searched_scope.type == "agent"
     assert response.trace.searched_scope.key == "iris"
+    assert memory_telemetry_snapshot()["semantic_recall"] == [(("empty", "agent"), 1)]
 
 
 def test_semantic_recall_drops_zero_score_rows_for_tokenized_queries() -> None:

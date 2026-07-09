@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from app.services.memory_telemetry import memory_telemetry_snapshot
 from app.services.queue_telemetry import build_worker_backpressure
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -129,6 +130,34 @@ def _add_http_metrics(builder: PrometheusTextBuilder, recorder: HttpMetricsRecor
             "counter",
             count,
             labels,
+        )
+
+
+def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
+    snapshot = memory_telemetry_snapshot()
+    for (status, scope_type), count in snapshot["semantic_recall"]:
+        builder.metric(
+            "palace_semantic_recall_total",
+            "Semantic recall requests by outcome and scope type.",
+            "counter",
+            count,
+            {"status": status, "scope_type": scope_type},
+        )
+    for (status, mode), count in snapshot["retention_extraction"]:
+        builder.metric(
+            "palace_retention_extraction_total",
+            "Retention extraction outcomes by mode.",
+            "counter",
+            count,
+            {"status": status, "mode": mode},
+        )
+    for (reason,), count in snapshot["scope_guard_violations"]:
+        builder.metric(
+            "palace_memory_scope_guard_violations_total",
+            "Memory scope guard denials by bounded reason.",
+            "counter",
+            count,
+            {"reason": reason},
         )
 
 
@@ -296,6 +325,7 @@ async def build_prometheus_metrics(
     builder = PrometheusTextBuilder()
     builder.metric("palace_metrics_scrape", "Successful Palace metrics scrape.", "gauge", 1)
     _add_http_metrics(builder, http_metrics)
+    _add_memory_runtime_metrics(builder)
     await _add_database_metrics(builder, db)
     await _add_queue_metrics(builder, arq_pool, db)
     return builder.render()

@@ -70,6 +70,7 @@ from app.services.memory_entries import (
     request_fingerprint,
     source_project_from_memory_metadata,
 )
+from app.services.memory_telemetry import record_scope_guard_violation, record_semantic_recall
 from app.services.palace import retrieve_palace
 from app.services.queue_telemetry import build_worker_backpressure
 from app.services.search import SearchService
@@ -536,6 +537,19 @@ async def _add_memory_entry_row(db: AsyncSession, *, item: Item, entry: Normaliz
                     "retryable": False,
                 },
             )
+        if superseded.superseded_by_entry_id is not None:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "invalid_supersession",
+                    "message": "supersedes_entry_id already has a superseded_by_entry_id",
+                    "supersedes_entry_id": str(entry.supersedes_entry_id),
+                    "superseded_by_entry_id": str(superseded.superseded_by_entry_id),
+                    "retryable": False,
+                },
+            )
+        await _ensure_supersession_chain_is_acyclic(db, entry=entry, first=superseded)
     memory_entry = MemoryEntry(
         tenant_id=entry.tenant_id,
         item_id=item.id,
@@ -559,6 +573,49 @@ async def _add_memory_entry_row(db: AsyncSession, *, item: Item, entry: Normaliz
         superseded.superseded_by_entry_id = memory_entry.id
         superseded.updated_at = entry.created_at
     return memory_entry
+
+
+async def _ensure_supersession_chain_is_acyclic(
+    db: AsyncSession,
+    *,
+    entry: NormalizedMemoryEntry,
+    first: MemoryEntry,
+) -> None:
+    seen = {first.id}
+    current = first
+    while current.supersedes_entry_id is not None:
+        if current.supersedes_entry_id in seen:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "invalid_supersession",
+                    "message": "supersedes_entry_id points into a supersession cycle",
+                    "supersedes_entry_id": str(entry.supersedes_entry_id),
+                    "cycle_entry_id": str(current.supersedes_entry_id),
+                    "retryable": False,
+                },
+            )
+        seen.add(current.supersedes_entry_id)
+        next_entry = await db.scalar(
+            select(MemoryEntry)
+            .where(MemoryEntry.tenant_id == entry.tenant_id)
+            .where(MemoryEntry.id == current.supersedes_entry_id)
+            .limit(1)
+        )
+        if next_entry is None:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "invalid_supersession",
+                    "message": "supersession chain contains a dangling supersedes_entry_id",
+                    "supersedes_entry_id": str(entry.supersedes_entry_id),
+                    "dangling_entry_id": str(current.supersedes_entry_id),
+                    "retryable": False,
+                },
+            )
+        current = next_entry
 
 
 def is_stale_memory_job(job: Job, *, now: datetime | None = None) -> bool:
@@ -1455,6 +1512,20 @@ async def semantic_recall_memory(
     body: SemanticRecallRequest,
 ) -> SemanticRecallResponse:
     scope = MemoryScope(type=body.scope_type, key=body.scope_key)
+    try:
+        return await _semantic_recall_memory(db, tenant_id=tenant_id, body=body, scope=scope)
+    except Exception:
+        record_semantic_recall(status="error", scope_type=scope.type)
+        raise
+
+
+async def _semantic_recall_memory(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    body: SemanticRecallRequest,
+    scope: MemoryScope,
+) -> SemanticRecallResponse:
     candidate_limit = body.candidate_limit or 50
     query_tokens = _semantic_recall_tokens(body.query)
     sql_score = _semantic_sql_score_expression(query_tokens).label("semantic_score")
@@ -1557,6 +1628,7 @@ async def semantic_recall_memory(
         date_to=body.date_to,
         budget_truncated=budget_truncated,
     )
+    record_semantic_recall(status="empty" if not selected else "hit", scope_type=scope.type)
     return SemanticRecallResponse(
         scope=scope,
         items=selected,
@@ -1907,6 +1979,7 @@ def _evaluate_delegated_agent_memory_policy(
             max_results_per_scope=policy.max_results_per_scope if policy else None,
         )
     if policy is None:
+        record_scope_guard_violation(reason="no_delegated_agent_policy")
         return DelegatedAgentMemoryDecision(
             caller_agent_scope_key=caller_agent_key,
             requested_agent_scope_keys=requested_keys,
@@ -1947,6 +2020,8 @@ def _evaluate_delegated_agent_memory_policy(
             deny_reasons.append("max_cross_agent_scopes_exceeded")
         if denied and "agent_scope_not_allowlisted" not in deny_reasons:
             deny_reasons.append("agent_scope_not_allowlisted")
+    for reason in deny_reasons:
+        record_scope_guard_violation(reason=reason)
 
     if authorized and denied:
         decision = "partial"
