@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import perf_counter
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -45,6 +46,8 @@ from app.schemas.memory import (
     MemoryRetrievalDoctorWakeupState,
     MemoryScope,
     MemoryScopeListResponse,
+    MemoryScopeProfile,
+    MemoryScopeProfileUpsertRequest,
     MemoryScopeSummary,
     MemoryRetrieveRequest,
     MemoryRetrieveResponse,
@@ -83,6 +86,23 @@ _MEMORY_STATUS_QUERY_MAP = {
     "failed": "failed",
     "cancelled": "cancelled",
 }
+
+
+def _memory_scope_profile_from_row(row: Any, *, scope: MemoryScope | None = None) -> MemoryScopeProfile:
+    resolved_scope = scope or MemoryScope(type=row["scope_type"], key=row["scope_key"])
+    return MemoryScopeProfile(
+        scope=resolved_scope,
+        retain_mission=row.get("retain_mission") or "",
+        quiet_recall=bool(row.get("quiet_recall", False)),
+        created_at=row.get("profile_created_at"),
+        updated_at=row.get("profile_updated_at"),
+        created_by=row.get("created_by"),
+        updated_by=row.get("updated_by"),
+    )
+
+
+def _default_memory_scope_profile(scope: MemoryScope) -> MemoryScopeProfile:
+    return MemoryScopeProfile(scope=scope, retain_mission="", quiet_recall=False)
 
 
 @dataclass
@@ -870,13 +890,35 @@ async def list_memory_scopes(
                     MAX(updated_at) AS latest_updated_at
                 FROM memory_items
                 GROUP BY scope_type, scope_key
+            ),
+            profiles AS (
+                SELECT
+                    scope_type,
+                    scope_key,
+                    retain_mission,
+                    quiet_recall,
+                    created_at AS profile_created_at,
+                    updated_at AS profile_updated_at,
+                    created_by,
+                    updated_by
+                FROM memory_scope_profiles
+                WHERE tenant_id = :tenant_id
             )
             SELECT
-                g.scope_type,
-                g.scope_key,
-                g.entry_count,
+                COALESCE(g.scope_type, p.scope_type) AS scope_type,
+                CASE
+                    WHEN COALESCE(g.scope_type, p.scope_type) = 'tenant_shared' THEN NULL
+                    ELSE COALESCE(g.scope_key, p.scope_key)
+                END AS scope_key,
+                COALESCE(g.entry_count, 0) AS entry_count,
                 g.latest_created_at,
                 g.latest_updated_at,
+                COALESCE(p.retain_mission, '') AS retain_mission,
+                COALESCE(p.quiet_recall, false) AS quiet_recall,
+                p.profile_created_at,
+                p.profile_updated_at,
+                p.created_by,
+                p.updated_by,
                 COALESCE(
                     (
                         SELECT array_agg(tag ORDER BY tag)
@@ -905,7 +947,12 @@ async def list_memory_scopes(
                     ARRAY[]::text[]
                 ) AS sources
             FROM grouped g
-            ORDER BY g.latest_updated_at DESC NULLS LAST, g.scope_type, g.scope_key NULLS FIRST
+            FULL OUTER JOIN profiles p
+              ON p.scope_type = g.scope_type
+             AND p.scope_key IS NOT DISTINCT FROM g.scope_key
+            ORDER BY GREATEST(g.latest_updated_at, p.profile_updated_at) DESC NULLS LAST,
+                     COALESCE(g.scope_type, p.scope_type),
+                     COALESCE(g.scope_key, p.scope_key) NULLS FIRST
             LIMIT :limit
             """
         ),
@@ -920,17 +967,113 @@ async def list_memory_scopes(
     for row in rows:
         scope_type = row["scope_type"] or "tenant_shared"
         scope_key = row["scope_key"] if scope_type != "tenant_shared" else None
+        scope = MemoryScope(type=scope_type, key=scope_key)
         scopes.append(
             MemoryScopeSummary(
-                scope=MemoryScope(type=scope_type, key=scope_key),
+                scope=scope,
                 entry_count=int(row["entry_count"] or 0),
                 latest_created_at=row["latest_created_at"],
                 latest_updated_at=row["latest_updated_at"],
                 tags=list(row["tags"] or []),
                 sources=list(row["sources"] or []),
+                profile=_memory_scope_profile_from_row(row, scope=scope),
             )
         )
     return MemoryScopeListResponse(scopes=scopes, total=len(scopes), limit=limit)
+
+
+async def get_memory_scope_profile(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    scope: MemoryScope,
+) -> MemoryScopeProfile:
+    result = await db.execute(
+        text(
+            """
+            SELECT
+                scope_type,
+                scope_key,
+                retain_mission,
+                quiet_recall,
+                created_at AS profile_created_at,
+                updated_at AS profile_updated_at,
+                created_by,
+                updated_by
+            FROM memory_scope_profiles
+            WHERE tenant_id = :tenant_id
+              AND scope_type = :scope_type
+              AND scope_key IS NOT DISTINCT FROM :scope_key
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "scope_type": scope.type,
+            "scope_key": scope.key if scope.type != "tenant_shared" else None,
+        },
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        return _default_memory_scope_profile(scope)
+    return _memory_scope_profile_from_row(row, scope=scope)
+
+
+async def upsert_memory_scope_profile(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    body: MemoryScopeProfileUpsertRequest,
+) -> MemoryScopeProfile:
+    scope_key = body.scope.key if body.scope.type != "tenant_shared" else None
+    result = await db.execute(
+        text(
+            """
+            INSERT INTO memory_scope_profiles (
+                tenant_id,
+                scope_type,
+                scope_key,
+                retain_mission,
+                quiet_recall,
+                created_by,
+                updated_by
+            )
+            VALUES (
+                :tenant_id,
+                :scope_type,
+                :scope_key,
+                :retain_mission,
+                :quiet_recall,
+                :updated_by,
+                :updated_by
+            )
+            ON CONFLICT (tenant_id, scope_type, (coalesce(scope_key, '')))
+            DO UPDATE SET
+                retain_mission = EXCLUDED.retain_mission,
+                quiet_recall = EXCLUDED.quiet_recall,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+            RETURNING
+                scope_type,
+                scope_key,
+                retain_mission,
+                quiet_recall,
+                created_at AS profile_created_at,
+                updated_at AS profile_updated_at,
+                created_by,
+                updated_by
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "scope_type": body.scope.type,
+            "scope_key": scope_key,
+            "retain_mission": body.retain_mission,
+            "quiet_recall": body.quiet_recall,
+            "updated_by": body.updated_by,
+        },
+    )
+    await db.commit()
+    return _memory_scope_profile_from_row(result.mappings().one(), scope=body.scope)
 
 
 async def retrieve_memory(

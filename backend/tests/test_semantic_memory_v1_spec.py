@@ -76,7 +76,6 @@ def test_semantic_memory_v1_spec_mentions_fixture_and_non_goals() -> None:
     assert "backend/tests/fixtures/semantic_memory_v1_eval_plan.json" in text
 
 
-@pytest.mark.xfail(strict=True, reason="SAR-1035+ must add persisted semantic scope profiles.")
 def test_semantic_scope_profile_service_exists_for_retain_mission() -> None:
     from app.services.semantic_scope_profiles import SemanticScopeProfileService
 

@@ -41,6 +41,8 @@ from app.schemas.memory import (
     MemoryRetrieveResponse,
     MemoryScope,
     MemoryScopeListResponse,
+    MemoryScopeProfile,
+    MemoryScopeProfileUpsertRequest,
     MemoryWakeupBriefResponse,
     MemoryWhoAmIResponse,
     RelationshipBackfillAcceptedResponse,
@@ -53,6 +55,7 @@ from app.services.memory import (
     accept_memory_artifact,
     build_memory_retrieval_doctor,
     build_memory_acceptance_response,
+    get_memory_scope_profile,
     get_memory_wakeup_brief,
     list_memory_entries,
     list_memory_jobs,
@@ -62,6 +65,7 @@ from app.services.memory import (
     retrieve_memory,
     retry_memory_job,
     serialize_memory_job,
+    upsert_memory_scope_profile,
 )
 from app.services.memory_admission import evaluate_memory_write_admission
 from app.services.memory_trajectory import retrieve_memory_trajectory
@@ -711,6 +715,37 @@ async def get_memory_scopes(
         tenant_id=request.state.tenant_id,
         limit=limit,
         sample_limit=sample_limit,
+    )
+
+
+@router.get("/scope-profile", response_model=MemoryScopeProfile, dependencies=[Depends(require_mcp_scope("read"))])
+async def get_memory_scope_profile_endpoint(
+    request: Request,
+    scope_type: str = Query(...),
+    scope_key: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryScopeProfile:
+    try:
+        scope = MemoryScope.model_validate({"type": scope_type, "key": scope_key})
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await get_memory_scope_profile(
+        db,
+        tenant_id=request.state.tenant_id,
+        scope=scope,
+    )
+
+
+@router.put("/scope-profile", response_model=MemoryScopeProfile, dependencies=[Depends(require_mcp_scope("admin"))])
+async def put_memory_scope_profile(
+    body: MemoryScopeProfileUpsertRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> MemoryScopeProfile:
+    return await upsert_memory_scope_profile(
+        db,
+        tenant_id=request.state.tenant_id,
+        body=body,
     )
 
 

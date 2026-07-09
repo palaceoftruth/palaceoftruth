@@ -15,6 +15,7 @@ from app.schemas.memory import (
     MemoryEntryRequest,
     MemoryRetrieveRequest,
     MemoryScope,
+    MemoryScopeProfileUpsertRequest,
     MemoryTrajectoryRequest,
 )
 from app.schemas.palace import PalaceRetrieveResponse, PalaceRetrieveTrace
@@ -26,12 +27,14 @@ from app.services.memory import (
     build_memory_idempotency_key,
     build_memory_tags,
     get_memory_wakeup_brief,
+    get_memory_scope_profile,
     list_memory_entries,
     list_memory_scopes,
     retrieve_memory,
     retrieve_agent_memory,
     retry_memory_job,
     serialize_memory_job,
+    upsert_memory_scope_profile,
 )
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.memory_entries import source_project_from_memory_metadata
@@ -115,6 +118,16 @@ class _ScalarsResult:
 
     def all(self):
         return self.values
+
+    def one(self):
+        if len(self.values) != 1:
+            raise AssertionError(f"Expected exactly one row, got {len(self.values)}")
+        return self.values[0]
+
+    def one_or_none(self):
+        if len(self.values) > 1:
+            raise AssertionError(f"Expected at most one row, got {len(self.values)}")
+        return self.values[0] if self.values else None
 
     def scalar_one(self):
         return self.values
@@ -1092,6 +1105,12 @@ def test_list_memory_scopes_summarizes_without_raw_content() -> None:
                     "latest_updated_at": datetime(2026, 5, 6, 12, 5, tzinfo=timezone.utc),
                     "tags": ["codex-memory", "migration-staging"],
                     "sources": ["codex"],
+                    "retain_mission": "Keep operator deployment facts.",
+                    "quiet_recall": True,
+                    "profile_created_at": datetime(2026, 5, 6, 11, 0, tzinfo=timezone.utc),
+                    "profile_updated_at": datetime(2026, 5, 6, 11, 5, tzinfo=timezone.utc),
+                    "created_by": "codex",
+                    "updated_by": "codex",
                 },
                 {
                     "scope_type": "tenant_shared",
@@ -1114,11 +1133,76 @@ def test_list_memory_scopes_summarizes_without_raw_content() -> None:
     assert response.scopes[0].entry_count == 3
     assert response.scopes[0].tags == ["codex-memory", "migration-staging"]
     assert response.scopes[0].sources == ["codex"]
+    assert response.scopes[0].profile.retain_mission == "Keep operator deployment facts."
+    assert response.scopes[0].profile.quiet_recall is True
     assert response.scopes[1].scope.type == "tenant_shared"
     assert response.scopes[1].scope.key is None
+    assert response.scopes[1].profile.retain_mission == ""
+    assert response.scopes[1].profile.quiet_recall is False
     compiled = "\n".join(session.executed)
     assert "i.raw_content" not in compiled
+    assert "memory_scope_profiles" in compiled
     assert "i.tenant_id =" in compiled
+
+
+def test_get_memory_scope_profile_defaults_when_profile_missing() -> None:
+    session = FakeSession(execute_results=[[]])
+
+    profile = asyncio.run(
+        get_memory_scope_profile(
+            session,
+            tenant_id="tenant-a",
+            scope=MemoryScope(type="agent", key="codex"),
+        )
+    )
+
+    assert profile.scope.type == "agent"
+    assert profile.scope.key == "codex"
+    assert profile.retain_mission == ""
+    assert profile.quiet_recall is False
+    assert "memory_scope_profiles" in "\n".join(session.executed)
+
+
+def test_upsert_memory_scope_profile_persists_shared_runtime_fields() -> None:
+    updated_at = datetime(2026, 7, 9, 2, 0, tzinfo=timezone.utc)
+    session = FakeSession(
+        execute_results=[
+            [
+                {
+                    "scope_type": "workspace",
+                    "scope_key": "hermes",
+                    "retain_mission": "Retain durable Hermes routing decisions.",
+                    "quiet_recall": True,
+                    "profile_created_at": updated_at,
+                    "profile_updated_at": updated_at,
+                    "created_by": "codex",
+                    "updated_by": "codex",
+                }
+            ]
+        ]
+    )
+
+    profile = asyncio.run(
+        upsert_memory_scope_profile(
+            session,
+            tenant_id="tenant-a",
+            body=MemoryScopeProfileUpsertRequest(
+                scope=MemoryScope(type="workspace", key="hermes"),
+                retain_mission=" Retain durable Hermes routing decisions. ",
+                quiet_recall=True,
+                updated_by="codex",
+            ),
+        )
+    )
+
+    assert profile.scope.type == "workspace"
+    assert profile.scope.key == "hermes"
+    assert profile.retain_mission == "Retain durable Hermes routing decisions."
+    assert profile.quiet_recall is True
+    assert session.commits == 1
+    compiled = "\n".join(session.executed)
+    assert "ON CONFLICT" in compiled
+    assert "retain_mission" in compiled
 
 
 def test_retrieve_agent_memory_searches_policy_scopes_and_excludes_private_broad_corpus(monkeypatch) -> None:

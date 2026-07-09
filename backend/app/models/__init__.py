@@ -10,6 +10,7 @@ from app.models.api_key import ApiKey, ApiKeyAuditEvent
 from app.models.palace import (
     CandidateCurationArtifact,
     CandidateCurationArtifactEvent,
+    MemoryScopeProfile,
     PalaceDirtyItem,
     PalaceRoomEvent,
     PalaceRun,
@@ -45,6 +46,7 @@ __all__ = [
     "ApiKeyAuditEvent",
     "CandidateCurationArtifact",
     "CandidateCurationArtifactEvent",
+    "MemoryScopeProfile",
     "PalaceTenantState",
     "TemporalFact",
     "SyncSource",
