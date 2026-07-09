@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from sqlalchemy import Text, and_, bindparam, func, or_, select, text
+from sqlalchemy import Text, and_, bindparam, case, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,10 @@ from app.schemas.memory import (
     MemoryScopeSummary,
     MemoryRetrieveRequest,
     MemoryRetrieveResponse,
+    SemanticRecallItem,
+    SemanticRecallRequest,
+    SemanticRecallResponse,
+    SemanticRecallTrace,
     MemoryWakeupBriefResponse,
     TagsMode,
 )
@@ -1209,6 +1213,357 @@ async def retrieve_memory(
 def _append_scope_once(scopes: list[MemoryScope], scope: MemoryScope) -> None:
     if all(existing.type != scope.type or existing.key != scope.key for existing in scopes):
         scopes.append(scope)
+
+
+_SEMANTIC_RECALL_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,}")
+_SEMANTIC_RECALL_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "at",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "i",
+    "last",
+    "me",
+    "of",
+    "on",
+    "please",
+    "show",
+    "tell",
+    "the",
+    "this",
+    "ticket",
+    "tickets",
+    "to",
+    "was",
+    "week",
+    "what",
+    "when",
+    "which",
+    "who",
+    "why",
+}
+
+
+def _semantic_recall_tokens(query: str) -> set[str]:
+    return {
+        token
+        for token in _SEMANTIC_RECALL_TOKEN_RE.findall(query.casefold())
+        if len(token) > 1 and token not in _SEMANTIC_RECALL_STOPWORDS
+    }
+
+
+def _semantic_recall_score(item: Item, *, query_tokens: set[str]) -> float:
+    if not query_tokens:
+        return 0.0
+    haystack = " ".join(
+        part.casefold()
+        for part in (
+            item.title,
+            item.summary or "",
+            item.raw_content or "",
+            " ".join(item.tags or []),
+        )
+        if part
+    )
+    if not haystack:
+        return 0.0
+    matched = sum(1 for token in query_tokens if token in haystack)
+    return round(matched / len(query_tokens), 4)
+
+
+def _normalize_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _semantic_temporal_status(
+    memory_entry: MemoryEntry,
+    *,
+    now: datetime,
+    valid_at: datetime | None,
+) -> str:
+    valid_from = _normalize_aware_datetime(memory_entry.valid_from)
+    valid_until = _normalize_aware_datetime(memory_entry.valid_until)
+    reference = _normalize_aware_datetime(valid_at) or now
+    if (
+        memory_entry.superseded_by_entry_id is not None
+        and (valid_at is None or (valid_until is not None and valid_until <= reference))
+    ):
+        return "superseded"
+    if valid_from is not None and valid_from > reference:
+        return "future"
+    if valid_until is not None and valid_until <= reference:
+        return "historical"
+    return "current"
+
+
+def _semantic_temporal_rank(status: str) -> int:
+    return {
+        "current": 0,
+        "superseded": 1,
+        "historical": 2,
+        "future": 3,
+    }.get(status, 4)
+
+
+def _serialize_semantic_recall_item(
+    item: Item,
+    memory_entry: MemoryEntry,
+    *,
+    score: float,
+    temporal_status: str,
+) -> SemanticRecallItem:
+    tags = item.tags or []
+    system_tags, semantic_tags = split_system_provenance_tags(tags)
+    return SemanticRecallItem(
+        entry_id=memory_entry.id,
+        source_item_id=item.id,
+        title=item.title,
+        summary=item.summary,
+        body=item.raw_content,
+        source=memory_entry.source,
+        source_url=memory_entry.source_url or item.source_url,
+        scope=MemoryScope(type=memory_entry.scope_type, key=memory_entry.scope_key),
+        tags=tags,
+        system_tags=system_tags,
+        semantic_tags=semantic_tags,
+        created_at=item.created_at,
+        valid_from=memory_entry.valid_from,
+        valid_until=memory_entry.valid_until,
+        supersedes_entry_id=memory_entry.supersedes_entry_id,
+        superseded_by_entry_id=memory_entry.superseded_by_entry_id,
+        fact_kind=memory_entry.fact_kind,
+        score=score,
+        temporal_status=temporal_status,
+    )
+
+
+def _apply_semantic_budget(
+    items: list[SemanticRecallItem],
+    *,
+    budget_chars: int | None,
+) -> tuple[list[SemanticRecallItem], bool]:
+    if budget_chars is None:
+        return items, False
+    selected: list[SemanticRecallItem] = []
+    used_chars = 0
+    for item in items:
+        estimated_chars = len(item.title) + len(item.summary or "") + len(item.body or "")
+        if used_chars + estimated_chars > budget_chars:
+            if not selected:
+                title_budget = max(0, budget_chars)
+                title = _truncate_semantic_text(item.title, title_budget)
+                summary_budget = max(0, budget_chars - len(title))
+                summary = _truncate_semantic_text(item.summary or "", summary_budget) or None
+                body_budget = max(0, budget_chars - len(title) - len(summary or ""))
+                body = _truncate_semantic_text(item.body or "", body_budget) or None
+                item = item.model_copy(update={"title": title, "summary": summary, "body": body})
+                selected.append(item)
+            return selected, True
+        selected.append(item)
+        used_chars += estimated_chars
+    return selected, False
+
+
+def _truncate_semantic_text(value: str, budget_chars: int) -> str:
+    if budget_chars <= 0:
+        return ""
+    if len(value) <= budget_chars:
+        return value
+    suffix = "..." if budget_chars >= 3 else ""
+    return value[: max(0, budget_chars - 3)].rstrip() + suffix
+
+
+def _semantic_context_budget_chars(body: SemanticRecallRequest) -> int | None:
+    token_budget_chars = body.recall_max_tokens * 4 if body.recall_max_tokens is not None else None
+    budgets = [budget for budget in (token_budget_chars, body.context_budget_chars) if budget is not None]
+    return min(budgets) if budgets else None
+
+
+def _semantic_sql_score_expression(query_tokens: set[str]):
+    haystack = func.lower(
+        func.concat(
+            Item.title,
+            " ",
+            func.coalesce(Item.summary, ""),
+            " ",
+            func.coalesce(Item.raw_content, ""),
+            " ",
+            func.coalesce(func.array_to_string(Item.tags, " "), ""),
+        )
+    )
+    if not query_tokens:
+        return literal(0)
+    expression = 0
+    for token in sorted(query_tokens):
+        expression = expression + case((haystack.contains(token, autoescape=True), 1), else_=0)
+    return expression
+
+
+def _semantic_temporal_rank_expression(reference: datetime, *, valid_at: datetime | None):
+    superseded_condition = MemoryEntry.superseded_by_entry_id.is_not(None)
+    if valid_at is not None:
+        superseded_condition = and_(
+            superseded_condition,
+            MemoryEntry.valid_until.is_not(None),
+            MemoryEntry.valid_until <= reference,
+        )
+    return case(
+        (superseded_condition, 1),
+        (and_(MemoryEntry.valid_from.is_not(None), MemoryEntry.valid_from > reference), 3),
+        (and_(MemoryEntry.valid_until.is_not(None), MemoryEntry.valid_until <= reference), 2),
+        else_=0,
+    )
+
+
+def _semantic_source_rank(item: Item) -> int:
+    metadata = item.metadata_ or {}
+    if any(isinstance(metadata.get(key), dict) for key in ("diary_rollup", "wakeup_brief", "memory_dream")):
+        return 2
+    if item.raw_content and item.raw_content.strip():
+        return 0
+    return 1
+
+
+def _semantic_source_rank_expression():
+    derived_metadata = or_(
+        Item.metadata_.op("?")("diary_rollup"),
+        Item.metadata_.op("?")("wakeup_brief"),
+        Item.metadata_.op("?")("memory_dream"),
+    )
+    has_source_body = func.length(func.btrim(func.coalesce(Item.raw_content, ""))) > 0
+    return case(
+        (derived_metadata, 2),
+        (has_source_body, 0),
+        else_=1,
+    )
+
+
+async def semantic_recall_memory(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    body: SemanticRecallRequest,
+) -> SemanticRecallResponse:
+    scope = MemoryScope(type=body.scope_type, key=body.scope_key)
+    candidate_limit = body.candidate_limit or 50
+    query_tokens = _semantic_recall_tokens(body.query)
+    sql_score = _semantic_sql_score_expression(query_tokens).label("semantic_score")
+    valid_at = _normalize_aware_datetime(body.valid_at)
+    now = datetime.now(timezone.utc)
+    temporal_rank = _semantic_temporal_rank_expression(valid_at or now, valid_at=valid_at)
+    source_rank = _semantic_source_rank_expression()
+
+    query = (
+        select(Item, MemoryEntry, sql_score)
+        .join(
+            MemoryEntry,
+            and_(
+                MemoryEntry.item_id == Item.id,
+                MemoryEntry.tenant_id == tenant_id,
+            ),
+        )
+        .where(Item.tenant_id == tenant_id)
+        .where(Item.deleted_at.is_(None))
+        .where(Item.status != "deleted")
+        .where(MemoryEntry.scope_type == scope.type)
+    )
+    if scope.key is None:
+        query = query.where(MemoryEntry.scope_key.is_(None))
+    else:
+        query = query.where(MemoryEntry.scope_key == scope.key)
+    if body.fact_kind_filter:
+        query = query.where(MemoryEntry.fact_kind.in_(body.fact_kind_filter))
+    if valid_at is not None:
+        query = query.where(or_(MemoryEntry.valid_from.is_(None), MemoryEntry.valid_from <= valid_at))
+        query = query.where(or_(MemoryEntry.valid_until.is_(None), MemoryEntry.valid_until > valid_at))
+    if body.date_from is not None:
+        query = query.where(Item.created_at >= body.date_from)
+    if body.date_to is not None:
+        query = query.where(Item.created_at <= body.date_to)
+    if query_tokens:
+        query = query.where(sql_score > 0)
+        if body.score_threshold is not None:
+            query = query.where(sql_score >= body.score_threshold * len(query_tokens))
+
+    count_query = select(func.count()).select_from(query.subquery())
+    total_considered = (await db.execute(count_query)).scalar_one()
+    rows = (
+        await db.execute(
+            query.order_by(
+                temporal_rank.asc(),
+                source_rank.asc(),
+                sql_score.desc(),
+                MemoryEntry.valid_from.desc().nulls_last(),
+                Item.created_at.desc(),
+                Item.id.desc(),
+            ).limit(candidate_limit)
+        )
+    ).all()
+
+    ranked: list[tuple[SemanticRecallItem, int, int]] = []
+    for row in rows:
+        item, memory_entry = row[0], row[1]
+        if len(row) > 2:
+            raw_score = float(row[2] or 0)
+            score = round(raw_score / len(query_tokens), 4) if query_tokens else 0.0
+        else:
+            score = _semantic_recall_score(item, query_tokens=query_tokens)
+        if query_tokens and score <= 0:
+            continue
+        if body.score_threshold is not None and score < body.score_threshold:
+            continue
+        temporal_status = _semantic_temporal_status(memory_entry, now=now, valid_at=valid_at)
+        serialized = _serialize_semantic_recall_item(
+            item,
+            memory_entry,
+            score=score,
+            temporal_status=temporal_status,
+        )
+        ranked.append((serialized, _semantic_temporal_rank(temporal_status), _semantic_source_rank(item)))
+
+    ranked.sort(
+        key=lambda entry: (
+            entry[1],
+            entry[2],
+            -entry[0].score,
+            entry[0].valid_from is None,
+            -(entry[0].valid_from or entry[0].created_at).timestamp(),
+            -entry[0].created_at.timestamp(),
+            str(entry[0].entry_id),
+        )
+    )
+    selected = [item for item, _, _ in ranked[: body.top_k]]
+    budget = _semantic_context_budget_chars(body)
+    selected, budget_truncated = _apply_semantic_budget(selected, budget_chars=budget)
+    trace = SemanticRecallTrace(
+        searched_scope=scope,
+        valid_at=valid_at,
+        fact_kind_filter=list(body.fact_kind_filter or []),
+        total_considered=total_considered,
+        candidate_limit=candidate_limit,
+        display_limit=body.top_k,
+        score_threshold=body.score_threshold,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        budget_truncated=budget_truncated,
+    )
+    return SemanticRecallResponse(
+        scope=scope,
+        items=selected,
+        total=len(selected),
+        total_considered=total_considered,
+        trace=trace,
+    )
 
 
 def _result_tags(result: object) -> set[str]:
