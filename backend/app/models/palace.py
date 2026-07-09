@@ -52,6 +52,8 @@ class MemoryScopeProfile(Base):
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     retain_mission: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    reflect_mission: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    reflection_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     quiet_recall: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -809,7 +811,7 @@ class CandidateCurationArtifact(Base):
     __tablename__ = "candidate_curation_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail')",
+            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail', 'candidate_memory_reflection')",
             name="ck_candidate_curation_artifact_kind",
         ),
         CheckConstraint(

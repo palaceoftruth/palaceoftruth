@@ -9,6 +9,7 @@ CandidateArtifactKind = Literal[
     "candidate_skill",
     "candidate_routing_manifest",
     "candidate_prompt_guardrail",
+    "candidate_memory_reflection",
 ]
 CandidateArtifactStatus = Literal[
     "draft",

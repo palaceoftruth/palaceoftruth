@@ -280,6 +280,8 @@ class MemoryScope(BaseModel):
 class MemoryScopeProfile(BaseModel):
     scope: MemoryScope
     retain_mission: str = ""
+    reflect_mission: str = ""
+    reflection_enabled: bool = False
     quiet_recall: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -290,10 +292,12 @@ class MemoryScopeProfile(BaseModel):
 class MemoryScopeProfileUpsertRequest(BaseModel):
     scope: MemoryScope
     retain_mission: str = ""
+    reflect_mission: str = ""
+    reflection_enabled: bool = False
     quiet_recall: bool = False
     updated_by: str | None = None
 
-    @field_validator("retain_mission")
+    @field_validator("retain_mission", "reflect_mission")
     @classmethod
     def mission_not_blank_when_present(cls, value: str) -> str:
         return value.strip()

@@ -98,6 +98,8 @@ def _memory_scope_profile_from_row(row: Any, *, scope: MemoryScope | None = None
     return MemoryScopeProfile(
         scope=resolved_scope,
         retain_mission=row.get("retain_mission") or "",
+        reflect_mission=row.get("reflect_mission") or "",
+        reflection_enabled=bool(row.get("reflection_enabled", False)),
         quiet_recall=bool(row.get("quiet_recall", False)),
         created_at=row.get("profile_created_at"),
         updated_at=row.get("profile_updated_at"),
@@ -107,7 +109,13 @@ def _memory_scope_profile_from_row(row: Any, *, scope: MemoryScope | None = None
 
 
 def _default_memory_scope_profile(scope: MemoryScope) -> MemoryScopeProfile:
-    return MemoryScopeProfile(scope=scope, retain_mission="", quiet_recall=False)
+    return MemoryScopeProfile(
+        scope=scope,
+        retain_mission="",
+        reflect_mission="",
+        reflection_enabled=False,
+        quiet_recall=False,
+    )
 
 
 @dataclass
@@ -1045,6 +1053,8 @@ async def list_memory_scopes(
                     scope_type,
                     scope_key,
                     retain_mission,
+                    reflect_mission,
+                    reflection_enabled,
                     quiet_recall,
                     created_at AS profile_created_at,
                     updated_at AS profile_updated_at,
@@ -1063,6 +1073,8 @@ async def list_memory_scopes(
                 g.latest_created_at,
                 g.latest_updated_at,
                 COALESCE(p.retain_mission, '') AS retain_mission,
+                COALESCE(p.reflect_mission, '') AS reflect_mission,
+                COALESCE(p.reflection_enabled, false) AS reflection_enabled,
                 COALESCE(p.quiet_recall, false) AS quiet_recall,
                 p.profile_created_at,
                 p.profile_updated_at,
@@ -1144,6 +1156,8 @@ async def get_memory_scope_profile(
                 scope_type,
                 scope_key,
                 retain_mission,
+                reflect_mission,
+                reflection_enabled,
                 quiet_recall,
                 created_at AS profile_created_at,
                 updated_at AS profile_updated_at,
@@ -1182,6 +1196,8 @@ async def upsert_memory_scope_profile(
                 scope_type,
                 scope_key,
                 retain_mission,
+                reflect_mission,
+                reflection_enabled,
                 quiet_recall,
                 created_by,
                 updated_by
@@ -1191,6 +1207,8 @@ async def upsert_memory_scope_profile(
                 :scope_type,
                 :scope_key,
                 :retain_mission,
+                :reflect_mission,
+                :reflection_enabled,
                 :quiet_recall,
                 :updated_by,
                 :updated_by
@@ -1198,6 +1216,8 @@ async def upsert_memory_scope_profile(
             ON CONFLICT (tenant_id, scope_type, (coalesce(scope_key, '')))
             DO UPDATE SET
                 retain_mission = EXCLUDED.retain_mission,
+                reflect_mission = EXCLUDED.reflect_mission,
+                reflection_enabled = EXCLUDED.reflection_enabled,
                 quiet_recall = EXCLUDED.quiet_recall,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = now()
@@ -1205,6 +1225,8 @@ async def upsert_memory_scope_profile(
                 scope_type,
                 scope_key,
                 retain_mission,
+                reflect_mission,
+                reflection_enabled,
                 quiet_recall,
                 created_at AS profile_created_at,
                 updated_at AS profile_updated_at,
@@ -1217,6 +1239,8 @@ async def upsert_memory_scope_profile(
             "scope_type": body.scope.type,
             "scope_key": scope_key,
             "retain_mission": body.retain_mission,
+            "reflect_mission": body.reflect_mission,
+            "reflection_enabled": body.reflection_enabled,
             "quiet_recall": body.quiet_recall,
             "updated_by": body.updated_by,
         },
