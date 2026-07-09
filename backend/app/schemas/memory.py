@@ -14,6 +14,7 @@ from app.services.retrieval_lenses import validate_retrieval_lens_name
 
 MemoryKind = Literal["task_retrospective", "content_approval", "founder_note"]
 MemoryScopeType = Literal["session", "agent", "workspace", "tenant_shared"]
+MemoryEntryFactKind = Literal["world", "experience", "observation"]
 MemoryWakeupBriefScopeType = Literal["tenant", "wing"]
 RelationshipExtractionPolicy = Literal["immediate", "deferred", "skip"]
 TagsMode = Literal["any", "all"]
@@ -318,6 +319,10 @@ class MemoryEntryRequest(BaseModel):
     created_by_role: str | None = None
     metadata: dict[str, Any] | None = None
     idempotency_key: str | None = Field(default=None, max_length=MEMORY_IDEMPOTENCY_KEY_MAX_LENGTH)
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_entry_id: uuid.UUID | None = None
+    fact_kind: MemoryEntryFactKind | None = None
     webhook_url: str | None = None
     enable_ai_enrichment: bool = False
     relationship_policy: RelationshipExtractionPolicy = "immediate"
@@ -338,6 +343,12 @@ class MemoryEntryRequest(BaseModel):
     @classmethod
     def tags_must_not_be_blank(cls, value: list[str]) -> list[str]:
         return _clean_tags(value) or []
+
+    @model_validator(mode="after")
+    def validate_temporal_window(self) -> "MemoryEntryRequest":
+        if self.valid_from is not None and self.valid_until is not None and self.valid_until < self.valid_from:
+            raise ValueError("valid_until must be greater than or equal to valid_from")
+        return self
 
 
 class LegacyMemoryArtifactRequest(BaseModel):
@@ -504,6 +515,7 @@ class MemoryJobListResponse(BaseModel):
 
 
 class MemoryEntryListItem(BaseModel):
+    entry_id: uuid.UUID | None = None
     source_item_id: uuid.UUID
     title: str
     summary: str | None = None
@@ -514,6 +526,11 @@ class MemoryEntryListItem(BaseModel):
     system_tags: list[str] = Field(default_factory=list)
     semantic_tags: list[str] = Field(default_factory=list)
     source_project: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_entry_id: uuid.UUID | None = None
+    superseded_by_entry_id: uuid.UUID | None = None
+    fact_kind: MemoryEntryFactKind | None = None
     created_at: datetime
     updated_at: datetime
     readiness_state: str

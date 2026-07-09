@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job
 from app.models.item import Item
-from app.models.palace import PalaceTenantState
+from app.models.palace import MemoryEntry, PalaceTenantState
 from app.schemas.memory import (
     AgentMemoryRetrieveRequest,
     AgentMemoryRetrieveResponse,
@@ -222,6 +222,10 @@ def _existing_memory_item_fingerprint(
             "source_url": item.source_url,
             "created_by_role": memory_entry.get("created_by_role"),
             "metadata": memory_entry.get("metadata"),
+            "valid_from": memory_entry.get("valid_from"),
+            "valid_until": memory_entry.get("valid_until"),
+            "supersedes_entry_id": memory_entry.get("supersedes_entry_id"),
+            "fact_kind": memory_entry.get("fact_kind"),
             "enable_ai_enrichment": bool(payload.get("enable_ai_enrichment", False)),
             "relationship_policy": payload.get("relationship_policy", "immediate"),
             "accepted_as": "canonical",
@@ -508,6 +512,51 @@ def _item_metadata(entry: NormalizedMemoryEntry) -> dict:
     return metadata
 
 
+async def _add_memory_entry_row(db: AsyncSession, *, item: Item, entry: NormalizedMemoryEntry) -> MemoryEntry:
+    superseded: MemoryEntry | None = None
+    if entry.supersedes_entry_id is not None:
+        superseded = await db.scalar(
+            select(MemoryEntry)
+            .where(MemoryEntry.tenant_id == entry.tenant_id)
+            .where(MemoryEntry.id == entry.supersedes_entry_id)
+            .limit(1)
+        )
+        if superseded is None:
+            await db.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "status": "invalid_supersession",
+                    "message": "supersedes_entry_id does not refer to an existing memory entry in this tenant",
+                    "supersedes_entry_id": str(entry.supersedes_entry_id),
+                    "retryable": False,
+                },
+            )
+    memory_entry = MemoryEntry(
+        tenant_id=entry.tenant_id,
+        item_id=item.id,
+        scope_type=entry.scope.type,
+        scope_key=entry.scope.key if entry.scope.type != "tenant_shared" else None,
+        source=entry.source,
+        source_url=entry.source_url,
+        created_by_role=(entry.metadata.get("memory_entry") or {}).get("created_by_role"),
+        idempotency_key=entry.idempotency_key,
+        valid_from=entry.valid_from,
+        valid_until=entry.valid_until,
+        supersedes_entry_id=entry.supersedes_entry_id,
+        fact_kind=entry.fact_kind,
+        metadata_=(entry.metadata.get("memory_entry") or {}).get("metadata") or {},
+        created_at=entry.created_at,
+        updated_at=entry.created_at,
+    )
+    db.add(memory_entry)
+    await db.flush()
+    if superseded is not None:
+        superseded.superseded_by_entry_id = memory_entry.id
+        superseded.updated_at = entry.created_at
+    return memory_entry
+
+
 def is_stale_memory_job(job: Job, *, now: datetime | None = None) -> bool:
     if job.status not in {"queued", "processing"} or job.created_at is None:
         return False
@@ -612,6 +661,7 @@ async def accept_memory_entry(
 
     try:
         await db.flush()
+        memory_entry = await _add_memory_entry_row(db, item=item, entry=entry)
         job_payload: dict[str, Any] = {
             "idempotency_key": entry.idempotency_key,
             "enable_ai_enrichment": entry.enable_ai_enrichment,
@@ -620,6 +670,7 @@ async def accept_memory_entry(
             "accepted_as": entry.accepted_as,
             "relationship_policy": entry.relationship_policy,
             "request_fingerprint": entry.request_fingerprint,
+            "memory_entry_id": str(memory_entry.id),
         }
         if admission_audit is not None:
             job_payload["admission"] = admission_audit
@@ -737,7 +788,12 @@ def build_memory_acceptance_response(
     )
 
 
-def _memory_entry_scope(item: Item) -> MemoryScope | None:
+def _memory_entry_scope(item: Item, memory_entry: MemoryEntry | None = None) -> MemoryScope | None:
+    if memory_entry is not None:
+        try:
+            return MemoryScope(type=memory_entry.scope_type, key=memory_entry.scope_key)
+        except ValueError:
+            return None
     memory_entry = (item.metadata_ or {}).get("memory_entry")
     if not isinstance(memory_entry, dict):
         return None
@@ -750,7 +806,9 @@ def _memory_entry_scope(item: Item) -> MemoryScope | None:
         return None
 
 
-def _memory_entry_source(item: Item) -> str | None:
+def _memory_entry_source(item: Item, memory_entry: MemoryEntry | None = None) -> str | None:
+    if memory_entry is not None:
+        return memory_entry.source if memory_entry.source and memory_entry.source.strip() else None
     memory_entry = (item.metadata_ or {}).get("memory_entry")
     if not isinstance(memory_entry, dict):
         return None
@@ -758,24 +816,40 @@ def _memory_entry_source(item: Item) -> str | None:
     return source if isinstance(source, str) and source.strip() else None
 
 
-def _serialize_memory_entry_list_item(item: Item, job: Job | None) -> MemoryEntryListItem | None:
-    scope = _memory_entry_scope(item)
+def _memory_entry_source_project(item: Item, memory_entry: MemoryEntry | None = None) -> str | None:
+    if memory_entry is not None:
+        return source_project_from_memory_metadata({"memory_entry": {"metadata": memory_entry.metadata_ or {}}})
+    return source_project_from_memory_metadata(item.metadata_)
+
+
+def _serialize_memory_entry_list_item(
+    item: Item,
+    job: Job | None,
+    memory_entry: MemoryEntry | None = None,
+) -> MemoryEntryListItem | None:
+    scope = _memory_entry_scope(item, memory_entry)
     if scope is None:
         return None
     mapped_job_status = MEMORY_JOB_PUBLIC_STATUS_MAP.get(job.status, job.status) if job else None
     tags = item.tags or []
     system_tags, semantic_tags = split_system_provenance_tags(tags)
     return MemoryEntryListItem(
+        entry_id=memory_entry.id if memory_entry else None,
         source_item_id=item.id,
         title=item.title,
         summary=item.summary,
-        source=_memory_entry_source(item),
-        source_url=item.source_url,
+        source=_memory_entry_source(item, memory_entry),
+        source_url=memory_entry.source_url if memory_entry else item.source_url,
         scope=scope,
         tags=tags,
         system_tags=system_tags,
         semantic_tags=semantic_tags,
-        source_project=source_project_from_memory_metadata(item.metadata_),
+        source_project=_memory_entry_source_project(item, memory_entry),
+        valid_from=memory_entry.valid_from if memory_entry else None,
+        valid_until=memory_entry.valid_until if memory_entry else None,
+        supersedes_entry_id=memory_entry.supersedes_entry_id if memory_entry else None,
+        superseded_by_entry_id=memory_entry.superseded_by_entry_id if memory_entry else None,
+        fact_kind=memory_entry.fact_kind if memory_entry else None,
         created_at=item.created_at,
         updated_at=item.updated_at,
         readiness_state=item.status,
@@ -801,12 +875,19 @@ async def list_memory_entries(
     limit: int = 20,
     cursor: datetime | None = None,
 ) -> MemoryEntryListResponse:
-    scope_type_expr = _json_text_path(Item.metadata_, "memory_entry", "scope", "type")
-    scope_key_expr = _json_text_path(Item.metadata_, "memory_entry", "scope", "key")
+    scope_type_expr = func.coalesce(MemoryEntry.scope_type, _json_text_path(Item.metadata_, "memory_entry", "scope", "type"))
+    scope_key_expr = func.coalesce(MemoryEntry.scope_key, _json_text_path(Item.metadata_, "memory_entry", "scope", "key"))
     memory_entry_expr = Item.metadata_["memory_entry"]
 
     query = (
-        select(Item, Job)
+        select(Item, Job, MemoryEntry)
+        .outerjoin(
+            MemoryEntry,
+            and_(
+                MemoryEntry.item_id == Item.id,
+                MemoryEntry.tenant_id == tenant_id,
+            ),
+        )
         .outerjoin(
             Job,
             and_(
@@ -818,7 +899,7 @@ async def list_memory_entries(
         .where(Item.tenant_id == tenant_id)
         .where(Item.deleted_at.is_(None))
         .where(Item.status != "deleted")
-        .where(memory_entry_expr.is_not(None))
+        .where(or_(MemoryEntry.id.is_not(None), memory_entry_expr.is_not(None)))
         .where(scope_type_expr == scope.type)
     )
     if scope.key is None:
@@ -843,8 +924,8 @@ async def list_memory_entries(
     ).all()
 
     entries: list[MemoryEntryListItem] = []
-    for item, job in rows[:limit]:
-        entry = _serialize_memory_entry_list_item(item, job)
+    for item, job, memory_entry in rows[:limit]:
+        entry = _serialize_memory_entry_list_item(item, job, memory_entry)
         if entry is not None:
             entries.append(entry)
 
@@ -869,17 +950,24 @@ async def list_memory_scopes(
             """
             WITH memory_items AS (
                 SELECT
-                    COALESCE(i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') AS scope_type,
-                    NULLIF(i.metadata->'memory_entry'->'scope'->>'key', '') AS scope_key,
+                    COALESCE(me.scope_type, i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') AS scope_type,
+                    CASE
+                        WHEN COALESCE(me.scope_type, i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') = 'tenant_shared'
+                            THEN NULL
+                        ELSE COALESCE(me.scope_key, NULLIF(i.metadata->'memory_entry'->'scope'->>'key', ''))
+                    END AS scope_key,
                     i.created_at,
                     i.updated_at,
                     COALESCE(i.tags, ARRAY[]::varchar[]) AS tags,
-                    NULLIF(i.metadata->'memory_entry'->>'source', '') AS source
+                    COALESCE(me.source, NULLIF(i.metadata->'memory_entry'->>'source', '')) AS source
                 FROM items i
+                LEFT JOIN memory_entries me
+                  ON me.item_id = i.id
+                 AND me.tenant_id = :tenant_id
                 WHERE i.tenant_id = :tenant_id
                   AND i.deleted_at IS NULL
                   AND i.status != 'deleted'
-                  AND i.metadata->'memory_entry' IS NOT NULL
+                  AND (me.id IS NOT NULL OR i.metadata->'memory_entry' IS NOT NULL)
             ),
             grouped AS (
                 SELECT
