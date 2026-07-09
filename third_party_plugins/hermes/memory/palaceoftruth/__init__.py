@@ -56,15 +56,19 @@ DEFAULT_OAUTH_CLIENT_SCOPES = (
     "write:session",
 )
 SEARCH_TOOL_NAME = "palace_search"
+SEMANTIC_RECALL_TOOL_NAME = "palace_semantic_recall"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
 SKILL_TAG_PREFIX = "skill-"
 SCOPE_TYPES = {"session", "agent", "workspace", "tenant_shared"}
+FACT_KINDS = {"world", "experience", "observation"}
+RELATIONSHIP_POLICIES = {"immediate", "deferred", "skip"}
 PALACE_MEMORY_ROUTE_SCOPES = {
     ("GET", "/api/v1/memory/whoami"): "read",
     ("GET", "/api/v1/memory/scopes"): "read",
     ("POST", "/api/v1/memory/retrieve-agent"): "read",
     ("POST", "/api/v1/memory/retrieve"): "read",
+    ("POST", "/api/v1/memory/semantic-recall"): "read",
     ("POST", "/api/v1/memory/entries"): "write",
     ("POST", "/api/v1/memory/entries:batch"): "write",
 }
@@ -187,6 +191,26 @@ def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
             return True
         if normalized in {"0", "false", "no", "off"}:
             return False
+    return default
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
     return default
 
 
@@ -651,6 +675,65 @@ def _format_result_evidence(result: dict[str, Any], *, base_url: str) -> str:
     if not parts:
         return ""
     return "  Evidence: " + "; ".join(parts)
+
+
+def _scope_label_from_scope(scope: dict[str, Any] | None) -> str | None:
+    if not isinstance(scope, dict):
+        return None
+    scope_type = str(scope.get("type") or "").strip()
+    if scope_type not in SCOPE_TYPES:
+        return None
+    if scope_type == "tenant_shared":
+        return "tenant_shared"
+    scope_key = str(scope.get("key") or "").strip()
+    return f"{scope_type}/{scope_key}" if scope_key else scope_type
+
+
+def _format_semantic_result_evidence(result: dict[str, Any], *, base_url: str) -> str:
+    parts: list[str] = []
+    entry_id = _optional_str(result.get("entry_id"))
+    if entry_id:
+        parts.append(f"entry_id={entry_id}")
+    source_item_id = _optional_str(result.get("source_item_id"))
+    if source_item_id:
+        parts.append(f"source_item_id={source_item_id}")
+        source_url = _item_api_url(base_url, source_item_id)
+        if source_url:
+            parts.append(f"item_url={source_url}")
+    scope_label = _scope_label_from_scope(result.get("scope"))
+    if scope_label:
+        parts.append(f"scope={scope_label}")
+    source = _optional_str(result.get("source"))
+    if source:
+        parts.append(f"source={source}")
+    source_url = _optional_str(result.get("source_url"))
+    if source_url:
+        parts.append(f"source_url={source_url}")
+    fact_kind = _optional_str(result.get("fact_kind"))
+    if fact_kind:
+        parts.append(f"fact_kind={fact_kind}")
+    temporal_status = _optional_str(result.get("temporal_status"))
+    if temporal_status:
+        parts.append(f"temporal_status={temporal_status}")
+    for key in ("valid_from", "valid_until"):
+        value = _optional_str(result.get(key))
+        if value:
+            parts.append(f"{key}={value}")
+    tag_parts: list[str] = []
+    for key in ("tags", "semantic_tags", "system_tags"):
+        raw_tags = result.get(key)
+        if not isinstance(raw_tags, list):
+            continue
+        tags = list(dict.fromkeys(str(tag).strip() for tag in raw_tags if str(tag).strip()))
+        if tags:
+            tag_parts.append(f"{key}={', '.join(tags[:12])}")
+    parts.extend(tag_parts)
+    score = result.get("score")
+    if isinstance(score, (int, float)):
+        parts.append(f"score={score:.2f}")
+    if not parts:
+        return ""
+    return "  Provenance: " + "; ".join(parts)
 
 
 def _scope_type_from_result(result: dict[str, Any]) -> str | None:
@@ -1304,6 +1387,75 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 },
             },
             {
+                "name": SEMANTIC_RECALL_TOOL_NAME,
+                "description": (
+                    "Strict-scope semantic recall from Palace memory entries. "
+                    "Use temporal filters and fact_kind_filter when the user asks "
+                    "for current, historical, or fact-kind-specific memory."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The semantic memory lookup query.",
+                        },
+                        "scope_type": {
+                            "type": "string",
+                            "enum": sorted(SCOPE_TYPES),
+                            "description": (
+                                "Optional explicit scope. Defaults to the active "
+                                "Hermes configured scope, not tenant-wide recall."
+                            ),
+                        },
+                        "scope_key": {
+                            "type": "string",
+                            "description": "Scope key for agent, workspace, or session recall.",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 8,
+                        },
+                        "candidate_limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                        },
+                        "score_threshold": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                        "recall_max_tokens": {
+                            "type": "integer",
+                            "minimum": 200,
+                            "maximum": 20000,
+                            "default": 1500,
+                        },
+                        "context_budget_chars": {
+                            "type": "integer",
+                            "minimum": 200,
+                            "maximum": 20000,
+                        },
+                        "valid_at": {
+                            "type": "string",
+                            "description": "Optional ISO timestamp for temporal recall.",
+                        },
+                        "fact_kind_filter": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": sorted(FACT_KINDS)},
+                            "description": "Optional fact kinds to recall.",
+                        },
+                        "date_from": {"type": "string"},
+                        "date_to": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": REMEMBER_TOOL_NAME,
                 "description": (
                     "Save a concise durable memory to Palace of Truth under the "
@@ -1326,6 +1478,34 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                             ),
                             "default": "memory",
                         },
+                        "valid_from": {
+                            "type": "string",
+                            "description": "Optional ISO timestamp when this memory starts being valid.",
+                        },
+                        "valid_until": {
+                            "type": "string",
+                            "description": "Optional ISO timestamp when this memory stops being valid.",
+                        },
+                        "supersedes_entry_id": {
+                            "type": "string",
+                            "description": "Optional prior semantic memory entry id this write supersedes.",
+                        },
+                        "fact_kind": {
+                            "type": "string",
+                            "enum": sorted(FACT_KINDS),
+                            "description": "Optional semantic fact kind.",
+                        },
+                        "enable_ai_enrichment": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Opt in to Palace enrichment/extraction for this explicit write.",
+                        },
+                        "relationship_policy": {
+                            "type": "string",
+                            "enum": sorted(RELATIONSHIP_POLICIES),
+                            "default": "immediate",
+                            "description": "Relationship extraction policy for Palace ingestion.",
+                        },
                     },
                     "required": ["content"],
                     "additionalProperties": False,
@@ -1343,10 +1523,41 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "properties": {
                         "contents": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "content": {"type": "string"},
+                                            "target": {
+                                                "type": "string",
+                                                "enum": ["memory", "user"],
+                                            },
+                                            "valid_from": {"type": "string"},
+                                            "valid_until": {"type": "string"},
+                                            "supersedes_entry_id": {"type": "string"},
+                                            "fact_kind": {
+                                                "type": "string",
+                                                "enum": sorted(FACT_KINDS),
+                                            },
+                                            "enable_ai_enrichment": {"type": "boolean"},
+                                            "relationship_policy": {
+                                                "type": "string",
+                                                "enum": sorted(RELATIONSHIP_POLICIES),
+                                            },
+                                        },
+                                        "required": ["content"],
+                                        "additionalProperties": False,
+                                    },
+                                ]
+                            },
                             "minItems": 1,
                             "maxItems": 100,
-                            "description": "Durable memories to save in order.",
+                            "description": (
+                                "Durable memories to save in order. Each item may be "
+                                "a string or an object with temporal retention fields."
+                            ),
                         },
                         "target": {
                             "type": "string",
@@ -1356,6 +1567,21 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                                 "for stable user preferences."
                             ),
                             "default": "memory",
+                        },
+                        "default_valid_from": {"type": "string"},
+                        "default_valid_until": {"type": "string"},
+                        "default_fact_kind": {
+                            "type": "string",
+                            "enum": sorted(FACT_KINDS),
+                        },
+                        "default_enable_ai_enrichment": {
+                            "type": "boolean",
+                            "default": False,
+                        },
+                        "default_relationship_policy": {
+                            "type": "string",
+                            "enum": sorted(RELATIONSHIP_POLICIES),
+                            "default": "immediate",
                         },
                     },
                     "required": ["contents"],
@@ -1389,6 +1615,63 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "ok": True,
                     "query": query,
                     "result": text or "No Palace of Truth memory matched this query.",
+                }
+            )
+
+        if tool_name == SEMANTIC_RECALL_TOOL_NAME:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "query is required",
+                    }
+                )
+            try:
+                payload = self._build_semantic_recall_payload(query, args, self._session_id)
+                response = self._request_json(
+                    "POST",
+                    "/api/v1/memory/semantic-recall",
+                    payload,
+                )
+                text = self._format_semantic_recall_response(response)
+            except Exception as exc:
+                if "HTTP 404" not in str(exc):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "query": query,
+                            "error": _safe_exception_summary(exc),
+                        }
+                    )
+                try:
+                    text = self._retrieve_text(query, self._session_id)
+                except Exception as fallback_exc:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "query": query,
+                            "fallback_used": True,
+                            "error": _safe_exception_summary(fallback_exc),
+                        }
+                    )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "query": query,
+                        "fallback_used": True,
+                        "result": text
+                        or "No Palace of Truth memory matched this query.",
+                    }
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "query": query,
+                    "fallback_used": False,
+                    "result": text
+                    or "No Palace of Truth semantic memory matched this query.",
+                    "trace": response.get("trace"),
                 }
             )
 
@@ -1430,6 +1713,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     target=target,
                     content=content,
                     tenant_id=tenant_id,
+                    valid_from=_optional_str(args.get("valid_from")),
+                    valid_until=_optional_str(args.get("valid_until")),
+                    supersedes_entry_id=_optional_str(args.get("supersedes_entry_id")),
+                    fact_kind=_optional_str(args.get("fact_kind")),
+                    enable_ai_enrichment=_optional_bool(args.get("enable_ai_enrichment")),
+                    relationship_policy=_optional_str(args.get("relationship_policy"))
+                    or "immediate",
                 )
                 response = self._post_memory_entries("/api/v1/memory/entries", payload)
             except Exception as exc:
@@ -1460,15 +1750,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": "contents must be an array",
                     }
                 )
-            contents = [str(content or "").strip() for content in raw_contents]
-            if not contents or any(not content for content in contents):
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "contents must contain 1 to 100 non-empty strings",
-                    }
-                )
-            if len(contents) > 100:
+            if len(raw_contents) > 100:
                 return json.dumps(
                     {
                         "ok": False,
@@ -1499,14 +1781,21 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     }
                 )
             try:
+                contents = self._normalize_bulk_memory_entries(raw_contents, args, target)
                 entries = [
                     self._build_memory_write_payload(
                         action="add",
-                        target=target,
-                        content=content,
+                        target=entry["target"],
+                        content=entry["content"],
                         tenant_id=tenant_id,
+                        valid_from=entry.get("valid_from"),
+                        valid_until=entry.get("valid_until"),
+                        supersedes_entry_id=entry.get("supersedes_entry_id"),
+                        fact_kind=entry.get("fact_kind"),
+                        enable_ai_enrichment=bool(entry.get("enable_ai_enrichment")),
+                        relationship_policy=str(entry.get("relationship_policy") or "immediate"),
                     )
-                    for content in contents
+                    for entry in contents
                 ]
             except Exception as exc:
                 return json.dumps(
@@ -2234,6 +2523,168 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             used_chars += added_chars
         return "\n".join(lines)
 
+    def _build_semantic_recall_payload(
+        self,
+        query: str,
+        args: dict[str, Any],
+        session_id: str,
+    ) -> dict[str, Any]:
+        explicit_scope_type = _optional_str(args.get("scope_type"))
+        explicit_scope_key = _optional_str(args.get("scope_key"))
+        active_scope = self._build_scope(session_id) or {
+            "type": "agent",
+            "key": self._agent_identity or "hermes",
+        }
+        if explicit_scope_type and explicit_scope_type not in SCOPE_TYPES:
+            raise ValueError(f"scope_type must be one of {', '.join(sorted(SCOPE_TYPES))}")
+        if explicit_scope_type:
+            scope: dict[str, str] = {"type": explicit_scope_type}
+            if explicit_scope_type != "tenant_shared":
+                if not explicit_scope_key:
+                    raise ValueError("scope_key is required for non-tenant_shared semantic recall")
+                scope["key"] = explicit_scope_key
+            self._validate_semantic_recall_scope(scope, active_scope)
+        else:
+            scope = active_scope
+
+        def _bounded_int(key: str, default: int | None, minimum: int, maximum: int) -> int | None:
+            raw = args.get(key)
+            if raw is None:
+                return default
+            value = int(raw)
+            if value < minimum or value > maximum:
+                raise ValueError(f"{key} must be between {minimum} and {maximum}")
+            return value
+
+        fact_kind_filter = args.get("fact_kind_filter")
+        if fact_kind_filter is None:
+            normalized_fact_kinds = None
+        elif isinstance(fact_kind_filter, list):
+            normalized_fact_kinds = []
+            for raw_kind in fact_kind_filter:
+                fact_kind = _optional_str(raw_kind)
+                if not fact_kind:
+                    continue
+                if fact_kind not in FACT_KINDS:
+                    raise ValueError("fact_kind_filter contains an unsupported fact kind")
+                if fact_kind not in normalized_fact_kinds:
+                    normalized_fact_kinds.append(fact_kind)
+        else:
+            raise ValueError("fact_kind_filter must be an array")
+
+        score_threshold = args.get("score_threshold")
+        if score_threshold is not None:
+            score_threshold = float(score_threshold)
+            if score_threshold < 0 or score_threshold > 1:
+                raise ValueError("score_threshold must be between 0 and 1")
+
+        payload: dict[str, Any] = {
+            "query": _trim(query, 2000),
+            "scope_type": scope["type"],
+            "scope_key": scope.get("key"),
+            "top_k": _bounded_int("top_k", 8, 1, 50),
+            "candidate_limit": _bounded_int("candidate_limit", None, 1, 200),
+            "score_threshold": score_threshold,
+            "recall_max_tokens": _bounded_int("recall_max_tokens", 1500, 200, 20000),
+            "context_budget_chars": _bounded_int("context_budget_chars", None, 200, 20000),
+            "valid_at": _optional_str(args.get("valid_at")),
+            "fact_kind_filter": normalized_fact_kinds,
+            "date_from": _optional_str(args.get("date_from")),
+            "date_to": _optional_str(args.get("date_to")),
+        }
+        return {key: value for key, value in payload.items() if value is not None}
+
+    def _validate_semantic_recall_scope(
+        self,
+        requested_scope: dict[str, str],
+        active_scope: dict[str, str],
+    ) -> None:
+        requested_type = requested_scope.get("type")
+        requested_key = requested_scope.get("key")
+        active_type = active_scope.get("type")
+        active_key = active_scope.get("key")
+
+        if requested_type == active_type and requested_key == active_key:
+            return
+        if requested_type == "tenant_shared" and self._include_tenant_shared:
+            return
+        if requested_type == "workspace":
+            allowed_workspace_keys = {
+                key
+                for key in (self._agent_workspace, active_key if active_type == "workspace" else None)
+                if key
+            }
+            if requested_key in allowed_workspace_keys:
+                return
+        raise ValueError(
+            "semantic recall scope must match the active Hermes scope; tenant_shared "
+            "requires PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true, and sibling-agent "
+            "semantic recall is not exposed through this tool"
+        )
+
+    def _format_semantic_recall_response(self, response: dict[str, Any]) -> str:
+        raw_items = response.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            return ""
+
+        lines = ["Recalled semantic memory from Palace of Truth:"]
+        trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
+        searched_scope = _scope_label_from_scope(trace.get("searched_scope"))
+        if searched_scope:
+            lines.append(f"- Semantic recall searched scope: {searched_scope}.")
+        budget_parts = []
+        for label, key in (
+            ("candidates", "candidate_limit"),
+            ("display", "display_limit"),
+        ):
+            value = trace.get(key)
+            if isinstance(value, int):
+                budget_parts.append(f"{label}: {value}")
+        if trace.get("recall_max_tokens"):
+            budget_parts.append(f"recall tokens: {trace['recall_max_tokens']}")
+        if budget_parts:
+            lines.append("- Semantic recall budgets: " + ", ".join(budget_parts) + ".")
+        if trace.get("valid_at"):
+            lines.append(f"- Temporal reference: valid_at={trace['valid_at']}.")
+        if trace.get("fact_kind_filter"):
+            lines.append("- Fact kind filter: " + ", ".join(trace["fact_kind_filter"]) + ".")
+        if trace.get("budget_truncated"):
+            lines.append("- Semantic recall returned the highest-ranked memories within budget.")
+
+        used_chars = sum(len(line) for line in lines)
+        for result in raw_items[: self._agent_display_limit]:
+            if not isinstance(result, dict):
+                continue
+            title = _trim(str(result.get("title") or "Untitled semantic memory"), 120)
+            chunk = _trim(
+                str(result.get("body") or result.get("summary") or "").replace("\n", " "),
+                500,
+            )
+            score = result.get("score")
+            scope_label = _scope_label_from_scope(result.get("scope"))
+            fact_kind = _optional_str(result.get("fact_kind"))
+            temporal_status = _optional_str(result.get("temporal_status"))
+            qualifiers = [part for part in (scope_label, fact_kind, temporal_status) if part]
+            title_with_context = f"{title} [{', '.join(qualifiers)}]" if qualifiers else title
+            result_line = (
+                f"- [{score:.2f}] {title_with_context}"
+                if isinstance(score, (int, float))
+                else f"- {title_with_context}"
+            )
+            evidence_line = _format_semantic_result_evidence(result, base_url=self._base_url)
+            chunk_line = f"  Snippet: {chunk}" if chunk else ""
+            added_chars = len(result_line) + len(evidence_line) + len(chunk_line)
+            if used_chars + added_chars > self._context_budget_chars and len(lines) > 1:
+                lines.append("- Additional semantic memories were omitted to stay within the context budget.")
+                break
+            lines.append(result_line)
+            if evidence_line:
+                lines.append(evidence_line)
+            if chunk:
+                lines.append(chunk_line)
+            used_chars += added_chars
+        return "\n".join(lines)
+
     def _retrieve_text(self, query: str, session_id: str) -> str:
         started_at = perf_counter()
         request_payload = {
@@ -2496,10 +2947,90 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             payload["scope"] = scope
         return payload
 
+    def _normalize_bulk_memory_entries(
+        self,
+        raw_contents: list[Any],
+        args: dict[str, Any],
+        default_target: str,
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        default_relationship_policy = (
+            _optional_str(args.get("default_relationship_policy")) or "immediate"
+        )
+        if default_relationship_policy not in RELATIONSHIP_POLICIES:
+            raise ValueError("default_relationship_policy is unsupported")
+        default_fact_kind = _optional_str(args.get("default_fact_kind"))
+        if default_fact_kind and default_fact_kind not in FACT_KINDS:
+            raise ValueError("default_fact_kind is unsupported")
+
+        for raw in raw_contents:
+            if isinstance(raw, dict):
+                content = _optional_str(raw.get("content"))
+                target = _optional_str(raw.get("target")) or default_target
+                fact_kind = _optional_str(raw.get("fact_kind")) or default_fact_kind
+                relationship_policy = (
+                    _optional_str(raw.get("relationship_policy")) or default_relationship_policy
+                )
+                entry = {
+                    "content": content,
+                    "target": target,
+                    "valid_from": _optional_str(raw.get("valid_from"))
+                    or _optional_str(args.get("default_valid_from")),
+                    "valid_until": _optional_str(raw.get("valid_until"))
+                    or _optional_str(args.get("default_valid_until")),
+                    "supersedes_entry_id": _optional_str(raw.get("supersedes_entry_id")),
+                    "fact_kind": fact_kind,
+                    "enable_ai_enrichment": _optional_bool(
+                        raw.get("enable_ai_enrichment"),
+                        _optional_bool(args.get("default_enable_ai_enrichment")),
+                    ),
+                    "relationship_policy": relationship_policy,
+                }
+            else:
+                entry = {
+                    "content": _optional_str(raw),
+                    "target": default_target,
+                    "valid_from": _optional_str(args.get("default_valid_from")),
+                    "valid_until": _optional_str(args.get("default_valid_until")),
+                    "supersedes_entry_id": None,
+                    "fact_kind": default_fact_kind,
+                    "enable_ai_enrichment": _optional_bool(
+                        args.get("default_enable_ai_enrichment")
+                    ),
+                    "relationship_policy": default_relationship_policy,
+                }
+            if not entry["content"]:
+                raise ValueError("contents must contain 1 to 100 non-empty strings or objects")
+            if entry["target"] not in {"memory", "user"}:
+                raise ValueError("target must be memory or user")
+            if entry["fact_kind"] and entry["fact_kind"] not in FACT_KINDS:
+                raise ValueError("fact_kind is unsupported")
+            if entry["relationship_policy"] not in RELATIONSHIP_POLICIES:
+                raise ValueError("relationship_policy is unsupported")
+            entries.append(entry)
+        if not entries:
+            raise ValueError("contents must contain 1 to 100 non-empty strings or objects")
+        return entries
+
     def _build_memory_write_payload(
-        self, *, action: str, target: str, content: str, tenant_id: str
+        self,
+        *,
+        action: str,
+        target: str,
+        content: str,
+        tenant_id: str,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        supersedes_entry_id: str | None = None,
+        fact_kind: str | None = None,
+        enable_ai_enrichment: bool = False,
+        relationship_policy: str = "immediate",
     ) -> dict[str, Any]:
         _reject_oversized_explicit_write(content)
+        if fact_kind and fact_kind not in FACT_KINDS:
+            raise ValueError("fact_kind is unsupported")
+        if relationship_policy not in RELATIONSHIP_POLICIES:
+            raise ValueError("relationship_policy is unsupported")
         scope = self._build_scope(self._session_id)
         target_label = "user profile" if target == "user" else "memory"
         title = _trim(
@@ -2517,6 +3048,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "scope": scope,
                     "agent_identity": self._agent_identity,
                     "content": content,
+                    "valid_from": valid_from,
+                    "valid_until": valid_until,
+                    "supersedes_entry_id": supersedes_entry_id,
+                    "fact_kind": fact_kind,
+                    "enable_ai_enrichment": enable_ai_enrichment,
+                    "relationship_policy": relationship_policy,
                 },
                 sort_keys=True,
             ).encode("utf-8")
@@ -2528,16 +3065,30 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             f"hermes-memory-action-{action}",
             *[f"{SKILL_TAG_PREFIX}{skill}" for skill in self._active_skills],
         ]
+        memory_tool_metadata: dict[str, Any] = {
+            "action": action,
+            "target": target,
+        }
+        for key, value in (
+            ("valid_from", valid_from),
+            ("valid_until", valid_until),
+            ("supersedes_entry_id", supersedes_entry_id),
+            ("fact_kind", fact_kind),
+        ):
+            if value:
+                memory_tool_metadata[key] = value
+        if enable_ai_enrichment:
+            memory_tool_metadata["enable_ai_enrichment"] = True
+        if relationship_policy != "immediate":
+            memory_tool_metadata["relationship_policy"] = relationship_policy
+
         metadata: dict[str, Any] = {
             "provider": "palaceoftruth",
             "session_id": self._session_id,
             "agent_identity": self._agent_identity,
             "agent_workspace": self._agent_workspace,
             "platform": self._platform,
-            "memory_tool": {
-                "action": action,
-                "target": target,
-            },
+            "memory_tool": memory_tool_metadata,
         }
         if self._active_skills:
             metadata["active_skills"] = list(self._active_skill_names)
@@ -2553,7 +3104,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "tags": tags,
             "metadata": metadata,
             "idempotency_key": idempotency_key,
+            "enable_ai_enrichment": enable_ai_enrichment,
+            "relationship_policy": relationship_policy,
         }
+        if valid_from:
+            payload["valid_from"] = valid_from
+        if valid_until:
+            payload["valid_until"] = valid_until
+        if supersedes_entry_id:
+            payload["supersedes_entry_id"] = supersedes_entry_id
+        if fact_kind:
+            payload["fact_kind"] = fact_kind
         if scope is not None:
             payload["scope"] = scope
         return payload

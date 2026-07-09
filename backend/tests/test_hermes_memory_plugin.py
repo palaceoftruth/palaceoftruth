@@ -562,7 +562,12 @@ def test_palaceoftruth_provider_exposes_explicit_search_and_remember_tools(
     schemas = provider.get_tool_schemas()
     tool_names = {schema["name"] for schema in schemas}
 
-    assert tool_names == {"palace_search", "palace_remember", "palace_remember_bulk"}
+    assert tool_names == {
+        "palace_search",
+        "palace_semantic_recall",
+        "palace_remember",
+        "palace_remember_bulk",
+    }
     assert "palace_search" in provider.system_prompt_block()
 
 
@@ -736,6 +741,167 @@ def test_palaceoftruth_search_tool_uses_route_aware_retrieval(monkeypatch) -> No
     assert "agent/orchestrator, workspace/hermes" in result["result"]
 
 
+def test_palaceoftruth_semantic_recall_tool_posts_temporal_request(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="hermes1",
+        agent_workspace="palaceoftruth",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        assert method == "POST"
+        assert path == "/api/v1/memory/semantic-recall"
+        seen_payload.update(payload or {})
+        return {
+            "trace": {
+                "searched_scope": {"type": "agent", "key": "hermes1"},
+                "valid_at": "2026-07-09T12:00:00Z",
+                "fact_kind_filter": ["world"],
+                "candidate_limit": 25,
+                "display_limit": 2,
+                "budget_truncated": False,
+            },
+            "items": [
+                {
+                    "entry_id": "entry-1",
+                    "source_item_id": "source-1",
+                    "title": "Semantic routing fact",
+                    "body": "Hermes should cite Palace semantic memory provenance.",
+                    "source": "hermes-agent-memory-tool",
+                    "source_url": "https://example.test/evidence",
+                    "scope": {"type": "agent", "key": "hermes1"},
+                    "tags": ["semantic-memory"],
+                    "semantic_tags": ["routing"],
+                    "system_tags": ["scope-agent"],
+                    "valid_from": "2026-07-01T00:00:00Z",
+                    "valid_until": None,
+                    "fact_kind": "world",
+                    "score": 0.91,
+                    "temporal_status": "current",
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {
+                "query": "semantic routing",
+                "valid_at": "2026-07-09T12:00:00Z",
+                "fact_kind_filter": ["world", "world"],
+                "candidate_limit": 25,
+                "top_k": 2,
+                "recall_max_tokens": 900,
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["fallback_used"] is False
+    assert seen_payload == {
+        "query": "semantic routing",
+        "scope_type": "agent",
+        "scope_key": "hermes1",
+        "top_k": 2,
+        "candidate_limit": 25,
+        "recall_max_tokens": 900,
+        "valid_at": "2026-07-09T12:00:00Z",
+        "fact_kind_filter": ["world"],
+    }
+    assert "Semantic routing fact [agent/hermes1, world, current]" in result["result"]
+    assert "entry_id=entry-1" in result["result"]
+    assert "source_item_id=source-1" in result["result"]
+    assert "scope=agent/hermes1" in result["result"]
+    assert "fact_kind=world" in result["result"]
+    assert "valid_from=2026-07-01T00:00:00Z" in result["result"]
+    assert "semantic_tags=routing" in result["result"]
+    assert "score=0.91" in result["result"]
+
+
+def test_palaceoftruth_semantic_recall_falls_back_for_older_server(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        assert path == "/api/v1/memory/semantic-recall"
+        raise RuntimeError("Palace of Truth POST /api/v1/memory/semantic-recall failed with HTTP 404")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider._retrieve_text = lambda query, session_id: "fallback route-aware memory"  # type: ignore[method-assign]
+
+    result = json.loads(
+        provider.handle_tool_call("palace_semantic_recall", {"query": "older server"})
+    )
+
+    assert result == {
+        "ok": True,
+        "query": "older server",
+        "fallback_used": True,
+        "result": "fallback route-aware memory",
+    }
+
+
+def test_palaceoftruth_semantic_recall_rejects_sibling_agent_scope(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="hermes1",
+        agent_workspace="palaceoftruth",
+    )
+
+    def fake_request_json(*_args, **_kwargs) -> dict:
+        raise AssertionError("sibling-agent semantic recall must fail before HTTP")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {
+                "query": "other agent memory",
+                "scope_type": "agent",
+                "scope_key": "other-agent",
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "ValueError"
+    assert "sibling-agent semantic recall is not exposed" in result["error"]["message"]
+
+
 def test_palaceoftruth_search_tool_exposes_generic_title_match_evidence(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
@@ -888,6 +1054,68 @@ def test_palaceoftruth_remember_tool_writes_to_memory_entries(monkeypatch) -> No
     ]
 
 
+def test_palaceoftruth_remember_tool_sends_temporal_retention_fields(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        assert path == "/api/v1/memory/entries"
+        return {"job_id": "job-1", "status": "accepted"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {
+                "content": "Hermes semantic recall should cite provenance.",
+                "valid_from": "2026-07-01T00:00:00Z",
+                "valid_until": "2026-08-01T00:00:00Z",
+                "supersedes_entry_id": "11111111-1111-1111-1111-111111111111",
+                "fact_kind": "world",
+                "enable_ai_enrichment": True,
+                "relationship_policy": "deferred",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    payload = requests_seen[1][2]
+    assert payload is not None
+    assert payload["valid_from"] == "2026-07-01T00:00:00Z"
+    assert payload["valid_until"] == "2026-08-01T00:00:00Z"
+    assert payload["supersedes_entry_id"] == "11111111-1111-1111-1111-111111111111"
+    assert payload["fact_kind"] == "world"
+    assert payload["enable_ai_enrichment"] is True
+    assert payload["relationship_policy"] == "deferred"
+    assert payload["metadata"]["memory_tool"] == {
+        "action": "add",
+        "target": "memory",
+        "valid_from": "2026-07-01T00:00:00Z",
+        "valid_until": "2026-08-01T00:00:00Z",
+        "supersedes_entry_id": "11111111-1111-1111-1111-111111111111",
+        "fact_kind": "world",
+        "enable_ai_enrichment": True,
+        "relationship_policy": "deferred",
+    }
+
+
 def test_palaceoftruth_request_json_retries_429_retry_after(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
@@ -1020,6 +1248,43 @@ def test_palaceoftruth_route_aware_search_sends_read_scope_for_post(
     assert captured == [
         ("GET", "/api/v1/memory/scopes", "read", "read"),
         ("POST", "/api/v1/memory/retrieve-agent", "read", "read"),
+    ]
+
+
+def test_palaceoftruth_semantic_recall_sends_read_scope_for_post(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    captured: list[tuple[str, str, str | None, str | None]] = []
+
+    def fake_urlopen(request, timeout: int):
+        captured.append(
+            (
+                request.get_method(),
+                request_path(request),
+                request.get_header("X-mcp-scope"),
+                request.get_header("X-mcp-scopes"),
+            )
+        )
+        return FakeJsonResponse({"trace": {"searched_scope": {"type": "agent", "key": "orchestrator"}}, "items": []})
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = json.loads(
+        provider.handle_tool_call("palace_semantic_recall", {"query": "temporal recall"})
+    )
+
+    assert result["ok"] is True
+    assert captured == [
+        ("POST", "/api/v1/memory/semantic-recall", "read", "read"),
     ]
 
 
@@ -1276,6 +1541,82 @@ def test_palaceoftruth_remember_bulk_uses_batch_endpoint(monkeypatch) -> None:
         ("GET", "/api/v1/memory/whoami"),
         ("POST", "/api/v1/memory/entries:batch"),
     ]
+
+
+def test_palaceoftruth_remember_bulk_accepts_temporal_entry_objects(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return {"tenant_id": "tenant-a"}
+        if method == "POST" and path == "/api/v1/memory/entries:batch":
+            assert payload is not None
+            return {
+                "status": "accepted",
+                "accepted": len(payload["entries"]),
+                "failed": 0,
+                "results": [],
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember_bulk",
+            {
+                "contents": [
+                    {
+                        "content": "Remember temporal A.",
+                        "valid_from": "2026-07-01T00:00:00Z",
+                        "fact_kind": "experience",
+                    },
+                    {
+                        "content": "Remember temporal B.",
+                        "target": "user",
+                        "relationship_policy": "skip",
+                        "enable_ai_enrichment": False,
+                    },
+                ],
+                "default_fact_kind": "world",
+                "default_enable_ai_enrichment": True,
+                "default_relationship_policy": "deferred",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    payload = requests_seen[1][2]
+    assert payload is not None
+    assert payload["entries"][0]["body"] == "Remember temporal A."
+    assert payload["entries"][0]["valid_from"] == "2026-07-01T00:00:00Z"
+    assert payload["entries"][0]["fact_kind"] == "experience"
+    assert payload["entries"][0]["enable_ai_enrichment"] is True
+    assert payload["entries"][0]["relationship_policy"] == "deferred"
+    assert payload["entries"][1]["body"] == "Remember temporal B."
+    assert payload["entries"][1]["fact_kind"] == "world"
+    assert payload["entries"][1]["enable_ai_enrichment"] is False
+    assert payload["entries"][1]["relationship_policy"] == "skip"
+    assert payload["entries"][1]["metadata"]["memory_tool"] == {
+        "action": "add",
+        "target": "user",
+        "fact_kind": "world",
+        "relationship_policy": "skip",
+    }
 
 
 def test_palaceoftruth_write_paths_send_write_scope_for_entries(

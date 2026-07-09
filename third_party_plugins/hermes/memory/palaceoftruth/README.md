@@ -28,6 +28,13 @@ Why this lives here:
   `PALACEOFTRUTH_AGENT_BROAD_CANDIDATE_LIMIT`,
   `PALACEOFTRUTH_AGENT_DISPLAY_LIMIT`, and
   `PALACEOFTRUTH_CONTEXT_BUDGET_CHARS`.
+- `palace_semantic_recall` exposes the strict-scope semantic memory route
+  `/api/v1/memory/semantic-recall` for Hermes agents that need source-backed
+  temporal recall. It defaults to the active configured Hermes scope and
+  supports `valid_at`, `fact_kind_filter`, `top_k`, `candidate_limit`,
+  `score_threshold`, `recall_max_tokens`, `context_budget_chars`, `date_from`,
+  and `date_to`. Older Palace servers that do not yet expose the route fall
+  back to the existing route-aware recall path.
 - Delegated cross-agent recall remains opt-in. Set
   `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS=agent/*` with
   `PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT` to ask Palace to discover matching
@@ -60,6 +67,11 @@ Why this lives here:
   for intentional bulk saves, not as a local offline spool or replay queue.
   The local bulk-call quota prevents a single Hermes turn from looping this
   endpoint without an explicit operator override.
+- `palace_remember` and `palace_remember_bulk` accept temporal retention fields
+  (`valid_from`, `valid_until`, `supersedes_entry_id`, `fact_kind`) plus
+  explicit enrichment controls (`enable_ai_enrichment`, `relationship_policy`).
+  Bulk writes remain backward compatible with a list of strings and can also
+  accept per-entry objects with those fields.
 - Explicit memory tool writes over 24,000 characters are rejected with a clear
   error instead of being silently truncated. Automatic turn sync may still trim
   very long conversation bodies, but it records truncation metadata so operators
@@ -70,6 +82,10 @@ Agent-visible search results:
 - Every rendered `palace_search` or recall result must include the decisive
   match evidence beside the title and snippet: item id, Palace item API URL,
   scope, tags or matched tags, and score when Palace returned those fields.
+- Every rendered `palace_semantic_recall` result must include citeable
+  provenance: entry id, source item id, Palace item API URL, scope, source,
+  validity window, temporal status, fact kind, tags, and score when Palace
+  returned those fields.
 - Keep tags visible even when the title is generic. A generic title such as
   `Memory` can be a correct match when `tags` or `matched_tags` include the
   user's requested handle, project id, or regression key.
