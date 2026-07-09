@@ -617,6 +617,106 @@ class MemoryRetrieveResponse(BaseModel):
     total: int
 
 
+SemanticMemoryTemporalStatus = Literal["current", "historical", "superseded", "future"]
+SemanticMemoryRecallStatus = Literal["ok"]
+
+
+class SemanticRecallRequest(BaseModel):
+    scope_type: MemoryScopeType = "tenant_shared"
+    scope_key: str | None = None
+    query: str
+    top_k: int = Field(8, ge=1, le=50)
+    candidate_limit: int | None = Field(None, ge=1, le=200)
+    score_threshold: float | None = Field(None, ge=0, le=1)
+    recall_max_tokens: int | None = Field(1500, ge=200, le=20000)
+    context_budget_chars: int | None = Field(None, ge=200, le=20000)
+    valid_at: datetime | None = None
+    fact_kind_filter: list[MemoryEntryFactKind] | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+
+    @field_validator("query")
+    @classmethod
+    def semantic_query_not_blank(cls, value: str) -> str:
+        return _validate_not_blank(value, "query")
+
+    @field_validator("scope_key")
+    @classmethod
+    def optional_semantic_scope_key_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_not_blank(value, "scope_key")
+
+    @field_validator("fact_kind_filter")
+    @classmethod
+    def semantic_fact_kind_filter_dedupes(
+        cls,
+        value: list[MemoryEntryFactKind] | None,
+    ) -> list[MemoryEntryFactKind] | None:
+        if value is None:
+            return None
+        deduped: list[MemoryEntryFactKind] = []
+        for fact_kind in value:
+            if fact_kind not in deduped:
+                deduped.append(fact_kind)
+        return deduped
+
+    @model_validator(mode="after")
+    def validate_semantic_scope(self) -> "SemanticRecallRequest":
+        MemoryScope(type=self.scope_type, key=self.scope_key)
+        if (
+            self.date_from is not None
+            and self.date_to is not None
+            and self.date_to < self.date_from
+        ):
+            raise ValueError("date_to must be greater than or equal to date_from")
+        return self
+
+
+class SemanticRecallTrace(BaseModel):
+    status: SemanticMemoryRecallStatus = "ok"
+    searched_scope: MemoryScope
+    valid_at: datetime | None = None
+    fact_kind_filter: list[MemoryEntryFactKind] = Field(default_factory=list)
+    total_considered: int = 0
+    candidate_limit: int
+    display_limit: int
+    score_threshold: float | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    budget_truncated: bool = False
+
+
+class SemanticRecallItem(BaseModel):
+    entry_id: uuid.UUID
+    source_item_id: uuid.UUID
+    title: str
+    summary: str | None = None
+    body: str | None = None
+    source: str | None = None
+    source_url: str | None = None
+    scope: MemoryScope
+    tags: list[str] = Field(default_factory=list)
+    system_tags: list[str] = Field(default_factory=list)
+    semantic_tags: list[str] = Field(default_factory=list)
+    created_at: datetime
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_entry_id: uuid.UUID | None = None
+    superseded_by_entry_id: uuid.UUID | None = None
+    fact_kind: MemoryEntryFactKind | None = None
+    score: float
+    temporal_status: SemanticMemoryTemporalStatus
+
+
+class SemanticRecallResponse(BaseModel):
+    scope: MemoryScope
+    items: list[SemanticRecallItem]
+    total: int
+    total_considered: int
+    trace: SemanticRecallTrace
+
+
 class AgentMemoryRetrieveRequest(BaseModel):
     query: str
     agent_scope_key: str | None = None

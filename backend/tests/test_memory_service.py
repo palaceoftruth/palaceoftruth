@@ -16,6 +16,7 @@ from app.schemas.memory import (
     MemoryRetrieveRequest,
     MemoryScope,
     MemoryScopeProfileUpsertRequest,
+    SemanticRecallRequest,
     MemoryTrajectoryRequest,
 )
 from app.schemas.palace import PalaceRetrieveResponse, PalaceRetrieveTrace
@@ -33,6 +34,7 @@ from app.services.memory import (
     retrieve_memory,
     retrieve_agent_memory,
     retry_memory_job,
+    semantic_recall_memory,
     serialize_memory_job,
     upsert_memory_scope_profile,
 )
@@ -1183,6 +1185,594 @@ def test_list_memory_entries_uses_cursor_for_next_page() -> None:
     assert [entry.title for entry in listed.entries] == ["First"]
     assert listed.next_cursor == extra.created_at
     assert "items.created_at < '2026-04-14" in "\n".join(session.executed)
+
+
+def _semantic_memory_row(
+    *,
+    title: str,
+    body: str,
+    scope_key: str,
+    valid_from: datetime | None,
+    valid_until: datetime | None = None,
+    superseded_by_entry_id: uuid.UUID | None = None,
+    supersedes_entry_id: uuid.UUID | None = None,
+    fact_kind: str | None = "experience",
+    created_at: datetime | None = None,
+    metadata: dict | None = None,
+) -> tuple[Item, MemoryEntry]:
+    item_id = uuid.uuid4()
+    entry_id = uuid.uuid4()
+    item = Item(
+        id=item_id,
+        source_type="note",
+        title=title,
+        summary=body,
+        raw_content=body,
+        metadata_=metadata or {},
+        tags=["agent-memory", "scope-agent", f"agent-{scope_key}"],
+        categories=[],
+        tenant_id="tenant-a",
+        status="ready",
+        created_at=created_at or datetime(2026, 7, 1, tzinfo=timezone.utc),
+        updated_at=created_at or datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    entry = MemoryEntry(
+        id=entry_id,
+        item_id=item_id,
+        tenant_id="tenant-a",
+        scope_type="agent",
+        scope_key=scope_key,
+        source="hermes",
+        source_url=f"memory://entry/agent/{scope_key}/{entry_id}",
+        valid_from=valid_from,
+        valid_until=valid_until,
+        supersedes_entry_id=supersedes_entry_id,
+        superseded_by_entry_id=superseded_by_entry_id,
+        fact_kind=fact_kind,
+        metadata_={},
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+    return item, entry
+
+
+def test_semantic_recall_prefers_current_entry_and_marks_superseded() -> None:
+    old_item, old_entry = _semantic_memory_row(
+        title="Iris staging port was 8443",
+        body="Iris used staging port 8443 for the Palace deploy.",
+        scope_key="iris",
+        valid_from=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    current_item, current_entry = _semantic_memory_row(
+        title="Iris staging port is 9443",
+        body="Iris currently uses staging port 9443 for the Palace deploy.",
+        scope_key="iris",
+        valid_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        supersedes_entry_id=old_entry.id,
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    old_entry.superseded_by_entry_id = current_entry.id
+    session = FakeSession(execute_results=[2, [(old_item, old_entry), (current_item, current_entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="Iris staging port",
+                top_k=2,
+            ),
+        )
+    )
+
+    assert [item.entry_id for item in response.items] == [current_entry.id, old_entry.id]
+    assert response.items[0].temporal_status == "current"
+    assert response.items[1].temporal_status == "superseded"
+    assert response.total_considered == 2
+
+
+def test_semantic_recall_valid_at_returns_historical_entry_only() -> None:
+    old_item, old_entry = _semantic_memory_row(
+        title="Iris staging port was 8443",
+        body="Iris used staging port 8443 for the Palace deploy.",
+        scope_key="iris",
+        valid_from=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(old_item, old_entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port",
+                valid_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+                top_k=5,
+            ),
+        )
+    )
+
+    assert [item.entry_id for item in response.items] == [old_entry.id]
+    assert response.items[0].temporal_status == "current"
+    compiled = "\n".join(session.executed)
+    assert "memory_entries.valid_from IS NULL OR memory_entries.valid_from <= '2026-04-01" in compiled
+    assert "memory_entries.valid_until IS NULL OR memory_entries.valid_until > '2026-04-01" in compiled
+
+
+def test_semantic_recall_valid_at_keeps_open_ended_superseded_entry_current() -> None:
+    old_item, old_entry = _semantic_memory_row(
+        title="Iris staging port was 8443",
+        body="Iris used staging port 8443 for the Palace deploy.",
+        scope_key="iris",
+        valid_from=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        valid_until=None,
+        superseded_by_entry_id=uuid.uuid4(),
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(old_item, old_entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port",
+                valid_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            ),
+        )
+    )
+
+    assert [item.entry_id for item in response.items] == [old_entry.id]
+    assert response.items[0].temporal_status == "current"
+    compiled = "\n".join(session.executed)
+    assert "memory_entries.valid_until IS NOT NULL" in compiled
+
+
+def test_semantic_recall_default_marks_open_ended_superseded_entry() -> None:
+    old_item, old_entry = _semantic_memory_row(
+        title="Iris staging port was 8443",
+        body="Iris used staging port 8443 for the Palace deploy.",
+        scope_key="iris",
+        valid_from=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        valid_until=None,
+        superseded_by_entry_id=uuid.uuid4(),
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(old_item, old_entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port",
+            ),
+        )
+    )
+
+    assert [item.entry_id for item in response.items] == [old_entry.id]
+    assert response.items[0].temporal_status == "superseded"
+
+
+def test_semantic_recall_keeps_agent_scope_strict_even_for_matching_sibling_entry() -> None:
+    iris_item, iris_entry = _semantic_memory_row(
+        title="Iris staging port is 9443",
+        body="Iris staging port matches the query.",
+        scope_key="iris",
+        valid_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(iris_item, iris_entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port perfect match",
+                top_k=5,
+            ),
+        )
+    )
+
+    assert [item.scope.key for item in response.items] == ["iris"]
+    compiled = "\n".join(session.executed)
+    assert "memory_entries.scope_type = 'agent'" in compiled
+    assert "memory_entries.scope_key = 'iris'" in compiled
+    assert "vera" not in compiled
+    assert "eva" not in compiled
+    assert "ORDER BY CASE" in compiled
+    assert compiled.index("ORDER BY CASE") < compiled.index("semantic_score DESC")
+
+
+def test_semantic_recall_filters_fact_kind_and_keeps_date_filters_distinct() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris observed SAR-1037",
+        body="Iris observed SAR-1037 recall behavior.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        fact_kind="observation",
+    )
+    session = FakeSession(execute_results=[1, [(item, entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="SAR-1037 recall",
+                fact_kind_filter=["observation"],
+                date_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                date_to=datetime(2026, 7, 2, tzinfo=timezone.utc),
+            ),
+        )
+    )
+
+    assert response.items[0].fact_kind == "observation"
+    assert response.trace.fact_kind_filter == ["observation"]
+    compiled = "\n".join(session.executed)
+    assert "memory_entries.fact_kind IN ('observation')" in compiled
+    assert "items.created_at >= '2026-07-01" in compiled
+    assert "items.created_at <= '2026-07-02" in compiled
+
+
+def test_semantic_recall_empty_result_returns_success_trace() -> None:
+    session = FakeSession(execute_results=[0, []])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="nothing here",
+            ),
+        )
+    )
+
+    assert response.items == []
+    assert response.total == 0
+    assert response.total_considered == 0
+    assert response.scope.type == "agent"
+    assert response.scope.key == "iris"
+    assert response.trace.status == "ok"
+    assert response.trace.searched_scope.type == "agent"
+    assert response.trace.searched_scope.key == "iris"
+
+
+def test_semantic_recall_drops_zero_score_rows_for_tokenized_queries() -> None:
+    item, entry = _semantic_memory_row(
+        title="Unrelated Palace deploy note",
+        body="This row does not match the requested search terms.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, entry, 0)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port",
+            ),
+        )
+    )
+
+    assert response.items == []
+    assert response.total == 0
+    assert response.total_considered == 1
+    compiled = "\n".join(session.executed)
+    assert "> 0" in compiled
+
+
+def test_semantic_recall_orders_current_candidates_before_score_limit() -> None:
+    session = FakeSession(execute_results=[0, []])
+
+    asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="staging port",
+                candidate_limit=1,
+            ),
+        )
+    )
+
+    compiled = "\n".join(session.executed)
+    assert "> 0" in compiled
+    assert "ORDER BY CASE" in compiled
+    assert compiled.index("ORDER BY CASE") < compiled.index("semantic_score DESC")
+    assert "LIMIT 1" in compiled
+
+
+def test_semantic_recall_prefers_source_backed_entry_over_derived_summary() -> None:
+    source_item, source_entry = _semantic_memory_row(
+        title="Iris SAR-1037 source note",
+        body="Iris saw SAR-1037 semantic recall source evidence.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    derived_item, derived_entry = _semantic_memory_row(
+        title="Iris SAR-1037 generated summary",
+        body="Iris saw SAR-1037 semantic recall source evidence.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        metadata={"memory_dream": {"artifact_type": "summary"}},
+    )
+    session = FakeSession(
+        execute_results=[
+            2,
+            [(derived_item, derived_entry, 4), (source_item, source_entry, 4)],
+        ]
+    )
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="SAR-1037 semantic recall source evidence",
+                top_k=2,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [source_entry.id, derived_entry.id]
+    compiled = "\n".join(session.executed)
+    assert "? 'memory_dream'" in compiled
+    assert "length(btrim(coalesce(items.raw_content, ''))) > 0" in compiled
+
+
+def test_semantic_recall_sql_source_rank_treats_blank_body_as_not_source_backed() -> None:
+    source_item, source_entry = _semantic_memory_row(
+        title="Iris SAR-1037 source note",
+        body="Iris saw SAR-1037 semantic recall source evidence.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    blank_item, blank_entry = _semantic_memory_row(
+        title="Iris SAR-1037 blank note",
+        body="Iris saw SAR-1037 semantic recall source evidence.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+    blank_item.raw_content = "   "
+    session = FakeSession(
+        execute_results=[
+            2,
+            [(blank_item, blank_entry, 4), (source_item, source_entry, 4)],
+        ]
+    )
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="SAR-1037 semantic recall source evidence",
+                top_k=2,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [source_entry.id, blank_entry.id]
+    compiled = "\n".join(session.executed)
+    assert "length(btrim(coalesce(items.raw_content, ''))) > 0" in compiled
+
+
+def test_semantic_recall_short_query_returns_success_without_tokens() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris short recall",
+        body="Short recall should not crash.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, entry, 0)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="a",
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert response.items[0].score == 0
+    assert response.trace.status == "ok"
+
+
+def test_semantic_recall_sql_score_includes_tags_for_thresholds() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris recall",
+        body="Body omits the provenance token.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    item.tags = ["agent-memory", "scope-agent", "codex-specific"]
+    session = FakeSession(execute_results=[1, [(item, entry, 1)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="codex-specific",
+                score_threshold=1,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert response.items[0].score == 1
+    compiled = "\n".join(session.executed)
+    assert "array_to_string(items.tags" in compiled
+    assert ">= 1" in compiled
+
+
+def test_semantic_recall_threshold_ignores_question_stopwords() -> None:
+    item, entry = _semantic_memory_row(
+        title="SAR-1015 auto-advanced",
+        body="Iris auto-advanced SAR-1015 from Backlog to In Progress.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, entry, 2)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="which SAR tickets did I auto-advance last week?",
+                score_threshold=0.7,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert response.items[0].score == 1
+    compiled = "\n".join(session.executed)
+    assert ">= 1.4" in compiled
+
+
+def test_semantic_recall_sql_score_escapes_like_wildcards() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris recall",
+        body="Body omits the underscore token.",
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    item.tags = ["codex_memory"]
+    session = FakeSession(execute_results=[1, [(item, entry, 1)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="codex_memory",
+                score_threshold=1,
+            ),
+        )
+    )
+
+    compiled = "\n".join(session.executed)
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert "ESCAPE '/'" in compiled
+    assert "codex/_memory" in compiled
+
+
+def test_semantic_recall_defaults_match_v1_contract() -> None:
+    request = SemanticRecallRequest(
+        scope_type="agent",
+        scope_key="iris",
+        query="default recall contract",
+    )
+
+    assert request.top_k == 8
+    assert request.recall_max_tokens == 1500
+    response = asyncio.run(
+        semantic_recall_memory(
+            FakeSession(execute_results=[0, []]),
+            tenant_id="tenant-a",
+            body=request,
+        )
+    )
+    assert response.trace.candidate_limit == 50
+
+
+def test_semantic_recall_token_budget_uses_estimated_character_budget() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris long recall",
+        body="x" * 900,
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="Iris long recall",
+                recall_max_tokens=500,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert response.trace.budget_truncated is False
+
+
+def test_semantic_recall_truncates_first_item_to_budget() -> None:
+    item, entry = _semantic_memory_row(
+        title="Iris oversized recall",
+        body="x" * 900,
+        scope_key="iris",
+        valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, entry)]])
+
+    response = asyncio.run(
+        semantic_recall_memory(
+            session,
+            tenant_id="tenant-a",
+            body=SemanticRecallRequest(
+                scope_type="agent",
+                scope_key="iris",
+                query="Iris oversized recall",
+                context_budget_chars=260,
+            ),
+        )
+    )
+
+    assert [result.entry_id for result in response.items] == [entry.id]
+    assert response.trace.budget_truncated is True
+    assert len(response.items[0].title) + len(response.items[0].summary or "") + len(response.items[0].body or "") <= 260
 
 
 def test_list_memory_scopes_summarizes_without_raw_content() -> None:

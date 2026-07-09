@@ -91,10 +91,18 @@ def test_semantic_memory_entry_schema_accepts_valid_until() -> None:
     assert entry.valid_until is None
 
 
-@pytest.mark.xfail(strict=True, reason="SAR-1038+ must expose strict semantic recall over REST/MCP.")
 def test_semantic_recall_request_schema_accepts_valid_at_and_budget() -> None:
     from app.schemas.memory import SemanticRecallRequest
 
     request = SemanticRecallRequest(**_load_fixture()["sample_requests"]["semantic_recall"])
+    assert request.scope_type == "agent"
+    assert request.scope_key == "iris"
     assert request.valid_at
     assert request.recall_max_tokens == 1500
+
+
+@pytest.mark.xfail(strict=True, reason="SAR-1038+ must expose strict semantic recall over REST/MCP.")
+def test_semantic_recall_rest_surface_exists() -> None:
+    from app.api.memory import semantic_recall_memory_artifacts
+
+    assert semantic_recall_memory_artifacts
