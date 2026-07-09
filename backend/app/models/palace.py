@@ -84,6 +84,81 @@ class MemoryScopeProfile(Base):
     )
 
 
+class MemoryEntry(Base):
+    __tablename__ = "memory_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    supersedes_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("memory_entries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    superseded_by_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("memory_entries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    fact_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('agent', 'workspace', 'session', 'tenant_shared')",
+            name="ck_memory_entries_scope_type",
+        ),
+        CheckConstraint(
+            "(scope_type = 'tenant_shared' AND scope_key IS NULL) "
+            "OR (scope_type != 'tenant_shared' AND scope_key IS NOT NULL)",
+            name="ck_memory_entries_scope_shape",
+        ),
+        CheckConstraint(
+            "fact_kind IS NULL OR fact_kind IN ('world', 'experience', 'observation')",
+            name="ck_memory_entries_fact_kind",
+        ),
+        CheckConstraint(
+            "valid_until IS NULL OR valid_from IS NULL OR valid_until >= valid_from",
+            name="ck_memory_entries_valid_window",
+        ),
+        Index("uq_memory_entries_tenant_item", "tenant_id", "item_id", unique=True),
+        Index(
+            "uq_memory_entries_tenant_idempotency",
+            "tenant_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=idempotency_key.isnot(None),
+        ),
+        Index("ix_memory_entries_tenant_scope_created", "tenant_id", "scope_type", "scope_key", "created_at"),
+        Index("ix_memory_entries_tenant_valid_window", "tenant_id", "valid_from", "valid_until"),
+        Index("ix_memory_entries_tenant_supersession", "tenant_id", "supersedes_entry_id", "superseded_by_entry_id"),
+    )
+
+
 class TemporalFact(Base):
     __tablename__ = "temporal_facts"
     __table_args__ = (

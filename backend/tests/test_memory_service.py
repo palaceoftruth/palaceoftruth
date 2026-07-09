@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.models.item import Item
 from app.models.job import Job
-from app.models.palace import PalaceTenantState
+from app.models.palace import MemoryEntry, PalaceTenantState
 from app.schemas.memory import (
     AgentMemoryRetrieveRequest,
     LegacyMemoryArtifactRequest,
@@ -440,6 +440,7 @@ def test_accept_canonical_memory_entry_uses_canonical_metadata() -> None:
     )
 
     item = next(value for value in session.added if value.__class__.__name__ == "Item")
+    memory_entry = next(value for value in session.added if value.__class__.__name__ == "MemoryEntry")
     job = next(value for value in session.added if value.__class__.__name__ == "Job")
 
     assert result.accepted_as == "canonical"
@@ -447,10 +448,81 @@ def test_accept_canonical_memory_entry_uses_canonical_metadata() -> None:
     assert item.metadata_["memory_entry"]["scope"] == {"type": "workspace", "key": "launch-pad"}
     assert item.metadata_["memory_entry"]["source"] == "hermes"
     assert item.metadata_.get("memory_contract") is None
+    assert memory_entry.item_id == item.id
+    assert memory_entry.scope_type == "workspace"
+    assert memory_entry.scope_key == "launch-pad"
+    assert memory_entry.source == "hermes"
+    assert memory_entry.idempotency_key == item.idempotency_key
     assert "scope-workspace" in item.tags
     assert job.payload["accepted_as"] == "canonical"
     assert job.payload["relationship_policy"] == "skip"
     assert isinstance(job.payload["request_fingerprint"], str)
+    assert job.payload["memory_entry_id"] == str(memory_entry.id)
+
+
+def test_accept_canonical_memory_entry_persists_temporal_fields_and_supersession_lineage() -> None:
+    previous = MemoryEntry(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        item_id=uuid.uuid4(),
+        scope_type="workspace",
+        scope_key="launch-pad",
+        source="hermes",
+        source_url="memory://old",
+        idempotency_key="old-key",
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    session = FakeSession(scalar_results=[None, previous])
+    valid_from = datetime(2026, 4, 12, 0, 0, tzinfo=timezone.utc)
+    valid_until = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
+
+    asyncio.run(
+        accept_canonical_memory_entry(
+            session,
+            body=_entry(
+                idempotency_key="new-key",
+                valid_from=valid_from,
+                valid_until=valid_until,
+                supersedes_entry_id=previous.id,
+                fact_kind="experience",
+                metadata={"agent_workspace": "Launch Pad"},
+            ),
+            signing_key="signing-key",
+        )
+    )
+
+    memory_entry = next(
+        value
+        for value in session.added
+        if value.__class__.__name__ == "MemoryEntry" and value.id != previous.id
+    )
+    assert memory_entry.valid_from == valid_from
+    assert memory_entry.valid_until == valid_until
+    assert memory_entry.supersedes_entry_id == previous.id
+    assert memory_entry.fact_kind == "experience"
+    assert memory_entry.metadata_ == {"agent_workspace": "Launch Pad"}
+    assert previous.superseded_by_entry_id == memory_entry.id
+
+
+def test_accept_canonical_memory_entry_rolls_back_invalid_supersession() -> None:
+    session = FakeSession(scalar_results=[None, None])
+
+    try:
+        asyncio.run(
+            accept_canonical_memory_entry(
+                session,
+                body=_entry(supersedes_entry_id=uuid.uuid4()),
+                signing_key="signing-key",
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 422
+        assert exc.detail["status"] == "invalid_supersession"
+    else:
+        raise AssertionError("invalid supersedes_entry_id should fail closed")
+
+    assert session.rollbacks == 1
 
 
 def test_accept_canonical_memory_entry_replays_same_payload_with_existing_pointers() -> None:
@@ -1009,7 +1081,23 @@ def test_list_memory_entries_filters_scope_tags_tenant_and_serializes_job_state(
         tenant_id="tenant-a",
         status="completed",
     )
-    session = FakeSession(execute_results=[1, [(item, job)]])
+    memory_entry = MemoryEntry(
+        id=uuid.uuid4(),
+        item_id=item_id,
+        tenant_id="tenant-a",
+        scope_type="workspace",
+        scope_key="launch-pad",
+        source="mcp-relational",
+        source_url="memory://entry/workspace/launch-pad",
+        idempotency_key="entry-key",
+        valid_from=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        fact_kind="world",
+        metadata_={"agent_workspace": "Launch Pad"},
+        created_at=datetime(2026, 4, 12, 12, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 4, 12, 12, 3, tzinfo=timezone.utc),
+    )
+    session = FakeSession(execute_results=[1, [(item, job, memory_entry)]])
 
     listed = asyncio.run(
         list_memory_entries(
@@ -1025,10 +1113,14 @@ def test_list_memory_entries_filters_scope_tags_tenant_and_serializes_job_state(
     assert listed.total == 1
     assert listed.next_cursor is None
     assert listed.entries[0].source_item_id == item_id
+    assert listed.entries[0].entry_id == memory_entry.id
     assert listed.entries[0].scope.type == "workspace"
     assert listed.entries[0].scope.key == "launch-pad"
-    assert listed.entries[0].source == "mcp"
+    assert listed.entries[0].source == "mcp-relational"
     assert listed.entries[0].source_project == "launch-pad"
+    assert listed.entries[0].valid_from == datetime(2026, 4, 1, tzinfo=timezone.utc)
+    assert listed.entries[0].valid_until == datetime(2026, 6, 1, tzinfo=timezone.utc)
+    assert listed.entries[0].fact_kind == "world"
     assert listed.entries[0].system_tags == ["skill-codex-automation-handoff"]
     assert listed.entries[0].semantic_tags == ["launch", "agent-memory"]
     assert listed.entries[0].readiness_state == "ready"
@@ -1066,7 +1158,7 @@ def test_list_memory_entries_uses_cursor_for_next_page() -> None:
         created_at=datetime(2026, 4, 12, 12, 0, tzinfo=timezone.utc),
         updated_at=datetime(2026, 4, 12, 12, 0, tzinfo=timezone.utc),
     )
-    session = FakeSession(execute_results=[2, [(first, None), (extra, None)]])
+    session = FakeSession(execute_results=[2, [(first, None, None), (extra, None, None)]])
 
     listed = asyncio.run(
         list_memory_entries(

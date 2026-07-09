@@ -35,6 +35,10 @@ class NormalizedMemoryEntry:
     accepted_as: str
     request_fingerprint: str
     source_url: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_entry_id: Any | None = None
+    fact_kind: str | None = None
 
 
 def _dedupe_tags(tags: list[str]) -> list[str]:
@@ -147,6 +151,10 @@ def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
             "source_url": body.source_url,
             "created_by_role": body.created_by_role,
             "metadata": body.metadata,
+            "valid_from": body.valid_from.astimezone(timezone.utc).isoformat() if body.valid_from else None,
+            "valid_until": body.valid_until.astimezone(timezone.utc).isoformat() if body.valid_until else None,
+            "supersedes_entry_id": str(body.supersedes_entry_id) if body.supersedes_entry_id else None,
+            "fact_kind": body.fact_kind,
             "enable_ai_enrichment": body.enable_ai_enrichment,
             "relationship_policy": body.relationship_policy,
             "accepted_as": "canonical",
@@ -162,6 +170,10 @@ def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
             "scope": body.scope.model_dump(mode="json"),
             "metadata": body.metadata,
             "idempotency_key": idempotency_key,
+            "valid_from": body.valid_from.astimezone(timezone.utc).isoformat() if body.valid_from else None,
+            "valid_until": body.valid_until.astimezone(timezone.utc).isoformat() if body.valid_until else None,
+            "supersedes_entry_id": str(body.supersedes_entry_id) if body.supersedes_entry_id else None,
+            "fact_kind": body.fact_kind,
         }
     }
     return NormalizedMemoryEntry(
@@ -181,6 +193,10 @@ def normalize_memory_entry(body: MemoryEntryRequest) -> NormalizedMemoryEntry:
         accepted_as="canonical",
         request_fingerprint=entry_request_fingerprint,
         source_url=body.source_url,
+        valid_from=body.valid_from,
+        valid_until=body.valid_until,
+        supersedes_entry_id=body.supersedes_entry_id,
+        fact_kind=body.fact_kind,
     )
 
 
