@@ -89,6 +89,7 @@ def test_packaged_release_writes_canonical_update_manifest(tmp_path: Path, monke
     assert manifest["generated_at"] == "2026-06-27T06:00:00Z"
     assert manifest["compatibility"]["host"]["plugin_api"] == "memory"
     assert manifest["compatibility"]["runtime"]["python"] == ">=3.9"
+    assert "/api/v1/memory/semantic-recall" in manifest["compatibility"]["client"]["required_routes"]
     assert "/api/v1/memory/retrieve-agent" in manifest["compatibility"]["client"]["required_routes"]
     assert "/api/v1/memory/retrieve" in manifest["compatibility"]["client"]["required_routes"]
     assert manifest["signature"] == {"status": "reserved", "entries": []}

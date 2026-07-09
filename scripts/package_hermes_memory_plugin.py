@@ -138,6 +138,7 @@ def _build_update_manifest(
                 "required_routes": [
                     "/api/v1/memory/whoami",
                     "/api/v1/memory/scopes",
+                    "/api/v1/memory/semantic-recall",
                     "/api/v1/memory/retrieve-agent",
                     "/api/v1/memory/retrieve",
                     "/api/v1/memory/entries",
