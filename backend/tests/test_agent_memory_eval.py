@@ -64,7 +64,7 @@ def test_compatibility_fixture_pack_normalizes_all_transports() -> None:
         "mcp-stdio",
         "hermes",
     ]
-    assert len(pack["cases"]) == 12
+    assert len(pack["cases"]) == 16
     assert report["summary"]["passed"] is True
     assert report["summary"]["target_comparisons"]["compatibility_fixture_r5"] == {
         "metric": "R@5",
@@ -72,10 +72,10 @@ def test_compatibility_fixture_pack_normalizes_all_transports() -> None:
         "actual": 1.0,
         "passed": True,
     }
-    assert report["summary"]["per_transport"]["rest"]["case_count"] == 3
-    assert report["summary"]["per_transport"]["mcp-http"]["case_count"] == 3
-    assert report["summary"]["per_transport"]["mcp-stdio"]["case_count"] == 3
-    assert report["summary"]["per_transport"]["hermes"]["case_count"] == 3
+    assert report["summary"]["per_transport"]["rest"]["case_count"] == 4
+    assert report["summary"]["per_transport"]["mcp-http"]["case_count"] == 4
+    assert report["summary"]["per_transport"]["mcp-stdio"]["case_count"] == 4
+    assert report["summary"]["per_transport"]["hermes"]["case_count"] == 4
     assert report["summary"]["route_accuracy"] == 1.0
     assert report["summary"]["source_coverage_accuracy"] == 1.0
     assert report["summary"]["current_first_accuracy"] == 1.0
