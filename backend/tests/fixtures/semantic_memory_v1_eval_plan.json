@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "fixture_id": "sar-1034-semantic-memory-v1-eval-plan",
+  "description": "Canonical SAR-1034 fixture plan for Palace-native Hermes semantic memory v1.",
+  "source_evidence": {
+    "iris_handoff_path": "/home/asarver/.hermes/cache/research/palace-handoff-FINAL-2026-07-08.md",
+    "palace_source_item_ids": [
+      "983a0f01-04fa-4c87-8ebc-f64a5ba8f18e",
+      "08d8da00-1ee1-4ce5-9a14-6f605997fdf6"
+    ],
+    "linear_task": "SAR-1034"
+  },
+  "vocabulary": {
+    "semantic_api_temporal_end_field": "valid_until",
+    "existing_palace_temporal_fact_end_field": "valid_to",
+    "recall_time_filter": "valid_at",
+    "fact_kind_values": ["world", "experience", "observation"]
+  },
+  "scope_profiles": [
+    {
+      "scope": {"type": "agent", "key": "iris"},
+      "retain_mission": "Retain SAR ticket IDs, Linear audit trail entries, exception/incident facts, scan durability, and run-by-run agent actions with timestamps. Do not retain banter or ephemeral debug context.",
+      "quiet_recall": false,
+      "expected_tags": ["agent:iris", "sar"]
+    },
+    {
+      "scope": {"type": "agent", "key": "codex"},
+      "retain_mission": "Retain repo paths, default branch names, file line anchors, regression-test references, failed-approach lessons, and git commit SHAs tagged to work.",
+      "quiet_recall": false,
+      "expected_tags": ["agent:codex", "repo"]
+    },
+    {
+      "scope": {"type": "workspace", "key": "hermes"},
+      "retain_mission": "Retain durable cross-lane infrastructure facts, recurring skills, runbooks, and project-level conventions for any Hermes lane.",
+      "quiet_recall": false,
+      "expected_tags": ["workspace:hermes", "domain"]
+    }
+  ],
+  "v1_gates": [
+    {
+      "id": "strict-scope-isolation",
+      "title": "Strict scope isolation",
+      "category": "scope",
+      "ship_gate": true,
+      "expected_case_ids": ["agent-iris-does-not-leak-agent-eva"]
+    },
+    {
+      "id": "provenance-presence-typing",
+      "title": "Provenance presence and typing",
+      "category": "provenance",
+      "ship_gate": true,
+      "required_hit_fields": {
+        "entry_id": "string",
+        "scope_type": "string",
+        "scope_key": "string",
+        "source": "string",
+        "created_at": "datetime",
+        "valid_from": "datetime|null",
+        "score": "number"
+      }
+    },
+    {
+      "id": "identity-sovereignty",
+      "title": "Identity and sovereignty",
+      "category": "scope",
+      "ship_gate": true,
+      "expected_case_ids": ["agent-iris-cannot-write-agent-eva-without-grant"]
+    },
+    {
+      "id": "mission-honored",
+      "title": "Mission honored",
+      "category": "retention",
+      "ship_gate": true,
+      "expected_case_ids": ["iris-greeting-retains-zero", "iris-sar-transition-retains-action"]
+    },
+    {
+      "id": "empty-recall-contract",
+      "title": "Empty recall contract",
+      "category": "recall",
+      "ship_gate": true,
+      "expected_response": {
+        "status_code": 200,
+        "items": [],
+        "total_considered": 0,
+        "scope": "agent/iris",
+        "trace_required": true
+      }
+    },
+    {
+      "id": "source-vs-summary",
+      "title": "Source-vs-summary preference",
+      "category": "ranking",
+      "ship_gate": true,
+      "expected_case_ids": ["source-entry-outranks-generated-summary"]
+    },
+    {
+      "id": "workspace-collision",
+      "title": "Workspace collision",
+      "category": "scope",
+      "ship_gate": true,
+      "expected_case_ids": ["workspace-hermes-does-not-leak-agent-iris-private"]
+    },
+    {
+      "id": "multi-source-aggregation",
+      "title": "Multi-source aggregation",
+      "category": "retrieval",
+      "ship_gate": true,
+      "expected_case_ids": ["iris-sar-weekly-answer-cites-five-ticket-sources"]
+    },
+    {
+      "id": "budget-containment",
+      "title": "Budget containment",
+      "category": "budget",
+      "ship_gate": true,
+      "limits": {
+        "top_k_default": 8,
+        "top_k_max": 50,
+        "recall_max_tokens_default": 1500,
+        "recall_max_tokens_min": 200,
+        "recall_max_tokens_max": 20000,
+        "candidate_limit_default": 50,
+        "candidate_limit_max": 200
+      }
+    },
+    {
+      "id": "stale-current-temporal",
+      "title": "Stale/current temporal",
+      "category": "temporal",
+      "ship_gate": true,
+      "expected_case_ids": ["current-port-outranks-superseded-port", "valid-at-returns-historical-port"]
+    }
+  ],
+  "v1_5_deferrals": [
+    {
+      "id": "temporal-edge-cases",
+      "title": "Temporal filter edge cases",
+      "reason": "Requires real temporal schema and lineage enforcement before meaningful fixtures can run.",
+      "cases": ["future-valid-from", "valid-until-before-valid-from", "dangling-supersedes", "supersession-cycle", "missing-reverse-lineage"]
+    },
+    {
+      "id": "load-cost-budgets",
+      "title": "Load and cost budgets",
+      "reason": "Requires deployed recall and retention implementation plus representative 10k-entry scopes.",
+      "targets": {"recall_p95_seconds": 2.0, "retain_p95_seconds": 4.0}
+    }
+  ],
+  "v2_deferrals": [
+    {
+      "id": "reflection-promotion-gate",
+      "title": "Reflection and promotion-gated consolidation",
+      "reason": "Reflection is only load-bearing after v1 temporal recall and v1.5 hardening produce stable contradiction evidence."
+    }
+  ],
+  "sample_requests": {
+    "semantic_recall": {
+      "scope_type": "agent",
+      "scope_key": "iris",
+      "query": "which SAR tickets did I auto-advance last week?",
+      "top_k": 8,
+      "score_threshold": 0.7,
+      "recall_max_tokens": 1500,
+      "valid_at": "2026-07-08T00:00:00Z",
+      "fact_kind_filter": ["experience"]
+    },
+    "temporal_remember": {
+      "scope_type": "agent",
+      "scope_key": "iris",
+      "title": "SAR-1015 auto-advanced",
+      "body": "Iris auto-advanced SAR-1015 from Backlog to In Progress at 13:18 UTC.",
+      "valid_from": "2026-07-01T13:18:00Z",
+      "valid_until": null,
+      "supersedes": null,
+      "fact_kind": "experience",
+      "tags": ["sar:SAR-1015", "agent:iris"]
+    }
+  },
+  "iris_end_to_end": {
+    "query": "which SAR tickets did I auto-advance last week?",
+    "expected_ticket_ids": ["SAR-1015", "SAR-1016", "SAR-1017", "SAR-1018", "SAR-1019"],
+    "expected_scope": {"type": "agent", "key": "iris"},
+    "forbidden_scope_keys": ["vera", "eve", "lux", "barbara"]
+  }
+}
