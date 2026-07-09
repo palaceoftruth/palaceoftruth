@@ -476,6 +476,7 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
 
     pods = pods_payload.get("items") if isinstance(pods_payload.get("items"), list) else []
     restart_rows: list[dict[str, Any]] = []
+    non_running_rows: list[dict[str, str]] = []
     master_not_found_hits: list[dict[str, str]] = []
     log_read_failures: list[dict[str, str]] = []
     selected_worker_pods = 0
@@ -489,7 +490,13 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
         app_label = str((metadata.get("labels") or {}).get("app") or "")
         if args.worker_name_fragment and args.worker_name_fragment not in app_label and args.worker_name_fragment not in pod_name:
             continue
+        if metadata.get("deletionTimestamp"):
+            continue
+        phase = str(status.get("phase") or "")
         selected_worker_pods += 1
+        if phase and phase != "Running":
+            non_running_rows.append({"pod": pod_name, "phase": phase})
+            continue
         for container_status in status.get("containerStatuses") or []:
             if not isinstance(container_status, dict):
                 continue
@@ -527,13 +534,15 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
 
     if selected_worker_pods == 0:
         _alert(report, "worker_pods_not_found", "no worker pods matched rollout smoke selector")
+    if non_running_rows:
+        _alert(report, "worker_pod_not_running", "one or more worker pods are not running", pods=non_running_rows)
     if restart_rows:
         _alert(report, "worker_restart_spike", "worker restart threshold exceeded", pods=restart_rows)
     if master_not_found_hits:
         _alert(report, "master_not_found", "MasterNotFoundError or No master found appeared in worker logs", pods=master_not_found_hits)
     if log_read_failures:
         _alert(report, "worker_log_scan_failed", "one or more worker container logs could not be scanned", pods=log_read_failures)
-    failed = bool(restart_rows or master_not_found_hits or log_read_failures or selected_worker_pods == 0)
+    failed = bool(non_running_rows or restart_rows or master_not_found_hits or log_read_failures or selected_worker_pods == 0)
     _record_check(
         report,
         "kubernetes_alerts",
@@ -541,6 +550,7 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
         pod_count=len(pods),
         selected_worker_pods=selected_worker_pods,
         selected_worker_containers=selected_worker_containers,
+        non_running_pods=non_running_rows,
         restart_alerts=restart_rows,
         master_not_found_hits=master_not_found_hits,
         log_read_failures=log_read_failures,

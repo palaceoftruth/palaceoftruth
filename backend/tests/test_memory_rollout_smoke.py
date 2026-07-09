@@ -429,6 +429,122 @@ def test_kubernetes_check_allows_resolved_sentinel_startup_retries() -> None:
     assert report["checks"][0]["status"] == "passed"
 
 
+def test_kubernetes_check_ignores_terminating_worker_startup_retries() -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-old",
+                            "labels": {"app": "palaceoftruth-worker"},
+                            "deletionTimestamp": "2026-07-08T00:26:00Z",
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    },
+                    {
+                        "metadata": {
+                            "name": "worker-new",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    },
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            if "worker-old" in path:
+                return (
+                    "Waiting for Redis Sentinel master discovery before ARQ startup: "
+                    "error=redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+                )
+            return "Redis Sentinel startup dependency ready: master=10.42.5.211:6379"
+
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        skip_kubernetes=False,
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        restart_alert_threshold=3,
+        skip_log_scan=False,
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+    )
+
+    rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
+
+    assert report["alerts"] == []
+    assert report["checks"][0]["status"] == "passed"
+    assert report["checks"][0]["selected_worker_pods"] == 1
+
+
+def test_kubernetes_check_fails_on_active_non_running_worker() -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-pending",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Pending",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    },
+                    {
+                        "metadata": {
+                            "name": "worker-running",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    },
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return "Redis Sentinel startup dependency ready: master=10.42.5.211:6379"
+
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        skip_kubernetes=False,
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        restart_alert_threshold=3,
+        skip_log_scan=False,
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+    )
+
+    rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
+
+    assert [alert["code"] for alert in report["alerts"]] == ["worker_pod_not_running"]
+    assert report["checks"][0]["status"] == "failed"
+    assert report["checks"][0]["non_running_pods"] == [{"pod": "worker-pending", "phase": "Pending"}]
+
+
 def test_kubernetes_check_alerts_when_master_not_found_after_startup_ready() -> None:
     class FakeKube:
         namespace = "palaceoftruth"
