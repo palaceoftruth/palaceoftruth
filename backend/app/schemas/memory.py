@@ -276,6 +276,35 @@ class MemoryScope(BaseModel):
         return self
 
 
+class MemoryScopeProfile(BaseModel):
+    scope: MemoryScope
+    retain_mission: str = ""
+    quiet_recall: bool = False
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_by: str | None = None
+    updated_by: str | None = None
+
+
+class MemoryScopeProfileUpsertRequest(BaseModel):
+    scope: MemoryScope
+    retain_mission: str = ""
+    quiet_recall: bool = False
+    updated_by: str | None = None
+
+    @field_validator("retain_mission")
+    @classmethod
+    def mission_not_blank_when_present(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("updated_by")
+    @classmethod
+    def optional_updated_by_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_not_blank(value, "updated_by")
+
+
 class MemoryEntryRequest(BaseModel):
     tenant_id: str
     title: str
@@ -514,6 +543,13 @@ class MemoryScopeSummary(BaseModel):
     latest_updated_at: datetime | None = None
     tags: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    profile: MemoryScopeProfile | None = None
+
+    @model_validator(mode="after")
+    def default_profile_matches_scope(self) -> "MemoryScopeSummary":
+        if self.profile is None:
+            self.profile = MemoryScopeProfile(scope=self.scope)
+        return self
 
 
 class MemoryScopeListResponse(BaseModel):

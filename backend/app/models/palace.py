@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -36,6 +37,50 @@ class PalaceTenantState(Base):
         TIMESTAMP(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class MemoryScopeProfile(Base):
+    __tablename__ = "memory_scope_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retain_mission: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    quiet_recall: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('agent', 'workspace', 'session', 'tenant_shared')",
+            name="ck_memory_scope_profiles_scope_type",
+        ),
+        CheckConstraint(
+            "(scope_type = 'tenant_shared' AND scope_key IS NULL) "
+            "OR (scope_type != 'tenant_shared' AND scope_key IS NOT NULL)",
+            name="ck_memory_scope_profiles_scope_shape",
+        ),
+        Index(
+            "uq_memory_scope_profiles_tenant_scope",
+            "tenant_id",
+            "scope_type",
+            func.coalesce(scope_key, ""),
+            unique=True,
+        ),
     )
 
 

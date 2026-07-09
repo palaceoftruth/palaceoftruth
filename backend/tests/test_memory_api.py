@@ -34,6 +34,7 @@ from app.schemas.memory import (
     MemoryRetrieveRequest,
     MemoryRetrieveResponse,
     MemoryScopeListResponse,
+    MemoryScopeProfile,
     MemoryScopeSummary,
     MemorySourceTrustSummaryResponse,
     MemoryTrajectoryEntry,
@@ -1095,6 +1096,11 @@ def test_memory_scopes_list_uses_authenticated_tenant(monkeypatch) -> None:
                     latest_updated_at=datetime(2026, 5, 6, 12, 5, tzinfo=timezone.utc),
                     tags=["codex-memory"],
                     sources=["codex"],
+                    profile={
+                        "scope": {"type": "workspace", "key": "exampleos"},
+                        "retain_mission": "Remember migration status.",
+                        "quiet_recall": True,
+                    },
                 )
             ],
             total=1,
@@ -1110,6 +1116,92 @@ def test_memory_scopes_list_uses_authenticated_tenant(monkeypatch) -> None:
     assert payload["scopes"][0]["scope"] == {"type": "workspace", "key": "exampleos"}
     assert payload["scopes"][0]["entry_count"] == 3
     assert payload["scopes"][0]["sources"] == ["codex"]
+    assert payload["scopes"][0]["profile"]["retain_mission"] == "Remember migration status."
+    assert payload["scopes"][0]["profile"]["quiet_recall"] is True
+
+
+def test_memory_scope_profile_get_uses_authenticated_tenant(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_get_memory_scope_profile(db, *, tenant_id: str, scope):
+        assert tenant_id == "tenant-a"
+        assert scope.type == "agent"
+        assert scope.key == "iris"
+        return MemoryScopeProfile(
+            scope={"type": "agent", "key": "iris"},
+            retain_mission="Retain Iris operator handoffs.",
+            quiet_recall=True,
+        )
+
+    monkeypatch.setattr("app.api.memory.get_memory_scope_profile", fake_get_memory_scope_profile)
+
+    response = client.get("/api/v1/memory/scope-profile?scope_type=agent&scope_key=iris")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == {"type": "agent", "key": "iris"}
+    assert payload["retain_mission"] == "Retain Iris operator handoffs."
+    assert payload["quiet_recall"] is True
+
+
+def test_memory_scope_profile_get_rejects_invalid_scope_shape() -> None:
+    client = _build_app(FakeSession())
+
+    response = client.get("/api/v1/memory/scope-profile?scope_type=agent")
+
+    assert response.status_code == 422
+    assert "agent scope requires a key" in response.json()["detail"]
+
+
+def test_memory_scope_profile_put_requires_admin_scope(monkeypatch) -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["read", "write"])
+
+    response = client.put(
+        "/api/v1/memory/scope-profile",
+        json={
+            "scope": {"type": "agent", "key": "iris"},
+            "retain_mission": "Retain durable canary evidence.",
+            "quiet_recall": True,
+            "updated_by": "codex",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_memory_scope_profile_put_updates_authenticated_tenant(monkeypatch) -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["admin"])
+
+    async def fake_upsert_memory_scope_profile(db, *, tenant_id: str, body):
+        assert tenant_id == "tenant-a"
+        assert body.scope.type == "workspace"
+        assert body.scope.key == "hermes"
+        assert body.retain_mission == "Retain Hermes routing facts."
+        assert body.quiet_recall is False
+        return MemoryScopeProfile(
+            scope=body.scope,
+            retain_mission=body.retain_mission,
+            quiet_recall=body.quiet_recall,
+            updated_by=body.updated_by,
+        )
+
+    monkeypatch.setattr("app.api.memory.upsert_memory_scope_profile", fake_upsert_memory_scope_profile)
+
+    response = client.put(
+        "/api/v1/memory/scope-profile",
+        json={
+            "scope": {"type": "workspace", "key": "hermes"},
+            "retain_mission": " Retain Hermes routing facts. ",
+            "quiet_recall": False,
+            "updated_by": "codex",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == {"type": "workspace", "key": "hermes"}
+    assert payload["retain_mission"] == "Retain Hermes routing facts."
+    assert payload["quiet_recall"] is False
 
 
 def test_memory_relationship_backfill_endpoint_enqueues_tenant_sweep() -> None:
