@@ -6,6 +6,12 @@ from fastapi.testclient import TestClient
 from app.api.system import router
 from app.auth import AuthContext, verify_memory_auth
 from app.database import get_db
+from app.services.memory_telemetry import (
+    record_retention_extraction,
+    record_scope_guard_violation,
+    record_semantic_recall,
+    reset_memory_telemetry_for_tests,
+)
 from app.services.prometheus_metrics import HttpMetricsRecorder
 
 
@@ -239,6 +245,10 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
 
 
 def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
+    reset_memory_telemetry_for_tests()
+    record_semantic_recall(status="empty", scope_type="agent")
+    record_retention_extraction(status="written", mode="extracted_write")
+    record_scope_guard_violation(reason="agent_scope_not_allowlisted")
     client = _metrics_client(MetricsSession())
 
     response = client.get("/api/v1/metrics")
@@ -256,6 +266,9 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert "palace_dirty_backlog_items 5" in body
     assert "palace_dirty_backlog_generation 9" in body
     assert 'palace_webhook_jobs{status="failed"} 2' in body
+    assert 'palace_semantic_recall_total{scope_type="agent",status="empty"} 1' in body
+    assert 'palace_retention_extraction_total{mode="extracted_write",status="written"} 1' in body
+    assert 'palace_memory_scope_guard_violations_total{reason="agent_scope_not_allowlisted"} 1' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert "tenant-a" not in body
 

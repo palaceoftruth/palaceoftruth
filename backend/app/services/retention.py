@@ -16,6 +16,7 @@ from app.services.codex_memory_privacy import redact_codex_memory_preview, scan_
 from app.services.llm import LLMService
 from app.services.memory import MemoryArtifactAcceptanceResult, accept_canonical_memory_entry
 from app.services.memory_admission import evaluate_memory_write_admission
+from app.services.memory_telemetry import record_retention_extraction
 from app.services.semantic_scope_profiles import SemanticScopeProfileService
 
 logger = logging.getLogger(__name__)
@@ -133,8 +134,13 @@ class RetentionService:
 
         profile = await self.profile_service.get_profile(body.scope)
         retain_mission = profile.retain_mission.strip() or _DEFAULT_RETAIN_MISSION
-        extracted = await self.extract(body, retain_mission=retain_mission)
+        try:
+            extracted = await self.extract(body, retain_mission=retain_mission)
+        except Exception:
+            record_retention_extraction(status="error", mode=mode)
+            raise
         if not extracted.entries:
+            record_retention_extraction(status="empty", mode=mode)
             return RetentionWriteResult(
                 mode=mode,
                 created_count=0,
@@ -163,6 +169,8 @@ class RetentionService:
                 logger.info("retention extraction candidate rejected: %s", admission.reason_code)
                 continue
             accepted_candidates.append((candidate, extracted_entry, admission.audit))
+        if rejected_count:
+            record_retention_extraction(status="rejected", mode=mode)
 
         results: list[MemoryArtifactAcceptanceResult] = []
         for candidate, _extracted_entry, audit in accepted_candidates:
@@ -175,6 +183,7 @@ class RetentionService:
                 )
             )
 
+        record_retention_extraction(status="written" if results else "empty", mode=mode)
         return RetentionWriteResult(
             mode=mode,
             created_count=len(results),

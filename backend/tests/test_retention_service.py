@@ -10,6 +10,7 @@ from app.services.retention import (
     RetentionExtractionOutput,
     RetentionService,
 )
+from app.services.memory_telemetry import memory_telemetry_snapshot, reset_memory_telemetry_for_tests
 
 
 class FakeSession:
@@ -91,6 +92,7 @@ def _entry(**overrides) -> MemoryEntryRequest:
 
 @pytest.mark.asyncio
 async def test_retention_service_empty_extraction_creates_zero_entries() -> None:
+    reset_memory_telemetry_for_tests()
     db = FakeSession()
     llm = FakeLLM(RetentionExtractionOutput(entries=[]))
     profile = FakeProfileService("Retain SAR tickets. Do not retain greetings.")
@@ -104,6 +106,7 @@ async def test_retention_service_empty_extraction_creates_zero_entries() -> None
     assert db.added == []
     assert profile.scopes == [MemoryScope(type="agent", key="iris")]
     assert "Retain SAR tickets" in llm.messages[1]["content"]
+    assert memory_telemetry_snapshot()["retention_extraction"] == [(("empty", "extracted_write"), 1)]
 
 
 @pytest.mark.asyncio
@@ -213,6 +216,7 @@ async def test_retention_service_raw_write_preserves_existing_memory_write_compa
 
 @pytest.mark.asyncio
 async def test_retention_service_extraction_failure_writes_nothing() -> None:
+    reset_memory_telemetry_for_tests()
     db = FakeSession()
     service = RetentionService(
         db,
@@ -225,3 +229,4 @@ async def test_retention_service_extraction_failure_writes_nothing() -> None:
         await service.retain(_entry(body="Iris auto-advanced SAR-1015."), mode="extracted_write")
 
     assert db.added == []
+    assert memory_telemetry_snapshot()["retention_extraction"] == [(("error", "extracted_write"), 1)]
