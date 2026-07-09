@@ -1319,9 +1319,9 @@ def test_benchmark_cli_compatibility_report_writes_normalized_pack(tmp_path: Pat
     report = smoke_module.json.loads(report_output.read_text())
     normalized_pack = smoke_module.json.loads(pack_output.read_text())
     assert report["summary"]["passed"] is True
-    assert report["summary"]["per_transport"]["hermes"]["case_count"] == 3
+    assert report["summary"]["per_transport"]["hermes"]["case_count"] == 4
     assert normalized_pack["artifact_metadata"]["offline_report_only"] is True
-    assert len(normalized_pack["cases"]) == 12
+    assert len(normalized_pack["cases"]) == 16
 
 
 def test_codex_bridge_report_can_write_json_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

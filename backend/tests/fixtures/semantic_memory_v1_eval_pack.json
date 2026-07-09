@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "pack_id": "sar-1042-semantic-memory-v1-eval-gates",
+  "description": "Sanitized executable SAR-1042 eval pack for Palace-native Hermes semantic memory v1 gates.",
+  "artifact_metadata": {
+    "source": "SAR-1042",
+    "offline_report_only": true,
+    "network_calls": false,
+    "writes_memory": false,
+    "raw_memory_content_reported": false,
+    "required_transports": ["rest", "mcp-http", "mcp-stdio", "hermes"],
+    "iris_canary_query": "which SAR tickets did I auto-advance last week?"
+  },
+  "benchmark_targets": {
+    "semantic_memory_v1_r8": {
+      "metric": "R@8",
+      "value": 1.0
+    }
+  },
+  "cases": [
+    {
+      "id": "agent-iris-does-not-leak-agent-eva",
+      "v1_gate_id": "strict-scope-isolation",
+      "category": "scope",
+      "query": "Iris staging recall should not include Eva private notes",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-iris-scope-memory"],
+      "forbidden_item_ids": ["agent-eva-private-memory"],
+      "expected_scope_labels": {
+        "agent-iris-scope-memory": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["Iris scoped recall"],
+      "forbidden_context_terms": ["Eva private"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- Semantic recall searched scope: agent/iris.\n- [0.98] Iris scoped recall [agent/iris, experience, current]\n  Iris scoped recall stayed inside agent/iris.",
+      "results": [
+        {
+          "item_id": "agent-iris-scope-memory",
+          "title": "Iris scoped recall",
+          "score": 0.98,
+          "scope": {"type": "agent", "key": "iris"}
+        }
+      ]
+    },
+    {
+      "id": "semantic-hit-provenance-fields-typed",
+      "v1_gate_id": "provenance-presence-typing",
+      "category": "provenance",
+      "query": "Iris semantic recall provenance fields",
+      "display_limit": 5,
+      "expected_item_ids": ["entry-iris-provenance"],
+      "expected_scope_labels": {
+        "entry-iris-provenance": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris", "entry_id=entry-iris-provenance", "source_item_id=item-iris-provenance"],
+      "expected_hermes_titles": ["Iris provenance envelope"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- [0.97] Iris provenance envelope [agent/iris, experience, current]\n  Provenance: entry_id=entry-iris-provenance; source_item_id=item-iris-provenance; source=hermes; created_at=2026-07-08T12:00:00Z; valid_from=2026-07-08T12:00:00Z.",
+      "results": [
+        {
+          "item_id": "entry-iris-provenance",
+          "title": "Iris provenance envelope",
+          "score": 0.97,
+          "scope": {"type": "agent", "key": "iris"},
+          "source": "hermes",
+          "created_at": "2026-07-08T12:00:00Z",
+          "valid_from": "2026-07-08T12:00:00Z",
+          "source_item_id": "item-iris-provenance"
+        }
+      ]
+    },
+    {
+      "id": "agent-iris-cannot-write-agent-eva-without-grant",
+      "v1_gate_id": "identity-sovereignty",
+      "category": "scope",
+      "query": "Iris write scope sovereignty",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-iris-sovereign-write"],
+      "forbidden_item_ids": ["agent-eva-cross-write"],
+      "expected_scope_labels": {
+        "agent-iris-sovereign-write": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["Iris sovereign write"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- [0.96] Iris sovereign write [agent/iris, experience, current]\n  The retained action remained in the caller scope agent/iris.",
+      "results": [
+        {
+          "item_id": "agent-iris-sovereign-write",
+          "title": "Iris sovereign write",
+          "score": 0.96,
+          "scope": {"type": "agent", "key": "iris"}
+        }
+      ]
+    },
+    {
+      "id": "iris-sar-transition-retains-action",
+      "v1_gate_id": "mission-honored",
+      "category": "retention",
+      "query": "Iris retain mission should keep SAR action facts",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-iris-sar-action"],
+      "expected_scope_labels": {
+        "agent-iris-sar-action": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["SAR action retained"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- [0.95] SAR action retained [agent/iris, experience, current]\n  Iris retained the SAR action fact and ignored unrelated greeting chatter.",
+      "results": [
+        {
+          "item_id": "agent-iris-sar-action",
+          "title": "SAR action retained",
+          "score": 0.95,
+          "scope": {"type": "agent", "key": "iris"},
+          "tags": ["sar:SAR-1015", "agent:iris"]
+        }
+      ]
+    },
+    {
+      "id": "semantic-empty-recall-agent-iris",
+      "v1_gate_id": "empty-recall-contract",
+      "category": "recall",
+      "query": "Iris nonexistent semantic memory should return empty success",
+      "display_limit": 5,
+      "expected_item_ids": [],
+      "expected_scope_labels": {},
+      "expected_hermes_scope_labels": [],
+      "expected_hermes_titles": [],
+      "hermes_context": "",
+      "results": []
+    },
+    {
+      "id": "source-entry-outranks-generated-summary",
+      "v1_gate_id": "source-vs-summary",
+      "category": "ranking",
+      "query": "Iris source evidence should outrank generated summary",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-iris-source-note"],
+      "expected_top_rank_item_id": "agent-iris-source-note",
+      "expected_scope_labels": {
+        "agent-iris-source-note": "agent/iris",
+        "agent-iris-generated-summary": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["Iris source-backed note"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- [0.94] Iris source-backed note [agent/iris, experience, current]\n  Source-backed note outranked generated summary for the source-sensitive question.",
+      "results": [
+        {
+          "item_id": "agent-iris-source-note",
+          "title": "Iris source-backed note",
+          "score": 0.94,
+          "scope": {"type": "agent", "key": "iris"},
+          "source_url": "memory://entry/agent/iris/source-note"
+        },
+        {
+          "item_id": "agent-iris-generated-summary",
+          "title": "Iris generated summary",
+          "score": 0.91,
+          "scope": {"type": "agent", "key": "iris"},
+          "metadata": {"memory_dream": {"artifact_type": "summary"}}
+        }
+      ]
+    },
+    {
+      "id": "workspace-hermes-does-not-leak-agent-iris-private",
+      "v1_gate_id": "workspace-collision",
+      "category": "scope",
+      "query": "Hermes workspace recall should not leak Iris private agent facts",
+      "display_limit": 5,
+      "expected_item_ids": ["workspace-hermes-shared-routing"],
+      "forbidden_item_ids": ["agent-iris-private-routing"],
+      "expected_scope_labels": {
+        "workspace-hermes-shared-routing": "workspace/hermes"
+      },
+      "expected_hermes_scope_labels": ["workspace/hermes"],
+      "expected_hermes_titles": ["Hermes shared routing"],
+      "forbidden_context_terms": ["Iris private"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- Retrieval searched scopes: workspace/hermes.\n- [0.93] Hermes shared routing [workspace/hermes]\n  Shared Hermes routing memory is safe for workspace recall.",
+      "results": [
+        {
+          "item_id": "workspace-hermes-shared-routing",
+          "title": "Hermes shared routing",
+          "score": 0.93,
+          "scope": {"type": "workspace", "key": "hermes"}
+        }
+      ]
+    },
+    {
+      "id": "iris-sar-weekly-answer-cites-five-ticket-sources",
+      "v1_gate_id": "multi-source-aggregation",
+      "category": "retrieval",
+      "query": "which SAR tickets did I auto-advance last week?",
+      "display_limit": 8,
+      "expected_item_ids": ["SAR-1015", "SAR-1016", "SAR-1017", "SAR-1018", "SAR-1019"],
+      "expected_source_groups": {
+        "SAR-1015": ["SAR-1015"],
+        "SAR-1016": ["SAR-1016"],
+        "SAR-1017": ["SAR-1017"],
+        "SAR-1018": ["SAR-1018"],
+        "SAR-1019": ["SAR-1019"]
+      },
+      "expected_scope_labels": {
+        "SAR-1015": "agent/iris",
+        "SAR-1016": "agent/iris",
+        "SAR-1017": "agent/iris",
+        "SAR-1018": "agent/iris",
+        "SAR-1019": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["SAR-1015 auto-advanced", "SAR-1016 auto-advanced", "SAR-1017 auto-advanced", "SAR-1018 auto-advanced", "SAR-1019 auto-advanced"],
+      "forbidden_context_terms": ["agent/vera", "agent/eve", "agent/lux", "agent/barbara"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- Semantic recall searched scope: agent/iris.\n- [0.99] SAR-1015 auto-advanced [agent/iris]\n- [0.98] SAR-1016 auto-advanced [agent/iris]\n- [0.97] SAR-1017 auto-advanced [agent/iris]\n- [0.96] SAR-1018 auto-advanced [agent/iris]\n- [0.95] SAR-1019 auto-advanced [agent/iris]",
+      "results": [
+        {"item_id": "SAR-1015", "title": "SAR-1015 auto-advanced", "score": 0.99, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "SAR-1016", "title": "SAR-1016 auto-advanced", "score": 0.98, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "SAR-1017", "title": "SAR-1017 auto-advanced", "score": 0.97, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "SAR-1018", "title": "SAR-1018 auto-advanced", "score": 0.96, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "SAR-1019", "title": "SAR-1019 auto-advanced", "score": 0.95, "scope": {"type": "agent", "key": "iris"}}
+      ]
+    },
+    {
+      "id": "semantic-budget-containment-renders-within-limit",
+      "v1_gate_id": "budget-containment",
+      "category": "budget",
+      "query": "Iris budgeted semantic recall",
+      "display_limit": 2,
+      "context_budget_chars": 360,
+      "expected_item_ids": ["agent-iris-budget-one", "agent-iris-budget-two"],
+      "expected_scope_labels": {
+        "agent-iris-budget-one": "agent/iris",
+        "agent-iris-budget-two": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["display: 2", "context chars: 360"],
+      "expected_hermes_titles": ["Iris budget one", "Iris budget two"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- Semantic recall budgets: display: 2, context chars: 360.\n- [0.90] Iris budget one [agent/iris]\n- [0.89] Iris budget two [agent/iris]",
+      "results": [
+        {"item_id": "agent-iris-budget-one", "title": "Iris budget one", "score": 0.9, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "agent-iris-budget-two", "title": "Iris budget two", "score": 0.89, "scope": {"type": "agent", "key": "iris"}}
+      ]
+    },
+    {
+      "id": "current-port-outranks-superseded-port",
+      "v1_gate_id": "stale-current-temporal",
+      "category": "temporal",
+      "query": "Iris current staging port",
+      "display_limit": 5,
+      "expected_item_ids": ["agent-iris-current-port"],
+      "current_item_ids": ["agent-iris-current-port"],
+      "stale_item_ids": ["agent-iris-superseded-port"],
+      "expected_top_rank_item_id": "agent-iris-current-port",
+      "expected_scope_labels": {
+        "agent-iris-current-port": "agent/iris",
+        "agent-iris-superseded-port": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["Iris current port"],
+      "hermes_context": "Recalled semantic memory from Palace of Truth:\n- [0.92] Iris current port [agent/iris, current]\n  The current fact outranked the superseded port.",
+      "results": [
+        {"item_id": "agent-iris-current-port", "title": "Iris current port", "score": 0.92, "scope": {"type": "agent", "key": "iris"}},
+        {"item_id": "agent-iris-superseded-port", "title": "Iris superseded port", "score": 0.91, "scope": {"type": "agent", "key": "iris"}}
+      ]
+    }
+  ]
+}

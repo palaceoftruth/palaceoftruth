@@ -220,6 +220,75 @@
           "hermes_context": "Recalled context from Palace of Truth:\n- Retrieval searched scopes: workspace/palaceoftruth and then global merge.\n- [0.95] SAR-480 task contract [note]\n- [0.91] Palace improvement research [note]\n- Interfering workspace hits were lower ranked and outside the answer source set."
         }
       }
+    },
+    {
+      "id": "iris-sar-weekly-semantic-canary",
+      "category": "semantic-memory-v1",
+      "query": "which SAR tickets did I auto-advance last week?",
+      "display_limit": 8,
+      "context_budget_chars": 900,
+      "expected_item_ids": ["SAR-1015", "SAR-1016", "SAR-1017", "SAR-1018", "SAR-1019"],
+      "expected_source_groups": {
+        "SAR-1015": ["SAR-1015"],
+        "SAR-1016": ["SAR-1016"],
+        "SAR-1017": ["SAR-1017"],
+        "SAR-1018": ["SAR-1018"],
+        "SAR-1019": ["SAR-1019"]
+      },
+      "expected_scope_labels": {
+        "SAR-1015": "agent/iris",
+        "SAR-1016": "agent/iris",
+        "SAR-1017": "agent/iris",
+        "SAR-1018": "agent/iris",
+        "SAR-1019": "agent/iris"
+      },
+      "expected_hermes_scope_labels": ["agent/iris"],
+      "expected_hermes_titles": ["SAR-1015 auto-advanced", "SAR-1016 auto-advanced", "SAR-1017 auto-advanced", "SAR-1018 auto-advanced", "SAR-1019 auto-advanced"],
+      "expected_route": "selected_scope",
+      "forbidden_context_terms": ["agent/vera", "agent/eve", "agent/lux", "agent/barbara"],
+      "transport_outputs": {
+        "rest": {
+          "trace": {"fallback_used": false, "ranking_traces": [{"route": "selected_scope"}]},
+          "results": [
+            {"item_id": "SAR-1015", "title": "SAR-1015 auto-advanced", "score": 0.99, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1016", "title": "SAR-1016 auto-advanced", "score": 0.98, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1017", "title": "SAR-1017 auto-advanced", "score": 0.97, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1018", "title": "SAR-1018 auto-advanced", "score": 0.96, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1019", "title": "SAR-1019 auto-advanced", "score": 0.95, "scope": {"type": "agent", "key": "iris"}}
+          ]
+        },
+        "mcp-http": {
+          "trace": {"fallback_used": false, "ranking_traces": [{"route": "selected_scope"}]},
+          "results": [
+            {"item_id": "SAR-1015", "title": "SAR-1015 auto-advanced", "score": 0.99, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1016", "title": "SAR-1016 auto-advanced", "score": 0.98, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1017", "title": "SAR-1017 auto-advanced", "score": 0.97, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1018", "title": "SAR-1018 auto-advanced", "score": 0.96, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1019", "title": "SAR-1019 auto-advanced", "score": 0.95, "scope_label": "agent/iris"}
+          ]
+        },
+        "mcp-stdio": {
+          "trace": {"fallback_used": false, "search_ranking_trace": {"route": "selected_scope"}},
+          "results": [
+            {"item_id": "SAR-1015", "title": "SAR-1015 auto-advanced", "score": 0.99, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1016", "title": "SAR-1016 auto-advanced", "score": 0.98, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1017", "title": "SAR-1017 auto-advanced", "score": 0.97, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1018", "title": "SAR-1018 auto-advanced", "score": 0.96, "scope": {"type": "agent", "key": "iris"}},
+            {"item_id": "SAR-1019", "title": "SAR-1019 auto-advanced", "score": 0.95, "scope": {"type": "agent", "key": "iris"}}
+          ]
+        },
+        "hermes": {
+          "route": "selected_scope",
+          "results": [
+            {"item_id": "SAR-1015", "title": "SAR-1015 auto-advanced", "score": 0.99, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1016", "title": "SAR-1016 auto-advanced", "score": 0.98, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1017", "title": "SAR-1017 auto-advanced", "score": 0.97, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1018", "title": "SAR-1018 auto-advanced", "score": 0.96, "scope_label": "agent/iris"},
+            {"item_id": "SAR-1019", "title": "SAR-1019 auto-advanced", "score": 0.95, "scope_label": "agent/iris"}
+          ],
+          "hermes_context": "Recalled semantic memory from Palace of Truth:\n- Semantic recall searched scope: agent/iris.\n- [0.99] SAR-1015 auto-advanced [agent/iris]\n- [0.98] SAR-1016 auto-advanced [agent/iris]\n- [0.97] SAR-1017 auto-advanced [agent/iris]\n- [0.96] SAR-1018 auto-advanced [agent/iris]\n- [0.95] SAR-1019 auto-advanced [agent/iris]"
+        }
+      }
     }
   ]
 }
