@@ -34,6 +34,9 @@ DEFAULT_RETRIEVE_LIMIT = 5
 DEFAULT_AGENT_CANDIDATE_LIMIT = 20
 DEFAULT_AGENT_DISPLAY_LIMIT = 12
 DEFAULT_CONTEXT_BUDGET_CHARS = 4000
+DEFAULT_SEMANTIC_PREFETCH_ENABLED = False
+DEFAULT_SEMANTIC_PREFETCH_TOP_K = 5
+DEFAULT_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS = 1200
 DEFAULT_TIMEOUT_SECONDS = 10
 DEFAULT_SOURCE = "hermes-agent"
 DEFAULT_CREATED_BY_ROLE = "assistant"
@@ -66,6 +69,7 @@ RELATIONSHIP_POLICIES = {"immediate", "deferred", "skip"}
 PALACE_MEMORY_ROUTE_SCOPES = {
     ("GET", "/api/v1/memory/whoami"): "read",
     ("GET", "/api/v1/memory/scopes"): "read",
+    ("GET", "/api/v1/memory/scope-profile"): "read",
     ("POST", "/api/v1/memory/retrieve-agent"): "read",
     ("POST", "/api/v1/memory/retrieve"): "read",
     ("POST", "/api/v1/memory/semantic-recall"): "read",
@@ -839,6 +843,26 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
             "PALACEOFTRUTH_CONTEXT_BUDGET_CHARS",
             DEFAULT_CONTEXT_BUDGET_CHARS,
         ),
+        "semantic_prefetch_enabled": _env_bool(
+            "PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED",
+            DEFAULT_SEMANTIC_PREFETCH_ENABLED,
+        ),
+        "semantic_prefetch_top_k": _env_int(
+            "PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K",
+            DEFAULT_SEMANTIC_PREFETCH_TOP_K,
+        ),
+        "semantic_prefetch_candidate_limit": _env_int(
+            "PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT",
+            DEFAULT_AGENT_CANDIDATE_LIMIT,
+        ),
+        "semantic_prefetch_recall_max_tokens": _env_int(
+            "PALACEOFTRUTH_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS",
+            DEFAULT_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS,
+        ),
+        "semantic_prefetch_context_budget_chars": _env_int(
+            "PALACEOFTRUTH_SEMANTIC_PREFETCH_CONTEXT_BUDGET_CHARS",
+            DEFAULT_CONTEXT_BUDGET_CHARS,
+        ),
         "include_tenant_shared": _env_bool("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", False),
         "include_broad_corpus": _env_bool("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", False),
         "include_agent_scope_patterns": _split_patterns(
@@ -924,6 +948,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._agent_broad_candidate_limit = DEFAULT_AGENT_CANDIDATE_LIMIT
         self._agent_display_limit = DEFAULT_AGENT_DISPLAY_LIMIT
         self._context_budget_chars = DEFAULT_CONTEXT_BUDGET_CHARS
+        self._semantic_prefetch_enabled = DEFAULT_SEMANTIC_PREFETCH_ENABLED
+        self._semantic_prefetch_top_k = DEFAULT_SEMANTIC_PREFETCH_TOP_K
+        self._semantic_prefetch_candidate_limit = DEFAULT_AGENT_CANDIDATE_LIMIT
+        self._semantic_prefetch_recall_max_tokens = DEFAULT_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS
+        self._semantic_prefetch_context_budget_chars = DEFAULT_CONTEXT_BUDGET_CHARS
         self._include_tenant_shared = False
         self._include_broad_corpus = False
         self._include_agent_scope_patterns: list[str] = []
@@ -1062,6 +1091,31 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             {
                 "key": "context_budget_chars",
                 "description": "Approximate maximum recalled context characters",
+                "default": str(DEFAULT_CONTEXT_BUDGET_CHARS),
+            },
+            {
+                "key": "semantic_prefetch_enabled",
+                "description": "Use strict-scope semantic recall for Hermes pre-turn context",
+                "default": "false",
+            },
+            {
+                "key": "semantic_prefetch_top_k",
+                "description": "Maximum semantic memories requested for pre-turn context",
+                "default": str(DEFAULT_SEMANTIC_PREFETCH_TOP_K),
+            },
+            {
+                "key": "semantic_prefetch_candidate_limit",
+                "description": "Semantic recall candidate budget for pre-turn context",
+                "default": str(DEFAULT_AGENT_CANDIDATE_LIMIT),
+            },
+            {
+                "key": "semantic_prefetch_recall_max_tokens",
+                "description": "Semantic recall token budget for pre-turn context",
+                "default": str(DEFAULT_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS),
+            },
+            {
+                "key": "semantic_prefetch_context_budget_chars",
+                "description": "Rendered semantic pre-turn context character budget",
                 "default": str(DEFAULT_CONTEXT_BUDGET_CHARS),
             },
             {
@@ -1213,6 +1267,54 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             max(
                 200,
                 int(self._config.get("context_budget_chars", DEFAULT_CONTEXT_BUDGET_CHARS)),
+            ),
+        )
+        self._semantic_prefetch_enabled = _config_bool(
+            self._config,
+            "semantic_prefetch_enabled",
+            default=DEFAULT_SEMANTIC_PREFETCH_ENABLED,
+        )
+        self._semantic_prefetch_top_k = min(
+            50,
+            max(
+                1,
+                int(self._config.get("semantic_prefetch_top_k", DEFAULT_SEMANTIC_PREFETCH_TOP_K)),
+            ),
+        )
+        self._semantic_prefetch_candidate_limit = min(
+            200,
+            max(
+                1,
+                int(
+                    self._config.get(
+                        "semantic_prefetch_candidate_limit",
+                        DEFAULT_AGENT_CANDIDATE_LIMIT,
+                    )
+                ),
+            ),
+        )
+        self._semantic_prefetch_recall_max_tokens = min(
+            20000,
+            max(
+                200,
+                int(
+                    self._config.get(
+                        "semantic_prefetch_recall_max_tokens",
+                        DEFAULT_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS,
+                    )
+                ),
+            ),
+        )
+        self._semantic_prefetch_context_budget_chars = min(
+            20000,
+            max(
+                200,
+                int(
+                    self._config.get(
+                        "semantic_prefetch_context_budget_chars",
+                        DEFAULT_CONTEXT_BUDGET_CHARS,
+                    )
+                ),
             ),
         )
         self._timeout_seconds = int(
@@ -1855,7 +1957,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 and self._prefetch_cache["workspace"] == active_workspace
             ):
                 return self._prefetch_cache["text"]
-        text = self._retrieve_text(query, active_session)
+        text = self._prefetch_text(query, active_session)
         with self._prefetch_lock:
             self._prefetch_cache = {
                 "query": query,
@@ -1875,7 +1977,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             return
 
         def _worker() -> None:
-            text = self._retrieve_text(query, active_session)
+            text = self._prefetch_text(query, active_session)
             with self._prefetch_lock:
                 self._prefetch_cache = {
                     "query": query,
@@ -1886,6 +1988,83 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
+
+    def _prefetch_text(self, query: str, session_id: str) -> str:
+        if not self._semantic_prefetch_enabled:
+            return self._retrieve_text(query, session_id)
+        try:
+            return self._semantic_prefetch_text(query, session_id)
+        except Exception as exc:
+            if "HTTP 404" in str(exc):
+                _log_retrieval_diagnostic(
+                    logging.WARNING,
+                    "semantic_prefetch_unavailable",
+                    endpoint="/api/v1/memory/semantic-recall",
+                    reason="semantic_recall_route_unavailable_fail_closed",
+                )
+                return ""
+            raise
+
+    def _semantic_prefetch_text(self, query: str, session_id: str) -> str:
+        started_at = perf_counter()
+        if (
+            self._scope_type == "agent"
+            and self._agent_identity
+            and self._scope_key
+            and self._scope_key != self._agent_identity
+        ):
+            raise ValueError(
+                "semantic prefetch agent scope must match the active Hermes agent_identity; "
+                "sibling-agent semantic recall is not exposed through pre-turn context"
+            )
+        payload = self._build_semantic_recall_payload(
+            query,
+            {
+                "top_k": self._semantic_prefetch_top_k,
+                "candidate_limit": self._semantic_prefetch_candidate_limit,
+                "recall_max_tokens": self._semantic_prefetch_recall_max_tokens,
+                "context_budget_chars": self._semantic_prefetch_context_budget_chars,
+            },
+            session_id,
+        )
+        response = self._request_json("POST", "/api/v1/memory/semantic-recall", payload)
+        trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
+        items = response.get("items") if isinstance(response.get("items"), list) else []
+        active_scope = {"type": payload["scope_type"], "key": payload.get("scope_key")}
+        _log_retrieval_diagnostic(
+            logging.INFO,
+            "semantic_prefetch_success" if items else "semantic_prefetch_empty",
+            endpoint="/api/v1/memory/semantic-recall",
+            elapsed_ms=round((perf_counter() - started_at) * 1000),
+            timeout_seconds=self._timeout_seconds,
+            searched_scope=_scope_label_from_scope(trace.get("searched_scope")) or _scope_label(active_scope),
+            result_count=len(items),
+            budget_truncated=trace.get("budget_truncated") or trace.get("context_budget_truncated"),
+        )
+        if not items:
+            quiet_recall = self._scope_quiet_recall(active_scope)
+            _log_retrieval_diagnostic(
+                logging.INFO,
+                "semantic_prefetch_empty_rendering",
+                searched_scope=_scope_label(active_scope),
+                quiet_recall=quiet_recall,
+            )
+            if quiet_recall:
+                return ""
+            return (
+                "Palace of Truth semantic recall searched "
+                f"{_scope_label(active_scope)} and found no matching semantic memory."
+            )
+
+        original_display_limit = self._agent_display_limit
+        original_context_budget = self._context_budget_chars
+        try:
+            self._agent_display_limit = self._semantic_prefetch_top_k
+            self._context_budget_chars = self._semantic_prefetch_context_budget_chars
+            return self._format_semantic_recall_response(response)
+        finally:
+            self._agent_display_limit = original_display_limit
+            self._context_budget_chars = original_context_budget
 
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
@@ -2393,12 +2572,37 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if scope_type not in SCOPE_TYPES:
                 continue
             if scope_type == "tenant_shared":
-                discovered.append({"type": "tenant_shared"})
+                discovered_scope: dict[str, Any] = {"type": "tenant_shared"}
+                if isinstance(entry.get("profile"), dict):
+                    discovered_scope["profile"] = entry["profile"]
+                discovered.append(discovered_scope)
                 continue
             key = _scope_key(scope)
             if key:
-                discovered.append({"type": scope_type, "key": key})
+                discovered_scope = {"type": scope_type, "key": key}
+                if isinstance(entry.get("profile"), dict):
+                    discovered_scope["profile"] = entry["profile"]
+                discovered.append(discovered_scope)
         return discovered
+
+    def _scope_quiet_recall(self, scope: dict[str, Any]) -> bool:
+        try:
+            response = self._request_json(
+                "GET",
+                "/api/v1/memory/scope-profile",
+                params={
+                    "scope_type": scope.get("type"),
+                    "scope_key": scope.get("key"),
+                },
+            )
+        except Exception as exc:
+            _log_retrieval_diagnostic(
+                logging.WARNING,
+                "semantic_prefetch_scope_profile_failed",
+                error_class=exc.__class__.__name__,
+            )
+            return False
+        return _optional_bool(response.get("quiet_recall"), default=False)
 
     def _workspace_scope_keys_for_agent_retrieve(
         self,

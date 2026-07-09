@@ -35,6 +35,25 @@ Why this lives here:
   `score_threshold`, `recall_max_tokens`, `context_budget_chars`, `date_from`,
   and `date_to`. Older Palace servers that do not yet expose the route fall
   back to the existing route-aware recall path.
+- Hermes pre-turn recall remains route-aware by default. Set
+  `PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED=true` to make the pre-turn
+  `prefetch()` hook call strict-scope semantic recall instead. The explicit
+  `palace_semantic_recall` tool remains available regardless of this setting.
+- Semantic pre-turn recall uses separate operator knobs from route-aware recall:
+  `PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K` (default `5`),
+  `PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT` (default `20`),
+  `PALACEOFTRUTH_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS` (default `1200`), and
+  `PALACEOFTRUTH_SEMANTIC_PREFETCH_CONTEXT_BUDGET_CHARS` (default `4000`).
+  Empty pre-turn recall is always audit-logged. The active scope profile's
+  `quiet_recall=true` only suppresses the outward empty-recall block; it does
+  not suppress audit traces.
+- Semantic pre-turn recall is strict to the active Hermes scope. It does not
+  expose sibling-agent semantic memory through pre-turn context, and the
+  rendered block keeps provenance compact instead of dumping raw chunks.
+  If `/api/v1/memory/semantic-recall` is unavailable, semantic pre-turn recall
+  fails closed for that turn instead of falling back to broader route-aware
+  recall. Use the explicit `palace_semantic_recall` tool when an operator wants
+  an older-server compatibility fallback.
 - Delegated cross-agent recall remains opt-in. Set
   `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS=agent/*` with
   `PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT` to ask Palace to discover matching
