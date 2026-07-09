@@ -101,7 +101,6 @@ def test_semantic_recall_request_schema_accepts_valid_at_and_budget() -> None:
     assert request.recall_max_tokens == 1500
 
 
-@pytest.mark.xfail(strict=True, reason="SAR-1038+ must expose strict semantic recall over REST/MCP.")
 def test_semantic_recall_rest_surface_exists() -> None:
     from app.api.memory import semantic_recall_memory_artifacts
 

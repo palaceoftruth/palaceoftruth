@@ -36,6 +36,7 @@ from app.services.codex_memory_privacy import scan_codex_memory_privacy
 logger = logging.getLogger(__name__)
 
 ScopeType = Literal["session", "agent", "workspace", "tenant_shared"]
+MemoryFactKind = Literal["world", "experience", "observation"]
 WakeupBriefScopeType = Literal["tenant", "wing"]
 CheckpointScopeType = Literal["session", "agent", "workspace"]
 CheckpointKind = Literal["stop", "precompact", "manual", "handoff"]
@@ -78,7 +79,12 @@ PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
     "SECONDBRAIN_MCP_CHECKPOINT_CAPTURE_DISABLED",
 )
 
-WRITE_OPERATIONS = {"create_memory_entry", "capture_checkpoint", "backfill_deferred_relationships"}
+WRITE_OPERATIONS = {
+    "create_memory_entry",
+    "create_memory_entries_batch",
+    "capture_checkpoint",
+    "backfill_deferred_relationships",
+}
 SESSION_CONTEXT_ENTRY_FIELDS = (
     "id",
     "item_id",
@@ -872,9 +878,13 @@ class SecondBrainApiClient:
         created_by_role: str | None,
         metadata: dict[str, Any] | None,
         idempotency_key: str | None,
-        webhook_url: str | None,
-        enable_ai_enrichment: bool,
-        relationship_policy: str,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        supersedes_entry_id: str | None = None,
+        fact_kind: MemoryFactKind | None = None,
+        webhook_url: str | None = None,
+        enable_ai_enrichment: bool = False,
+        relationship_policy: str = "immediate",
     ) -> dict[str, Any]:
         payload = {
             "tenant_id": await self.tenant_id(),
@@ -889,11 +899,88 @@ class SecondBrainApiClient:
             "created_by_role": created_by_role,
             "metadata": metadata,
             "idempotency_key": idempotency_key,
+            "valid_from": _normalize_optional_timestamp("valid_from", valid_from),
+            "valid_until": _normalize_optional_timestamp("valid_until", valid_until),
+            "supersedes_entry_id": (
+                _validate_uuid_text("supersedes_entry_id", supersedes_entry_id)
+                if supersedes_entry_id is not None
+                else None
+            ),
+            "fact_kind": fact_kind,
             "webhook_url": webhook_url,
             "enable_ai_enrichment": enable_ai_enrichment,
             "relationship_policy": relationship_policy,
         }
         return await self._request_json("POST", "/api/v1/memory/entries", json_body=payload, required_scope="write")
+
+    async def create_memory_entries_batch(
+        self,
+        *,
+        entries: list[dict[str, Any]],
+        default_source: str,
+        default_scope_type: ScopeType,
+        default_scope_key: str | None,
+        default_relationship_policy: str,
+    ) -> dict[str, Any]:
+        tenant_id = await self.tenant_id()
+        normalized_entries: list[dict[str, Any]] = []
+        for index, raw_entry in enumerate(entries):
+            if not isinstance(raw_entry, dict):
+                raise ValueError("entries must contain objects")
+            title = raw_entry.get("title")
+            body = raw_entry.get("body")
+            if not isinstance(title, str) or not title.strip():
+                raise ValueError(f"entries[{index}].title must not be blank")
+            if not isinstance(body, str) or not body.strip():
+                raise ValueError(f"entries[{index}].body must not be blank")
+            raw_scope_type = raw_entry.get("scope_type")
+            scope_type = cast(ScopeType, raw_scope_type or default_scope_type)
+            if "scope_key" in raw_entry:
+                scope_key = cast(str | None, raw_entry.get("scope_key"))
+            elif raw_scope_type is None or raw_scope_type == default_scope_type:
+                scope_key = default_scope_key
+            else:
+                scope_key = None
+            supersedes_entry_id = raw_entry.get("supersedes_entry_id")
+            normalized_entries.append(
+                {
+                    "tenant_id": tenant_id,
+                    "title": title,
+                    "body": body,
+                    "source": raw_entry.get("source") or default_source,
+                    "created_at": _normalize_created_at(cast(str | None, raw_entry.get("created_at"))),
+                    "summary": raw_entry.get("summary"),
+                    "tags": raw_entry.get("tags") or [],
+                    "scope": _build_scope(scope_type, scope_key),
+                    "source_url": raw_entry.get("source_url"),
+                    "created_by_role": raw_entry.get("created_by_role"),
+                    "metadata": raw_entry.get("metadata"),
+                    "idempotency_key": raw_entry.get("idempotency_key"),
+                    "valid_from": _normalize_optional_timestamp(
+                        "valid_from",
+                        cast(str | None, raw_entry.get("valid_from")),
+                    ),
+                    "valid_until": _normalize_optional_timestamp(
+                        "valid_until",
+                        cast(str | None, raw_entry.get("valid_until")),
+                    ),
+                    "supersedes_entry_id": (
+                        _validate_uuid_text("supersedes_entry_id", supersedes_entry_id)
+                        if isinstance(supersedes_entry_id, str)
+                        else None
+                    ),
+                    "fact_kind": raw_entry.get("fact_kind"),
+                    "webhook_url": raw_entry.get("webhook_url"),
+                    "enable_ai_enrichment": bool(raw_entry.get("enable_ai_enrichment", False)),
+                    "relationship_policy": raw_entry.get("relationship_policy") or default_relationship_policy,
+                }
+            )
+        return await self._request_json(
+            "POST",
+            "/api/v1/memory/entries:batch",
+            json_body={"entries": normalized_entries},
+            required_scope="write",
+        )
 
     async def get_memory_job(self, job_id: str) -> dict[str, Any]:
         return await self._request_json("GET", f"/api/v1/memory/jobs/{job_id}", required_scope="read")
@@ -1141,6 +1228,43 @@ class SecondBrainApiClient:
             "date_to": _normalize_optional_timestamp("date_to", date_to),
         }
         return await self._request_json("POST", "/api/v1/memory/retrieve-agent", json_body=payload, required_scope="read")
+
+    async def semantic_recall_memory(
+        self,
+        *,
+        query: str,
+        scope_type: ScopeType,
+        scope_key: str | None,
+        top_k: int,
+        candidate_limit: int | None,
+        score_threshold: float | None,
+        recall_max_tokens: int | None,
+        context_budget_chars: int | None,
+        valid_at: str | None,
+        fact_kind_filter: list[MemoryFactKind] | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> dict[str, Any]:
+        payload = {
+            "query": query,
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+            "top_k": top_k,
+            "candidate_limit": candidate_limit,
+            "score_threshold": score_threshold,
+            "recall_max_tokens": recall_max_tokens,
+            "context_budget_chars": context_budget_chars,
+            "valid_at": _normalize_optional_timestamp("valid_at", valid_at),
+            "fact_kind_filter": fact_kind_filter,
+            "date_from": _normalize_optional_timestamp("date_from", date_from),
+            "date_to": _normalize_optional_timestamp("date_to", date_to),
+        }
+        return await self._request_json(
+            "POST",
+            "/api/v1/memory/semantic-recall",
+            json_body=payload,
+            required_scope="read",
+        )
 
     async def retrieve_memory_trajectory(
         self,
@@ -1399,6 +1523,25 @@ def _summarize_result_for_audit(result: Any) -> dict[str, Any]:
                 continue
             label = row.get("retrieved_scope_label") or row.get("source_project")
             if isinstance(label, str) and label and label not in scope_labels:
+                scope_labels.append(label)
+        if scope_labels:
+            summary["returned_scope_labels"] = scope_labels[:20]
+    items = result.get("items")
+    if isinstance(items, list):
+        summary["returned_item_count"] = len(items)
+        scope_labels = []
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            scope = row.get("scope")
+            if not isinstance(scope, dict):
+                continue
+            scope_type = scope.get("type")
+            scope_key = scope.get("key")
+            if not isinstance(scope_type, str):
+                continue
+            label = scope_type if not scope_key else f"{scope_type}/{scope_key}"
+            if label not in scope_labels:
                 scope_labels.append(label)
         if scope_labels:
             summary["returned_scope_labels"] = scope_labels[:20]
@@ -1843,6 +1986,10 @@ async def create_memory_entry(
     created_by_role: str | None = None,
     metadata: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    supersedes_entry_id: str | None = None,
+    fact_kind: MemoryFactKind | None = None,
     webhook_url: str | None = None,
     enable_ai_enrichment: bool = False,
     relationship_policy: str = "immediate",
@@ -1869,6 +2016,10 @@ async def create_memory_entry(
         "created_by_role": created_by_role,
         "metadata": metadata,
         "idempotency_key": idempotency_key,
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "supersedes_entry_id": supersedes_entry_id,
+        "fact_kind": fact_kind,
         "webhook_url": webhook_url,
         "enable_ai_enrichment": enable_ai_enrichment,
         "relationship_policy": relationship_policy,
@@ -1890,6 +2041,10 @@ async def create_memory_entry(
             created_by_role=created_by_role,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            supersedes_entry_id=supersedes_entry_id,
+            fact_kind=fact_kind,
             webhook_url=webhook_url,
             enable_ai_enrichment=enable_ai_enrichment,
             relationship_policy=relationship_policy,
@@ -2545,6 +2700,66 @@ async def palace_search(
 
 
 @mcp.tool()
+async def palace_semantic_recall(
+    query: str,
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    scope_type: ScopeType | None = None,
+    scope_key: str | None = None,
+    top_k: int = 8,
+    candidate_limit: int | None = None,
+    score_threshold: float | None = None,
+    recall_max_tokens: int | None = 1500,
+    context_budget_chars: int | None = None,
+    valid_at: str | None = None,
+    fact_kind_filter: list[MemoryFactKind] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Strict-scope semantic recall with temporal filters and source-backed provenance."""
+    runtime = _runtime(ctx)
+    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+        runtime.settings,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        fallback_scope_type="tenant_shared",
+        fallback_scope_key=None,
+    )
+    params = {
+        "query": query,
+        "scope_type": resolved_scope_type,
+        "scope_key": resolved_scope_key,
+        "top_k": top_k,
+        "candidate_limit": candidate_limit,
+        "score_threshold": score_threshold,
+        "recall_max_tokens": recall_max_tokens,
+        "context_budget_chars": context_budget_chars,
+        "valid_at": valid_at,
+        "fact_kind_filter": fact_kind_filter,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+    return await _run_mcp_operation(
+        ctx,
+        operation="palace_semantic_recall",
+        params=params,
+        call=lambda: runtime.api.semantic_recall_memory(
+            query=query,
+            scope_type=resolved_scope_type,
+            scope_key=resolved_scope_key,
+            top_k=top_k,
+            candidate_limit=candidate_limit,
+            score_threshold=score_threshold,
+            recall_max_tokens=recall_max_tokens,
+            context_budget_chars=context_budget_chars,
+            valid_at=valid_at,
+            fact_kind_filter=fact_kind_filter,
+            date_from=date_from,
+            date_to=date_to,
+        ),
+    )
+
+
+@mcp.tool()
 async def palace_remember(
     title: str,
     body: str,
@@ -2559,6 +2774,10 @@ async def palace_remember(
     created_by_role: str | None = "agent",
     metadata: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    supersedes_entry_id: str | None = None,
+    fact_kind: MemoryFactKind | None = None,
     webhook_url: str | None = None,
     enable_ai_enrichment: bool = False,
     relationship_policy: str = "immediate",
@@ -2586,9 +2805,51 @@ async def palace_remember(
         created_by_role=created_by_role,
         metadata=metadata,
         idempotency_key=idempotency_key,
+        valid_from=valid_from,
+        valid_until=valid_until,
+        supersedes_entry_id=supersedes_entry_id,
+        fact_kind=fact_kind,
         webhook_url=webhook_url,
         enable_ai_enrichment=enable_ai_enrichment,
         relationship_policy=relationship_policy,
+    )
+
+
+@mcp.tool()
+async def palace_remember_bulk(
+    entries: list[dict[str, Any]],
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    default_source: str = "codex",
+    default_scope_type: ScopeType | None = None,
+    default_scope_key: str | None = None,
+    default_relationship_policy: str = "immediate",
+) -> dict[str, Any]:
+    """Batch durable Palace memory writes, including optional temporal retention fields per entry."""
+    runtime = _runtime(ctx)
+    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+        runtime.settings,
+        scope_type=default_scope_type,
+        scope_key=default_scope_key,
+        fallback_scope_type="agent" if default_scope_key is not None else "tenant_shared",
+        fallback_scope_key=None,
+    )
+    return await _run_mcp_operation(
+        ctx,
+        operation="create_memory_entries_batch",
+        params={
+            "entries": entries,
+            "default_source": default_source,
+            "default_scope_type": resolved_scope_type,
+            "default_scope_key": resolved_scope_key,
+            "default_relationship_policy": default_relationship_policy,
+        },
+        call=lambda: runtime.api.create_memory_entries_batch(
+            entries=entries,
+            default_source=default_source,
+            default_scope_type=resolved_scope_type,
+            default_scope_key=resolved_scope_key,
+            default_relationship_policy=default_relationship_policy,
+        ),
     )
 
 

@@ -42,7 +42,9 @@ from app.mcp_server import (
     palace_connection_info,
     palace_context,
     palace_remember,
+    palace_remember_bulk,
     palace_search,
+    palace_semantic_recall,
     mcp,
     retrieve_agent_memory,
     retrieve_memory_trajectory,
@@ -107,7 +109,9 @@ async def test_mcp_surface_exposes_no_destructive_item_or_feed_delete_tools() ->
 
     assert {
         "palace_search",
+        "palace_semantic_recall",
         "palace_remember",
+        "palace_remember_bulk",
         "palace_checkpoint",
         "palace_context",
         "get_wakeup_context",
@@ -2536,6 +2540,138 @@ def test_retrieve_agent_memory_posts_policy_request() -> None:
     assert seen_payload["tags_mode"] == "all"
 
 
+def test_api_client_posts_semantic_recall_request() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/memory/semantic-recall"
+        seen_payload.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json={
+                "scope": {"type": "agent", "key": "iris"},
+                "items": [],
+                "total": 0,
+                "total_considered": 0,
+                "trace": {
+                    "searched_scope": {"type": "agent", "key": "iris"},
+                    "fact_kind_filter": ["world"],
+                    "total_considered": 0,
+                    "candidate_limit": 10,
+                    "display_limit": 4,
+                    "score_threshold": 0.35,
+                },
+            },
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            result = await api.semantic_recall_memory(
+                query="Iris semantic memory",
+                scope_type="agent",
+                scope_key="iris",
+                top_k=4,
+                candidate_limit=10,
+                score_threshold=0.35,
+                recall_max_tokens=1200,
+                context_budget_chars=4800,
+                valid_at="2026-07-09T12:00:00Z",
+                fact_kind_filter=["world"],
+                date_from="2026-07-01T00:00:00Z",
+                date_to=None,
+            )
+            assert result["scope"] == {"type": "agent", "key": "iris"}
+
+    asyncio.run(scenario())
+    assert seen_payload == {
+        "query": "Iris semantic memory",
+        "scope_type": "agent",
+        "scope_key": "iris",
+        "top_k": 4,
+        "candidate_limit": 10,
+        "score_threshold": 0.35,
+        "recall_max_tokens": 1200,
+        "context_budget_chars": 4800,
+        "valid_at": "2026-07-09T12:00:00Z",
+        "fact_kind_filter": ["world"],
+        "date_from": "2026-07-01T00:00:00Z",
+        "date_to": None,
+    }
+
+
+def test_api_client_posts_temporal_memory_entry_fields() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        assert request.url.path == "/api/v1/memory/entries"
+        seen_payload.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            202,
+            json={
+                "status": "queued",
+                "contract_status": "queued",
+                "retryable": False,
+                "job_id": "550e8400-e29b-41d4-a716-446655440011",
+                "poll_url": "https://api.palaceoftruth.test/api/v1/memory/jobs/550e8400-e29b-41d4-a716-446655440011",
+                "poll_after_seconds": 5,
+                "accepted_as": "memory_entry",
+                "source_item_id": "550e8400-e29b-41d4-a716-446655440012",
+                "scope": {"type": "agent", "key": "iris"},
+            },
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            await api.create_memory_entry(
+                title="Iris state",
+                body="Iris prefers current semantic recall.",
+                source="mcp",
+                created_at="2026-07-09T12:00:00Z",
+                summary=None,
+                tags=["semantic-memory"],
+                scope_type="agent",
+                scope_key="iris",
+                source_url=None,
+                created_by_role="agent",
+                metadata=None,
+                idempotency_key="semantic-temporal",
+                valid_from="2026-07-09T10:00:00Z",
+                valid_until=None,
+                supersedes_entry_id="550e8400-e29b-41d4-a716-446655440099",
+                fact_kind="world",
+            )
+
+    asyncio.run(scenario())
+    assert seen_payload["tenant_id"] == "tenant-a"
+    assert seen_payload["valid_from"] == "2026-07-09T10:00:00Z"
+    assert seen_payload["valid_until"] is None
+    assert seen_payload["supersedes_entry_id"] == "550e8400-e29b-41d4-a716-446655440099"
+    assert seen_payload["fact_kind"] == "world"
+
+
 def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() -> None:
     seen: list[tuple[str, str]] = []
     seen_payload: dict[str, object] = {}
@@ -2663,6 +2799,341 @@ def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() ->
     assert result_summary["trace"]["context_budget_chars"] == 4000
     assert "raw specialist memory body" not in json.dumps(audit_payload)
     assert "secret summary" not in json.dumps(audit_payload)
+
+
+def test_palace_semantic_recall_posts_strict_scope_request_and_audits() -> None:
+    seen: list[tuple[str, str]] = []
+    seen_payload: dict[str, object] = {}
+    audit_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/api/v1/memory/semantic-recall":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "scope": {"type": "agent", "key": "iris"},
+                    "items": [
+                        {
+                            "entry_id": "550e8400-e29b-41d4-a716-446655440031",
+                            "source_item_id": "550e8400-e29b-41d4-a716-446655440032",
+                            "title": "Iris current state",
+                            "body": "raw body must not enter audit",
+                            "source": "mcp",
+                            "scope": {"type": "agent", "key": "iris"},
+                            "created_at": "2026-07-09T12:00:00Z",
+                            "score": 0.9,
+                            "temporal_status": "current",
+                            "fact_kind": "world",
+                        }
+                    ],
+                    "total": 1,
+                    "total_considered": 1,
+                    "trace": {
+                        "searched_scope": {"type": "agent", "key": "iris"},
+                        "valid_at": "2026-07-09T12:00:00Z",
+                        "fact_kind_filter": ["world"],
+                        "total_considered": 1,
+                        "candidate_limit": 10,
+                        "display_limit": 3,
+                    },
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_semantic_recall(
+                query="Iris current state",
+                ctx=ctx,
+                scope_type="agent",
+                scope_key="iris",
+                top_k=3,
+                candidate_limit=10,
+                valid_at="2026-07-09T12:00:00Z",
+                fact_kind_filter=["world"],
+            )
+
+    asyncio.run(scenario())
+
+    assert seen == [
+        ("POST", "/api/v1/memory/semantic-recall"),
+        ("POST", "/api/v1/memory/mcp/audit"),
+    ]
+    assert seen_payload["scope_type"] == "agent"
+    assert seen_payload["scope_key"] == "iris"
+    assert seen_payload["valid_at"] == "2026-07-09T12:00:00Z"
+    assert seen_payload["fact_kind_filter"] == ["world"]
+    assert audit_payload["operation"] == "palace_semantic_recall"
+    assert audit_payload["required_scope"] == "read"
+    assert audit_payload["params_summary"]["query"] == {"redacted": True, "present": True}
+    assert audit_payload["params_summary"]["scope_type"] == "agent"
+    assert audit_payload["params_summary"]["scope_key"] == "iris"
+    assert "raw body must not enter audit" not in json.dumps(audit_payload)
+
+
+def test_palace_remember_bulk_posts_batch_entries_with_temporal_fields() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries:batch":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                202,
+                json={
+                    "status": "accepted",
+                    "accepted": 1,
+                    "failed": 0,
+                    "poll_after_seconds": 5,
+                    "retryable": False,
+                    "results": [
+                        {
+                            "index": 0,
+                            "status": "queued",
+                            "contract_status": "queued",
+                            "retryable": False,
+                            "job_id": "550e8400-e29b-41d4-a716-446655440041",
+                            "accepted_as": "memory_entry",
+                            "source_item_id": "550e8400-e29b-41d4-a716-446655440042",
+                            "scope": {"type": "agent", "key": "iris"},
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember_bulk(
+                entries=[
+                    {
+                        "title": "Iris state",
+                        "body": "Iris semantic recall is exposed.",
+                        "created_at": "2026-07-09T12:00:00Z",
+                        "scope_type": "agent",
+                        "scope_key": "iris",
+                        "valid_from": "2026-07-09T10:00:00Z",
+                        "fact_kind": "world",
+                    }
+                ],
+                ctx=ctx,
+            )
+
+    asyncio.run(scenario())
+    entries = seen_payload["entries"]
+    assert isinstance(entries, list)
+    assert entries[0]["tenant_id"] == "tenant-a"
+    assert entries[0]["scope"] == {"type": "agent", "key": "iris"}
+    assert entries[0]["valid_from"] == "2026-07-09T10:00:00Z"
+    assert entries[0]["fact_kind"] == "world"
+
+
+def test_palace_remember_bulk_key_only_default_scope_uses_agent_scope() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries:batch":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                202,
+                json={
+                    "status": "accepted",
+                    "accepted": 1,
+                    "failed": 0,
+                    "poll_after_seconds": 5,
+                    "retryable": False,
+                    "results": [
+                        {
+                            "index": 0,
+                            "status": "queued",
+                            "contract_status": "queued",
+                            "retryable": False,
+                            "job_id": "550e8400-e29b-41d4-a716-446655440061",
+                            "accepted_as": "memory_entry",
+                            "source_item_id": "550e8400-e29b-41d4-a716-446655440062",
+                            "scope": {"type": "agent", "key": "iris"},
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember_bulk(
+                entries=[
+                    {
+                        "title": "Iris state",
+                        "body": "Key-only default scope uses agent scope.",
+                    }
+                ],
+                ctx=ctx,
+                default_scope_key="iris",
+            )
+
+    asyncio.run(scenario())
+    entries = seen_payload["entries"]
+    assert isinstance(entries, list)
+    assert entries[0]["scope"] == {"type": "agent", "key": "iris"}
+
+
+def test_palace_remember_bulk_does_not_inherit_default_key_for_tenant_shared_entry() -> None:
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/memory/whoami":
+            return httpx.Response(200, json={"tenant_id": "tenant-a"})
+        if request.url.path == "/api/v1/memory/entries:batch":
+            seen_payload.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                202,
+                json={
+                    "status": "accepted",
+                    "accepted": 1,
+                    "failed": 0,
+                    "poll_after_seconds": 5,
+                    "retryable": False,
+                    "results": [
+                        {
+                            "index": 0,
+                            "status": "queued",
+                            "contract_status": "queued",
+                            "retryable": False,
+                            "job_id": "550e8400-e29b-41d4-a716-446655440051",
+                            "accepted_as": "memory_entry",
+                            "source_item_id": "550e8400-e29b-41d4-a716-446655440052",
+                            "scope": {"type": "tenant_shared"},
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/memory/mcp/audit":
+            return httpx.Response(
+                201,
+                json={
+                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                    "tenant_id": "tenant-a",
+                    "status": "recorded",
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="iris",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember_bulk(
+                entries=[
+                    {
+                        "title": "Shared fact",
+                        "body": "This entry intentionally belongs to tenant_shared.",
+                        "scope_type": "tenant_shared",
+                    }
+                ],
+                ctx=ctx,
+            )
+
+    asyncio.run(scenario())
+    entries = seen_payload["entries"]
+    assert isinstance(entries, list)
+    assert entries[0]["scope"] == {"type": "tenant_shared"}
 
 
 def test_palace_search_alias_uses_configured_default_agent_scope() -> None:

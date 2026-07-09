@@ -43,6 +43,8 @@ from app.schemas.memory import (
     MemoryScopeListResponse,
     MemoryScopeProfile,
     MemoryScopeProfileUpsertRequest,
+    SemanticRecallRequest,
+    SemanticRecallResponse,
     MemoryWakeupBriefResponse,
     MemoryWhoAmIResponse,
     RelationshipBackfillAcceptedResponse,
@@ -65,6 +67,7 @@ from app.services.memory import (
     retrieve_memory,
     retry_memory_job,
     serialize_memory_job,
+    semantic_recall_memory,
     upsert_memory_scope_profile,
 )
 from app.services.memory_admission import evaluate_memory_write_admission
@@ -1097,6 +1100,23 @@ async def retrieve_agent_memory_artifacts(
         )
     )
     return response
+
+
+@router.post(
+    "/semantic-recall",
+    response_model=SemanticRecallResponse,
+    dependencies=[Depends(require_mcp_scope("read"))],
+)
+async def semantic_recall_memory_artifacts(
+    body: SemanticRecallRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> SemanticRecallResponse:
+    return await semantic_recall_memory(
+        db,
+        tenant_id=request.state.tenant_id,
+        body=body,
+    )
 
 
 @router.post(
