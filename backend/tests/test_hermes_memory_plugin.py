@@ -835,6 +835,297 @@ def test_palaceoftruth_semantic_recall_tool_posts_temporal_request(monkeypatch) 
     assert "score=0.91" in result["result"]
 
 
+def test_palaceoftruth_semantic_prefetch_is_disabled_by_default(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.delenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", raising=False)
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        calls.append((method, path))
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert method == "POST"
+        assert path == "/api/v1/memory/retrieve-agent"
+        return {
+            "trace": {"searched_scopes": [{"type": "agent", "key": "hermes"}]},
+            "results": [
+                {
+                    "item_id": "route-aware-item",
+                    "title": "Route-aware memory",
+                    "chunk_text": "Default pre-turn recall remains route-aware.",
+                    "score": 0.9,
+                }
+            ],
+            "total": 1,
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    text = provider.prefetch("default recall", session_id="session-1")
+
+    assert "Route-aware memory" in text
+    assert ("POST", "/api/v1/memory/semantic-recall") not in calls
+    assert {schema["name"] for schema in provider.get_tool_schemas()} >= {"palace_semantic_recall"}
+
+
+def test_palaceoftruth_semantic_prefetch_posts_strict_scope_request(monkeypatch, caplog) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "iris")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K", "3")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT", "21")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_RECALL_MAX_TOKENS", "800")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_CONTEXT_BUDGET_CHARS", "1200")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="iris",
+        agent_workspace="hermes",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scope-profile":
+            assert params == {"scope_type": "agent", "scope_key": "iris"}
+            return {"scope": {"type": "agent", "key": "iris"}, "quiet_recall": False}
+        assert method == "POST"
+        assert path == "/api/v1/memory/semantic-recall"
+        seen_payload.update(payload or {})
+        return {
+            "trace": {
+                "searched_scope": {"type": "agent", "key": "iris"},
+                "candidate_limit": 21,
+                "display_limit": 3,
+                "recall_max_tokens": 800,
+            },
+            "items": [
+                {
+                    "entry_id": "entry-iris",
+                    "source_item_id": "item-iris",
+                    "title": "Iris launch preference",
+                    "body": "Iris prefers source-backed semantic recall at wake-up.",
+                    "scope": {"type": "agent", "key": "iris"},
+                    "source": "hermes-agent-memory-tool",
+                    "fact_kind": "experience",
+                    "score": 0.93,
+                    "temporal_status": "current",
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.INFO)
+
+    text = provider.prefetch("startup recall", session_id="session-1")
+
+    assert seen_payload == {
+        "query": "startup recall",
+        "scope_type": "agent",
+        "scope_key": "iris",
+        "top_k": 3,
+        "candidate_limit": 21,
+        "recall_max_tokens": 800,
+        "context_budget_chars": 1200,
+    }
+    assert "Iris launch preference [agent/iris, experience, current]" in text
+    assert "entry_id=entry-iris" in text
+    assert "event=semantic_prefetch_success" in caplog.text
+    assert "startup recall" not in caplog.text
+    assert "Iris prefers source-backed" not in caplog.text
+
+
+def test_palaceoftruth_semantic_prefetch_empty_respects_quiet_recall(monkeypatch, caplog) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "quiet-agent")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="quiet-agent")
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scope-profile":
+            return {"scope": {"type": "agent", "key": "quiet-agent"}, "quiet_recall": True}
+        assert method == "POST"
+        assert path == "/api/v1/memory/semantic-recall"
+        return {
+            "trace": {"searched_scope": {"type": "agent", "key": "quiet-agent"}},
+            "items": [],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.INFO)
+
+    assert provider.prefetch("no matching memory", session_id="session-1") == ""
+    assert "event=semantic_prefetch_empty" in caplog.text
+    assert "'quiet_recall': True" in caplog.text
+
+
+def test_palaceoftruth_semantic_prefetch_empty_renders_when_not_quiet(monkeypatch, caplog) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "workspace")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_workspace="hermes")
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scope-profile":
+            return {"scope": {"type": "workspace", "key": "hermes"}, "quiet_recall": False}
+        return {"trace": {"searched_scope": {"type": "workspace", "key": "hermes"}}, "items": []}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.INFO)
+
+    text = provider.prefetch("no matching memory", session_id="session-1")
+
+    assert text == (
+        "Palace of Truth semantic recall searched workspace/hermes and found no matching semantic memory."
+    )
+    assert "event=semantic_prefetch_empty" in caplog.text
+    assert "'quiet_recall': False" in caplog.text
+
+
+def test_palaceoftruth_semantic_prefetch_reports_budget_truncation(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "iris")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_CONTEXT_BUDGET_CHARS", "320")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="iris")
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scope-profile":
+            return {"scope": {"type": "agent", "key": "iris"}, "quiet_recall": False}
+        return {
+            "trace": {
+                "searched_scope": {"type": "agent", "key": "iris"},
+                "budget_truncated": True,
+            },
+            "items": [
+                {
+                    "entry_id": f"entry-{index}",
+                    "title": f"Iris semantic memory {index}",
+                    "body": "This recalled semantic memory is deliberately long enough to consume budget.",
+                    "scope": {"type": "agent", "key": "iris"},
+                    "score": 0.9,
+                }
+                for index in range(5)
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    text = provider.prefetch("budget recall", session_id="session-1")
+
+    assert "Semantic recall returned the highest-ranked memories within budget." in text
+    assert "Additional semantic memories were omitted to stay within the context budget." in text
+
+
+def test_palaceoftruth_semantic_prefetch_fails_closed_when_route_unavailable(
+    monkeypatch, caplog
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "iris")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "agent/*")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="iris")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        calls.append((method, path))
+        if path == "/api/v1/memory/semantic-recall":
+            raise RuntimeError("Palace of Truth POST /api/v1/memory/semantic-recall failed with HTTP 404")
+        raise AssertionError(f"semantic prefetch must not fall back to {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    caplog.set_level(logging.WARNING)
+
+    assert provider.prefetch("older server", session_id="session-1") == ""
+    assert calls == [("POST", "/api/v1/memory/semantic-recall")]
+    assert "event=semantic_prefetch_unavailable" in caplog.text
+    assert "semantic_recall_route_unavailable_fail_closed" in caplog.text
+
+
+def test_palaceoftruth_semantic_prefetch_rejects_sibling_agent_scope(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "other-agent")
+    monkeypatch.setenv("PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="iris")
+
+    def fake_request_json(*_args, **_kwargs) -> dict:
+        raise AssertionError("sibling-agent semantic prefetch must fail before HTTP")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="sibling-agent semantic recall is not exposed"):
+        provider.prefetch("sibling recall", session_id="session-1")
+
+
 def test_palaceoftruth_semantic_recall_falls_back_for_older_server(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
