@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     source_subscription_max_failures: int = 5
     source_subscription_manual_sync_cooldown_seconds: int = 300
     source_subscription_stale_queued_minutes: int = 60
+    # Disabled until the later HTTP-provider slice is deployed.  The dispatcher
+    # and lease semantics can therefore be validated without initiating traffic.
+    source_resource_refresh_dispatch_enabled: bool = False
+    source_resource_refresh_dispatch_batch_size: int = 20
+    source_resource_refresh_lease_seconds: int = 900
 
     # Social post capture
     facebook_oembed_access_token: str = ""

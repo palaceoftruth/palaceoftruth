@@ -28,6 +28,16 @@ RefreshOutcome = Literal["success", "not_modified", "failure", "gone"]
 
 
 @dataclass(frozen=True)
+class RefreshLease:
+    """A durable claim passed from the dispatcher to one future refresh job."""
+
+    resource_id: uuid.UUID
+    tenant_id: str
+    token: uuid.UUID
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class AliasDecision:
     normalized_url: str
     decision: Literal["accepted", "rejected", "conflict"]
@@ -176,6 +186,59 @@ def compute_freshness(resource: SourceResource, *, now: datetime | None = None) 
     if now < due_at + timedelta(seconds=resource.refresh_slo_seconds):
         return "due"
     return "stale"
+
+
+def is_due_for_refresh(resource: SourceResource, *, now: datetime) -> bool:
+    """Return whether a resource can be claimed without bypassing its policy.
+
+    The dispatcher retries ``unreachable`` resources after their bounded backoff,
+    but never schedules manual, paused, or tombstoned resources.
+    """
+
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    if resource.kind != "http" or resource.refresh_policy == "manual":
+        return False
+    if resource.status not in {"active", "unreachable"}:
+        return False
+    if resource.next_due_at is None or resource.next_due_at > now:
+        return False
+    if resource.backoff_until is not None and resource.backoff_until > now:
+        return False
+    if resource.refresh_lease_expires_at is not None and resource.refresh_lease_expires_at > now:
+        return False
+    return True
+
+
+def claim_refresh_lease(
+    resource: SourceResource,
+    *,
+    now: datetime,
+    lease_seconds: int,
+    token: uuid.UUID | None = None,
+) -> RefreshLease | None:
+    """Claim one due resource, returning ``None`` when another worker owns it."""
+
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+    if not is_due_for_refresh(resource, now=now):
+        return None
+    lease_token = token or uuid.uuid4()
+    expires_at = now + timedelta(seconds=lease_seconds)
+    resource.refresh_lease_token = lease_token
+    resource.refresh_lease_expires_at = expires_at
+    return RefreshLease(
+        resource_id=resource.id,
+        tenant_id=resource.tenant_id,
+        token=lease_token,
+        expires_at=expires_at,
+    )
+
+
+def refresh_lease_job_id(lease: RefreshLease) -> str:
+    """Create an auditable ARQ id that is stable for one durable lease."""
+
+    return f"refresh-source-resource:{lease.resource_id}:{lease.token}"
 
 
 def _iso(value: datetime | None) -> str | None:
