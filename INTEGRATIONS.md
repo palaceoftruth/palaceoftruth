@@ -35,12 +35,16 @@ Key points:
 
 - It is a thin adapter over the existing REST contract, not a second memory implementation.
 - It supports both `stdio` and streamable HTTP transport.
-- It authenticates to Palace of Truth with `PALACEOFTRUTH_API_KEY`.
+- It prefers OAuth client credentials or a static bearer token when configured,
+  with `PALACEOFTRUTH_API_KEY` retained only as an explicit compatibility
+  fallback during migration.
 - It intentionally does not expose admin provisioning endpoints.
 - The Helm chart can run it as a dedicated `mcp` workload that reuses the backend image and calls the in-cluster backend Service.
 
 Run and configuration details live in the MCP adapter section of [README.md](./README.md)
 and in the packaged plugin guide at [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](./third_party_plugins/agent_clients/palaceoftruth-memory/README.md).
+The OAuth runtime, raw REST resource, and credential-lifecycle contract is
+documented in [docs/palace-oauth-mcp-runtime-rollout.md](./docs/palace-oauth-mcp-runtime-rollout.md).
 
 ---
 
