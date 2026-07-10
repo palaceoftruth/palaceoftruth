@@ -82,6 +82,46 @@ but they authenticate with either
 client key, client secret, token URL, resource, and scopes whenever those values
 are present.
 
+## Raw REST Scripts
+
+Raw REST callers must request the API resource, not the MCP resource. Discover
+the exact resource identifier instead of guessing an `audience` value:
+
+```bash
+PALACE_API_BASE=https://api.palace.sarvent.cloud
+PALACE_API_RESOURCE=$(curl -fsS \
+  "$PALACE_API_BASE/.well-known/oauth-protected-resource/api/v1" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["resource"])')
+
+read -rsp 'Palace MCP client secret: ' PALACEOFTRUTH_MCP_CLIENT_SECRET; echo
+PALACE_API_BEARER_TOKEN=$(curl -fsS -X POST \
+  "$PALACE_API_BASE/api/v1/memory/mcp/oauth/token" \
+  -d grant_type=client_credentials \
+  --data-urlencode client_id=helm-mcp \
+  "--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" \
+  --data-urlencode scope=read \
+  --data-urlencode "resource=${PALACE_API_RESOURCE}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+curl -fsS \
+  -H "Authorization: Bearer ${PALACE_API_BEARER_TOKEN}" \
+  "$PALACE_API_BASE/api/v1/memory/scopes"
+```
+
+The token endpoint form field is named `resource`. The runtime setting
+`oauthAudience` is only a compatibility fallback that the official adapter
+normalizes into that `resource` field. A `400 invalid_resource` response means
+the client already authenticated but the exact resource URI was missing or not
+accepted; regenerating the client secret will not repair that mismatch. A bad
+client id or secret instead returns `401 invalid_client`.
+
+MCP client registration is create-only. Repeating registration for an existing
+`tenant_id` and `client_key` returns `409` without changing the stored secret
+hash. Never use registration as an implicit rotation mechanism; credential
+rotation must be a separately reviewed workflow that updates the external
+secret, rolls the consumers, verifies both REST and MCP canaries, and only then
+retires the old credential.
+
 ## Verification
 
 Render both modes before rollout:
