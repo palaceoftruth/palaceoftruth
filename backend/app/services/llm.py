@@ -3,11 +3,12 @@ import copy
 import json
 import logging
 import re
+from dataclasses import dataclass
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Any, Literal
 
 from openai import AsyncOpenAI, RateLimitError, APIStatusError, BadRequestError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
 
@@ -42,8 +43,28 @@ class TagExtraction(BaseModel):
 
 
 class RelationshipClassification(BaseModel):
-    relationship: str = "none"
+    relationship: Literal["related_to", "expands_on", "contradicts", "prerequisite_of", "example_of", "none"] = "none"
     confidence: float = 0.0
+
+
+@dataclass
+class LLMCompletionDiagnostics:
+    """Bounded, non-sensitive completion metadata for operational callers."""
+
+    provider: Literal["openrouter", "openai", "unknown"] = "unknown"
+    fallback_used: bool = False
+    retry_count: int = 0
+
+
+@dataclass(frozen=True)
+class RelationshipClassificationResult:
+    relationship: str
+    confidence: float
+    validation_outcome: Literal["valid", "empty", "malformed", "timeout", "provider_error"]
+    provider: Literal["openrouter", "openai", "unknown"]
+    retry_provider: Literal["openrouter", "openai", "unknown"]
+    fallback_used: bool
+    retry_count: int
 
 
 class BrowserAction(BaseModel):
@@ -272,12 +293,15 @@ class LLMService:
         messages: list[dict],
         model: str | None = None,
         response_format: dict[str, Any] | None = None,
+        diagnostics: LLMCompletionDiagnostics | None = None,
     ) -> Any:
         chain = self._build_model_chain(model)
         for attempt, current_model in enumerate(chain):
             transient_retry = 0
             while True:
                 try:
+                    if diagnostics is not None:
+                        diagnostics.provider = "openrouter"
                     response = await self._create_openrouter_completion(
                         current_model,
                         messages,
@@ -296,6 +320,8 @@ class LLMService:
                         )
                         await asyncio.sleep(delay)
                         transient_retry += 1
+                        if diagnostics is not None:
+                            diagnostics.retry_count += 1
                         continue
                     if attempt < len(chain) - 1:
                         next_model = chain[attempt + 1]
@@ -306,6 +332,8 @@ class LLMService:
                             exc,
                             next_model,
                         )
+                        if diagnostics is not None:
+                            diagnostics.fallback_used = True
                         break
                     logger.warning(
                         "OpenRouter chain returned malformed completion from %s after %d retries, falling back to %s",
@@ -313,6 +341,9 @@ class LLMService:
                         transient_retry,
                         _OPENAI_FALLBACK_MODEL,
                     )
+                    if diagnostics is not None:
+                        diagnostics.provider = "openai"
+                        diagnostics.fallback_used = True
                     return await self._create_validated_openai_completion(
                         messages,
                         response_format=response_format,
@@ -332,6 +363,8 @@ class LLMService:
                         )
                         await asyncio.sleep(delay)
                         transient_retry += 1
+                        if diagnostics is not None:
+                            diagnostics.retry_count += 1
                         continue
                     delay = self._get_openrouter_fallback_delay(status, attempt)
                     if delay is not None and attempt < len(chain) - 1:
@@ -346,6 +379,8 @@ class LLMService:
                         )
                         if delay:
                             await asyncio.sleep(delay)
+                        if diagnostics is not None:
+                            diagnostics.fallback_used = True
                         break
                     logger.warning(
                         "OpenRouter chain exhausted (%s %d), falling back to %s",
@@ -353,18 +388,27 @@ class LLMService:
                         status,
                         _OPENAI_FALLBACK_MODEL,
                     )
+                    if diagnostics is not None:
+                        diagnostics.provider = "openai"
+                        diagnostics.fallback_used = True
                     return await self._create_validated_openai_completion(
                         messages,
                         response_format=response_format,
                     )
         raise RuntimeError("LLM completion failed after all retries and fallbacks")
 
-    async def complete(self, messages: list[dict], model: str | None = None) -> str:
+    async def complete(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+        *,
+        diagnostics: LLMCompletionDiagnostics | None = None,
+    ) -> str:
         """Send chat completion with automatic fallback through the model chain.
 
         Order: OpenRouter primary → OpenRouter fallbacks → OpenAI gpt-4o-mini (direct).
         """
-        response = await self._complete_with_fallback(messages, model=model)
+        response = await self._complete_with_fallback(messages, model=model, diagnostics=diagnostics)
         return self._completion_content(response)
 
     async def complete_structured(
@@ -374,6 +418,7 @@ class LLMService:
         *,
         schema_name: str,
         model: str | None = None,
+        diagnostics: LLMCompletionDiagnostics | None = None,
     ) -> BaseModel:
         """Request schema-shaped JSON, with one legacy-parser retry for older providers."""
         response_format = {
@@ -389,11 +434,14 @@ class LLMService:
                 messages,
                 model=model,
                 response_format=response_format,
+                diagnostics=diagnostics,
             )
             return schema.model_validate(_json_loads_from_response(self._completion_content(response)))
         except Exception as exc:
             logger.warning("Structured LLM response failed for %s; retrying legacy JSON parse: %s", schema_name, exc)
-            raw = await self.complete(messages, model=model)
+            if diagnostics is not None:
+                diagnostics.retry_count += 1
+            raw = await self.complete(messages, model=model, diagnostics=diagnostics)
             return schema.model_validate(_json_loads_from_response(raw))
 
     async def complete_with_usage(
@@ -519,6 +567,21 @@ class LLMService:
 
         Returns (relationship_type, confidence). On parse failure returns ("none", 0.0).
         """
+        result = await self.classify_relationship_detailed(title_a, summary_a, title_b, summary_b)
+        return result.relationship, result.confidence
+
+    async def classify_relationship_detailed(
+        self,
+        title_a: str,
+        summary_a: str,
+        title_b: str,
+        summary_b: str,
+    ) -> RelationshipClassificationResult:
+        """Classify a relationship with bounded diagnostics for worker telemetry.
+
+        Diagnostics intentionally exclude prompts, item identifiers, and provider messages
+        so metrics and logs remain safe for tenant content.
+        """
         messages = [
             {
                 "role": "system",
@@ -539,22 +602,47 @@ class LLMService:
                 ),
             },
         ]
+        diagnostics = LLMCompletionDiagnostics()
         try:
             data = await self.complete_structured(
                 messages,
                 RelationshipClassification,
                 schema_name="relationship_classification",
+                diagnostics=diagnostics,
             )
             assert isinstance(data, RelationshipClassification)
-            rel = str(data.relationship)
-            conf = float(data.confidence)
-            valid = {"related_to", "expands_on", "contradicts", "prerequisite_of", "example_of", "none"}
-            if rel not in valid:
-                rel = "none"
-            return rel, max(0.0, min(conf, 1.0))
+            outcome: Literal["valid", "empty", "malformed", "timeout", "provider_error"] = (
+                "empty" if data.relationship == "none" else "valid"
+            )
+            return RelationshipClassificationResult(
+                relationship=data.relationship,
+                confidence=max(0.0, min(data.confidence, 1.0)),
+                validation_outcome=outcome,
+                provider=diagnostics.provider,
+                # Current bounded retry loops execute against OpenRouter models;
+                # direct OpenAI is a terminal fallback, never a retry target.
+                retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
+                fallback_used=diagnostics.fallback_used,
+                retry_count=diagnostics.retry_count,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            logger.warning("Relationship classification timed out: %s", exc)
+            outcome = "timeout"
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Relationship classification was malformed: %s", exc)
+            outcome = "malformed"
         except Exception as exc:
             logger.warning("Failed to classify relationship: %s", exc)
-            return "none", 0.0
+            outcome = "provider_error"
+        return RelationshipClassificationResult(
+            relationship="none",
+            confidence=0.0,
+            validation_outcome=outcome,
+            provider=diagnostics.provider,
+            retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
+            fallback_used=diagnostics.fallback_used,
+            retry_count=diagnostics.retry_count,
+        )
 
     async def get_browser_actions(self, page_text: str, url: str) -> list[dict]:
         """Given visible page text, return a list of click actions to dismiss overlays.
