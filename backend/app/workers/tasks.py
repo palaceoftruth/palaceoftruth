@@ -3,6 +3,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from arq.jobs import Job as ArqJob, JobStatus
 from sqlalchemy import delete, text
 
 from app.database import async_session
@@ -19,12 +20,14 @@ from app.pipelines.image import ImagePipeline
 from app.pipelines.note import NotePipeline
 from app.services.bundle import run_restore_job
 from app.services.image_analysis import ImageAnalysisError
+from app.services.embedder import EmbeddingRequestError
 from app.services.item_processing import process_prebuilt_item
 from app.services.job_progress import record_job_progress_event
 from app.services.memory import (
     MEMORY_JOB_TYPE,
     STALE_MEMORY_PROCESSING_MINUTES,
     STALE_MEMORY_QUEUED_MINUTES,
+    is_stale_memory_job,
 )
 from app.services.source_subscriptions import reflect_source_subscription_entry_for_job
 from app.workers.queues import (
@@ -47,6 +50,30 @@ _RELATIONSHIP_POLICIES = {"immediate", "deferred", "skip"}
 _TAXONOMY_BACKFILL_DEFAULT_LIMIT = 50
 _TAXONOMY_BACKFILL_MAX_LIMIT = 500
 _TAXONOMY_BACKFILL_SOURCE_TYPES = ("media", "webpage", "pdf", "doc", "image", "note")
+_ACTIVE_ARQ_STATUSES = {JobStatus.queued, JobStatus.deferred, JobStatus.in_progress}
+
+
+async def _memory_job_is_requeueable(redis, job_id: str) -> bool:
+    """Fail closed while an active/result-bearing deterministic ARQ job exists."""
+    try:
+        status = await ArqJob(job_id, redis=redis).status()
+    except Exception as exc:
+        logger.warning(
+            "recover_stale_memory_jobs: could not inspect ARQ status for job %s; leaving DB row unchanged: %s",
+            job_id,
+            exc,
+        )
+        return False
+    if status in _ACTIVE_ARQ_STATUSES:
+        logger.info("recover_stale_memory_jobs: job %s is still %s in ARQ; skipping", job_id, status.value)
+        return False
+    if status == JobStatus.complete:
+        logger.warning(
+            "recover_stale_memory_jobs: job %s has a completed ARQ result; skipping duplicate enqueue",
+            job_id,
+        )
+        return False
+    return True
 
 
 def _empty_taxonomy_condition_sql() -> str:
@@ -554,28 +581,39 @@ async def embed_item(ctx: dict, item_id: str, skip_ai_enrichment: bool = False, 
 
 async def memory_artifact(ctx: dict, job_id: str, **_ignored_future_kwargs) -> None:
     try:
-        async with async_session() as db:
-            job = await db.get(Job, uuid.UUID(job_id))
-            if not job:
-                raise ValueError(f"Job {job_id} not found")
-            if job.job_type != MEMORY_JOB_TYPE:
-                raise ValueError(f"Job {job_id} is not a memory artifact job")
-            if not job.item_id:
-                raise ValueError(f"Job {job_id} has no item_id")
+        try:
+            async with async_session() as db:
+                job = await db.get(Job, uuid.UUID(job_id))
+                if not job:
+                    raise ValueError(f"Job {job_id} not found")
+                if job.job_type != MEMORY_JOB_TYPE:
+                    raise ValueError(f"Job {job_id} is not a memory artifact job")
+                if not job.item_id:
+                    raise ValueError(f"Job {job_id} has no item_id")
 
-            item = await db.get(Item, job.item_id)
-            if not item:
-                raise ValueError(f"Item {job.item_id} not found for job {job_id}")
+                item = await db.get(Item, job.item_id)
+                if not item:
+                    raise ValueError(f"Item {job.item_id} not found for job {job_id}")
 
-            result = await process_prebuilt_item(
-                db,
-                item=item,
-                embedder=ctx["embedder"],
-                llm=ctx["llm"],
-                tenant_id=job.tenant_id,
-                job=job,
-                enable_ai_enrichment=bool((job.payload or {}).get("enable_ai_enrichment", False)),
+                result = await process_prebuilt_item(
+                    db,
+                    item=item,
+                    embedder=ctx["embedder"],
+                    llm=ctx["llm"],
+                    tenant_id=job.tenant_id,
+                    job=job,
+                    enable_ai_enrichment=bool((job.payload or {}).get("enable_ai_enrichment", False)),
+                )
+        except EmbeddingRequestError as exc:
+            if exc.retryable:
+                raise
+            logger.warning(
+                "memory_artifact: terminal embedding failure for job %s (%s): %s",
+                job_id,
+                exc.failure_kind,
+                exc,
             )
+            return
         if result.status == "completed":
             relationship_policy = _relationship_policy_from_job(job)
             if relationship_policy == "immediate":
@@ -608,7 +646,7 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
         result = await db.execute(
             text(
                 f"""
-                SELECT j.id, j.status, j.item_id, j.tenant_id
+                SELECT j.id, j.status, j.item_id, j.tenant_id, j.payload
                 FROM jobs j
                 WHERE (
                     (j.status = 'processing' AND j.created_at < NOW() - INTERVAL '{STALE_MEMORY_PROCESSING_MINUTES} minutes')
@@ -629,10 +667,29 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
 
     for row in stale_rows:
         job_id = str(row.id)
+        row_payload = dict(getattr(row, "payload", None) or {})
+        arq_job_id = str(row_payload.get("memory_arq_job_id") or f"memory-artifact:{job_id}:0")
+        if not await _memory_job_is_requeueable(ctx["redis"], arq_job_id):
+            continue
         async with async_session() as db:
-            job = await db.get(Job, row.id)
+            # Serialize recovery against a worker completing the same durable row,
+            # then revalidate after the external ARQ-state observation.
+            job = await db.get(Job, row.id, with_for_update=True)
             if job is None:
                 continue
+            if not is_stale_memory_job(job):
+                continue
+            locked_payload = dict(job.payload or {})
+            locked_arq_job_id = str(
+                locked_payload.get("memory_arq_job_id") or f"memory-artifact:{job_id}:0"
+            )
+            if locked_arq_job_id != arq_job_id:
+                logger.info(
+                    "recover_stale_memory_jobs: generation advanced for job %s; deferring to the current ARQ id",
+                    job_id,
+                )
+                continue
+            row_payload = locked_payload
             item = await db.get(Item, job.item_id) if job.item_id else None
             if item is None or not item.raw_content:
                 job.status = "failed"
@@ -642,14 +699,36 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
                 await maybe_dispatch_webhook(ctx["redis"], job_id)
                 continue
 
+            try:
+                enqueued = await ctx["redis"].enqueue_job(
+                    "memory_artifact",
+                    job_id=job_id,
+                    _job_id=arq_job_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "recover_stale_memory_jobs: enqueue failed for ARQ job %s; leaving DB row unchanged: %s",
+                    arq_job_id,
+                    exc,
+                )
+                continue
+            if enqueued is None:
+                logger.info(
+                    "recover_stale_memory_jobs: ARQ job %s appeared during recovery; leaving DB row unchanged",
+                    arq_job_id,
+                )
+                continue
             job.status = "queued"
             job.progress = 0
             job.error_message = None
             job.completed_at = None
             item.status = "processing"
+            if "memory_arq_job_id" not in row_payload:
+                row_payload["memory_arq_generation"] = 0
+                row_payload["memory_arq_job_id"] = arq_job_id
+                job.payload = row_payload
             await db.commit()
 
-        await ctx["redis"].enqueue_job("memory_artifact", job_id=job_id)
         logger.info("recover_stale_memory_jobs: requeued job %s for tenant %s", job_id, row.tenant_id)
 
 

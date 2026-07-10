@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import uuid
 
 import pytest
+from arq.jobs import JobStatus
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,7 @@ from app.models.item import Item
 from app.models.job import Job
 from app.pipelines.image import ImagePipeline
 from app.services.image_analysis import ImageAnalysisError
+from app.services.embedder import EmbeddingRequestError
 from app.services.relationships import RelationshipService
 from app.workers.queues import PALACE_WORKER_QUEUE
 from app.workers import feed_tasks
@@ -92,8 +94,9 @@ class FakeArqPool:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, dict]] = []
 
-    async def enqueue_job(self, name: str, **kwargs) -> None:
+    async def enqueue_job(self, name: str, **kwargs):
         self.enqueued.append((name, kwargs))
+        return SimpleNamespace(job_id=kwargs.get("_job_id", "queued"))
 
 
 class FakeItemsSession:
@@ -167,7 +170,7 @@ class FakeFeedTaskSession:
         assert "SELECT j.id" in sql
         return RowsResult(self.stale_rows)
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         assert model in {Job, Item}
         return self.jobs.get(key)
 
@@ -469,7 +472,7 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
         tenant_id="tenant-a",
         status="processing",
         progress=45,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
     )
     stale_item = Item(
         id=item_id,
@@ -496,7 +499,11 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
     )
     redis = FakeArqPool()
 
+    async def requeueable(*_args, **_kwargs):
+        return True
+
     monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", requeueable)
 
     await tasks.recover_stale_memory_jobs({"redis": redis})
 
@@ -505,6 +512,7 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
             "memory_artifact",
             {
                 "job_id": str(job_id),
+                "_job_id": f"memory-artifact:{job_id}:0",
             },
         )
     ]
@@ -512,6 +520,218 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
     assert stale_job.progress == 0
     assert stale_job.error_message is None
     assert stale_item.status == "processing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (JobStatus.queued, False),
+        (JobStatus.deferred, False),
+        (JobStatus.in_progress, False),
+        (JobStatus.complete, False),
+        (JobStatus.not_found, True),
+    ],
+)
+async def test_memory_stale_recovery_guard_respects_arq_state(monkeypatch, status, expected) -> None:
+    class FakeArqJob:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def status(self):
+            return status
+
+    monkeypatch.setattr(tasks, "ArqJob", FakeArqJob)
+
+    assert await tasks._memory_job_is_requeueable(object(), "job-1") is expected
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_memory_jobs_leaves_rows_unchanged_when_arq_state_is_unknown(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    stale_job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="processing",
+        progress=45,
+    )
+    stale_item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Recovered note",
+        source_type="note",
+        status="processing",
+        raw_content="Recovered memory note content.",
+    )
+    session = FakeFeedTaskSession(
+        [SimpleNamespace(id=job_id, status="processing", item_id=item_id, tenant_id="tenant-a")],
+        {job_id: stale_job, item_id: stale_item},
+    )
+    redis = FakeArqPool()
+
+    async def not_requeueable(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", not_requeueable)
+
+    await tasks.recover_stale_memory_jobs({"redis": redis})
+
+    assert stale_job.status == "processing"
+    assert stale_job.progress == 45
+    assert stale_item.status == "processing"
+    assert redis.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_memory_jobs_does_not_regress_row_completed_after_arq_check(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    completed_job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="completed",
+        progress=100,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        completed_at=datetime.now(timezone.utc),
+    )
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Completed memory",
+        source_type="note",
+        status="ready",
+        raw_content="Completed memory body.",
+    )
+    session = FakeFeedTaskSession(
+        [
+            SimpleNamespace(
+                id=job_id,
+                status="processing",
+                item_id=item_id,
+                tenant_id="tenant-a",
+                payload={},
+            )
+        ],
+        {job_id: completed_job, item_id: item},
+    )
+    redis = FakeArqPool()
+
+    async def initially_requeueable(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", initially_requeueable)
+
+    await tasks.recover_stale_memory_jobs({"redis": redis})
+
+    assert completed_job.status == "completed"
+    assert completed_job.progress == 100
+    assert item.status == "ready"
+    assert redis.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_memory_jobs_leaves_row_when_deterministic_enqueue_collides(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    stale_job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="processing",
+        progress=45,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Racing memory",
+        source_type="note",
+        status="processing",
+        raw_content="Racing memory body.",
+    )
+    session = FakeFeedTaskSession(
+        [SimpleNamespace(id=job_id, status="processing", item_id=item_id, tenant_id="tenant-a", payload={})],
+        {job_id: stale_job, item_id: item},
+    )
+
+    class CollidingArqPool(FakeArqPool):
+        async def enqueue_job(self, name: str, **kwargs):
+            self.enqueued.append((name, kwargs))
+            return None
+
+    redis = CollidingArqPool()
+
+    async def initially_requeueable(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", initially_requeueable)
+
+    await tasks.recover_stale_memory_jobs({"redis": redis})
+
+    assert stale_job.status == "processing"
+    assert stale_job.progress == 45
+    assert item.status == "processing"
+    assert len(redis.enqueued) == 1
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_memory_jobs_skips_generation_advanced_before_row_lock(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    current_arq_id = f"memory-artifact:{job_id}:1"
+    stale_job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        payload={"memory_arq_generation": 1, "memory_arq_job_id": current_arq_id},
+    )
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Advanced generation",
+        source_type="note",
+        status="processing",
+        raw_content="Current generation memory body.",
+    )
+    old_arq_id = f"memory-artifact:{job_id}:0"
+    session = FakeFeedTaskSession(
+        [
+            SimpleNamespace(
+                id=job_id,
+                status="queued",
+                item_id=item_id,
+                tenant_id="tenant-a",
+                payload={"memory_arq_generation": 0, "memory_arq_job_id": old_arq_id},
+            )
+        ],
+        {job_id: stale_job, item_id: item},
+    )
+    redis = FakeArqPool()
+
+    async def old_generation_missing(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", old_generation_missing)
+
+    await tasks.recover_stale_memory_jobs({"redis": redis})
+
+    assert stale_job.payload["memory_arq_job_id"] == current_arq_id
+    assert stale_job.status == "queued"
+    assert redis.enqueued == []
 
 
 @pytest.mark.asyncio
@@ -765,6 +985,88 @@ async def test_memory_artifact_defers_relationships_when_job_policy_requests_it(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_memory_artifact_does_not_retry_terminal_embedding_validation(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Poison memory",
+        source_type="note",
+        raw_content="Oversized memory body",
+        status="processing",
+    )
+    job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={},
+    )
+    redis = FakeArqPool()
+
+    async def terminal_failure(*_args, **_kwargs):
+        raise EmbeddingRequestError(
+            "maximum request size is 300000 tokens",
+            retryable=False,
+            failure_kind="validation",
+            provider_status_code=400,
+        )
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(FakeMemoryArtifactSession(job, item)))
+    monkeypatch.setattr(tasks, "process_prebuilt_item", terminal_failure)
+
+    await tasks.memory_artifact(
+        {"redis": redis, "embedder": object(), "llm": object()},
+        job_id=str(job_id),
+    )
+
+    assert redis.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_memory_artifact_reraises_exhausted_transient_embedding_failure(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Retryable memory",
+        source_type="note",
+        raw_content="Retry this memory body",
+        status="processing",
+    )
+    job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="memory_artifact",
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+        payload={},
+    )
+
+    async def transient_failure(*_args, **_kwargs):
+        raise EmbeddingRequestError(
+            "provider unavailable",
+            retryable=True,
+            failure_kind="http_status",
+            provider_status_code=503,
+        )
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(FakeMemoryArtifactSession(job, item)))
+    monkeypatch.setattr(tasks, "process_prebuilt_item", transient_failure)
+
+    with pytest.raises(EmbeddingRequestError, match="provider unavailable"):
+        await tasks.memory_artifact(
+            {"redis": FakeArqPool(), "embedder": object(), "llm": object()},
+            job_id=str(job_id),
+        )
 
 
 @pytest.mark.asyncio
