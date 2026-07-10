@@ -165,6 +165,51 @@ class PalaceItemSourceSummary(BaseModel):
     source_records: list[PalaceSourceRecordSummary] = Field(default_factory=list)
 
 
+class PalaceSourceResourceAliasSummary(BaseModel):
+    id: uuid.UUID
+    signal: Literal["submitted", "final", "canonical"]
+    decision: Literal["accepted", "rejected", "conflict"]
+    normalized_url: str
+    final_url: str | None = None
+    canonical_signal_url: str | None = None
+    observed_at: datetime
+
+
+class PalaceSourceResourceSummary(BaseModel):
+    id: uuid.UUID
+    kind: Literal["http"]
+    canonical_url: str
+    freshness: Literal["current", "due", "stale", "unreachable", "gone", "unknown"]
+    status: Literal["active", "unreachable", "gone", "paused"]
+    refresh_policy: Literal["manual", "interval", "adaptive"]
+    refresh_slo_seconds: int
+    last_http_status: int | None = None
+    has_etag: bool
+    has_last_modified: bool
+    consecutive_failures: int
+    robots_decision: str | None = None
+    robots_cached_at: datetime | None = None
+    published_at: datetime | None = None
+    captured_at: datetime | None = None
+    last_verified_at: datetime | None = None
+    content_changed_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    last_success_at: datetime | None = None
+    next_due_at: datetime | None = None
+    backoff_until: datetime | None = None
+    current_source_record_id: uuid.UUID | None = None
+    last_successful_source_record_id: uuid.UUID | None = None
+
+
+class PalaceSourceResourceDetail(PalaceSourceResourceSummary):
+    aliases: list[PalaceSourceResourceAliasSummary] = Field(default_factory=list)
+
+
+class PalaceSourceResourceListResponse(BaseModel):
+    resources: list[PalaceSourceResourceSummary] = Field(default_factory=list)
+    total: int
+
+
 class PalaceClaimSourceSupportSummary(BaseModel):
     id: uuid.UUID
     source_record_id: uuid.UUID

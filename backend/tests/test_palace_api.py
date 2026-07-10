@@ -15,6 +15,7 @@ from app.database import get_db
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 from app.models.item import Item
 from app.models.palace import PalaceRoomEvent, PalaceRun, Room, SyncSource
+from app.models.source_resource import SourceResource, SourceResourceAlias
 from app.schemas.palace import (
     PalaceControlTower,
     PalaceDiaryRollupStatus,
@@ -55,6 +56,20 @@ from app.services.source_compiler import (
     ClaimSupportSummary,
 )
 from app.workers.queues import PALACE_WORKER_QUEUE
+
+
+def _source_resource(*, tenant_id: str = "tenant-a") -> SourceResource:
+    return SourceResource(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        kind="http",
+        canonical_url="https://example.com/docs",
+        canonical_identity="identity",
+        refresh_policy="interval",
+        refresh_slo_seconds=3600,
+        status="active",
+        consecutive_failures=0,
+    )
 
 
 class _FakeScalarResult:
@@ -146,6 +161,59 @@ def _freshness(status: str = "fresh") -> PalaceSectionFreshness:
         target_generation=3,
         message="ok",
     )
+
+
+def test_source_resource_list_is_tenant_scoped_and_omits_content() -> None:
+    resource = _source_resource()
+    client = _build_app(FakeSession(execute_results=[[resource]]))
+
+    response = client.get("/api/v1/palace/source-resources")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["resources"][0]["canonical_url"] == "https://example.com/docs"
+    assert body["resources"][0]["has_etag"] is False
+    assert "content_digest" not in body["resources"][0]
+    assert "validator_etag" not in body["resources"][0]
+
+
+def test_source_resource_detail_rejects_other_tenants_and_returns_safe_aliases() -> None:
+    resource = _source_resource()
+    alias = SourceResourceAlias(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        resource_id=resource.id,
+        submitted_url="https://example.com/docs#install",
+        normalized_url="https://example.com/docs",
+        signal="submitted",
+        decision="accepted",
+        observed_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    client = _build_app(
+        FakeSession(objects={(SourceResource, resource.id): resource}, execute_results=[[alias]])
+    )
+
+    response = client.get(f"/api/v1/palace/source-resources/{resource.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["aliases"] == [
+        {
+            "id": str(alias.id),
+            "signal": "submitted",
+            "decision": "accepted",
+            "normalized_url": "https://example.com/docs",
+            "final_url": None,
+            "canonical_signal_url": None,
+            "observed_at": body["aliases"][0]["observed_at"],
+        }
+    ]
+    assert "submitted_url" not in body["aliases"][0]
+
+    other = _source_resource(tenant_id="tenant-b")
+    forbidden_client = _build_app(FakeSession(objects={(SourceResource, other.id): other}))
+    assert forbidden_client.get(f"/api/v1/palace/source-resources/{other.id}").status_code == 404
 
 
 def test_palace_overview_endpoint_returns_reviewed_shape(monkeypatch) -> None:
