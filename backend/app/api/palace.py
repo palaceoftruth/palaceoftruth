@@ -5,6 +5,7 @@ import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
@@ -164,7 +165,8 @@ def _serialize_mcp_client(row) -> McpOAuthClientSummary:
 
 
 def _config_snippets(request: Request, *, client_key: str = "<client_key>", scopes: list[str] | None = None) -> McpClientConfigSnippets:
-    base_url = str(request.base_url).rstrip("/")
+    parsed_base = urlsplit(str(request.base_url))
+    base_url = urlunsplit(("https", parsed_base.netloc, parsed_base.path.rstrip("/"), "", ""))
     api_base = f"{base_url}/api/v1"
     mcp_url = f"{base_url}/mcp"
     token_url = f"{api_base}/memory/mcp/oauth/token"
@@ -193,6 +195,17 @@ def _config_snippets(request: Request, *, client_key: str = "<client_key>", scop
             '"--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" '
             f"--data-urlencode scope={scope_arg!r} "
             f"--data-urlencode resource={mcp_url!r} "
+            "| python3 -c 'import json,sys; print(json.load(sys.stdin)[\"access_token\"])')"
+        ),
+        oauth_api_token_command=(
+            "read -rsp 'Palace MCP client secret: ' PALACEOFTRUTH_MCP_CLIENT_SECRET; echo\n"
+            "export PALACEOFTRUTH_API_BEARER_TOKEN=$(curl -fsS -X POST "
+            f"{token_url} "
+            "-d grant_type=client_credentials "
+            f"--data-urlencode client_id={client_key!r} "
+            '"--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" '
+            f"--data-urlencode scope={scope_arg!r} "
+            f"--data-urlencode resource={api_base!r} "
             "| python3 -c 'import json,sys; print(json.load(sys.stdin)[\"access_token\"])')"
         ),
         legacy_api_key_toml=(
@@ -293,13 +306,7 @@ async def register_palace_mcp_client(
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
                  CAST(:metadata AS jsonb), :secret_hash, NULL, :token_ttl_seconds)
-            ON CONFLICT (tenant_id, client_key) DO UPDATE
-            SET display_name = EXCLUDED.display_name,
-                allowed_scopes = EXCLUDED.allowed_scopes,
-                metadata = EXCLUDED.metadata,
-                oauth_client_secret_hash = EXCLUDED.oauth_client_secret_hash,
-                oauth_revoked_at = NULL,
-                oauth_token_ttl_seconds = EXCLUDED.oauth_token_ttl_seconds
+            ON CONFLICT (tenant_id, client_key) DO NOTHING
             RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
                       oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
             """
@@ -314,8 +321,17 @@ async def register_palace_mcp_client(
             "token_ttl_seconds": body.token_ttl_seconds,
         },
     )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'MCP client key "{body.client_key}" already exists. Registration is create-only and did not '
+                "rotate its secret. Use an explicit credential-rotation workflow if rotation is intended."
+            ),
+        )
     await db.commit()
-    client = _serialize_mcp_client(result.mappings().one())
+    client = _serialize_mcp_client(row)
     return McpOAuthClientRegisterResponse(
         tenant_id=tenant_id,
         client=client,

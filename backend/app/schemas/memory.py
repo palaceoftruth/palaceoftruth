@@ -155,6 +155,7 @@ class McpClientConfigSnippets(BaseModel):
     codex_stdio_toml: str
     http_oauth_toml: str
     oauth_token_command: str
+    oauth_api_token_command: str
     legacy_api_key_toml: str
     secret_handling_note: str
 
