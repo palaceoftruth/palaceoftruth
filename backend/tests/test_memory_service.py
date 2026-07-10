@@ -959,7 +959,11 @@ def test_serialize_memory_job_maps_completed_to_complete() -> None:
 
     assert serialized.job_id == job.id
     assert serialized.status == "complete"
+    assert serialized.contract_status == "completed"
     assert serialized.created_at == job.created_at
+    assert serialized.poll_after_seconds == 5
+    assert serialized.retryable is False
+    assert serialized.retry_after_seconds is None
 
 
 def test_retry_memory_job_requeues_failed_note() -> None:
