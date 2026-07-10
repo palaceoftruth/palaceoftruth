@@ -159,6 +159,14 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
             count,
             {"reason": reason},
         )
+    for (status, failure_kind, retryable), count in snapshot["embedding_requests"]:
+        builder.metric(
+            "palace_embedding_requests_total",
+            "Embedding provider requests by bounded outcome classification.",
+            "counter",
+            count,
+            {"status": status, "failure_kind": failure_kind, "retryable": retryable},
+        )
 
 
 async def _query_rows(db: Any, sql: str) -> list[Any]:

@@ -14,7 +14,7 @@ from app.models.embedding import Embedding, EmbeddingProfileVector
 from app.models.item import Item
 from app.models.job import Job
 from app.services.chunker import chunk_text
-from app.services.embedder import EmbeddingService
+from app.services.embedder import EmbeddingRequestError, EmbeddingService
 from app.services.embedding_storage import embedding_record_for_profile
 from app.services.item_dates import apply_effective_date
 from app.services.job_progress import job_event_status_for_job_status, record_job_progress_event
@@ -73,8 +73,10 @@ async def process_prebuilt_item(
     tracked memory-artifact worker. Caller-owned fields win: AI enrichment only
     fills summary/tags/categories when they are missing.
     """
+    item_id = item.id
+    job_id = job.id if job is not None else None
     if not item.raw_content:
-        raise ValueError(f"Item {item.id} has no raw_content")
+        raise ValueError(f"Item {item_id} has no raw_content")
 
     try:
         await _set_job_progress(db, job, phase="started", status="processing", progress=15)
@@ -193,23 +195,38 @@ async def process_prebuilt_item(
 
     except Exception as exc:
         await db.rollback()
-        logger.exception("prebuilt item processing failed for item %s: %s", item.id, exc)
+        logger.exception("prebuilt item processing failed for item %s: %s", item_id, exc)
         try:
-            item.status = "failed"
-            if job is not None:
-                job.status = "failed"
-                job.error_message = str(exc)[:500]
-                job.completed_at = datetime.now(timezone.utc)
+            # Rollback expires ORM state in async sessions. Reload by scalar IDs so
+            # failure persistence cannot mask the provider error with MissingGreenlet.
+            failed_item = await db.get(Item, item_id)
+            failed_job = await db.get(Job, job_id) if job_id is not None else None
+            if failed_item is not None:
+                failed_item.status = "failed"
+            if failed_job is not None:
+                failed_job.status = "failed"
+                failed_job.error_message = str(exc)[:500]
+                failed_job.completed_at = datetime.now(timezone.utc)
+                metadata: dict[str, object] = {"error_class": exc.__class__.__name__}
+                if isinstance(exc, EmbeddingRequestError):
+                    metadata.update(
+                        {
+                            "failure_kind": exc.failure_kind,
+                            "retryable": exc.retryable,
+                            "provider_status_code": exc.provider_status_code,
+                        }
+                    )
                 await record_job_progress_event(
                     db,
-                    job=job,
+                    job=failed_job,
                     phase="failed",
                     status="failed",
-                    progress=job.progress,
+                    progress=failed_job.progress,
                     message=str(exc),
-                    metadata={"error_class": exc.__class__.__name__},
+                    metadata=metadata,
                 )
             await db.commit()
         except Exception:
             await db.rollback()
+            logger.exception("failed to persist processing error for item %s job %s", item_id, job_id)
         raise

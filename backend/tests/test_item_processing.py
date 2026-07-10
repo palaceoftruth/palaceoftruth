@@ -7,8 +7,9 @@ import pytest
 
 from app.models.embedding import Embedding
 from app.models.item import Item
-from app.models.job import Job
+from app.models.job import Job, JobProgressEvent
 from app.embedding_profile import resolve_embedding_profile
+from app.services.embedder import EmbeddingRequestError
 from app.services.item_processing import process_prebuilt_item
 
 
@@ -49,6 +50,7 @@ class FakeSession:
         self.commit_count = 0
         self.rollback_count = 0
         self.executed_sql: list[str] = []
+        self.added: list[object] = []
 
     async def scalar(self, _statement):
         return None
@@ -61,6 +63,7 @@ class FakeSession:
         return ScalarResult(None)
 
     def add(self, value) -> None:
+        self.added.append(value)
         if isinstance(value, Embedding):
             self.embeddings.append(value)
 
@@ -69,6 +72,13 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rollback_count += 1
+
+    async def get(self, model, key):
+        if model is Item and key == self.item.id:
+            return self.item
+        if model is Job and key == self.job.id:
+            return self.job
+        return None
 
 
 @pytest.mark.asyncio
@@ -228,3 +238,85 @@ async def test_process_prebuilt_item_ai_enrichment_fills_only_missing_tags() -> 
 
     assert item.tags == ["memory"]
     assert item.categories == ["operator-memory"]
+
+
+@pytest.mark.asyncio
+async def test_process_prebuilt_item_persists_original_embedding_error_on_fresh_rows() -> None:
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    original_item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Poison memory",
+        source_type="note",
+        status="processing",
+        raw_content="Content that reaches a deterministic provider validation error.",
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    original_job = Job(
+        id=job_id,
+        item_id=item_id,
+        tenant_id="tenant-a",
+        job_type="memory_artifact",
+        status="queued",
+        progress=0,
+    )
+    fresh_item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Poison memory",
+        source_type="note",
+        status="processing",
+        raw_content=original_item.raw_content,
+    )
+    fresh_job = Job(
+        id=job_id,
+        item_id=item_id,
+        tenant_id="tenant-a",
+        job_type="memory_artifact",
+        status="processing",
+        progress=15,
+    )
+    failure = EmbeddingRequestError(
+        "maximum request size is 300000 tokens",
+        retryable=False,
+        failure_kind="validation",
+        provider_status_code=400,
+    )
+
+    class FailingEmbedder(FakeEmbedder):
+        async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            raise failure
+
+    class FreshFailureSession(FakeSession):
+        async def get(self, model, key):
+            if model is Item and key == item_id:
+                return fresh_item
+            if model is Job and key == job_id:
+                return fresh_job
+            return None
+
+    session = FreshFailureSession(original_item, original_job)
+
+    with pytest.raises(EmbeddingRequestError) as captured:
+        await process_prebuilt_item(
+            session,
+            item=original_item,
+            embedder=FailingEmbedder(),
+            llm=FakeLlm(),
+            tenant_id="tenant-a",
+            job=original_job,
+            enable_ai_enrichment=False,
+        )
+
+    assert captured.value is failure
+    assert session.rollback_count == 1
+    assert fresh_item.status == "failed"
+    assert fresh_job.status == "failed"
+    assert fresh_job.error_message == "maximum request size is 300000 tokens"
+    assert fresh_job.completed_at is not None
+    failure_events = [value for value in session.added if isinstance(value, JobProgressEvent)]
+    assert failure_events[-1].status == "failed"
+    assert failure_events[-1].progress == 15

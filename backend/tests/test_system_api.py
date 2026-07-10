@@ -7,6 +7,7 @@ from app.api.system import router
 from app.auth import AuthContext, verify_memory_auth
 from app.database import get_db
 from app.services.memory_telemetry import (
+    record_embedding_request,
     record_retention_extraction,
     record_scope_guard_violation,
     record_semantic_recall,
@@ -249,6 +250,7 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     record_semantic_recall(status="empty", scope_type="agent")
     record_retention_extraction(status="written", mode="extracted_write")
     record_scope_guard_violation(reason="agent_scope_not_allowlisted")
+    record_embedding_request(status="retry", failure_kind="timeout", retryable=True)
     client = _metrics_client(MetricsSession())
 
     response = client.get("/api/v1/metrics")
@@ -258,6 +260,10 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     body = response.text
     assert 'palace_http_requests_total{method="GET",route="/api/v1/health",status_code="200"} 1' in body
     assert 'palace_jobs{job_type="memory_artifact",status="queued"} 3' in body
+    assert (
+        'palace_embedding_requests_total{failure_kind="timeout",retryable="true",status="retry"} 1'
+        in body
+    )
     assert 'palace_memory_jobs{status="failed"} 1' in body
     assert 'palace_items{source_type="note",status="ready"} 7' in body
     assert 'palace_items{source_type="other",status="ready"} 3' in body

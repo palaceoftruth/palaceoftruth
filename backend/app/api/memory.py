@@ -169,8 +169,24 @@ async def _memory_queue_contract_hint(request: Request) -> MemoryQueueHint:
 
 
 async def _enqueue_memory_job_or_raise(request: Request, db: AsyncSession, *, job: Job) -> None:
+    payload = dict(job.payload or {})
     try:
-        await request.app.state.arq_pool.enqueue_job("memory_artifact", job_id=str(job.id))
+        generation = int(payload.get("memory_arq_generation", -1)) + 1
+    except (TypeError, ValueError):
+        generation = 0
+    arq_job_id = f"memory-artifact:{job.id}:{generation}"
+    payload["memory_arq_generation"] = generation
+    payload["memory_arq_job_id"] = arq_job_id
+    job.payload = payload
+    await db.commit()
+    try:
+        enqueued = await request.app.state.arq_pool.enqueue_job(
+            "memory_artifact",
+            job_id=str(job.id),
+            _job_id=arq_job_id,
+        )
+        if enqueued is None:
+            raise RuntimeError(f"Memory ARQ job id {arq_job_id} already exists")
     except Exception as exc:
         logger.warning(
             "memory write enqueue failed tenant=%s job_id=%s error_class=%s",

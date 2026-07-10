@@ -1774,7 +1774,11 @@ def test_memory_job_retry_requeues_failed_job() -> None:
         status="failed",
         progress=100,
         error_message="boom",
-        payload={"contract_status": "dependency_unavailable"},
+        payload={
+            "contract_status": "dependency_unavailable",
+            "memory_arq_generation": 2,
+            "memory_arq_job_id": f"memory-artifact:{job_id}:2",
+        },
         created_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),
     )
@@ -1791,7 +1795,12 @@ def test_memory_job_retry_requeues_failed_job() -> None:
     assert "contract_status" not in job.payload
     assert job.completed_at is None
     assert item.status == "processing"
-    assert client.app.state.arq_pool.enqueued == [("memory_artifact", {"job_id": str(job_id)})]
+    assert client.app.state.arq_pool.enqueued == [
+        (
+            "memory_artifact",
+            {"job_id": str(job_id), "_job_id": f"memory-artifact:{job_id}:3"},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -3616,7 +3625,13 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
     assert write_response.json()["accepted_as"] == "canonical"
     assert write_response.json()["scope"] == {"type": "workspace", "key": "launch-pad"}
     assert main_app.state.arq_pool.enqueued == [
-        ("memory_artifact", {"job_id": write_response.json()["job_id"]})
+        (
+            "memory_artifact",
+            {
+                "job_id": write_response.json()["job_id"],
+                "_job_id": f'memory-artifact:{write_response.json()["job_id"]}:0',
+            },
+        )
     ]
     assert retrieve_response.status_code == 200
     assert retrieve_response.json()["trace"]["requested_scope_key"] == "launch-pad"
