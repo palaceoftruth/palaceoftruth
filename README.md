@@ -189,7 +189,11 @@ read-only network checks are explicitly desired.
 
 The repo-packaged Codex/Claude plugin lives in [third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
-For governed multi-agent memory positioning, use `scripts/demo_agent_organization_memory.py`. The demo shows specialist agents writing private `agent/<key>` memories while `agent/orchestrator` retrieves only server-authorized specialist scopes and writes only to its own agent scope.
+For governed multi-agent memory positioning, use the
+[Agent Organization Memory demo](docs/agent-organization-memory-demo.md) and
+`scripts/demo_agent_organization_memory.py`. The demo shows specialist agents
+writing private `agent/<key>` memories while `agent/orchestrator` retrieves only
+server-authorized specialist scopes and writes only to its own agent scope.
 
 ## Hermes Plugin
 

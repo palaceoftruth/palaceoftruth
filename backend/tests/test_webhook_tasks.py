@@ -78,10 +78,14 @@ async def test_maybe_dispatch_webhook_snapshots_memory_status(monkeypatch) -> No
                 "payload_snapshot": {
                     "job_id": str(job_id),
                     "status": "complete",
+                    "contract_status": "completed",
                     "error_message": None,
                     "duplicate_of": None,
                     "created_at": None,
                     "completed_at": "2026-04-18T16:00:00Z",
+                    "poll_after_seconds": 5,
+                    "retryable": False,
+                    "retry_after_seconds": None,
                 },
             },
         )
