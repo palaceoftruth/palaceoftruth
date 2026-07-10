@@ -634,13 +634,7 @@ async def register_mcp_oauth_client(
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
                  CAST(:metadata AS jsonb), :secret_hash, NULL, :token_ttl_seconds)
-            ON CONFLICT (tenant_id, client_key) DO UPDATE
-            SET display_name = EXCLUDED.display_name,
-                allowed_scopes = EXCLUDED.allowed_scopes,
-                metadata = EXCLUDED.metadata,
-                oauth_client_secret_hash = EXCLUDED.oauth_client_secret_hash,
-                oauth_revoked_at = NULL,
-                oauth_token_ttl_seconds = EXCLUDED.oauth_token_ttl_seconds
+            ON CONFLICT (tenant_id, client_key) DO NOTHING
             RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
                       oauth_revoked_at, oauth_token_ttl_seconds
             """
@@ -655,10 +649,20 @@ async def register_mcp_oauth_client(
             "token_ttl_seconds": body.token_ttl_seconds,
         },
     )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'MCP client key "{body.client_key}" already exists for tenant "{tenant_id}". Registration is '
+                "create-only and did not rotate its secret. Use an explicit credential-rotation workflow if "
+                "rotation is intended."
+            ),
+        )
     await db.commit()
     return McpOAuthClientRegisterResponse(
         tenant_id=tenant_id,
-        client=_serialize_mcp_oauth_client(result.mappings().one()),
+        client=_serialize_mcp_oauth_client(row),
         client_secret=raw_secret,
     )
 

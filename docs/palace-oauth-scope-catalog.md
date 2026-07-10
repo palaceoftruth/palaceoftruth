@@ -41,5 +41,11 @@ curl -fsS -X POST "$PALACE_TOKEN_URL" \
   --data-urlencode resource='https://api.palace.sarvent.cloud/mcp'
 ```
 
+That resource is for MCP calls. For raw REST calls, first read
+`/.well-known/oauth-protected-resource/api/v1` and send its exact `resource`
+value (currently `https://api.palace.sarvent.cloud/api/v1`) in the token
+request. Do not send only an `audience` form field: the token endpoint requires
+the OAuth Resource Indicators `resource` parameter.
+
 Unsupported scopes must fail closed during client registration, token issuance,
 bearer validation, and API-key MCP scope-header validation.

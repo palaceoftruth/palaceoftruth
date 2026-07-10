@@ -133,6 +133,8 @@ class FakeSession:
                     "last_seen_at": None,
                 }
                 self.mcp_clients.append(row)
+            elif "do nothing" in sql:
+                return _Result([])
             else:
                 row.update(
                     {
@@ -554,6 +556,39 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
     stored = session.mcp_clients[0]
     assert stored["oauth_client_secret_hash"] != body["client_secret"]
     assert stored["oauth_token_ttl_seconds"] == 1800
+
+
+def test_register_mcp_oauth_client_rejects_duplicate_without_rotating_secret() -> None:
+    existing = {
+        "id": uuid.uuid4(),
+        "tenant_id": "tenant-a",
+        "client_key": "helm-mcp",
+        "display_name": "Palace Helm MCP",
+        "allowed_scopes": ["read", "write"],
+        "metadata": {},
+        "oauth_client_secret_hash": "existing-hash",
+        "oauth_revoked_at": None,
+        "oauth_token_ttl_seconds": 3600,
+        "created_at": datetime.now(timezone.utc),
+        "last_seen_at": None,
+    }
+    session = FakeSession(mcp_clients=[existing])
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/register",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={
+            "client_key": "helm-mcp",
+            "display_name": "Palace Helm MCP",
+            "allowed_scopes": ["read", "write"],
+            "token_ttl_seconds": 1800,
+        },
+    )
+
+    assert response.status_code == 409
+    assert existing["oauth_client_secret_hash"] == "existing-hash"
+    assert "create-only and did not rotate its secret" in response.json()["detail"]
 
 
 def test_revoke_mcp_oauth_client_revokes_tokens_for_tenant_client() -> None:

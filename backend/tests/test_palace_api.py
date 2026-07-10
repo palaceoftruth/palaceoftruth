@@ -766,6 +766,26 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
     assert isinstance(payload["client_secret"], str)
     assert payload["client_secret"] not in payload["config_snippets"]["http_oauth_toml"]
     assert "PALACEOFTRUTH_MCP_BEARER_TOKEN" in payload["config_snippets"]["http_oauth_toml"]
+    assert "PALACEOFTRUTH_API_BEARER_TOKEN" in payload["config_snippets"]["oauth_api_token_command"]
+    assert "resource='https://testserver/api/v1'" in payload["config_snippets"]["oauth_api_token_command"]
+
+
+def test_register_palace_mcp_client_rejects_duplicate_without_rotating_secret() -> None:
+    session = FakeSession(execute_results=[[]])
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "helm-mcp",
+            "display_name": "Palace Helm MCP",
+            "allowed_scopes": ["read", "write"],
+            "token_ttl_seconds": 1800,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "create-only and did not rotate its secret" in response.json()["detail"]
 
 
 def test_register_palace_mcp_client_accepts_full_scope_catalog() -> None:

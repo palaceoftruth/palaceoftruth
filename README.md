@@ -311,6 +311,8 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and repo conventions
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
 - [DESIGN.md](DESIGN.md): frontend and product design guidance
+- [docs/palace-oauth-mcp-runtime-rollout.md](docs/palace-oauth-mcp-runtime-rollout.md): OAuth-first MCP deployment, raw REST resource discovery, and credential lifecycle
+- [docs/palace-oauth-scope-catalog.md](docs/palace-oauth-scope-catalog.md): supported MCP OAuth scopes and token request examples
 - [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
 - [docs/post-wakeup-claims-promotion-invalidation-design.md](docs/post-wakeup-claims-promotion-invalidation-design.md): first post-wakeup decision-claim, promotion, and invalidation design
 - [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](third_party_plugins/agent_clients/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
