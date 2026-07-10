@@ -7,6 +7,7 @@ from app.models.conversation import Conversation, ConversationMessage
 from app.models.feed import Feed
 from app.models.source_subscription import SourceSubscription, SourceSubscriptionEntry
 from app.models.api_key import ApiKey, ApiKeyAuditEvent
+from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.models.palace import (
     CandidateCurationArtifact,
     CandidateCurationArtifactEvent,
@@ -44,6 +45,9 @@ __all__ = [
     "SourceSubscriptionEntry",
     "ApiKey",
     "ApiKeyAuditEvent",
+    "SourceResource",
+    "SourceResourceAlias",
+    "SourceResourceAuditSnapshot",
     "CandidateCurationArtifact",
     "CandidateCurationArtifactEvent",
     "MemoryScopeProfile",

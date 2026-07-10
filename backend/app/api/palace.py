@@ -8,13 +8,14 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_secret, require_api_capability
 from app.database import async_session, get_db
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
+from app.models.source_resource import SourceResource, SourceResourceAlias
 from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
@@ -32,6 +33,10 @@ from app.schemas.palace import (
     PalaceClaimSupportReport,
     PalaceControlTower,
     PalaceItemSourceSummary,
+    PalaceSourceResourceAliasSummary,
+    PalaceSourceResourceDetail,
+    PalaceSourceResourceListResponse,
+    PalaceSourceResourceSummary,
     PalaceTemporalFactSummary,
     PalaceOverview,
     PalacePinRequest,
@@ -74,10 +79,41 @@ from app.services.source_compiler import (
     get_item_source_summary,
     review_decision_claim,
 )
+from app.services.source_resources import compute_freshness
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/palace", tags=["palace"])
 logger = logging.getLogger(__name__)
+
+
+def _source_resource_summary(resource: SourceResource) -> PalaceSourceResourceSummary:
+    """Serialize only operator-safe refresh metadata, never captured body content."""
+
+    return PalaceSourceResourceSummary(
+        id=resource.id,
+        kind=resource.kind,
+        canonical_url=resource.canonical_url,
+        freshness=compute_freshness(resource),
+        status=resource.status,
+        refresh_policy=resource.refresh_policy,
+        refresh_slo_seconds=resource.refresh_slo_seconds,
+        last_http_status=resource.last_http_status,
+        has_etag=resource.validator_etag is not None,
+        has_last_modified=resource.validator_last_modified is not None,
+        consecutive_failures=resource.consecutive_failures,
+        robots_decision=resource.robots_decision,
+        robots_cached_at=resource.robots_cached_at,
+        published_at=resource.published_at,
+        captured_at=resource.captured_at,
+        last_verified_at=resource.last_verified_at,
+        content_changed_at=resource.content_changed_at,
+        last_checked_at=resource.last_checked_at,
+        last_success_at=resource.last_success_at,
+        next_due_at=resource.next_due_at,
+        backoff_until=resource.backoff_until,
+        current_source_record_id=resource.current_source_record_id,
+        last_successful_source_record_id=resource.last_successful_source_record_id,
+    )
 
 
 def _serialize_claim_support_summary(claim) -> dict:
@@ -691,6 +727,60 @@ async def get_palace_room(
     db: AsyncSession = Depends(get_db),
 ) -> PalaceRoomDetail:
     return await get_room_detail(db, request.state.tenant_id, room_id)
+
+
+@router.get("/source-resources", response_model=PalaceSourceResourceListResponse, dependencies=[Depends(require_api_capability("read"))])
+async def list_source_resources(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceListResponse:
+    rows = (
+        await db.execute(
+            select(SourceResource)
+            .where(SourceResource.tenant_id == request.state.tenant_id)
+            .order_by(SourceResource.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return PalaceSourceResourceListResponse(
+        resources=[_source_resource_summary(resource) for resource in rows], total=len(rows)
+    )
+
+
+@router.get("/source-resources/{resource_id}", response_model=PalaceSourceResourceDetail, dependencies=[Depends(require_api_capability("read"))])
+async def get_source_resource(
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceDetail:
+    resource = await db.get(SourceResource, resource_id)
+    if resource is None or resource.tenant_id != request.state.tenant_id:
+        raise HTTPException(status_code=404, detail="Source resource not found")
+    summary = _source_resource_summary(resource)
+    aliases = (
+        await db.execute(
+            select(SourceResourceAlias)
+            .where(SourceResourceAlias.tenant_id == request.state.tenant_id)
+            .where(SourceResourceAlias.resource_id == resource.id)
+            .order_by(SourceResourceAlias.observed_at)
+        )
+    ).scalars().all()
+    return PalaceSourceResourceDetail(
+        **summary.model_dump(),
+        aliases=[
+            PalaceSourceResourceAliasSummary(
+                id=alias.id,
+                signal=alias.signal,
+                decision=alias.decision,
+                normalized_url=alias.normalized_url,
+                final_url=alias.final_url,
+                canonical_signal_url=alias.canonical_signal_url,
+                observed_at=alias.observed_at,
+            )
+            for alias in aliases
+        ],
+    )
 
 
 @router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary, dependencies=[Depends(require_api_capability("read"))])
