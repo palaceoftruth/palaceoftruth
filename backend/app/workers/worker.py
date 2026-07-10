@@ -12,6 +12,7 @@ from app.workers.tasks import process_media, process_youtube, process_webpage, p
 from app.workers.feed_tasks import poll_all_feeds, poll_feed, process_feed_item, requeue_stale_jobs
 from app.workers.media_fairness import dispatch_tenant_fair_media_jobs
 from app.workers.source_subscription_tasks import poll_all_source_subscriptions, poll_source_subscription_task, queue_discovered_source_subscription_entries, diagnose_stale_queued_source_subscription_entries_task
+from app.workers.source_resource_tasks import dispatch_due_source_resources, refresh_source_resource
 from app.workers.palace_tasks import palace_run_build, run_sync_source, poll_sync_sources, recover_palace_backlog, refresh_dirty_palace_rooms, run_palace_maintenance, repair_palace_artifacts, recompute_palace_tunnel_strengths, refresh_caught_up_wakeup_briefs, run_diary_rollup_maintenance, run_fact_registry_extraction, run_fact_registry_contradiction_sweep, run_wakeup_story_refresh, run_memory_dream_refresh, sweep_palace_index_integrity, mark_item_dirty_and_schedule, mark_items_dirty_and_schedule, watch_local_sync_sources
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
 from app.workers.webhook_tasks import deliver_webhook
@@ -84,6 +85,7 @@ class WorkerSettings:
         restore_bundle,
         poll_feed, process_feed_item,
         poll_source_subscription_task, queue_discovered_source_subscription_entries, diagnose_stale_queued_source_subscription_entries_task,
+        refresh_source_resource,
         dispatch_tenant_fair_media_jobs,
         requeue_stale_jobs,
         deliver_webhook,
@@ -93,6 +95,7 @@ class WorkerSettings:
         cron(poll_all_source_subscriptions, minute={3, 18, 33, 48}),
         cron(queue_discovered_source_subscription_entries, minute={8, 23, 38, 53}),
         cron(diagnose_stale_queued_source_subscription_entries_task, minute={13, 28, 43, 58}),
+        cron(dispatch_due_source_resources, minute={16, 31, 46}),
         cron(dispatch_tenant_fair_media_jobs),
         cron(requeue_stale_jobs, minute={5, 20, 35, 50}),  # offset from feed polls
         cron(recover_stale_memory_jobs, minute={7, 22, 37, 52}),  # offset from feed + sync recovery

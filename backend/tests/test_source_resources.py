@@ -9,9 +9,12 @@ from app.services.source_resources import (
     apply_refresh_observation,
     build_alias,
     canonical_http_identity,
+    claim_refresh_lease,
     compute_freshness,
     decide_alias,
+    is_due_for_refresh,
     normalize_http_url,
+    refresh_lease_job_id,
 )
 
 
@@ -241,7 +244,48 @@ def test_model_identity_constraint_is_tenant_and_kind_scoped() -> None:
     assert [column.name for column in unique.columns] == ["tenant_id", "kind", "canonical_identity"]
 
 
+def test_refresh_lease_claim_is_exclusive_until_expiry_and_has_deterministic_job_id() -> None:
+    resource = make_resource(next_due_at=NOW - timedelta(minutes=1))
+    first_token = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    first = claim_refresh_lease(resource, now=NOW, lease_seconds=300, token=first_token)
+
+    assert first is not None
+    assert refresh_lease_job_id(first) == f"refresh-source-resource:{resource.id}:{first_token}"
+    # A concurrent dispatcher sees the active lease and cannot enqueue a second job.
+    assert claim_refresh_lease(resource, now=NOW, lease_seconds=300) is None
+
+    recovered = claim_refresh_lease(
+        resource,
+        now=NOW + timedelta(seconds=301),
+        lease_seconds=300,
+        token=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+    )
+    assert recovered is not None
+    assert recovered.token != first.token
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"next_due_at": NOW - timedelta(seconds=1)}, True),
+        ({"next_due_at": NOW + timedelta(seconds=1)}, False),
+        ({"refresh_policy": "manual", "next_due_at": NOW}, False),
+        ({"status": "paused", "next_due_at": NOW}, False),
+        ({"status": "gone", "next_due_at": NOW}, False),
+        ({"status": "unreachable", "next_due_at": NOW}, True),
+        ({"next_due_at": NOW, "backoff_until": NOW + timedelta(seconds=1)}, False),
+    ],
+)
+def test_due_refresh_policy_excludes_non_actionable_resources(overrides: dict, expected: bool) -> None:
+    assert is_due_for_refresh(make_resource(**overrides), now=NOW) is expected
+
+
 def test_model_uses_tenant_qualified_foreign_keys() -> None:
     constraint_names = {constraint.name for constraint in SourceResource.__table__.constraints}
     assert "fk_source_resources_current_record_tenant" in constraint_names
     assert "fk_source_resources_last_success_record_tenant" in constraint_names
+
+
+def test_model_has_expiring_refresh_lease_fields() -> None:
+    column_names = set(SourceResource.__table__.columns.keys())
+    assert {"refresh_lease_token", "refresh_lease_expires_at"} <= column_names
