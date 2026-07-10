@@ -385,6 +385,60 @@ async def test_classify_relationship_clamps_invalid_confidence(llm_service) -> N
 
 
 @pytest.mark.asyncio
+async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm_service) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _completion_response('<think>compare sources</think>\n{"relationship": "related_to", "confidence": 0.85}')
+    ]
+
+    result = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+
+    assert result.relationship == "related_to"
+    assert result.confidence == 0.85
+    assert result.validation_outcome == "valid"
+    assert result.provider == "openrouter"
+    assert result.fallback_used is False
+    assert result.retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_classify_relationship_detailed_reports_malformed_and_timeout(llm_service, monkeypatch) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _completion_response('{"relationship": "unsupported", "confidence": 0.7}'),
+        _completion_response('{"relationship": "unsupported", "confidence": 0.7}'),
+    ]
+
+    malformed = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+
+    async def timed_out(*_args, **_kwargs):
+        raise TimeoutError("provider timeout")
+
+    monkeypatch.setattr(service, "complete_structured", timed_out)
+    timeout = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+
+    assert malformed.validation_outcome == "malformed"
+    assert malformed.relationship == "none"
+    assert malformed.retry_count == 1
+    assert timeout.validation_outcome == "timeout"
+    assert timeout.relationship == "none"
+
+
+@pytest.mark.asyncio
+async def test_classify_relationship_detailed_attributes_openrouter_retries_after_direct_fallback(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [_malformed_completion_response() for _ in range(9)]
+    openai_completions.outcomes = [_completion_response('{"relationship": "related_to", "confidence": 0.9}')]
+
+    result = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+
+    assert result.provider == "openai"
+    assert result.retry_provider == "openrouter"
+    assert result.fallback_used is True
+    assert result.retry_count == 6
+
+
+@pytest.mark.asyncio
 async def test_browser_actions_parse_reasoning_wrapped_array(llm_service) -> None:
     service, openrouter_completions, _openai_completions = llm_service
     openrouter_completions.outcomes = [

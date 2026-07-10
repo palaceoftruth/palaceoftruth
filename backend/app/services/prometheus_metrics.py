@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from app.services.memory_telemetry import memory_telemetry_snapshot
 from app.services.queue_telemetry import build_worker_backpressure
+from app.services.relationship_telemetry import relationship_telemetry_snapshot
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _SOURCE_TYPE_LABEL_ALLOWLIST = frozenset(
@@ -166,6 +167,49 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
             "counter",
             count,
             {"status": status, "failure_kind": failure_kind, "retryable": retryable},
+        )
+    relationship_snapshot = relationship_telemetry_snapshot()
+    for (provider, validation_outcome, fallback_used), count in relationship_snapshot["extractions"]:
+        builder.metric(
+            "palace_relationship_extractions_total",
+            "Relationship classifications by provider, validation outcome, and fallback use.",
+            "counter",
+            count,
+            {"provider": provider, "validation_outcome": validation_outcome, "fallback_used": fallback_used},
+        )
+    for (provider,), count in relationship_snapshot["retries"]:
+        builder.metric(
+            "palace_relationship_extraction_retries_total",
+            "Bounded relationship classification retries by provider.",
+            "counter",
+            count,
+            {"provider": provider},
+        )
+    duration_counts = dict(relationship_snapshot["duration_counts"])
+    for labels, duration_sum in relationship_snapshot["duration_sums"]:
+        provider, validation_outcome = labels
+        metric_labels = {"provider": provider, "validation_outcome": validation_outcome}
+        builder.metric(
+            "palace_relationship_extraction_duration_seconds_sum",
+            "Total relationship classification duration by provider and validation outcome.",
+            "counter",
+            duration_sum,
+            metric_labels,
+        )
+        builder.metric(
+            "palace_relationship_extraction_duration_seconds_count",
+            "Relationship classification duration sample count by provider and validation outcome.",
+            "counter",
+            duration_counts.get(labels, 0),
+            metric_labels,
+        )
+    for (provider,), count in relationship_snapshot["edges"]:
+        builder.metric(
+            "palace_relationship_edges_extracted_total",
+            "Relationship edges stored by classified provider.",
+            "counter",
+            count,
+            {"provider": provider},
         )
 
 

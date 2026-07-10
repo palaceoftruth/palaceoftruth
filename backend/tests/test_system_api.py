@@ -14,6 +14,10 @@ from app.services.memory_telemetry import (
     reset_memory_telemetry_for_tests,
 )
 from app.services.prometheus_metrics import HttpMetricsRecorder
+from app.services.relationship_telemetry import (
+    record_relationship_extraction,
+    reset_relationship_telemetry_for_tests,
+)
 
 
 class _ScalarResult:
@@ -247,10 +251,20 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
 
 def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     reset_memory_telemetry_for_tests()
+    reset_relationship_telemetry_for_tests()
     record_semantic_recall(status="empty", scope_type="agent")
     record_retention_extraction(status="written", mode="extracted_write")
     record_scope_guard_violation(reason="agent_scope_not_allowlisted")
     record_embedding_request(status="retry", failure_kind="timeout", retryable=True)
+    record_relationship_extraction(
+        provider="openrouter",
+        retry_provider="openrouter",
+        validation_outcome="malformed",
+        fallback_used=True,
+        retry_count=2,
+        duration_seconds=0.25,
+        edges_extracted=0,
+    )
     client = _metrics_client(MetricsSession())
 
     response = client.get("/api/v1/metrics")
@@ -275,6 +289,16 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert 'palace_semantic_recall_total{scope_type="agent",status="empty"} 1' in body
     assert 'palace_retention_extraction_total{mode="extracted_write",status="written"} 1' in body
     assert 'palace_memory_scope_guard_violations_total{reason="agent_scope_not_allowlisted"} 1' in body
+    assert (
+        'palace_relationship_extractions_total{fallback_used="true",provider="openrouter",validation_outcome="malformed"} 1'
+        in body
+    )
+    assert 'palace_relationship_extraction_retries_total{provider="openrouter"} 2' in body
+    assert (
+        'palace_relationship_extraction_duration_seconds_count{provider="openrouter",validation_outcome="malformed"} 1'
+        in body
+    )
+    assert 'palace_relationship_edges_extracted_total{provider="openrouter"} 0' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert "tenant-a" not in body
 

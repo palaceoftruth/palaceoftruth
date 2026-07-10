@@ -3,6 +3,10 @@ import uuid
 from types import SimpleNamespace
 
 from app.services.relationships import RelationshipService
+from app.services.relationship_telemetry import (
+    relationship_telemetry_snapshot,
+    reset_relationship_telemetry_for_tests,
+)
 
 
 class _FakeResult:
@@ -101,3 +105,23 @@ def test_relationship_extraction_skips_insert_when_endpoint_disappears() -> None
 
     assert len(db.execute_calls) == 3
     assert db.committed is True
+
+
+def test_relationship_extraction_records_bounded_telemetry() -> None:
+    reset_relationship_telemetry_for_tests()
+    item_id = uuid.uuid4()
+    item = SimpleNamespace(
+        id=item_id,
+        title="Source",
+        summary="Source summary",
+        tenant_id="tenant-a",
+    )
+    db = _FakeDB(item)
+    service = RelationshipService(db, embedder=object(), llm=_FakeLLM())
+
+    asyncio.run(service.find_relationships(item_id, tenant_id="tenant-a"))
+
+    snapshot = relationship_telemetry_snapshot()
+    assert snapshot["extractions"] == [(("unknown", "valid", "false"), 1)]
+    assert snapshot["edges"] == [(("unknown",), 1)]
+    assert snapshot["retries"] == [(("unknown",), 0)]

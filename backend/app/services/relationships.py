@@ -1,6 +1,7 @@
 """Relationship extraction service — centroid similarity + LLM classification."""
 import logging
 import uuid
+from time import monotonic
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,7 @@ from app.embedding_profile import resolve_embedding_profile
 from app.models.item import Item
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
+from app.services.relationship_telemetry import record_relationship_extraction
 from app.services.search import _embedding_search_plan
 
 logger = logging.getLogger(__name__)
@@ -99,11 +101,36 @@ class RelationshipService:
             if not row.summary:
                 continue
 
-            rel_type, confidence = await self.llm.classify_relationship(
-                item.title, item.summary, row.title, row.summary
-            )
+            started_at = monotonic()
+            detailed_classifier = getattr(self.llm, "classify_relationship_detailed", None)
+            if callable(detailed_classifier):
+                classification = await detailed_classifier(item.title, item.summary, row.title, row.summary)
+                rel_type = classification.relationship
+                confidence = classification.confidence
+                provider = classification.provider
+                retry_provider = classification.retry_provider
+                validation_outcome = classification.validation_outcome
+                fallback_used = classification.fallback_used
+                retry_count = classification.retry_count
+            else:
+                # Compatibility for test doubles and custom LLM implementations.
+                rel_type, confidence = await self.llm.classify_relationship(item.title, item.summary, row.title, row.summary)
+                provider = "unknown"
+                retry_provider = "unknown"
+                validation_outcome = "empty" if rel_type == "none" else "valid"
+                fallback_used = False
+                retry_count = 0
 
             if confidence < _MIN_CONFIDENCE or rel_type == "none":
+                record_relationship_extraction(
+                    provider=provider,
+                    retry_provider=retry_provider,
+                    validation_outcome=validation_outcome,
+                    fallback_used=fallback_used,
+                    retry_count=retry_count,
+                    duration_seconds=monotonic() - started_at,
+                    edges_extracted=0,
+                )
                 logger.debug(
                     "Skipping relationship %s→%s: type=%s confidence=%.2f",
                     item_id, row.id, rel_type, confidence,
@@ -141,12 +168,30 @@ class RelationshipService:
                 "conf": confidence,
             })
             if result.scalar_one_or_none() is None:
+                record_relationship_extraction(
+                    provider=provider,
+                    retry_provider=retry_provider,
+                    validation_outcome=validation_outcome,
+                    fallback_used=fallback_used,
+                    retry_count=retry_count,
+                    duration_seconds=monotonic() - started_at,
+                    edges_extracted=0,
+                )
                 logger.info(
                     "Skipped relationship %s→%s: endpoint missing or no longer ready",
                     item_id,
                     row.id,
                 )
                 continue
+            record_relationship_extraction(
+                provider=provider,
+                retry_provider=retry_provider,
+                validation_outcome=validation_outcome,
+                fallback_used=fallback_used,
+                retry_count=retry_count,
+                duration_seconds=monotonic() - started_at,
+                edges_extracted=1,
+            )
             logger.info(
                 "Stored relationship %s→%s: %s (confidence=%.2f)",
                 item_id, row.id, rel_type, confidence,
