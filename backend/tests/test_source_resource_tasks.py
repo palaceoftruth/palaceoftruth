@@ -2,7 +2,10 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
+from app.models.source_resource import SourceResource
+from app.services.source_resources import canonical_http_identity
 from app.services.source_resources import RefreshLease, refresh_lease_job_id
 from app.workers import source_resource_tasks
 
@@ -13,6 +16,51 @@ class _FakeRedis:
 
     async def enqueue_job(self, name: str, **kwargs) -> None:
         self.enqueued.append((name, kwargs))
+
+
+class _FakeResult:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _ClaimSession:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.statement = None
+        self.added = []
+        self.flushed = False
+
+    async def execute(self, statement):
+        self.statement = statement
+        return _FakeResult(self.rows)
+
+    def add(self, resource) -> None:
+        self.added.append(resource)
+
+    async def flush(self) -> None:
+        self.flushed = True
+
+
+def _resource(*, status: str = "active", due_at=None, backoff_until=None) -> SourceResource:
+    return SourceResource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        kind="http",
+        canonical_url="https://example.com/source",
+        canonical_identity=canonical_http_identity("https://example.com/source"),
+        refresh_policy="interval",
+        refresh_slo_seconds=3600,
+        status=status,
+        next_due_at=due_at,
+        backoff_until=backoff_until,
+        consecutive_failures=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -66,6 +114,35 @@ async def test_dispatch_enqueues_auditable_bounded_claims(monkeypatch) -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_claim_due_resources_uses_skip_locked_predicates_and_defensive_lease_checks() -> None:
+    now = datetime.now(timezone.utc)
+    due = _resource(due_at=now)
+    paused = _resource(status="paused", due_at=now)
+    backed_off = _resource(due_at=now, backoff_until=now.replace(year=now.year + 1))
+    session = _ClaimSession([due, paused, backed_off])
+
+    leases = await source_resource_tasks.claim_due_source_resources(
+        session,
+        now=now,
+        limit=2,
+        lease_seconds=300,
+    )
+
+    assert [lease.resource_id for lease in leases] == [due.id]
+    assert session.added == [due]
+    assert session.flushed is True
+    sql = str(
+        session.statement.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "LIMIT 2" in sql
+    assert "source_resources.refresh_policy != 'manual'" in sql
+    assert "source_resources.refresh_lease_expires_at" in sql
 
 
 @pytest.mark.asyncio

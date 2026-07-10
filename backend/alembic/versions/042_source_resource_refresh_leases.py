@@ -1,6 +1,6 @@
 """Add durable leases for bounded watched-source refresh dispatch.
 
-Revision ID: 042_source_resource_refresh_leases
+Revision ID: 042_resource_refresh_leases
 Revises: 041_source_resources
 Create Date: 2026-07-10
 """
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "042_source_resource_refresh_leases"
+revision = "042_resource_refresh_leases"
 down_revision = "041_source_resources"
 branch_labels = None
 depends_on = None

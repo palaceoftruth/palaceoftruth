@@ -52,6 +52,7 @@ class SourceResource(Base):
         CheckConstraint("consecutive_failures >= 0", name="ck_source_resources_failure_count"),
         Index("ix_source_resources_tenant_next_due", "tenant_id", "next_due_at"),
         Index("ix_source_resources_tenant_status", "tenant_id", "status"),
+        Index("ix_source_resources_due_lease", "status", "next_due_at", "refresh_lease_expires_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
