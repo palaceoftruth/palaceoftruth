@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -192,7 +193,9 @@ class EmbeddingService:
         input_type: str,
         validate_dimensions: bool = True,
     ) -> list[list[float]]:
+        input_tokens = self._estimated_input_tokens(texts, input_type=input_type)
         for attempt in range(_MAX_RETRIES):
+            attempt_started = perf_counter()
             try:
                 if self.profile.provider == "local-http":
                     vectors = await self._embed_local_http(
@@ -224,10 +227,25 @@ class EmbeddingService:
                     vectors = [item.embedding for item in ordered_data]
                     if validate_dimensions:
                         self._validate_dimensions(vectors)
-                record_embedding_request(status="success", failure_kind="none", retryable=False)
+                record_embedding_request(
+                    status="success",
+                    failure_kind="none",
+                    retryable=False,
+                    provider=self.profile.provider,
+                    input_type=input_type,
+                    duration_seconds=perf_counter() - attempt_started,
+                    batch_size=len(texts),
+                    input_tokens=input_tokens,
+                )
                 return vectors
             except EmbeddingRequestError as e:
-                self._record_terminal_error(e)
+                self._record_terminal_error(
+                    e,
+                    input_type=input_type,
+                    started_at=attempt_started,
+                    batch_size=len(texts),
+                    input_tokens=input_tokens,
+                )
                 raise
             except httpx.HTTPStatusError as e:
                 retryable = e.response.status_code in _RETRYABLE_HTTP_STATUS_CODES
@@ -238,23 +256,38 @@ class EmbeddingService:
                     provider_status_code=e.response.status_code,
                 )
                 if not retryable:
-                    self._record_terminal_error(error)
+                    self._record_terminal_error(
+                        error,
+                        input_type=input_type,
+                        started_at=attempt_started,
+                        batch_size=len(texts),
+                        input_tokens=input_tokens,
+                    )
                     raise error from e
-                await self._retry_or_raise(error, attempt, cause=e)
+                await self._retry_or_raise(
+                    error, attempt, cause=e, input_type=input_type, started_at=attempt_started,
+                    batch_size=len(texts), input_tokens=input_tokens,
+                )
             except httpx.TimeoutException as e:
                 error = EmbeddingRequestError(
                     "Embedding HTTP API timed out",
                     retryable=True,
                     failure_kind="timeout",
                 )
-                await self._retry_or_raise(error, attempt, cause=e)
+                await self._retry_or_raise(
+                    error, attempt, cause=e, input_type=input_type, started_at=attempt_started,
+                    batch_size=len(texts), input_tokens=input_tokens,
+                )
             except (APITimeoutError, APIConnectionError) as e:
                 error = EmbeddingRequestError(
                     f"Embedding API connection failed: {e}",
                     retryable=True,
                     failure_kind="connection",
                 )
-                await self._retry_or_raise(error, attempt, cause=e)
+                await self._retry_or_raise(
+                    error, attempt, cause=e, input_type=input_type, started_at=attempt_started,
+                    batch_size=len(texts), input_tokens=input_tokens,
+                )
             except RateLimitError as e:
                 retryable = not self._is_quota_error(e)
                 error = EmbeddingRequestError(
@@ -264,9 +297,18 @@ class EmbeddingService:
                     provider_status_code=429,
                 )
                 if not retryable:
-                    self._record_terminal_error(error)
+                    self._record_terminal_error(
+                        error,
+                        input_type=input_type,
+                        started_at=attempt_started,
+                        batch_size=len(texts),
+                        input_tokens=input_tokens,
+                    )
                     raise error from e
-                await self._retry_or_raise(error, attempt, cause=e)
+                await self._retry_or_raise(
+                    error, attempt, cause=e, input_type=input_type, started_at=attempt_started,
+                    batch_size=len(texts), input_tokens=input_tokens,
+                )
             except APIStatusError as e:
                 retryable = e.status_code in _RETRYABLE_HTTP_STATUS_CODES and not self._is_quota_error(e)
                 error = EmbeddingRequestError(
@@ -276,9 +318,18 @@ class EmbeddingService:
                     provider_status_code=e.status_code,
                 )
                 if not retryable:
-                    self._record_terminal_error(error)
+                    self._record_terminal_error(
+                        error,
+                        input_type=input_type,
+                        started_at=attempt_started,
+                        batch_size=len(texts),
+                        input_tokens=input_tokens,
+                    )
                     raise error from e
-                await self._retry_or_raise(error, attempt, cause=e)
+                await self._retry_or_raise(
+                    error, attempt, cause=e, input_type=input_type, started_at=attempt_started,
+                    batch_size=len(texts), input_tokens=input_tokens,
+                )
         raise AssertionError("embedding retry loop exhausted without a classified error")
 
     async def _retry_or_raise(
@@ -287,13 +338,28 @@ class EmbeddingService:
         attempt: int,
         *,
         cause: Exception | None = None,
+        input_type: str = "other",
+        started_at: float | None = None,
+        batch_size: int | None = None,
+        input_tokens: int | None = None,
     ) -> None:
+        telemetry = {
+            "provider": self.profile.provider,
+            "input_type": input_type,
+            "duration_seconds": perf_counter() - started_at if started_at is not None else None,
+            "batch_size": batch_size,
+            "input_tokens": input_tokens,
+        }
         if attempt + 1 >= _MAX_RETRIES:
-            record_embedding_request(status="error", failure_kind=error.failure_kind, retryable=True)
+            record_embedding_request(
+                status="error", failure_kind=error.failure_kind, retryable=True, **telemetry
+            )
             if cause is None:
                 raise error
             raise error from cause
-        record_embedding_request(status="retry", failure_kind=error.failure_kind, retryable=True)
+        record_embedding_request(
+            status="retry", failure_kind=error.failure_kind, retryable=True, **telemetry
+        )
         wait = _BASE_BACKOFF * (2 ** attempt)
         logger.warning(
             "Embedding request %s, retrying in %.1fs (attempt %d/%d)",
@@ -309,13 +375,35 @@ class EmbeddingService:
         message = str(exc).lower()
         return any(marker in message for marker in _QUOTA_ERROR_MARKERS)
 
-    @staticmethod
-    def _record_terminal_error(error: EmbeddingRequestError) -> None:
+    def _record_terminal_error(
+        self,
+        error: EmbeddingRequestError,
+        *,
+        input_type: str = "other",
+        started_at: float | None = None,
+        batch_size: int | None = None,
+        input_tokens: int | None = None,
+    ) -> None:
         record_embedding_request(
             status="error",
             failure_kind=error.failure_kind,
             retryable=error.retryable,
+            provider=self.profile.provider,
+            input_type=input_type,
+            duration_seconds=perf_counter() - started_at if started_at is not None else None,
+            batch_size=batch_size,
+            input_tokens=input_tokens,
         )
+
+    def _estimated_input_tokens(self, texts: list[str], *, input_type: str) -> int | None:
+        if input_type == "image":
+            return None
+        try:
+            encoding = tiktoken.encoding_for_model(self.model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        request_texts = self._apply_input_instruction(texts, input_type=input_type)
+        return sum(len(encoding.encode(value)) for value in request_texts)
 
     async def _embed_local_http(
         self,
