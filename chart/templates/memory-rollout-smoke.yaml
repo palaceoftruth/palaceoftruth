@@ -48,6 +48,11 @@ metadata:
   annotations:
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # Run after Helm has waited for normal workload resources. Failed smoke
+    # Jobs stay available for diagnosis until the next hook creation.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: {{ .Values.memoryRolloutSmoke.activeDeadlineSeconds }}
@@ -95,6 +100,10 @@ spec:
             - {{ .Values.memoryRolloutSmoke.jobIntervalSeconds | quote }}
             - --request-timeout
             - {{ .Values.memoryRolloutSmoke.requestTimeoutSeconds | quote }}
+            - --dependency-timeout-seconds
+            - {{ .Values.memoryRolloutSmoke.dependencyTimeoutSeconds | quote }}
+            - --dependency-interval-seconds
+            - {{ .Values.memoryRolloutSmoke.dependencyIntervalSeconds | quote }}
             {{- if .Values.memoryRolloutSmoke.expectedAuthMode }}
             - --expected-auth-mode
             - {{ .Values.memoryRolloutSmoke.expectedAuthMode | quote }}

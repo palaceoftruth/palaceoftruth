@@ -326,6 +326,23 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
     assert _arg_value(container["args"], "--request-timeout") == "60"
 
 
+def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
+    manifests = _render_chart("valkey.sentinel.enabled=true")
+    for name in ("palaceoftruth-worker", "palaceoftruth-media-worker", "palaceoftruth-palace-worker"):
+        command = _deployment_by_name(manifests, name)["spec"]["template"]["spec"]["containers"][0]["command"]
+        assert command[:3] == ["python", "scripts/wait_for_worker_dependencies.py", "--"]
+
+    job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
+    annotations = job["metadata"]["annotations"]
+    assert annotations["helm.sh/hook"] == "post-install,post-upgrade"
+    assert annotations["helm.sh/hook-weight"] == "10"
+    assert annotations["helm.sh/hook-delete-policy"] == "before-hook-creation,hook-succeeded"
+    assert job["spec"]["activeDeadlineSeconds"] == 600
+    args = job["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert _arg_value(args, "--dependency-timeout-seconds") == "300"
+    assert _arg_value(args, "--dependency-interval-seconds") == "5"
+
+
 def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_identity() -> None:
     manifests = _render_chart(
         "valkey.sentinel.enabled=true",

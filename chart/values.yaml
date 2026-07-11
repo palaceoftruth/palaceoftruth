@@ -423,13 +423,17 @@ memoryRolloutSmoke:
   jobTimeoutSeconds: 180
   jobIntervalSeconds: 5
   requestTimeoutSeconds: 10
+  # Wait for backend readiness and ARQ workers to finish their DB/Sentinel
+  # startup gates before submitting the durable memory write.
+  dependencyTimeoutSeconds: 300
+  dependencyIntervalSeconds: 5
   # Optional OAuth assertions for the rollout smoke. Leave blank for legacy
   # API-key smoke; set these when the smoke authenticates as an MCP OAuth client.
   expectedAuthMode: ""
   expectedTenantId: ""
   expectedClientKey: ""
   expectedScopes: []
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: 600
   ttlSecondsAfterFinished: 86400
   resources:
     requests:
@@ -456,7 +460,7 @@ mediaWorker:
   replicas: 1
   queueName: "arq:queue:media"
   maxJobs: 1
-  command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.MediaWorkerSettings"]
+  command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.MediaWorkerSettings"]
   resources:
     requests:
       memory: "512Mi"

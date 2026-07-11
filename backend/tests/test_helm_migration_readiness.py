@@ -53,6 +53,12 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
     assert env["MIGRATION_DB_WAIT_INTERVAL_SECONDS"]["value"] == "2"
     assert env["MIGRATION_DB_CONNECT_TIMEOUT_SECONDS"]["value"] == "3"
     assert pod_spec["containers"][0]["command"] == ["alembic", "upgrade", "head"]
+    assert job["metadata"]["annotations"] == {
+        "argocd.argoproj.io/sync-wave": "1",
+        "helm.sh/hook": "post-install,pre-upgrade",
+        "helm.sh/hook-weight": "-10",
+        "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded",
+    }
 
 
 def test_migration_readiness_gate_can_be_disabled() -> None:

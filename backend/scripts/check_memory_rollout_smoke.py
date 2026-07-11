@@ -321,6 +321,120 @@ def check_api_health(client: HttpClient, report: dict[str, Any]) -> None:
     _record_check(report, "api_health", "passed", http_status=result.status)
 
 
+def _api_readiness_state(client: HttpClient) -> dict[str, Any]:
+    result = client.request("GET", "/ready")
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    dependencies = payload.get("dependencies") if isinstance(payload.get("dependencies"), dict) else {}
+    dependency_statuses = {
+        name: value.get("status")
+        for name, value in dependencies.items()
+        if isinstance(value, dict)
+    }
+    ready = (
+        result.status < 400
+        and payload.get("status") == "ok"
+        and {"database", "queue"}.issubset(dependency_statuses)
+        and all(status == "ok" for status in dependency_statuses.values())
+    )
+    return {
+        "ready": ready,
+        "http_status": result.status,
+        "status": payload.get("status"),
+        "dependencies": dependency_statuses,
+    }
+
+
+def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> dict[str, Any]:
+    pods_payload = kube.get(
+        f"/api/v1/namespaces/{kube.namespace}/pods",
+        query={"labelSelector": args.pod_label_selector},
+    )
+    pods = pods_payload.get("items") if isinstance(pods_payload.get("items"), list) else []
+    selected_pods: list[str] = []
+    missing_markers: list[dict[str, Any]] = []
+    non_running: list[dict[str, str]] = []
+
+    for pod in pods:
+        if not isinstance(pod, dict):
+            continue
+        metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        pod_name = str(metadata.get("name") or "")
+        app_label = str((metadata.get("labels") or {}).get("app") or "")
+        if args.worker_name_fragment and args.worker_name_fragment not in app_label and args.worker_name_fragment not in pod_name:
+            continue
+        if metadata.get("deletionTimestamp"):
+            continue
+        selected_pods.append(pod_name)
+        phase = str(status.get("phase") or "")
+        if phase != "Running":
+            non_running.append({"pod": pod_name, "phase": phase})
+            continue
+        for container in pod.get("spec", {}).get("containers") or []:
+            container_name = container.get("name") if isinstance(container, dict) else None
+            if not container_name:
+                continue
+            log_text = kube.get_text(
+                f"/api/v1/namespaces/{kube.namespace}/pods/{pod_name}/log",
+                query={
+                    "container": container_name,
+                    "sinceSeconds": args.log_since_seconds,
+                    "tailLines": args.log_tail_lines,
+                },
+            )
+            required_markers = ("Redis Sentinel startup dependency ready", "Starting worker")
+            absent = [marker for marker in required_markers if marker not in log_text]
+            if absent:
+                missing_markers.append({"pod": pod_name, "container": container_name, "missing": absent})
+
+    return {
+        "ready": bool(selected_pods) and not non_running and not missing_markers,
+        "selected_pods": selected_pods,
+        "non_running": non_running,
+        "missing_markers": missing_markers,
+    }
+
+
+def check_runtime_dependencies(
+    client: HttpClient,
+    report: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    kube: KubernetesClient | None = None,
+) -> None:
+    """Wait until API, database/queue, and every ARQ worker are ready to consume."""
+    deadline = time.monotonic() + args.dependency_timeout_seconds
+    last_state: dict[str, Any] = {}
+    try:
+        kube = kube or KubernetesClient(namespace=args.namespace, timeout=args.request_timeout)
+    except Exception as exc:
+        _alert(report, "runtime_dependencies_unqueryable", str(exc), error_class=exc.__class__.__name__)
+        _record_check(report, "runtime_dependencies", "failed", error_class=exc.__class__.__name__)
+        return
+
+    while time.monotonic() <= deadline:
+        api_state = _api_readiness_state(client)
+        try:
+            worker_state = _worker_startup_state(kube, args)
+        except Exception as exc:
+            worker_state = {"ready": False, "error_class": exc.__class__.__name__, "error": str(exc)}
+        last_state = {"api": api_state, "workers": worker_state}
+        if api_state["ready"] and worker_state["ready"]:
+            _record_check(report, "runtime_dependencies", "passed", **last_state)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(args.dependency_interval_seconds, remaining))
+
+    _alert(
+        report,
+        "runtime_dependencies_not_ready",
+        "backend readiness or ARQ worker startup did not complete before the memory write",
+        last_state=last_state,
+    )
+    _record_check(report, "runtime_dependencies", "failed", **last_state)
+
+
 def check_mcp_reachable(url: str | None, report: dict[str, Any], *, timeout: float) -> None:
     if not url:
         _record_check(report, "mcp_health", "skipped", reason="no MCP URL configured")
@@ -589,8 +703,12 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
         timeout=args.request_timeout,
     )
     check_api_health(client, report)
+    check_runtime_dependencies(client, report, args, kube=kube)
     resolve_tenant_identity(client, report, args)
-    check_memory_write(client, report, args)
+    if not any(alert["code"].startswith("runtime_dependencies_") for alert in report["alerts"]):
+        check_memory_write(client, report, args)
+    else:
+        _record_check(report, "memory_write", "skipped", reason="runtime dependencies unavailable")
     asyncio.run(check_sentinel(report))
     check_mcp_reachable(args.mcp_url, report, timeout=args.request_timeout)
     check_kubernetes(report, args, kube=kube)
@@ -608,6 +726,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcp-url", default=os.getenv("PALACEOFTRUTH_MCP_URL"))
     parser.add_argument("--scope-key", default=os.getenv("PALACE_ROLLOUT_SMOKE_SCOPE_KEY", "rollout-smoke"))
     parser.add_argument("--request-timeout", type=float, default=10.0)
+    parser.add_argument("--dependency-timeout-seconds", type=float, default=300.0)
+    parser.add_argument("--dependency-interval-seconds", type=float, default=5.0)
     parser.add_argument("--job-interval-seconds", type=float, default=5.0)
     parser.add_argument("--job-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--job-list-limit", type=int, default=20)

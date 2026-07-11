@@ -12,6 +12,12 @@ metadata:
     app.kubernetes.io/component: migration
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    # Flux uses Helm hooks; keep the ArgoCD wave for existing Argo consumers.
+    # A fresh install must create the database/credentials before migrations;
+    # upgrades still run migrations before normal workload resources change.
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.migrations.backoffLimit }}
   activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
