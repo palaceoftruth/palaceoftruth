@@ -347,7 +347,11 @@ def _embedding_search_plan(profile: EmbeddingProfile) -> _EmbeddingSearchPlan:
         vector_column=f"embedding_{profile.dimensions}",
         half_column=f"embedding_half_{profile.dimensions}",
         dimensions=profile.dimensions,
-        profile_filter="AND e.profile_name = :embedding_profile_name AND e.dimensions = :embedding_dimensions",
+        # Keep dimensions literal so PostgreSQL can prove the predicate implies the
+        # dimension-specific partial HNSW index predicate.
+        profile_filter=(
+            f"AND e.profile_name = :embedding_profile_name AND e.dimensions = {profile.dimensions}"
+        ),
         profile_name=profile.profile_name,
     )
 
@@ -1075,42 +1079,18 @@ class SearchService:
         effective_candidate_limit = _candidate_fetch_limit(limit, candidate_limit)
         embedding_plan = _embedding_search_plan(self.embedding_profile)
 
-        # Hybrid: 0.7 * vector cosine similarity (halfvec HNSW) + 0.3 * ts_rank.
-        # Deduplicate by item — best-scoring chunk per item only.
-        # Pull a slightly wider candidate set so deterministic hygiene reranking can
-        # demote stale self-chat memories without another DB round-trip or embedding call.
+        # Generate semantic and lexical candidates independently before applying the
+        # existing weighted rerank. The old query ranked the complete eligible corpus,
+        # which made candidate_limit an output cap rather than a work bound and kept
+        # PostgreSQL from using the HNSW/GIN indexes as candidate generators.
         # Use CAST() instead of :: to avoid conflict with SQLAlchemy :param syntax.
         sql = text(f"""
-            WITH ranked AS (
+            WITH semantic_candidates AS MATERIALIZED (
                 SELECT
                     e.item_id,
                     e.chunk_text,
                     e.chunk_index,
-                    1 - (e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions}))) AS vec_score,
-                    COALESCE(
-                        ts_rank(i.search_vector, plainto_tsquery('english', :query)),
-                        0
-                    ) AS text_score,
-                    i.title,
-                    i.summary,
-                    i.source_type,
-                    i.source_url,
-                    i.tags,
-                    i.created_at,
-                    COALESCE(i.effective_date, i.created_at) AS effective_date,
-                    i.effective_date_source,
-                    i.effective_date_quality,
-                    i.metadata AS item_metadata,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY e.item_id
-                        ORDER BY (
-                            :vw * (1 - (e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})))) +
-                            :tw * COALESCE(
-                                ts_rank(i.search_vector, plainto_tsquery('english', :query)),
-                                0
-                            )
-                        ) DESC
-                    ) AS rn
+                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance
                 FROM {embedding_plan.table_name} e
                 JOIN items i ON e.item_id = i.id
                 WHERE i.status = 'ready'
@@ -1158,6 +1138,120 @@ class SearchService:
                   )
                   AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
                   AND (CAST(:date_to   AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
+                ORDER BY
+                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) ASC
+                LIMIT :semantic_candidate_limit
+            ),
+            lexical_items AS MATERIALIZED (
+                SELECT
+                    i.id AS item_id,
+                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+                FROM items i
+                WHERE i.status = 'ready'
+                  AND i.deleted_at IS NULL
+                  AND i.tenant_id = :tenant_id
+                  AND i.search_vector @@ plainto_tsquery('english', :query)
+                  AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
+                  AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
+                  AND (
+                      CAST(:room_ids AS uuid[]) IS NULL
+                      OR EXISTS (
+                          SELECT 1 FROM room_memberships rm
+                          WHERE rm.tenant_id = :tenant_id
+                            AND rm.item_id = i.id
+                            AND rm.room_id = ANY(CAST(:room_ids AS uuid[]))
+                      )
+                  )
+                  AND (
+                      CAST(:scope_type AS text) IS NULL
+                      OR COALESCE(
+                          i.metadata->'memory_entry'->'scope'->>'type',
+                          CASE WHEN CAST(:scope_type AS text) = 'tenant_shared' THEN 'tenant_shared' ELSE NULL END
+                      ) = CAST(:scope_type AS text)
+                  )
+                  AND (
+                      CAST(:scope_key AS text) IS NULL
+                      OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
+                  )
+                  AND (
+                      CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
+                      OR i.metadata->'memory_entry' IS NULL
+                      OR COALESCE(i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') = 'tenant_shared'
+                  )
+                  AND (
+                      CAST(:tags AS text[]) IS NULL
+                      OR (CAST(:tags_mode AS text) = 'all' AND i.tags @> CAST(:tags AS text[]))
+                      OR (CAST(:tags_mode AS text) = 'any' AND i.tags && CAST(:tags AS text[]))
+                  )
+                  AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
+                  AND (CAST(:date_to AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM {embedding_plan.table_name} eligible_embedding
+                      WHERE eligible_embedding.item_id = i.id
+                        {embedding_plan.profile_filter.replace('e.', 'eligible_embedding.')}
+                  )
+                ORDER BY text_score DESC, i.id ASC
+                LIMIT :lexical_candidate_limit
+            ),
+            lexical_candidates AS MATERIALIZED (
+                SELECT
+                    li.item_id,
+                    best_chunk.chunk_text,
+                    best_chunk.chunk_index,
+                    best_chunk.distance
+                FROM lexical_items li
+                JOIN LATERAL (
+                    SELECT
+                        e.chunk_text,
+                        e.chunk_index,
+                        e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance
+                    FROM {embedding_plan.table_name} e
+                    WHERE e.item_id = li.item_id
+                      {embedding_plan.profile_filter}
+                    ORDER BY
+                        e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) ASC
+                    LIMIT 1
+                ) best_chunk ON TRUE
+            ),
+            candidate_chunks AS MATERIALIZED (
+                SELECT item_id, chunk_text, chunk_index FROM semantic_candidates
+                UNION
+                SELECT item_id, chunk_text, chunk_index FROM lexical_candidates
+            ),
+            scored AS (
+                SELECT
+                    e.item_id,
+                    e.chunk_text,
+                    e.chunk_index,
+                    1 - (e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions}))) AS vec_score,
+                    COALESCE(ts_rank(i.search_vector, plainto_tsquery('english', :query)), 0) AS text_score,
+                    i.title,
+                    i.summary,
+                    i.source_type,
+                    i.source_url,
+                    i.tags,
+                    i.created_at,
+                    COALESCE(i.effective_date, i.created_at) AS effective_date,
+                    i.effective_date_source,
+                    i.effective_date_quality,
+                    i.metadata AS item_metadata
+                FROM candidate_chunks candidate
+                JOIN {embedding_plan.table_name} e
+                  ON e.item_id = candidate.item_id
+                 AND e.chunk_index = candidate.chunk_index
+                 AND e.chunk_text = candidate.chunk_text
+                 {embedding_plan.profile_filter}
+                JOIN items i ON i.id = e.item_id
+            ),
+            ranked AS (
+                SELECT
+                    scored.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY item_id
+                        ORDER BY (:vw * vec_score + :tw * text_score) DESC, chunk_index ASC
+                    ) AS rn
+                FROM scored
             )
             SELECT
                 item_id, chunk_text, chunk_index,
@@ -1189,9 +1283,10 @@ class SearchService:
                     "date_from": date_from,
                     "date_to": date_to,
                     "candidate_limit": effective_candidate_limit,
+                    "semantic_candidate_limit": effective_candidate_limit,
+                    "lexical_candidate_limit": effective_candidate_limit,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
                     "embedding_profile_name": embedding_plan.profile_name,
-                    "embedding_dimensions": embedding_plan.dimensions,
                 },
             )
         ).fetchall()
