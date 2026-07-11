@@ -160,8 +160,19 @@ postgres:
   image: ghcr.io/cloudnative-pg/postgresql:16.4
   storage:
     size: 5Gi
+  # These are rendered as CNPG PostgreSQL parameters. Keep deployment-specific
+  # tuning in the environment overlay. Setting a pg_stat_statements.* key lets
+  # CNPG manage the required preload library and extension safely.
   parameters:
     shared_buffers: "128MB"
+  monitoring:
+    podMonitor:
+      # Render a manually managed CNPG PodMonitor when the Prometheus Operator
+      # is available in the target cluster.
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
 
 # Bundled Valkey (Redis-compatible) deployment
 valkey:

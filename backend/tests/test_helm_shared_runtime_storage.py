@@ -431,6 +431,10 @@ def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonit
     assert backend_service["spec"]["ports"][0]["name"] == "http"
     assert not any(manifest.get("kind") == "ServiceMonitor" for manifest in manifests)
 
+    postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    assert postgres_cluster["spec"]["postgresql"]["parameters"] == {"shared_buffers": "128MB"}
+    assert not any(manifest.get("kind") == "PodMonitor" for manifest in manifests)
+
 
 def test_backend_servicemonitor_renders_when_enabled() -> None:
     manifests = _render_chart(
@@ -452,3 +456,33 @@ def test_backend_servicemonitor_renders_when_enabled() -> None:
             "scrapeTimeout": "5s",
         }
     ]
+
+
+def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled() -> None:
+    manifests = _render_chart(
+        "postgres.parameters.pg_stat_statements\\.track=top",
+        "postgres.monitoring.podMonitor.enabled=true",
+        "postgres.monitoring.podMonitor.labels.release=kube-prometheus",
+        "postgres.monitoring.podMonitor.interval=15s",
+        "postgres.monitoring.podMonitor.scrapeTimeout=5s",
+    )
+
+    cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    pod_monitor = _manifest_by_kind_name(manifests, "PodMonitor", "palaceoftruth-postgres")
+
+    assert cluster["spec"]["postgresql"]["parameters"] == {
+        "pg_stat_statements.track": "top",
+        "shared_buffers": "128MB",
+    }
+    assert pod_monitor["metadata"]["labels"]["release"] == "kube-prometheus"
+    assert pod_monitor["spec"] == {
+        "selector": {"matchLabels": {"cnpg.io/cluster": "palaceoftruth-postgres"}},
+        "podMetricsEndpoints": [
+            {
+                "port": "metrics",
+                "path": "/metrics",
+                "interval": "15s",
+                "scrapeTimeout": "5s",
+            }
+        ],
+    }

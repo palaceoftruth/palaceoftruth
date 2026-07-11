@@ -16,7 +16,9 @@ spec:
 
   postgresql:
     parameters:
-      shared_buffers: {{ .Values.postgres.parameters.shared_buffers | quote }}
+      {{- range $name, $value := .Values.postgres.parameters }}
+      {{ $name }}: {{ $value | quote }}
+      {{- end }}
 
   bootstrap:
     initdb:
