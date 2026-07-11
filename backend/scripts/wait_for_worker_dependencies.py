@@ -6,6 +6,11 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    # Helm invokes this file directly, so include the backend package root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.wait_for_database import wait_for_writable_database
 from scripts.wait_for_redis_sentinel import (
