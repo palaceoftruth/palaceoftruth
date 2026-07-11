@@ -926,7 +926,7 @@ def test_create_memory_entry_returns_duplicate_replay_metadata() -> None:
     assert asyncio.run(scenario()) == replay_payload
 
 
-def test_create_memory_entry_preserves_structured_duplicate_conflict_error() -> None:
+def test_palace_remember_preserves_structured_duplicate_conflict_error() -> None:
     detail = {
         "status": "duplicate_conflict",
         "contract_status": "rejected",
@@ -966,10 +966,12 @@ def test_create_memory_entry_preserves_structured_duplicate_conflict_error() -> 
                     lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
                 )
             )
-            await create_memory_entry(
+            await palace_remember(
                 title="Duplicate conflict",
                 body="Changed body.",
                 ctx=ctx,
+                scope_type="agent",
+                scope_key="codex",
                 idempotency_key="same-request",
             )
 
@@ -1605,29 +1607,71 @@ def test_palace_remember_alias_uses_configured_default_scope() -> None:
     assert "Use Palace as the primary memory path" not in json.dumps(audit_payload)
 
 
-def test_palace_remember_alias_without_configured_scope_defaults_to_tenant_shared() -> None:
+@pytest.mark.parametrize(
+    ("scope_type", "scope_key", "expected_scope"),
+    [
+        ("agent", "codex", {"type": "agent", "key": "codex"}),
+        ("workspace", "palaceoftruth", {"type": "workspace", "key": "palaceoftruth"}),
+        ("session", "run-1073", {"type": "session", "key": "run-1073"}),
+        ("tenant_shared", None, {"type": "tenant_shared"}),
+    ],
+)
+def test_palace_remember_explicit_scope_overrides_configured_default(
+    scope_type: str,
+    scope_key: str | None,
+    expected_scope: dict[str, str],
+) -> None:
     seen_entry: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/memory/whoami":
             return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
         if request.url.path == "/api/v1/memory/entries":
-            payload = json.loads(request.content.decode())
-            seen_entry.update(payload)
-            return httpx.Response(
-                202,
-                json={
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "status": "queued",
-                    "scope": payload["scope"],
-                    "accepted_as": "canonical",
-                },
-            )
+            seen_entry.update(json.loads(request.content.decode()))
+            return httpx.Response(202, json={"status": "queued", "scope": expected_scope})
         if request.url.path == "/api/v1/memory/mcp/audit":
             return httpx.Response(201, json={"status": "recorded"})
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    default_scope_type="agent",
+                    default_scope_key="iris",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            await palace_remember(
+                title="Scoped note",
+                body="Explicit scope must override the configured destination.",
+                ctx=ctx,
+                scope_type=scope_type,  # type: ignore[arg-type]
+                scope_key=scope_key,
+            )
+
+    asyncio.run(scenario())
+    assert seen_entry["scope"] == expected_scope
+
+
+def test_palace_remember_alias_without_configured_scope_rejects_without_a_write() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        raise AssertionError(f"No API request is expected: {request.url.path}")
+
+    async def scenario() -> dict[str, object]:
         async with httpx.AsyncClient(
             base_url="https://api.palaceoftruth.test",
             transport=httpx.MockTransport(handler),
@@ -1644,15 +1688,21 @@ def test_palace_remember_alias_without_configured_scope_defaults_to_tenant_share
                     lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
                 )
             )
-            await palace_remember(
+            return await palace_remember(
                 title="Shared note",
-                body="No adapter default means tenant_shared.",
+                body="No adapter default must be rejected.",
                 ctx=ctx,
             )
 
-    asyncio.run(scenario())
-
-    assert seen_entry["scope"] == {"type": "tenant_shared"}
+    assert asyncio.run(scenario()) == {
+        "status": "rejected",
+        "contract_status": "rejected",
+        "reason_code": "scope_not_configured",
+        "retryable": False,
+        "message": "palace_remember requires an explicit scope_type and scope_key, or a complete configured default scope; tenant_shared must be explicit",
+        "field": "scope_type",
+    }
+    assert seen_paths == []
 
 
 def test_create_memory_entry_uses_configured_default_scope_when_omitted() -> None:
@@ -1731,28 +1781,14 @@ def test_create_memory_entry_requires_scope_type_when_only_scope_key_is_provided
     asyncio.run(scenario())
 
 
-def test_palace_remember_preserves_scope_key_only_agent_fallback() -> None:
-    seen_entry: dict[str, object] = {}
+def test_palace_remember_rejects_scope_key_only_without_a_write() -> None:
+    seen_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/memory/whoami":
-            return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
-        if request.url.path == "/api/v1/memory/entries":
-            seen_entry.update(json.loads(request.content.decode()))
-            return httpx.Response(
-                202,
-                json={
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "status": "queued",
-                    "scope": {"type": "agent", "key": "alice"},
-                    "accepted_as": "canonical",
-                },
-            )
-        if request.url.path == "/api/v1/memory/mcp/audit":
-            return httpx.Response(201, json={"status": "recorded"})
-        raise AssertionError(f"Unexpected path: {request.url.path}")
+        seen_paths.append(request.url.path)
+        raise AssertionError(f"No API request is expected: {request.url.path}")
 
-    async def scenario() -> None:
+    async def scenario() -> dict[str, object]:
         async with httpx.AsyncClient(
             base_url="https://api.palaceoftruth.test",
             transport=httpx.MockTransport(handler),
@@ -1766,11 +1802,12 @@ def test_palace_remember_preserves_scope_key_only_agent_fallback() -> None:
                     lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
                 )
             )
-            await palace_remember(title="Agent note", body="Scope key only.", ctx=ctx, scope_key="alice")
+            return await palace_remember(title="Agent note", body="Scope key only.", ctx=ctx, scope_key="alice")
 
-    asyncio.run(scenario())
-
-    assert seen_entry["scope"] == {"type": "agent", "key": "alice"}
+    result = asyncio.run(scenario())
+    assert result["reason_code"] == "scope_not_configured"
+    assert result["retryable"] is False
+    assert seen_paths == []
 
 
 def test_get_wakeup_brief_calls_memory_facade_with_scope() -> None:
@@ -2982,49 +3019,14 @@ def test_palace_remember_bulk_posts_batch_entries_with_temporal_fields() -> None
     assert entries[0]["fact_kind"] == "world"
 
 
-def test_palace_remember_bulk_key_only_default_scope_uses_agent_scope() -> None:
-    seen_payload: dict[str, object] = {}
+def test_palace_remember_bulk_rejects_key_only_default_scope_without_a_write() -> None:
+    seen_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/memory/whoami":
-            return httpx.Response(200, json={"tenant_id": "tenant-a"})
-        if request.url.path == "/api/v1/memory/entries:batch":
-            seen_payload.update(json.loads(request.content.decode()))
-            return httpx.Response(
-                202,
-                json={
-                    "status": "accepted",
-                    "accepted": 1,
-                    "failed": 0,
-                    "poll_after_seconds": 5,
-                    "retryable": False,
-                    "results": [
-                        {
-                            "index": 0,
-                            "status": "queued",
-                            "contract_status": "queued",
-                            "retryable": False,
-                            "job_id": "550e8400-e29b-41d4-a716-446655440061",
-                            "accepted_as": "memory_entry",
-                            "source_item_id": "550e8400-e29b-41d4-a716-446655440062",
-                            "scope": {"type": "agent", "key": "iris"},
-                        }
-                    ],
-                },
-            )
-        if request.url.path == "/api/v1/memory/mcp/audit":
-            return httpx.Response(
-                201,
-                json={
-                    "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
-                    "client_id": "550e8400-e29b-41d4-a716-446655440002",
-                    "tenant_id": "tenant-a",
-                    "status": "recorded",
-                },
-            )
-        raise AssertionError(f"Unexpected path: {request.url.path}")
+        seen_paths.append(request.url.path)
+        raise AssertionError(f"No API request is expected: {request.url.path}")
 
-    async def scenario() -> None:
+    async def scenario() -> dict[str, object]:
         async with httpx.AsyncClient(
             base_url="https://api.palaceoftruth.test",
             transport=httpx.MockTransport(handler),
@@ -3041,7 +3043,7 @@ def test_palace_remember_bulk_key_only_default_scope_uses_agent_scope() -> None:
                     lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
                 )
             )
-            await palace_remember_bulk(
+            return await palace_remember_bulk(
                 entries=[
                     {
                         "title": "Iris state",
@@ -3052,10 +3054,10 @@ def test_palace_remember_bulk_key_only_default_scope_uses_agent_scope() -> None:
                 default_scope_key="iris",
             )
 
-    asyncio.run(scenario())
-    entries = seen_payload["entries"]
-    assert isinstance(entries, list)
-    assert entries[0]["scope"] == {"type": "agent", "key": "iris"}
+    result = asyncio.run(scenario())
+    assert result["reason_code"] == "scope_not_configured"
+    assert result["retryable"] is False
+    assert seen_paths == []
 
 
 def test_palace_remember_bulk_does_not_inherit_default_key_for_tenant_shared_entry() -> None:

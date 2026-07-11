@@ -276,6 +276,71 @@ def _resolve_write_scope(
     return resolved_type, resolved_key
 
 
+def _scope_not_configured_outcome(*, field_name: str = "scope_type") -> dict[str, Any]:
+    """Return the stable, non-retryable contract for missing agent-write scope."""
+    return {
+        "status": "rejected",
+        "contract_status": "rejected",
+        "reason_code": "scope_not_configured",
+        "retryable": False,
+        "message": (
+            "palace_remember requires an explicit scope_type and scope_key, "
+            "or a complete configured default scope; tenant_shared must be explicit"
+        ),
+        "field": field_name,
+    }
+
+
+def _resolve_remember_scope(
+    settings: "SecondBrainMcpSettings",
+    *,
+    scope_type: ScopeType | None,
+    scope_key: str | None,
+) -> tuple[ScopeType, str | None] | dict[str, Any]:
+    """Resolve agent-facing write scope without inferring shared or keyed destinations."""
+    if scope_type is not None:
+        _build_scope(scope_type, scope_key)
+        return scope_type, scope_key
+    if scope_key is not None:
+        return _scope_not_configured_outcome(field_name="scope_type")
+    if settings.default_scope_type is None:
+        return _scope_not_configured_outcome()
+    _build_scope(settings.default_scope_type, settings.default_scope_key)
+    return settings.default_scope_type, settings.default_scope_key
+
+
+def _resolve_remember_bulk_scope(
+    settings: "SecondBrainMcpSettings",
+    *,
+    entries: list[dict[str, Any]],
+    default_scope_type: ScopeType | None,
+    default_scope_key: str | None,
+) -> tuple[ScopeType, str | None] | dict[str, Any]:
+    """Resolve the batch default without allowing any entry to infer a destination."""
+    for raw_entry in entries:
+        if isinstance(raw_entry, dict) and raw_entry.get("scope_key") is not None and raw_entry.get("scope_type") is None:
+            return _scope_not_configured_outcome(field_name="entries[].scope_type")
+
+    if default_scope_type is not None or default_scope_key is not None or settings.default_scope_type is not None:
+        return _resolve_remember_scope(
+            settings,
+            scope_type=default_scope_type,
+            scope_key=default_scope_key,
+        )
+
+    first_explicit_scope: tuple[ScopeType, str | None] | None = None
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict) or raw_entry.get("scope_type") is None:
+            return _scope_not_configured_outcome()
+        entry_scope_type = cast(ScopeType, raw_entry["scope_type"])
+        entry_scope_key = cast(str | None, raw_entry.get("scope_key"))
+        _build_scope(entry_scope_type, entry_scope_key)
+        if first_explicit_scope is None:
+            first_explicit_scope = (entry_scope_type, entry_scope_key)
+
+    return first_explicit_scope or _scope_not_configured_outcome()
+
+
 def _env_truthy(names: tuple[str, ...]) -> bool:
     raw, _ = _env_value(names)
     if raw is None:
@@ -2782,15 +2847,21 @@ async def palace_remember(
     enable_ai_enrichment: bool = False,
     relationship_policy: str = "immediate",
 ) -> dict[str, Any]:
-    """Convenience alias for durable Palace memory write-back."""
+    """Write durable memory only to an explicit or configured scoped destination.
+
+    Returns ``scope_not_configured`` with ``retryable=false`` without writing when
+    no complete destination is supplied. ``tenant_shared`` is allowed only when
+    requested explicitly with ``scope_type=\"tenant_shared\"``.
+    """
     runtime = _runtime(ctx)
-    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+    resolved_scope = _resolve_remember_scope(
         runtime.settings,
         scope_type=scope_type,
         scope_key=scope_key,
-        fallback_scope_type="agent" if scope_key is not None else "tenant_shared",
-        fallback_scope_key=None,
     )
+    if isinstance(resolved_scope, dict):
+        return resolved_scope
+    resolved_scope_type, resolved_scope_key = resolved_scope
     return await create_memory_entry(
         title=title,
         body=body,
@@ -2824,15 +2895,21 @@ async def palace_remember_bulk(
     default_scope_key: str | None = None,
     default_relationship_policy: str = "immediate",
 ) -> dict[str, Any]:
-    """Batch durable Palace memory writes, including optional temporal retention fields per entry."""
+    """Batch durable memory writes only with explicit or configured destinations.
+
+    Returns ``scope_not_configured`` with ``retryable=false`` before any write
+    when the batch default or an entry relies on scope-key-only inference.
+    """
     runtime = _runtime(ctx)
-    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+    resolved_scope = _resolve_remember_bulk_scope(
         runtime.settings,
-        scope_type=default_scope_type,
-        scope_key=default_scope_key,
-        fallback_scope_type="agent" if default_scope_key is not None else "tenant_shared",
-        fallback_scope_key=None,
+        entries=entries,
+        default_scope_type=default_scope_type,
+        default_scope_key=default_scope_key,
     )
+    if isinstance(resolved_scope, dict):
+        return resolved_scope
+    resolved_scope_type, resolved_scope_key = resolved_scope
     return await _run_mcp_operation(
         ctx,
         operation="create_memory_entries_batch",

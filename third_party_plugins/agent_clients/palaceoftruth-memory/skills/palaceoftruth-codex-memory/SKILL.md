@@ -124,8 +124,11 @@ Never store raw secrets, API keys, bearer tokens, client secrets, private
 transcript text, sensitive user content, or unredacted credential locations.
 
 Use `palace_remember` for concise durable write-back only when the adapter's
-configured default scope is the desired target, or pass `scope_type` and
-`scope_key` explicitly. The wrapper uses `source="codex"` and
+configured default scope is the desired target, or pass both `scope_type` and
+`scope_key` explicitly. Calls without either complete destination return the
+non-retryable `scope_not_configured` contract and do not write; scope-key-only
+agent inference is unsupported. `tenant_shared` requires an explicit
+`scope_type="tenant_shared"` request. The wrapper uses `source="codex"` and
 `created_by_role="agent"` defaults, but it must not be treated as an
 `agent/codex` scope override when a host such as Iris is configured for
 `agent/iris`.
