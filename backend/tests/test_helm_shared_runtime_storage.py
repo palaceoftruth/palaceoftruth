@@ -341,6 +341,7 @@ def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
     args = job["spec"]["template"]["spec"]["containers"][0]["args"]
     assert _arg_value(args, "--dependency-timeout-seconds") == "300"
     assert _arg_value(args, "--dependency-interval-seconds") == "5"
+    assert _arg_value(args, "--log-tail-lines") == "3000"
 
 
 def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_identity() -> None:
