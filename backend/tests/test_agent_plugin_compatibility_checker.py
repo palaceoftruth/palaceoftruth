@@ -93,7 +93,7 @@ def test_real_package_reports_codex_clawhub_first_and_openclaw_deferred() -> Non
 
     targets = {target["target"]: target for target in report["targets"]}
     assert targets["codex-plugin"]["supported"] is True
-    assert targets["codex-plugin"]["source_metadata"]["version"] == "0.1.0"
+    assert targets["codex-plugin"]["source_metadata"]["version"] == "0.2.0"
     assert targets["codex-plugin"]["relative_paths"] == {
         "skills": "./skills/",
         "mcpServers": "./.mcp.json",

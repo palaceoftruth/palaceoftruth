@@ -1,6 +1,6 @@
 {
   "name": "palaceoftruth-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Install Palace of Truth as a scoped MCP memory adapter for Codex agents.",
   "author": {
     "name": "Palace of Truth contributors",

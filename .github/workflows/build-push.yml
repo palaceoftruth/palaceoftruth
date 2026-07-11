@@ -38,6 +38,8 @@ jobs:
             tests/test_main_startup.py \
             tests/test_database_health.py \
             tests/test_detect_hermes_plugin_release.py \
+            tests/test_agent_plugin_release.py \
+            tests/test_agent_plugin_manifests.py \
             tests/test_retrieval_replay.py \
             -q
           uv run --python 3.12 python ../scripts/check_database_health.py
@@ -124,10 +126,12 @@ jobs:
           else
             CHANGED=false
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "asset_base=${ASSET_BASE}" >> "$GITHUB_OUTPUT"
-          echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "asset_base=${ASSET_BASE}"
+            echo "changed=${CHANGED}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -150,10 +154,12 @@ jobs:
             echo "Failed to read release coordinates from chart metadata" >&2
             exit 1
           fi
-          echo "chart_name=${CHART_NAME}" >> "$GITHUB_OUTPUT"
-          echo "backend_image=${{ env.REGISTRY_HOST }}/${BACKEND_REPO}" >> "$GITHUB_OUTPUT"
-          echo "frontend_image=${{ env.REGISTRY_HOST }}/${FRONTEND_REPO}" >> "$GITHUB_OUTPUT"
-          echo "hermes_plugin_image=${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}/hermes-memory-plugin" >> "$GITHUB_OUTPUT"
+          {
+            echo "chart_name=${CHART_NAME}"
+            echo "backend_image=${{ env.REGISTRY_HOST }}/${BACKEND_REPO}"
+            echo "frontend_image=${{ env.REGISTRY_HOST }}/${FRONTEND_REPO}"
+            echo "hermes_plugin_image=${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}/hermes-memory-plugin"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -241,6 +247,73 @@ jobs:
             "/tmp/hermes-plugin-release/${HERMES_PLUGIN_ASSET_BASE}.sha256" \
             --title "Hermes Memory Plugin v${HERMES_PLUGIN_VERSION}" \
             --notes-file /tmp/hermes-plugin-release/RELEASE_NOTES.md
+
+  publish-agent-plugin:
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect agent-client plugin release inputs
+        id: release
+        run: |
+          VERSION=$(python3 scripts/package_agent_memory_plugin.py --print-version)
+          BEFORE="${{ github.event.before }}"
+          CHANGED=$(python3 scripts/detect_agent_plugin_release.py --before "$BEFORE" --after "$GITHUB_SHA")
+          {
+            echo "version=${VERSION}"
+            echo "tag=agent-memory-plugin-v${VERSION}"
+            echo "asset_base=palaceoftruth-agent-memory-plugin-v${VERSION}"
+            echo "changed=${CHANGED}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package deterministic release assets
+        if: steps.release.outputs.changed == 'true'
+        run: |
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA") \
+            python3 scripts/package_agent_memory_plugin.py --output-dir /tmp/agent-plugin-release
+
+      - name: Create immutable agent-client release
+        if: steps.release.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          ASSET_BASE: ${{ steps.release.outputs.asset_base }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Bump both agent-client plugin manifests before merging package changes." >&2
+            exit 1
+          fi
+          cat > /tmp/agent-plugin-release/RELEASE_NOTES.md <<EOF
+          Palace agent-client memory plugin release.
+
+          Version: ${VERSION}
+          Commit: ${GITHUB_SHA}
+          Install marketplace: palaceoftruth/palaceoftruth at ${TAG}
+          Verify the published SHA-256 file before installation.
+          EOF
+          gh release create "$TAG" \
+            "/tmp/agent-plugin-release/${ASSET_BASE}.tar.gz" \
+            "/tmp/agent-plugin-release/${ASSET_BASE}.zip" \
+            "/tmp/agent-plugin-release/${ASSET_BASE}.json" \
+            "/tmp/agent-plugin-release/${ASSET_BASE}.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "Palace Agent Memory Plugin v${VERSION}" \
+            --notes-file /tmp/agent-plugin-release/RELEASE_NOTES.md
+          TAG_SHA=$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{print $1}')
+          if [ -z "$TAG_SHA" ]; then
+            TAG_SHA=$(git ls-remote origin "refs/tags/${TAG}" | awk '{print $1}')
+          fi
+          if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "Release tag $TAG resolved to $TAG_SHA, expected $GITHUB_SHA." >&2
+            exit 1
+          fi
 
   publish-chart:
     needs: build-push
