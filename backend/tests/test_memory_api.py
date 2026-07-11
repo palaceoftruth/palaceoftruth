@@ -15,7 +15,7 @@ from app.auth import verify_memory_auth
 from app.database import get_db
 from app.main import app as main_app
 from app.models.item import Item
-from app.models.job import Job
+from app.models.job import Job, JobAttempt
 from app.schemas.memory import (
     AgentMemoryRetrieveRequest,
     AgentMemoryRetrieveResponse,
@@ -64,8 +64,9 @@ class FakeSession:
         self.mcp_audit_events = []
         self.executed = []
         self.commits = 0
+        self.attempts: list[JobAttempt] = []
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         return self.jobs.get(key)
 
     async def scalar(self, statement):
@@ -77,6 +78,11 @@ class FakeSession:
     async def execute(self, statement, params=None):
         params = params or {}
         raw_sql = str(statement).lower()
+        if "from job_attempts" in raw_sql:
+            if "coalesce(max" in raw_sql:
+                return _ScalarResult(max((a.attempt_number for a in self.attempts), default=0) + 1)
+            active = [a for a in self.attempts if a.status in {"queued", "processing"}]
+            return _ScalarsResult(active)
         if "insert into mcp_clients" in raw_sql:
             row = next(
                 (
@@ -138,6 +144,15 @@ class FakeSession:
     async def refresh(self, _value) -> None:
         return None
 
+    def add(self, value) -> None:
+        if isinstance(value, JobAttempt):
+            if value.id is None:
+                value.id = uuid.uuid4()
+            self.attempts.append(value)
+
+    async def flush(self) -> None:
+        return None
+
 
 class _ScalarResult:
     def __init__(self, value: int) -> None:
@@ -156,6 +171,12 @@ class _ScalarsResult:
 
     def all(self):
         return self.values
+
+    def scalar_one_or_none(self):
+        return self.values[0] if self.values else None
+
+    def first(self):
+        return self.values[0] if self.values else None
 
 
 class _MappingRows:
@@ -301,7 +322,7 @@ def _agent_memory_result(
         summary=None,
         source_type="note",
         source_url=None,
-        tags=[f"scope-agent", f"agent-{agent_key}"],
+        tags=["scope-agent", f"agent-{agent_key}"],
         retrieved_scope_type="agent",
         retrieved_scope_key=agent_key,
         retrieved_scope_label=f"agent/{agent_key}",
@@ -1801,6 +1822,39 @@ def test_memory_job_retry_requeues_failed_job() -> None:
             {"job_id": str(job_id), "_job_id": f"memory-artifact:{job_id}:3"},
         )
     ]
+
+
+def test_memory_job_retry_can_retry_again_after_enqueue_failure() -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    item = SimpleNamespace(id=item_id, raw_content="Recovered note", status="failed", updated_at=None)
+    job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type=MEMORY_JOB_TYPE,
+        tenant_id="tenant-a",
+        status="failed",
+        progress=100,
+        payload={"contract_status": "dependency_unavailable"},
+        created_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+    )
+    session = FakeSession(jobs={job_id: job, item_id: item})
+    client = _build_app(session)
+    client.app.state.arq_pool.raise_on_enqueue = RuntimeError("redis unavailable")
+
+    failed = client.post(f"/api/v1/memory/jobs/{job_id}/retry")
+
+    assert failed.status_code == 503
+    assert session.attempts[0].status == "failed"
+    assert session.attempts[0].failure_kind == "enqueue_failed"
+
+    client.app.state.arq_pool.raise_on_enqueue = None
+    retried = client.post(f"/api/v1/memory/jobs/{job_id}/retry")
+
+    assert retried.status_code == 200
+    assert len(session.attempts) == 2
+    assert session.attempts[1].status == "queued"
 
 
 @pytest.mark.asyncio

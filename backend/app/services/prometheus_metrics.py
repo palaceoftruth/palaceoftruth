@@ -31,6 +31,15 @@ _JOB_TYPE_LABEL_ALLOWLIST = frozenset(
     {"memory_artifact", "note", "doc", "pdf", "webpage", "youtube", "feed", "image", "media", "bundle"}
 )
 _JOB_STATUS_LABEL_ALLOWLIST = frozenset({"queued", "processing", "completed", "failed", "duplicate"})
+_JOB_ATTEMPT_STATUS_LABEL_ALLOWLIST = frozenset(
+    {"queued", "processing", "completed", "failed", "dead_lettered"}
+)
+_JOB_ATTEMPT_TRIGGER_LABEL_ALLOWLIST = frozenset(
+    {"initial", "arq_retry", "manual_retry", "stale_recovery"}
+)
+_JOB_FAILURE_KIND_LABEL_ALLOWLIST = frozenset(
+    {"worker_error", "worker_cancelled", "enqueue_failed", "non_retryable", "max_attempts"}
+)
 _SOURCE_KIND_LABEL_ALLOWLIST = frozenset({"http"})
 _SOURCE_STATUS_LABEL_ALLOWLIST = frozenset({"active", "unreachable", "gone", "paused"})
 
@@ -362,6 +371,55 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
             ),
             label_columns=("status",),
         )
+        attempt_rows = await _query_rows(
+            db,
+            """
+            SELECT j.job_type, a.status, a.trigger, a.failure_kind, COUNT(*) AS count
+            FROM job_attempts a
+            JOIN jobs j ON j.id = a.job_id
+            GROUP BY j.job_type, a.status, a.trigger, a.failure_kind
+            """,
+        )
+        attempt_counts: dict[tuple[str, str, str], int] = defaultdict(int)
+        recovery_counts: dict[tuple[str, str], int] = defaultdict(int)
+        dead_letter_counts: dict[tuple[str, str], int] = defaultdict(int)
+        for row in attempt_rows:
+            job_type = _allowlisted_label(row["job_type"], _JOB_TYPE_LABEL_ALLOWLIST)
+            status = _allowlisted_label(row["status"], _JOB_ATTEMPT_STATUS_LABEL_ALLOWLIST)
+            trigger = _allowlisted_label(row["trigger"], _JOB_ATTEMPT_TRIGGER_LABEL_ALLOWLIST)
+            count = int(row["count"] or 0)
+            attempt_counts[(job_type, status, trigger)] += count
+            if trigger == "stale_recovery":
+                recovery_counts[(job_type, status)] += count
+            if status == "dead_lettered":
+                failure_kind = _allowlisted_label(
+                    row["failure_kind"], _JOB_FAILURE_KIND_LABEL_ALLOWLIST
+                )
+                dead_letter_counts[(job_type, failure_kind)] += count
+        for (job_type, status, trigger), count in sorted(attempt_counts.items()):
+            builder.metric(
+                "palace_job_attempts",
+                "Durable job attempts by bounded type, status, and trigger.",
+                "gauge",
+                count,
+                {"job_type": job_type, "status": status, "trigger": trigger},
+            )
+        for (job_type, outcome), count in sorted(recovery_counts.items()):
+            builder.metric(
+                "palace_job_recoveries",
+                "Durable stale-recovery attempts by bounded type and outcome.",
+                "gauge",
+                count,
+                {"job_type": job_type, "outcome": outcome},
+            )
+        for (job_type, failure_kind), count in sorted(dead_letter_counts.items()):
+            builder.metric(
+                "palace_job_dead_letters",
+                "Durable dead-lettered attempts by bounded type and failure class.",
+                "gauge",
+                count,
+                {"job_type": job_type, "failure_kind": failure_kind},
+            )
         job_age_rows = await _query_rows(
                 db,
                 """

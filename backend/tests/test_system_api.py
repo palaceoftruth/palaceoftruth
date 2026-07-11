@@ -91,6 +91,14 @@ class StatsSession:
 class MetricsSession:
     async def execute(self, statement):
         sql = str(statement).lower()
+        if "from job_attempts" in sql:
+            return _MappingsResult(
+                [
+                    {"job_type": "memory_artifact", "status": "completed", "trigger": "initial", "failure_kind": None, "count": 4},
+                    {"job_type": "memory_artifact", "status": "dead_lettered", "trigger": "manual_retry", "failure_kind": "non_retryable", "count": 1},
+                    {"job_type": "private-job", "status": "failed", "trigger": "private-trigger", "failure_kind": "private-error", "count": 2},
+                ]
+            )
         if "from jobs" in sql and "where job_type = 'memory_artifact'" in sql:
             return _MappingsResult([{"status": "queued", "count": 3}, {"status": "failed", "count": 1}])
         if "from jobs" in sql and "where webhook_url is not null" in sql:

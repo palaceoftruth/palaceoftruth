@@ -10,7 +10,7 @@ import pytest
 from app.embedding_profile import resolve_embedding_profile
 from app.models.embedding import Embedding
 from app.models.item import Item
-from app.models.job import Job, JobProgressEvent
+from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.pipelines.base import BasePipeline, stable_merge_tags
 from app.pipelines.youtube import MediaPendingAvailabilityError, MediaPipeline, MediaTranscriptionLimitError, TranscriptionChunk
 from app.pipelines.youtube import _render_transcript
@@ -112,10 +112,11 @@ class FakePipelineSession:
         self.rollbacks = 0
         self.progress_events: list[JobProgressEvent] = []
         self.embeddings: list[Embedding] = []
+        self.attempts: list[JobAttempt] = []
         self.scalar_values: list[object | None] = []
         self.scalar_statements: list[str] = []
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         if model is Job:
             return self.job if key == self.job.id else None
         if model is Item:
@@ -135,7 +136,14 @@ class FakePipelineSession:
         return None
 
     async def execute(self, statement):
-        if "SELECT DISTINCT unnest(tags)" in str(statement):
+        sql = str(statement)
+        if "FROM job_attempts" in sql:
+            if "coalesce(max" in sql.lower():
+                return FakeScalarResult(max((a.attempt_number for a in self.attempts), default=0) + 1)
+            return FakeAttemptResult(
+                [a for a in self.attempts if a.status in {"queued", "processing"}]
+            )
+        if "SELECT DISTINCT unnest(tags)" in sql:
             return FakeTagResult([])
         return FakeProgressEventResult(self.progress_events)
 
@@ -149,6 +157,11 @@ class FakePipelineSession:
         if isinstance(value, Embedding):
             self.embeddings.append(value)
             return
+        if isinstance(value, JobAttempt):
+            if value.id is None:
+                value.id = uuid.uuid4()
+            self.attempts.append(value)
+            return
         raise AssertionError(f"Unexpected added model: {type(value)!r}")
 
 
@@ -161,6 +174,28 @@ class FakeProgressEventResult:
 
     def all(self):
         return [event.id for event in self.events if event.id is not None]
+
+
+class FakeAttemptResult:
+    def __init__(self, attempts):
+        self.attempts = attempts
+
+    def scalar_one_or_none(self):
+        return self.attempts[0] if self.attempts else None
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.attempts[0] if self.attempts else None
+
+
+class FakeScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
 
 
 class FakeTagResult:
@@ -885,6 +920,28 @@ async def test_base_pipeline_marks_cancelled_job_terminal_and_retryable() -> Non
     assert job.error_message == "Worker cancelled the job before completion"
     assert job.completed_at is not None
     assert item.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_base_pipeline_dead_letters_non_retryable_failure() -> None:
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    item = Item(id=item_id, tenant_id="tenant-a", title="Bad media", source_type="media", status="processing")
+    job = Job(id=job_id, item_id=item_id, job_type="media", tenant_id="tenant-a", status="queued", progress=0)
+    session = FakePipelineSession(job=job, item=item)
+
+    class NonRetryableError(RuntimeError):
+        retryable = False
+
+    class TerminalPipeline(BasePipeline):
+        async def extract(self, **_kwargs):
+            raise NonRetryableError("provider rejected input")
+
+    with pytest.raises(NonRetryableError):
+        await TerminalPipeline(session, object(), object()).process(job_id, tenant_id="tenant-a")
+
+    assert session.attempts[0].status == "dead_lettered"
+    assert session.attempts[0].failure_kind == "non_retryable"
 
 
 @pytest.mark.asyncio

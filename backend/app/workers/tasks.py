@@ -692,6 +692,19 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
             row_payload = locked_payload
             item = await db.get(Item, job.item_id) if job.item_id else None
             if item is None or not item.raw_content:
+                from app.services.job_attempts import (
+                    active_job_attempt,
+                    mark_job_attempt_dead_lettered,
+                )
+
+                previous_attempt = await active_job_attempt(db, job_id=job.id)
+                if previous_attempt is not None:
+                    await mark_job_attempt_dead_lettered(
+                        db,
+                        attempt_id=previous_attempt.id,
+                        failure_kind="non_retryable",
+                        error="Stale memory job lost its source note content",
+                    )
                 job.status = "failed"
                 job.error_message = "Stale memory job lost its source note content and cannot be retried"
                 job.completed_at = datetime.now(timezone.utc)
@@ -699,6 +712,31 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
                 await maybe_dispatch_webhook(ctx["redis"], job_id)
                 continue
 
+            from app.services.job_attempts import (
+                active_job_attempt,
+                create_job_attempt,
+                mark_job_attempt_failed,
+            )
+
+            previous_attempt = await active_job_attempt(db, job_id=job.id)
+            if previous_attempt is not None:
+                await mark_job_attempt_failed(
+                    db,
+                    attempt_id=previous_attempt.id,
+                    failure_kind="worker_cancelled",
+                    error="Stale worker attempt recovered after ARQ state disappeared",
+                )
+            recovery_attempt = await create_job_attempt(
+                db,
+                job_id=job.id,
+                tenant_id=job.tenant_id,
+                trigger="stale_recovery",
+                arq_job_id=arq_job_id,
+                recovered_from_id=previous_attempt.id if previous_attempt else None,
+            )
+            # Persist recovery intent before publishing so an executing ARQ job
+            # can never outrun its durable lineage record.
+            await db.commit()
             try:
                 enqueued = await ctx["redis"].enqueue_job(
                     "memory_artifact",
@@ -706,15 +744,29 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
                     _job_id=arq_job_id,
                 )
             except Exception as exc:
+                await mark_job_attempt_failed(
+                    db,
+                    attempt_id=recovery_attempt.id,
+                    failure_kind="enqueue_failed",
+                    error=exc,
+                )
+                await db.commit()
                 logger.warning(
-                    "recover_stale_memory_jobs: enqueue failed for ARQ job %s; leaving DB row unchanged: %s",
+                    "recover_stale_memory_jobs: enqueue failed for ARQ job %s; recovery attempt recorded: %s",
                     arq_job_id,
                     exc,
                 )
                 continue
             if enqueued is None:
+                await mark_job_attempt_failed(
+                    db,
+                    attempt_id=recovery_attempt.id,
+                    failure_kind="enqueue_failed",
+                    error="ARQ job id already exists",
+                )
+                await db.commit()
                 logger.info(
-                    "recover_stale_memory_jobs: ARQ job %s appeared during recovery; leaving DB row unchanged",
+                    "recover_stale_memory_jobs: ARQ job %s appeared during recovery; attempt recorded",
                     arq_job_id,
                 )
                 continue

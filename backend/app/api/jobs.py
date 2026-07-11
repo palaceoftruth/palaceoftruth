@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import require_api_capability, verify_capture_job_read_auth
 from app.database import get_db
 from app.models.item import Item
-from app.models.job import Job, JobProgressEvent
-from app.schemas.job import JobProgressEventResponse, JobResponse, JobListResponse
+from app.models.job import Job, JobAttempt, JobProgressEvent
+from app.schemas.job import JobAttemptResponse, JobProgressEventResponse, JobResponse, JobListResponse
+from app.services.job_attempts import create_job_attempt, mark_job_attempt_failed
 from app.services.job_progress import record_job_progress_event
 from app.utils.job_payloads import load_retry_task_from_payload
 from app.utils.webhook import maybe_dispatch_webhook
@@ -68,6 +69,15 @@ async def _job_response(db: AsyncSession, job: Job, tenant_id: str) -> JobRespon
     response = JobResponse.model_validate(job)
     events = await _recent_progress_events(db, job_ids=[job.id], tenant_id=tenant_id)
     response.recent_progress_events = events.get(job.id, [])
+    attempts = (
+        await db.execute(
+            select(JobAttempt)
+            .where(JobAttempt.job_id == job.id, JobAttempt.tenant_id == tenant_id)
+            .order_by(JobAttempt.attempt_number.desc())
+            .limit(8)
+        )
+    ).scalars().all()
+    response.recent_attempts = [JobAttemptResponse.model_validate(row) for row in attempts]
     return response
 
 
@@ -275,7 +285,9 @@ async def retry_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Depe
     job.error_message = None
     job.completed_at = None
     job.duplicate_of = None
-    job.created_at = datetime.now(timezone.utc)
+    attempt = await create_job_attempt(
+        db, job_id=job.id, tenant_id=job.tenant_id, trigger="manual_retry"
+    )
     if item:
         item.status = "processing"
     await record_job_progress_event(
@@ -292,6 +304,9 @@ async def retry_job(job_id: uuid.UUID, request: Request, db: AsyncSession = Depe
     except Exception as exc:
         logger.exception("retry enqueue failed for job %s", job_id)
         try:
+            await mark_job_attempt_failed(
+                db, attempt_id=attempt.id, failure_kind="enqueue_failed", error=exc
+            )
             await _restore_retry_state(
                 db=db,
                 job=job,

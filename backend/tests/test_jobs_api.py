@@ -9,18 +9,19 @@ from app.api.jobs import router
 from app.auth import AuthContext, verify_capture_job_read_auth, verify_memory_auth
 from app.database import get_db
 from app.models.item import Item
-from app.models.job import Job, JobProgressEvent
+from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_FAIR_DISPATCH_TASK_NAME, singleton_job_id
 
 
 class FakeSession:
-    def __init__(self, jobs=None, items=None, progress_events=None) -> None:
+    def __init__(self, jobs=None, items=None, progress_events=None, attempts=None) -> None:
         self.jobs = jobs or {}
         self.items = items or {}
         self.progress_events = progress_events or []
+        self.attempts = attempts or []
         self.commits = 0
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         if model is Job:
             return self.jobs.get(key)
         if model is Item:
@@ -34,11 +35,25 @@ class FakeSession:
         return None
 
     async def execute(self, statement):
+        sql = str(statement)
+        if "FROM job_attempts" in sql:
+            if "coalesce(max" in sql.lower():
+                return FakeResult([max((a.attempt_number for a in self.attempts), default=0) + 1])
+            return FakeResult(self.attempts)
         return FakeResult(self.progress_events)
 
     def add(self, value) -> None:
         if isinstance(value, JobProgressEvent):
             self.progress_events.append(value)
+        elif isinstance(value, JobAttempt):
+            if value.id is None:
+                value.id = uuid.uuid4()
+            if value.created_at is None:
+                value.created_at = datetime.now(timezone.utc)
+            self.attempts.append(value)
+
+    async def flush(self) -> None:
+        return None
 
 
 class FakeResult:
@@ -50,6 +65,12 @@ class FakeResult:
 
     def all(self):
         return self.rows
+
+    def scalar_one_or_none(self):
+        return self.rows[0] if self.rows else None
+
+    def scalar_one(self):
+        return self.rows[0]
 
 
 class FakeArqPool:
@@ -377,7 +398,7 @@ def test_retry_requeues_cancelled_media_with_current_item_source_url_and_model()
     assert job.progress == 0
     assert job.error_message is None
     assert job.completed_at is None
-    assert job.created_at > stale_created_at
+    assert job.created_at == stale_created_at
     assert item.status == "processing"
     assert client.app.state.arq_pool.enqueued == [
         (
