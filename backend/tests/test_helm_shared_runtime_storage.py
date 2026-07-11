@@ -486,3 +486,40 @@ def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled(
             }
         ],
     }
+
+
+def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:
+    default_manifests = _render_chart("valkey.sentinel.enabled=true")
+    default_primary = _manifest_by_kind_name(default_manifests, "StatefulSet", "palaceoftruth-valkey-primary")
+    default_replica = _manifest_by_kind_name(default_manifests, "StatefulSet", "palaceoftruth-valkey-replica")
+
+    assert "affinity" not in default_primary["spec"]["template"]["spec"]
+    assert "affinity" not in default_replica["spec"]["template"]["spec"]
+
+    manifests = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "valkey.sentinel.primaryReplicaAntiAffinity.enabled=true",
+    )
+    primary = _manifest_by_kind_name(manifests, "StatefulSet", "palaceoftruth-valkey-primary")
+    replica = _manifest_by_kind_name(manifests, "StatefulSet", "palaceoftruth-valkey-replica")
+
+    assert primary["spec"]["template"]["spec"]["affinity"] == {
+        "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "topologyKey": "kubernetes.io/hostname",
+                    "labelSelector": {"matchLabels": {"app": "palaceoftruth-valkey-replica"}},
+                }
+            ]
+        }
+    }
+    assert replica["spec"]["template"]["spec"]["affinity"] == {
+        "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "topologyKey": "kubernetes.io/hostname",
+                    "labelSelector": {"matchLabels": {"app": "palaceoftruth-valkey-primary"}},
+                }
+            ]
+        }
+    }

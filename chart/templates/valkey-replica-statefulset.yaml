@@ -35,6 +35,17 @@ spec:
         app: {{ include "palaceoftruth.valkeyReplicaName" . }}
         {{- include "palaceoftruth.labels" . | nindent 8 }}
     spec:
+      {{- if .Values.valkey.sentinel.primaryReplicaAntiAffinity.enabled }}
+      # Keep every replica apart from the named primary. Operators must enable
+      # this only where two eligible hostnames are available.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: {{ include "palaceoftruth.valkeyPrimaryName" . }}
+      {{- end }}
       initContainers:
         - name: init-config
           image: {{ .Values.valkey.image }}

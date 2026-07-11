@@ -206,6 +206,11 @@ valkey:
     downAfterMilliseconds: 5000
     # Maximum milliseconds allowed for a complete failover.
     failoverTimeout: 10000
+    primaryReplicaAntiAffinity:
+      # Opt in only after confirming that at least two eligible nodes exist.
+      # Required hostname anti-affinity intentionally leaves a replica Pending
+      # instead of co-locating it with the primary after a node-capacity loss.
+      enabled: false
     resources:
       requests:
         memory: "32Mi"
