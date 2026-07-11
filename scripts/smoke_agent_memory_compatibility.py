@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -538,6 +539,11 @@ def mcp_create_memory_arguments(entry: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in arguments.items() if value is not None}
 
 
+def mcp_palace_remember_arguments(entry: dict[str, Any]) -> dict[str, Any]:
+    """Build the normal agent-facing MCP write contract from a canonical entry."""
+    return mcp_create_memory_arguments(entry)
+
+
 def memory_entry_listing_query(entry: dict[str, Any], run_id: str, *, limit: int = 10) -> dict[str, Any]:
     scope = entry.get("scope")
     if not isinstance(scope, dict) or not isinstance(scope.get("type"), str):
@@ -597,13 +603,19 @@ def parse_env_overrides(values: list[str]) -> dict[str, str]:
     return env
 
 
-def mcp_api_key_from_env(env: dict[str, str]) -> str:
-    return (
-        env.get("PALACEOFTRUTH_API_KEY")
-        or env.get("SECONDBRAIN_API_KEY")
-        or env.get("API_KEY")
+def mcp_auth_mode_from_env(env: dict[str, str]) -> str:
+    """Mirror adapter precedence while never returning credential material."""
+    if (env.get("PALACEOFTRUTH_MCP_BEARER_TOKEN") or env.get("SECONDBRAIN_MCP_BEARER_TOKEN") or "").strip():
+        return "static_bearer"
+    if (
+        env.get("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET")
+        or env.get("SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET")
         or ""
-    ).strip()
+    ).strip():
+        return "oauth_client_credentials"
+    if (env.get("PALACEOFTRUTH_API_KEY") or env.get("SECONDBRAIN_API_KEY") or env.get("API_KEY") or "").strip():
+        return "legacy_api_key"
+    return "missing"
 
 
 def build_stdio_env(args: argparse.Namespace) -> dict[str, str]:
@@ -612,9 +624,10 @@ def build_stdio_env(args: argparse.Namespace) -> dict[str, str]:
     env.setdefault("PALACEOFTRUTH_API_BASE_URL", args.api_base_url)
     if args.api_key:
         env["PALACEOFTRUTH_API_KEY"] = args.api_key
-    if not mcp_api_key_from_env(env):
+    if mcp_auth_mode_from_env(env) == "missing":
         raise SystemExit(
-            "--api-key, PALACEOFTRUTH_API_KEY, SECONDBRAIN_API_KEY, or API_KEY is required for mcp-stdio"
+            "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET (preferred), PALACEOFTRUTH_MCP_BEARER_TOKEN, "
+            "or --api-key/PALACEOFTRUTH_API_KEY is required for mcp-stdio"
         )
     return env
 
@@ -1280,6 +1293,39 @@ async def poll_mcp_job(
     raise RuntimeError(f"MCP memory job {job_id} did not finish before timeout; last payload: {last_payload}")
 
 
+def mcp_whoami_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate the non-secret identity evidence needed for OAuth-capable smokes."""
+    tenant_id = payload.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise RuntimeError(f"MCP whoami did not return tenant_id: {payload}")
+    auth_mode = payload.get("auth_mode")
+    if not isinstance(auth_mode, str) or not auth_mode:
+        raise RuntimeError(f"MCP whoami did not return auth_mode: {payload}")
+    summary: dict[str, Any] = {"status": "ok", "auth_mode": auth_mode, "tenant_id": tenant_id}
+    for field in ("mcp_client_key", "resource", "allowed_scopes"):
+        value = payload.get(field)
+        if value is not None:
+            summary[field] = value
+    if auth_mode == "mcp_oauth":
+        if not isinstance(summary.get("mcp_client_key"), str) or not summary["mcp_client_key"]:
+            raise RuntimeError(f"OAuth MCP whoami did not return mcp_client_key: {payload}")
+        if not isinstance(summary.get("resource"), str) or not summary["resource"]:
+            raise RuntimeError(f"OAuth MCP whoami did not return resource: {payload}")
+        if not isinstance(summary.get("allowed_scopes"), list) or not summary["allowed_scopes"]:
+            raise RuntimeError(f"OAuth MCP whoami did not return allowed_scopes: {payload}")
+    return summary
+
+
+def resolved_write_scope(accepted: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    expected = entry["scope"]
+    resolved = accepted.get("scope")
+    if not isinstance(resolved, dict) or resolved != expected:
+        raise RuntimeError(f"MCP palace_remember did not prove the expected resolved scope: {accepted}")
+    if resolved.get("type") == "tenant_shared" and expected.get("type") != "tenant_shared":
+        raise RuntimeError("MCP palace_remember unexpectedly wrote to tenant_shared")
+    return resolved
+
+
 async def run_mcp_smoke_with_client_async(
     args: argparse.Namespace,
     client: Any,
@@ -1293,11 +1339,12 @@ async def run_mcp_smoke_with_client_async(
 
     async with client:
         whoami = await client.call_tool("whoami")
-        if not isinstance(whoami, dict) or not whoami.get("tenant_id"):
-            raise RuntimeError(f"MCP whoami did not return tenant_id: {whoami}")
+        if not isinstance(whoami, dict):
+            raise RuntimeError(f"MCP whoami response was not an object: {whoami}")
+        whoami_step = mcp_whoami_summary(whoami)
         tenant_id = str(whoami["tenant_id"])
         result["tenant_id"] = tenant_id
-        result["steps"]["whoami"] = {"status": "ok"}
+        result["steps"]["whoami"] = whoami_step
 
         entry = make_memory_entry(
             tenant_id=tenant_id,
@@ -1307,12 +1354,16 @@ async def run_mcp_smoke_with_client_async(
             relationship_policy=args.relationship_policy,
             active_skills=args.active_skill,
         )
-        accepted = await client.call_tool("create_memory_entry", mcp_create_memory_arguments(entry))
+        accepted = await client.call_tool("palace_remember", mcp_palace_remember_arguments(entry))
         if not isinstance(accepted, dict) or not accepted.get("job_id"):
-            raise RuntimeError(f"MCP create_memory_entry did not return job_id: {accepted}")
+            raise RuntimeError(f"MCP palace_remember did not return job_id: {accepted}")
         job_id = str(accepted["job_id"])
         result["job_id"] = job_id
-        result["steps"]["write"] = {"status": accepted.get("status"), "accepted_as": accepted.get("accepted_as")}
+        result["steps"]["write"] = {
+            "status": accepted.get("status"),
+            "accepted_as": accepted.get("accepted_as"),
+            "scope": resolved_write_scope(accepted, entry),
+        }
 
         job = await poll_mcp_job(
             client,
@@ -1420,7 +1471,7 @@ async def run_mcp_smoke_async(args: argparse.Namespace) -> dict[str, Any]:
 async def run_mcp_stdio_smoke_async(args: argparse.Namespace) -> dict[str, Any]:
     command_args = stdio_args_for(args)
     env = build_stdio_env(args)
-    return await run_mcp_smoke_with_client_async(
+    result = await run_mcp_smoke_with_client_async(
         args,
         StdioMcpClient(
             command=args.stdio_command,
@@ -1435,6 +1486,39 @@ async def run_mcp_stdio_smoke_async(args: argparse.Namespace) -> dict[str, Any]:
             "stdio_cwd": args.stdio_cwd,
         },
     )
+    if getattr(args, "verify_no_scope_fail_closed", False):
+        probe_env = dict(env)
+        for name in (
+            "PALACEOFTRUTH_DEFAULT_SCOPE_TYPE",
+            "PALACEOFTRUTH_DEFAULT_SCOPE_KEY",
+            "SECONDBRAIN_DEFAULT_SCOPE_TYPE",
+            "SECONDBRAIN_DEFAULT_SCOPE_KEY",
+        ):
+            probe_env.pop(name, None)
+        with tempfile.TemporaryDirectory(prefix="palace-no-scope-") as hermes_home:
+            probe_env["HERMES_HOME"] = hermes_home
+            async with StdioMcpClient(
+                command=args.stdio_command,
+                args=command_args,
+                env=probe_env,
+                cwd=args.stdio_cwd,
+            ) as probe_client:
+                no_scope = await probe_client.call_tool(
+                    "palace_remember",
+                    {
+                        "title": "No-scope smoke probe",
+                        "body": "This request must fail closed before writing.",
+                        "idempotency_key": f"agent-memory-no-scope:{result['run_id']}",
+                    },
+                )
+        if not isinstance(no_scope, dict) or no_scope.get("reason_code") != "scope_not_configured" or no_scope.get("retryable") is not False:
+            raise RuntimeError(f"MCP palace_remember did not fail closed without a scope: {no_scope}")
+        result["steps"]["no_scope_fail_closed"] = {
+            "status": no_scope.get("status"),
+            "reason_code": no_scope.get("reason_code"),
+            "retryable": no_scope.get("retryable"),
+        }
+    return result
 
 
 def run_mcp_smoke(args: argparse.Namespace) -> dict[str, Any]:
@@ -3607,6 +3691,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Environment override for the stdio MCP server, as NAME=VALUE. Repeatable.",
     )
     mcp_stdio.add_argument("--dry-run", action="store_true")
+    mcp_stdio.add_argument(
+        "--verify-no-scope-fail-closed",
+        action="store_true",
+        help="Launch an isolated adapter probe and require palace_remember to reject an unscoped write.",
+    )
     mcp_stdio.set_defaults(func=cmd_mcp_stdio)
 
     readiness = sub.add_parser(

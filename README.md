@@ -189,6 +189,22 @@ read-only network checks are explicitly desired.
 
 The repo-packaged Codex/Claude plugin lives in [third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
+### Agent MCP authentication and writes
+
+For shared or remote MCP and Hermes runtimes, use OAuth client credentials first:
+`PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` with the token URL, API resource, client
+key, scopes, and default scope shown by `scripts/setup_codex_palace_memory.py`.
+The legacy `PALACEOFTRUTH_API_KEY` remains an explicit staged compatibility
+fallback; do not add either secret to a checked-in MCP profile. MCP owns OAuth
+transport authentication—it does not bypass authorization.
+
+Normal agent memory writes use `palace_remember` with an explicit scope and
+deterministic idempotency key. Use raw REST only for operator/auth diagnostics
+or other explicitly low-level tooling, never as an automatic agent fallback.
+Run `uv run python scripts/setup_codex_palace_memory.py --check` to identify
+adapter, API-base, installed-skill, and restart-required drift without mutating
+local Codex configuration.
+
 For governed multi-agent memory positioning, use the
 [Agent Organization Memory demo](docs/agent-organization-memory-demo.md) and
 `scripts/demo_agent_organization_memory.py`. The demo shows specialist agents

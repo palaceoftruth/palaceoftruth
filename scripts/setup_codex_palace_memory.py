@@ -35,9 +35,27 @@ HERMES_PLUGIN_MANIFEST = HERMES_PLUGIN_ROOT / "plugin.yaml"
 DEFAULT_API_BASE_URL = "https://api.palaceoftruth.test"
 DEFAULT_SCOPE_TYPE = "agent"
 DEFAULT_SCOPE_KEY = "codex"
-REDACTED_SECRET = "<redacted: set PALACEOFTRUTH_API_KEY in your Codex runtime environment>"
+REDACTED_SECRET = "<redacted: set this value in your Codex runtime environment>"
 PALACE_PLUGIN_NAME = "palaceoftruth-memory"
 PALACE_MCP_SERVER_NAME = "palaceoftruth-memory"
+OAUTH_CLIENT_SECRET_ENV = "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"
+OAUTH_TOKEN_URL_ENV = "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL"
+OAUTH_RESOURCE_ENV = "PALACEOFTRUTH_MCP_OAUTH_RESOURCE"
+OAUTH_CLIENT_KEY_ENV = "PALACEOFTRUTH_MCP_CLIENT_KEY"
+OAUTH_CLIENT_SCOPES_ENV = "PALACEOFTRUTH_MCP_CLIENT_SCOPES"
+BEARER_TOKEN_ENV = "PALACEOFTRUTH_MCP_BEARER_TOKEN"
+DEFAULT_SCOPE_TYPE_ENV = "PALACEOFTRUTH_DEFAULT_SCOPE_TYPE"
+DEFAULT_SCOPE_KEY_ENV = "PALACEOFTRUTH_DEFAULT_SCOPE_KEY"
+AUTH_ENV_ALIASES = {
+    "bearer_token": (BEARER_TOKEN_ENV, "SECONDBRAIN_MCP_BEARER_TOKEN"),
+    "oauth_client_secret": (OAUTH_CLIENT_SECRET_ENV, "SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET"),
+    "token_url": (OAUTH_TOKEN_URL_ENV, "SECONDBRAIN_MCP_OAUTH_TOKEN_URL"),
+    "resource": (OAUTH_RESOURCE_ENV, "SECONDBRAIN_MCP_OAUTH_RESOURCE"),
+    "client_key": (OAUTH_CLIENT_KEY_ENV, "SECONDBRAIN_MCP_CLIENT_KEY"),
+    "client_scopes": (OAUTH_CLIENT_SCOPES_ENV, "SECONDBRAIN_MCP_CLIENT_SCOPES"),
+    "default_scope_type": (DEFAULT_SCOPE_TYPE_ENV, "SECONDBRAIN_DEFAULT_SCOPE_TYPE"),
+    "default_scope_key": (DEFAULT_SCOPE_KEY_ENV, "SECONDBRAIN_DEFAULT_SCOPE_KEY"),
+}
 
 
 class SetupError(RuntimeError):
@@ -216,6 +234,63 @@ def codex_enabled_state(codex_home: Path) -> bool | None:
     return bool(enabled)
 
 
+def codex_runtime_mcp_settings(codex_home: Path) -> dict[str, Any]:
+    """Read non-secret runtime MCP settings to make local-profile drift visible."""
+    config = read_codex_config(codex_home)
+    servers = config.get("mcp_servers")
+    server = servers.get(PALACE_MCP_SERVER_NAME) if isinstance(servers, dict) else None
+    if not isinstance(server, dict):
+        return {"configured": False, "api_base_url": None, "default_scope": None}
+    env = server.get("env") if isinstance(server.get("env"), dict) else {}
+    return {
+        "configured": True,
+        "api_base_url": env.get("PALACEOFTRUTH_API_BASE_URL"),
+        "default_scope": {
+            "type": env.get(DEFAULT_SCOPE_TYPE_ENV),
+            "key": env.get(DEFAULT_SCOPE_KEY_ENV),
+        },
+        "client_key": env.get(OAUTH_CLIENT_KEY_ENV),
+    }
+
+
+def auth_configuration(args: argparse.Namespace) -> dict[str, Any]:
+    """Report auth precedence without exposing runtime credential values."""
+    def configured_value(names: tuple[str, ...]) -> str | None:
+        for name in names:
+            value = os.getenv(name)
+            if value and value.strip():
+                return value.strip()
+        return None
+
+    configured = {
+        "bearer_token": bool(configured_value(AUTH_ENV_ALIASES["bearer_token"])),
+        "oauth_client_credentials": bool(configured_value(AUTH_ENV_ALIASES["oauth_client_secret"])),
+        "legacy_api_key": bool(configured_value((args.api_key_env, "SECONDBRAIN_API_KEY", "API_KEY"))),
+    }
+    if configured["bearer_token"]:
+        mode = "static_bearer"
+    elif configured["oauth_client_credentials"]:
+        mode = "oauth_client_credentials"
+    elif configured["legacy_api_key"]:
+        mode = "legacy_api_key"
+    else:
+        mode = "missing"
+    return {
+        "mode": mode,
+        "configured": configured,
+        "oauth_preferred": True,
+        "legacy_fallback_retained": configured["legacy_api_key"],
+        "token_url": configured_value(AUTH_ENV_ALIASES["token_url"]) or f"{args.api_base_url}/api/v1/memory/mcp/oauth/token",
+        "resource": configured_value(AUTH_ENV_ALIASES["resource"]) or f"{args.api_base_url}/api/v1",
+        "client_key": configured_value(AUTH_ENV_ALIASES["client_key"]) or "default",
+        "client_scopes": configured_value(AUTH_ENV_ALIASES["client_scopes"]) or "read,write",
+        "default_scope": {
+            "type": configured_value(AUTH_ENV_ALIASES["default_scope_type"]) or args.scope_type,
+            "key": configured_value(AUTH_ENV_ALIASES["default_scope_key"]) or args.scope_key,
+        },
+    }
+
+
 def build_plugin_check_report(args: argparse.Namespace) -> dict[str, Any]:
     require_file(CODEX_PLUGIN_MANIFEST, "Codex plugin manifest")
     require_file(CODEX_MCP_CONFIG, "Codex MCP config")
@@ -240,10 +315,15 @@ def build_plugin_check_report(args: argparse.Namespace) -> dict[str, Any]:
     mcp_drift = compare_mcp_config(SKILLPACK_ROOT, installed_root)
     skillpack_drift = compare_skillpack(SKILLPACK_ROOT, installed_root)
     marketplace = marketplace_source(REPO_ROOT)
-    auth_env_present = bool(os.getenv(args.api_key_env))
+    auth = auth_configuration(args)
+    runtime_settings = codex_runtime_mcp_settings(codex_home)
+    runtime_drift: list[str] = []
+    runtime_api_base = runtime_settings["api_base_url"]
+    if isinstance(runtime_api_base, str) and runtime_api_base.rstrip("/") != args.api_base_url:
+        runtime_drift.append("Codex runtime PALACEOFTRUTH_API_BASE_URL differs from requested setup API base")
     version_drift = installed_version is not None and installed_version != desired_version
     installed = installed_root is not None and installed_manifest is not None
-    restart_required = bool(installed and (version_drift or mcp_drift or skillpack_drift["drifted"]))
+    restart_required = bool(installed and (version_drift or mcp_drift or skillpack_drift["drifted"] or runtime_drift))
     enabled = codex_enabled_state(codex_home)
 
     if not installed:
@@ -254,10 +334,13 @@ def build_plugin_check_report(args: argparse.Namespace) -> dict[str, Any]:
         codex_status = "drifted"
         update_state = "update-available"
         next_action = "Refresh the installed Codex plugin from the repo package and restart Codex."
-    elif not auth_env_present:
+    elif auth["mode"] == "missing":
         codex_status = "auth-missing"
         update_state = "current"
-        next_action = f"Set {args.api_key_env} in the Codex runtime environment before live MCP use."
+        next_action = (
+            f"Set {OAUTH_CLIENT_SECRET_ENV} for OAuth client credentials, or explicitly set "
+            f"{args.api_key_env} for staged legacy fallback, before live MCP use."
+        )
     else:
         codex_status = "ok"
         update_state = "current"
@@ -280,8 +363,9 @@ def build_plugin_check_report(args: argparse.Namespace) -> dict[str, Any]:
             "source": "explicit-path" if args.installed_plugin_path else ("codex-cache" if installed else None),
             "marketplace": marketplace,
             "enabled": enabled,
-            "api_key_env": args.api_key_env,
-            "auth_env_present": auth_env_present,
+            "auth": auth,
+            "runtime_settings": runtime_settings,
+            "runtime_drift": runtime_drift,
             "mcp_command_drift": mcp_drift,
             "skillpack_drift": skillpack_drift,
             "restart_required": restart_required,
@@ -308,7 +392,14 @@ def build_plugin_check_report(args: argparse.Namespace) -> dict[str, Any]:
 def redacted_env(api_base_url: str) -> dict[str, str]:
     return {
         "PALACEOFTRUTH_API_BASE_URL": api_base_url,
-        "PALACEOFTRUTH_API_KEY": REDACTED_SECRET,
+        OAUTH_CLIENT_SECRET_ENV: REDACTED_SECRET,
+        OAUTH_TOKEN_URL_ENV: f"{api_base_url}/api/v1/memory/mcp/oauth/token",
+        OAUTH_RESOURCE_ENV: f"{api_base_url}/api/v1",
+        OAUTH_CLIENT_KEY_ENV: "default",
+        OAUTH_CLIENT_SCOPES_ENV: "read,write",
+        DEFAULT_SCOPE_TYPE_ENV: DEFAULT_SCOPE_TYPE,
+        DEFAULT_SCOPE_KEY_ENV: DEFAULT_SCOPE_KEY,
+        "PALACEOFTRUTH_API_KEY": "<redacted: optional legacy fallback>",
     }
 
 
@@ -329,7 +420,15 @@ def codex_config_snippet(api_base_url: str) -> str:
             "",
             "[mcp_servers.palaceoftruth-memory.env]",
             f'PALACEOFTRUTH_API_BASE_URL = "{api_base_url}"',
-            f'PALACEOFTRUTH_API_KEY = "{REDACTED_SECRET}"',
+            f'{OAUTH_CLIENT_SECRET_ENV} = "{REDACTED_SECRET}"',
+            f'{OAUTH_TOKEN_URL_ENV} = "{api_base_url}/api/v1/memory/mcp/oauth/token"',
+            f'{OAUTH_RESOURCE_ENV} = "{api_base_url}/api/v1"',
+            f'{OAUTH_CLIENT_KEY_ENV} = "default"',
+            f'{OAUTH_CLIENT_SCOPES_ENV} = "read,write"',
+            f'{DEFAULT_SCOPE_TYPE_ENV} = "{DEFAULT_SCOPE_TYPE}"',
+            f'{DEFAULT_SCOPE_KEY_ENV} = "{DEFAULT_SCOPE_KEY}"',
+            "# Optional staged compatibility fallback; OAuth remains preferred.",
+            f'# PALACEOFTRUTH_API_KEY = "{REDACTED_SECRET}"',
         ]
     )
 
@@ -348,6 +447,7 @@ def smoke_command(args: argparse.Namespace, *, include_secret: bool) -> list[str
         "--relationship-policy",
         "immediate",
         "--skip-backfill",
+        "--verify-no-scope-fail-closed",
         "--active-skill",
         "palaceoftruth-codex-memory",
         "--stdio-command",
@@ -382,6 +482,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "repo_root": str(REPO_ROOT),
         "backend_root": str(BACKEND_ROOT),
         "adapter": str(MCP_ADAPTER),
+        "adapter_revision": sha256_file(MCP_ADAPTER),
         "skillpack": str(CODEX_SKILL),
         "scope": {"type": args.scope_type, **({"key": args.scope_key} if args.scope_key else {})},
         "api_base_url": args.api_base_url,
@@ -396,9 +497,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "delete_retry_admin_operations": False,
             "raw_secret_output": False,
         },
+        "auth": auth_configuration(args),
         "next_step": (
-            "Dry run complete. Set PALACEOFTRUTH_API_KEY in the runtime environment "
-            "and rerun with --live-smoke to verify the adapter end to end."
+            f"Dry run complete. Prefer {OAUTH_CLIENT_SECRET_ENV} with the shown token URL/resource "
+            f"and rerun with --live-smoke; use {args.api_key_env} only as explicit staged fallback."
         ),
     }
 
@@ -408,6 +510,7 @@ def format_text(report: dict[str, Any]) -> str:
         codex = report["codex"]
         hermes = report["hermes"]
         drift = codex["mcp_command_drift"] or ["none"]
+        runtime_drift = codex["runtime_drift"] or ["none"]
         skillpack = codex["skillpack_drift"]
         lines = [
             "Palace plugin install check",
@@ -419,10 +522,14 @@ def format_text(report: dict[str, Any]) -> str:
             f"Codex installed path: {codex['installed_path'] or 'n/a'}",
             f"Codex marketplace registered: {str(codex['marketplace']['registered']).lower()}",
             f"Codex enabled: {'unknown' if codex['enabled'] is None else str(codex['enabled']).lower()}",
-            f"{codex['api_key_env']} present: {str(codex['auth_env_present']).lower()}",
+            f"Auth mode: {codex['auth']['mode']}",
             f"Restart required: {str(codex['restart_required']).lower()}",
             "MCP drift:",
             *[f"- {item}" for item in drift],
+            "Runtime drift:",
+            *[f"- {item}" for item in runtime_drift],
+            f"Configured runtime API: {codex['runtime_settings']['api_base_url'] or 'n/a'}",
+            f"Configured default scope: {codex['runtime_settings']['default_scope'] or 'n/a'}",
             "Skillpack drift:",
             f"- missing: {len(skillpack['missing'])}",
             f"- changed: {len(skillpack['changed'])}",
@@ -440,6 +547,7 @@ def format_text(report: dict[str, Any]) -> str:
         f"API: {report['api_base_url']}",
         f"Scope: {report['scope']}",
         f"Adapter: {report['adapter']}",
+        f"Adapter revision: {report['adapter_revision']}",
         f"Skillpack: {report['skillpack']}",
         f"uv available: {str(report['uv_available']).lower()}",
         "",
@@ -458,11 +566,17 @@ def format_text(report: dict[str, Any]) -> str:
 
 
 def run_live_smoke(args: argparse.Namespace) -> int:
-    api_key = args.api_key or os.getenv(args.api_key_env) or ""
-    if not api_key:
-        raise SetupError(f"--api-key or {args.api_key_env} is required with --live-smoke")
+    auth = auth_configuration(args)
+    if args.api_key:
+        auth["mode"] = "legacy_api_key"
+    if auth["mode"] == "missing":
+        raise SetupError(
+            f"{OAUTH_CLIENT_SECRET_ENV} (preferred), {BEARER_TOKEN_ENV}, or --api-key/{args.api_key_env} "
+            "is required with --live-smoke"
+        )
     env = dict(os.environ)
-    env["PALACEOFTRUTH_API_KEY"] = api_key
+    if args.api_key:
+        env["PALACEOFTRUTH_API_KEY"] = args.api_key
     completed = subprocess.run(smoke_command(args, include_secret=True), check=False, env=env)
     return completed.returncode
 

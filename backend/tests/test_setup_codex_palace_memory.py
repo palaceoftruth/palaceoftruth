@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -30,6 +29,14 @@ def parse_args(values: list[str]) -> Any:
     return setup_script.build_parser().parse_args(values)
 
 
+def clear_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for names in setup_script.AUTH_ENV_ALIASES.values():
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+    for name in ("PALACEOFTRUTH_API_KEY", "SECONDBRAIN_API_KEY", "API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_setup_default_is_redacted_non_mutating_dry_run() -> None:
     args = parse_args(["--api-base-url", "https://api.palaceoftruth.test"])
 
@@ -39,9 +46,10 @@ def test_setup_default_is_redacted_non_mutating_dry_run() -> None:
     assert report["mutating"] is False
     assert report["scope"] == {"type": "agent", "key": "codex"}
     assert "palaceoftruth-codex-memory" in report["skillpack"]
-    assert "PALACEOFTRUTH_API_KEY" in report["codex_config_toml"]
+    assert setup_script.OAUTH_CLIENT_SECRET_ENV in report["codex_config_toml"]
     assert "tenant-api-key" not in report["codex_config_toml"]
-    assert report["redacted_env"]["PALACEOFTRUTH_API_KEY"].startswith("<redacted:")
+    assert report["redacted_env"][setup_script.OAUTH_CLIENT_SECRET_ENV].startswith("<redacted:")
+    assert report["auth"]["oauth_preferred"] is True
     assert report["live_smoke_contract"] == {
         "writes_scoped_memories": 1,
         "relationship_policy": "immediate",
@@ -54,7 +62,7 @@ def test_setup_default_is_redacted_non_mutating_dry_run() -> None:
 def test_plugin_check_reports_missing_install_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    clear_auth_env(monkeypatch)
     args = parse_args(
         [
             "--check",
@@ -73,8 +81,12 @@ def test_plugin_check_reports_missing_install_without_mutation(
     assert report["codex"]["installed"] is False
     assert report["codex"]["status"] == "missing"
     assert report["codex"]["update_state"] == "install-available"
-    assert report["codex"]["api_key_env"] == "PALACEOFTRUTH_API_KEY"
-    assert report["codex"]["auth_env_present"] is False
+    assert report["codex"]["auth"]["mode"] == "missing"
+    assert report["codex"]["auth"]["configured"] == {
+        "bearer_token": False,
+        "oauth_client_credentials": False,
+        "legacy_api_key": False,
+    }
     assert report["codex"]["mcp_command_drift"] == ["installed Codex plugin is missing"]
     assert report["codex"]["marketplace"]["registered"] is True
     assert report["codex"]["marketplace"]["path"] == (
@@ -82,7 +94,7 @@ def test_plugin_check_reports_missing_install_without_mutation(
     )
     assert report["hermes"]["package_surface"] == "hermes"
     assert report["hermes"]["status"] == "separate-package-surface"
-    assert "PALACEOFTRUTH_API_KEY" not in json.dumps(report["codex"]["next_action"])
+    assert "Install the repo Codex plugin package" in report["codex"]["next_action"]
 
 
 def test_plugin_check_detects_version_mcp_and_skillpack_drift(
@@ -128,7 +140,7 @@ def test_plugin_check_detects_version_mcp_and_skillpack_drift(
 
 
 def test_plugin_check_discovers_cached_codex_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    clear_auth_env(monkeypatch)
     installed = (
         tmp_path
         / "codex-home"
@@ -189,11 +201,40 @@ def test_setup_live_smoke_command_uses_stdio_adapter_without_backfill() -> None:
 
 
 def test_setup_live_smoke_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    clear_auth_env(monkeypatch)
     args = parse_args(["--live-smoke"])
 
-    with pytest.raises(setup_script.SetupError, match="PALACEOFTRUTH_API_KEY is required"):
+    with pytest.raises(setup_script.SetupError, match="OAUTH_CLIENT_SECRET"):
         setup_script.run_live_smoke(args)
+
+
+def test_setup_oauth_configuration_is_secret_safe_and_preferred(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_auth_env(monkeypatch)
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "legacy-secret")
+    monkeypatch.setenv(setup_script.OAUTH_CLIENT_SECRET_ENV, "oauth-secret")
+    monkeypatch.setenv(setup_script.OAUTH_CLIENT_KEY_ENV, "codex-remote")
+    args = parse_args(["--api-base-url", "https://api.palaceoftruth.test"])
+
+    auth = setup_script.auth_configuration(args)
+
+    assert auth["mode"] == "oauth_client_credentials"
+    assert auth["oauth_preferred"] is True
+    assert auth["legacy_fallback_retained"] is True
+    assert auth["client_key"] == "codex-remote"
+    assert "oauth-secret" not in json.dumps(auth)
+    assert "legacy-secret" not in json.dumps(auth)
+
+
+def test_setup_oauth_configuration_accepts_secondbrain_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_auth_env(monkeypatch)
+    monkeypatch.setenv("SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET", "oauth-secret")
+    monkeypatch.setenv("SECONDBRAIN_MCP_CLIENT_KEY", "codex-compat")
+    args = parse_args([])
+
+    auth = setup_script.auth_configuration(args)
+
+    assert auth["mode"] == "oauth_client_credentials"
+    assert auth["client_key"] == "codex-compat"
 
 
 def test_setup_live_smoke_runs_exact_previewed_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,7 +286,7 @@ def test_plugin_check_text_is_concise_and_secret_safe(
 
     assert "Palace plugin install check" in text
     assert "Mode: read-only dry-run" in text
-    assert "PALACEOFTRUTH_API_KEY present: true" in text
+    assert "Auth mode: legacy_api_key" in text
     assert "secret-value" not in text
 
 
