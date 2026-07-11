@@ -2250,7 +2250,7 @@ def build_codex_bridge_report(args: argparse.Namespace) -> dict[str, Any]:
         lifecycle = codex_bridge_lifecycle_payload(args)
         steps = {step["tool"]: step["arguments"] for step in lifecycle.get("steps", [])}
         retrieve = steps.get("retrieve_agent_memory") or {}
-        checkpoint = steps.get("capture_checkpoint") or {}
+        checkpoint = steps.get("palace_checkpoint") or {}
         lifecycle_failures = []
         if retrieve.get("agent_scope_key") != (args.scope_key or "codex"):
             lifecycle_failures.append("retrieve_agent_memory does not default to agent/codex")
@@ -2259,9 +2259,9 @@ def build_codex_bridge_report(args: argparse.Namespace) -> dict[str, Any]:
         if retrieve.get("include_broad_corpus") is not False:
             lifecycle_failures.append("retrieve_agent_memory allows broad corpus fallback")
         if checkpoint.get("dry_run") is not True:
-            lifecycle_failures.append("capture_checkpoint is not dry-run by default")
+            lifecycle_failures.append("palace_checkpoint is not dry-run by default")
         if checkpoint.get("scope_type") not in {"session", "workspace"}:
-            lifecycle_failures.append("capture_checkpoint scope is not session/workspace")
+            lifecycle_failures.append("palace_checkpoint scope is not session/workspace")
         if _json_contains_raw_secret(lifecycle):
             lifecycle_failures.append("lifecycle payload included a raw secret-like token")
         if lifecycle_failures:

@@ -41,8 +41,9 @@ def _write_memory_payload(agent_key: str, workspace_key: str) -> dict[str, Any]:
         "tags": ["agent-organization-demo", f"workspace-{workspace_key}", f"agent-{agent_key}"],
         "scope_type": "agent",
         "scope_key": agent_key,
+        "idempotency_key": f"agent-organization-demo:{workspace_key}:{agent_key}:finding",
         "created_by_role": "agent",
-        "relationship_policy": "deferred",
+        "relationship_policy": "immediate",
         "metadata": {
             "demo": "agent-organization-memory",
             "workspace_key": workspace_key,
@@ -69,7 +70,7 @@ def demo_payloads(
         {
             "phase": "specialist_write",
             "agent": specialist_key,
-            "tool": "create_memory_entry",
+            "tool": "palace_remember",
             "arguments": _write_memory_payload(specialist_key, workspace_key),
             "purpose": (
                 "Specialist writes only to its own private agent scope. "
@@ -104,7 +105,7 @@ def demo_payloads(
     orchestrator_writeback = {
         "phase": "orchestrator_writeback",
         "agent": orchestrator_key,
-        "tool": "create_memory_entry",
+        "tool": "palace_remember",
         "arguments": {
             "title": "Agent organization demo synthesis",
             "body": (
@@ -118,8 +119,9 @@ def demo_payloads(
             "tags": ["agent-organization-demo", f"workspace-{workspace_key}", f"agent-{orchestrator_key}"],
             "scope_type": "agent",
             "scope_key": orchestrator_key,
+            "idempotency_key": f"agent-organization-demo:{workspace_key}:{orchestrator_key}:synthesis",
             "created_by_role": "agent",
-            "relationship_policy": "deferred",
+            "relationship_policy": "immediate",
             "metadata": {
                 "demo": "agent-organization-memory",
                 "workspace_key": workspace_key,

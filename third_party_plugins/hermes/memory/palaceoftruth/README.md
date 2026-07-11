@@ -13,6 +13,25 @@ Why this lives here:
 - The plugin implements the Hermes-facing contract for Palace of Truth.
 - Palace of Truth developers need to be able to evolve that integration without hand-editing the deployment repo first.
 - Keeping the canonical plugin here lets this repo own the integration semantics while deployment repos own runtime image assembly and Kubernetes deployment.
+
+## Agent Write Contract
+
+For a normal single-memory agent write, use MCP `palace_remember` with an
+explicit scope and deterministic idempotency key. Use `agent/orchestrator` for
+orchestrator-owned learning, `agent/<stable-agent-key>` for a named Hermes
+agent, `workspace/<stable-project-key>` for a project outcome, and
+`session/<thread-or-run-id>` for a resumable run. `tenant_shared` is an
+intentional publication only. Use `palace_checkpoint` for handoff or
+compaction; reserve `create_memory_entry` for import, bulk/programmatic,
+compatibility, protocol, or advanced-field paths.
+
+MCP encapsulates configured transport authentication; it does not bypass OAuth.
+Raw REST is for operator integration/authentication diagnostics only, never an
+automatic agent fallback. If MCP is unavailable or unauthenticated, record a
+local `deferred` outcome with the non-secret error. Accepted or queued writes
+are not durable until terminal completion and exact-scope retrieval. A
+subagent returns evidence and a proposed capture payload unless direct
+write-back is explicitly delegated.
 - The plugin can authenticate with either the legacy tenant API key or Palace MCP OAuth client credentials. When
   `PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` is present, OAuth is preferred and API calls use a bearer token minted from
   `/api/v1/memory/mcp/oauth/token`; `PALACEOFTRUTH_API_KEY` remains a legacy fallback for hosts that have not cut over.

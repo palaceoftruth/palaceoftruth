@@ -43,6 +43,8 @@ def test_demo_payloads_keep_specialist_and_orchestrator_scopes_separate() -> Non
         "frontend-agent",
     ]
     assert {step["arguments"]["scope_type"] for step in specialist_writes} == {"agent"}
+    assert all(step["tool"] == "palace_remember" for step in specialist_writes)
+    assert all(step["arguments"]["idempotency_key"] for step in specialist_writes)
     recall = next(step for step in steps if step["phase"] == "orchestrator_recall")
     assert recall["arguments"]["agent_scope_key"] == "orchestrator"
     assert recall["arguments"]["workspace_scope_keys"] == ["palaceoftruth"]
@@ -56,6 +58,8 @@ def test_demo_payloads_keep_specialist_and_orchestrator_scopes_separate() -> Non
     writeback = next(step for step in steps if step["phase"] == "orchestrator_writeback")
     assert writeback["arguments"]["scope_type"] == "agent"
     assert writeback["arguments"]["scope_key"] == "orchestrator"
+    assert writeback["tool"] == "palace_remember"
+    assert writeback["arguments"]["idempotency_key"]
 
 
 def test_demo_rejects_ambiguous_scope_keys() -> None:

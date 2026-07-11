@@ -1354,7 +1354,7 @@ def test_codex_bridge_report_can_write_json_report(tmp_path: Path, monkeypatch: 
                     },
                 },
                 {
-                    "tool": "capture_checkpoint",
+                    "tool": "palace_checkpoint",
                     "arguments": {"scope_type": "session", "dry_run": True},
                 },
             ]
@@ -1415,7 +1415,7 @@ def test_codex_bridge_report_checks_setup_lifecycle_and_tool_surface(
                     },
                 },
                 {
-                    "tool": "capture_checkpoint",
+                    "tool": "palace_checkpoint",
                     "arguments": {"scope_type": "session", "dry_run": True},
                 },
             ]
@@ -1606,7 +1606,7 @@ def test_codex_bridge_report_fails_closed_on_unsafe_tool_surface(
                     },
                 },
                 {
-                    "tool": "capture_checkpoint",
+                    "tool": "palace_checkpoint",
                     "arguments": {"scope_type": "workspace", "dry_run": True},
                 },
             ]

@@ -83,7 +83,7 @@ def lifecycle_payloads(
             },
             {
                 "phase": "handoff_or_precompact",
-                "tool": "capture_checkpoint",
+                "tool": "palace_checkpoint",
                 "arguments": {
                     "title": "Codex session checkpoint",
                     "summary": "<concise state, decisions, and next steps>",
@@ -95,14 +95,15 @@ def lifecycle_payloads(
                     "scope_key": checkpoint_scope_key,
                     "checkpoint_kind": "precompact",
                     "tags": ["codex-lifecycle", resolved_workspace_key],
-                    "relationship_policy": "deferred",
+                    "relationship_policy": "immediate",
+                    "idempotency_key": "codex-checkpoint:<stable-thread-or-run-id>",
                     "dry_run": True,
                 },
-                "purpose": "Preview the checkpoint envelope before writing any resumable state.",
+                "purpose": "Preview the resumable checkpoint envelope before writing handoff or compaction state.",
             },
             {
                 "phase": "post_run",
-                "tool": "create_memory_entry",
+                "tool": "palace_remember",
                 "arguments": {
                     "title": "Codex durable project learning",
                     "body": "<non-sensitive operational learning for future runs>",
@@ -111,6 +112,7 @@ def lifecycle_payloads(
                     "tags": ["codex", "codex-lifecycle", resolved_workspace_key],
                     "scope_type": "workspace",
                     "scope_key": resolved_workspace_key,
+                    "idempotency_key": "codex-learning:<stable-run-or-commit-id>",
                     "created_by_role": "agent",
                     "metadata": {
                         "codex_lifecycle": {
@@ -122,7 +124,7 @@ def lifecycle_payloads(
                     },
                     "relationship_policy": "immediate",
                 },
-                "purpose": "Write concise durable learning after substantial work; omit for trivial runs.",
+                "purpose": "Write concise durable learning after substantial work; omit for trivial runs and defer locally on MCP failure.",
             },
         ],
         "local_fallback": {
