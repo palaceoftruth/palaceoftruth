@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_api_key_scope_header, require_mcp_scope, verify_memory_auth
+from app.auth import require_api_key_scope_header, require_mcp_scope
 from app.config import settings
 from app.database import get_db
 from app.models.job import Job
@@ -71,6 +71,7 @@ from app.services.memory import (
     upsert_memory_scope_profile,
 )
 from app.services.memory_admission import evaluate_memory_write_admission
+from app.services.memory_telemetry import record_retrieval
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.job_progress import record_job_progress_event
 from app.services.queue_telemetry import build_memory_queue_hint
@@ -80,6 +81,40 @@ from app.workers.queues import enqueue_singleton_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 logger = logging.getLogger(__name__)
+
+
+def _record_retrieval_metrics(
+    *, endpoint: str, outcome: str, latency_ms: float, response: object | None = None
+) -> None:
+    trace = getattr(response, "trace", None)
+    results = getattr(response, "results", None) or []
+    ranking_trace = getattr(trace, "search_ranking_trace", None) or {}
+    if not isinstance(ranking_trace, dict):
+        ranking_trace = {}
+    stage_seconds: dict[str, float | None] = {"total": latency_ms / 1000}
+    for trace_name, stage in (
+        ("selected_scope_duration_ms", "scoped_search"),
+        ("broad_corpus_duration_ms", "broad_rescue"),
+        ("merge_duration_ms", "merge"),
+    ):
+        duration_ms = getattr(trace, trace_name, None)
+        if isinstance(duration_ms, (int, float)):
+            stage_seconds[stage] = duration_ms / 1000
+    record_retrieval(
+        endpoint=endpoint,
+        outcome=outcome,
+        intent=ranking_trace.get("query_intent"),
+        route_confidence=getattr(trace, "route_confidence", None),
+        fallback_used=bool(getattr(trace, "fallback_used", False)),
+        abstained=bool(getattr(trace, "route_abstain_reason", None)),
+        empty=not results,
+        budget_truncated=bool(
+            getattr(trace, "budget_truncated", False)
+            or getattr(trace, "context_budget_truncated", False)
+        ),
+        stage_seconds=stage_seconds,
+        results=results,
+    )
 
 
 def _clean_query_tags(tags: list[str] | None) -> list[str] | None:
@@ -937,6 +972,7 @@ async def retrieve_memory_artifacts(
         )
     except Exception as exc:
         latency_ms = (perf_counter() - started) * 1000
+        _record_retrieval_metrics(endpoint="retrieve", outcome="error", latency_ms=latency_ms)
         _log_retrieval_diagnostics(
             endpoint="/api/v1/memory/retrieve",
             tenant_id=request.state.tenant_id,
@@ -961,6 +997,7 @@ async def retrieve_memory_artifacts(
         )
         raise
     latency_ms = (perf_counter() - started) * 1000
+    _record_retrieval_metrics(endpoint="retrieve", outcome="success", latency_ms=latency_ms, response=response)
     _log_retrieval_diagnostics(
         endpoint="/api/v1/memory/retrieve",
         tenant_id=request.state.tenant_id,
@@ -1069,6 +1106,7 @@ async def retrieve_agent_memory_artifacts(
             )
     except Exception as exc:
         latency_ms = (perf_counter() - started) * 1000
+        _record_retrieval_metrics(endpoint="retrieve_agent", outcome="error", latency_ms=latency_ms)
         _log_retrieval_diagnostics(
             endpoint="/api/v1/memory/retrieve-agent",
             tenant_id=request.state.tenant_id,
@@ -1094,6 +1132,9 @@ async def retrieve_agent_memory_artifacts(
         raise
 
     latency_ms = (perf_counter() - started) * 1000
+    _record_retrieval_metrics(
+        endpoint="retrieve_agent", outcome="success", latency_ms=latency_ms, response=response
+    )
     _log_retrieval_diagnostics(
         endpoint="/api/v1/memory/retrieve-agent",
         tenant_id=request.state.tenant_id,

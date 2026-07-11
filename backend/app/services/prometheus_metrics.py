@@ -27,6 +27,12 @@ _SOURCE_TYPE_LABEL_ALLOWLIST = frozenset(
         "memory",
     }
 )
+_JOB_TYPE_LABEL_ALLOWLIST = frozenset(
+    {"memory_artifact", "note", "doc", "pdf", "webpage", "youtube", "feed", "image", "media", "bundle"}
+)
+_JOB_STATUS_LABEL_ALLOWLIST = frozenset({"queued", "processing", "completed", "failed", "duplicate"})
+_SOURCE_KIND_LABEL_ALLOWLIST = frozenset({"http"})
+_SOURCE_STATUS_LABEL_ALLOWLIST = frozenset({"active", "unreachable", "gone", "paused"})
 
 
 class HttpMetricsRecorder:
@@ -105,6 +111,29 @@ class PrometheusTextBuilder:
     def render(self) -> str:
         return "\n".join(self._lines) + "\n"
 
+    def histogram(
+        self,
+        name: str,
+        help_text: str,
+        *,
+        buckets: tuple[float, ...],
+        counts: list[int],
+        count: int,
+        value_sum: float,
+        labels: dict[str, object],
+    ) -> None:
+        if name not in self._declared:
+            self._lines.append(f"# HELP {name} {help_text}")
+            self._lines.append(f"# TYPE {name} histogram")
+            self._declared.add(name)
+        for boundary, bucket_count in zip(buckets, counts, strict=True):
+            self._lines.append(
+                f'{name}_bucket{_format_labels({**labels, "le": _format_value(boundary)})} {bucket_count}'
+            )
+        self._lines.append(f'{name}_bucket{_format_labels({**labels, "le": "+Inf"})} {count}')
+        self._lines.append(f"{name}_sum{_format_labels(labels)} {_format_value(value_sum)}")
+        self._lines.append(f"{name}_count{_format_labels(labels)} {count}")
+
 
 def _add_http_metrics(builder: PrometheusTextBuilder, recorder: HttpMetricsRecorder | None) -> None:
     if recorder is None:
@@ -167,6 +196,65 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
             "counter",
             count,
             {"status": status, "failure_kind": failure_kind, "retryable": retryable},
+        )
+    retrieval_label_names = ("endpoint", "outcome")
+    for labels, count in snapshot["retrieval_requests"]:
+        builder.metric(
+            "palace_retrieval_requests_total",
+            "Retrieval requests by bounded outcome and routing classification.",
+            "counter",
+            count,
+            dict(zip(retrieval_label_names, labels, strict=True)),
+        )
+    for labels, count in snapshot["retrieval_classifications"]:
+        builder.metric(
+            "palace_retrieval_classifications_total",
+            "Retrieval decisions split into bounded low-cardinality dimensions.",
+            "counter",
+            count,
+            dict(zip(("endpoint", "dimension", "value"), labels, strict=True)),
+        )
+    result_label_names = ("endpoint", "rank_band", "freshness", "trust_class", "source_support_state")
+    for labels, count in snapshot["retrieval_results"]:
+        builder.metric(
+            "palace_retrieval_results_total",
+            "Returned retrieval results by bounded rank and evidence classification.",
+            "counter",
+            count,
+            dict(zip(result_label_names, labels, strict=True)),
+        )
+    histogram_specs = {
+        "retrieval_stage_duration": (
+            "palace_retrieval_stage_duration_seconds",
+            "Retrieval stage latency using fixed replica-aggregatable buckets.",
+            ("endpoint", "stage"),
+        ),
+        "embedding_duration": (
+            "palace_embedding_duration_seconds",
+            "Embedding provider request latency using fixed buckets.",
+            ("provider", "input_type", "status", "failure_kind"),
+        ),
+        "embedding_batch_size": (
+            "palace_embedding_batch_size",
+            "Embedding inputs per provider request.",
+            ("provider", "input_type"),
+        ),
+        "embedding_input_tokens": (
+            "palace_embedding_input_tokens",
+            "Estimated embedding input tokens per provider request.",
+            ("provider", "input_type"),
+        ),
+    }
+    for snapshot_name, labels, state in snapshot["histograms"]:
+        metric_name, help_text, label_names = histogram_specs[snapshot_name]
+        builder.histogram(
+            metric_name,
+            help_text,
+            buckets=state["buckets"],
+            counts=state["counts"],
+            count=state["count"],
+            value_sum=state["sum"],
+            labels=dict(zip(label_names, labels, strict=True)),
         )
     relationship_snapshot = relationship_telemetry_snapshot()
     for (provider, validation_outcome, fallback_used), count in relationship_snapshot["extractions"]:
@@ -236,6 +324,11 @@ def _source_type_label(source_type: object) -> str:
     return value if value in _SOURCE_TYPE_LABEL_ALLOWLIST else "other"
 
 
+def _allowlisted_label(value: object, allowed: frozenset[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in allowed else "other"
+
+
 def _add_item_rows(builder: PrometheusTextBuilder, rows: list[Any]) -> None:
     counts: dict[tuple[str, str], int] = defaultdict(int)
     for row in rows:
@@ -269,6 +362,31 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
             ),
             label_columns=("status",),
         )
+        job_age_rows = await _query_rows(
+                db,
+                """
+                SELECT job_type, status,
+                       EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint AS age_seconds
+                FROM jobs
+                WHERE status IN ('queued', 'processing')
+                GROUP BY job_type, status
+                """,
+            )
+        bounded_job_ages: dict[tuple[str, str], int] = {}
+        for row in job_age_rows:
+            labels = (
+                _allowlisted_label(row["job_type"], _JOB_TYPE_LABEL_ALLOWLIST),
+                _allowlisted_label(row["status"], _JOB_STATUS_LABEL_ALLOWLIST),
+            )
+            bounded_job_ages[labels] = max(bounded_job_ages.get(labels, 0), int(row["age_seconds"] or 0))
+        for (job_type, status), age_seconds in sorted(bounded_job_ages.items()):
+            builder.metric(
+                "palace_jobs_oldest_age_seconds",
+                "Oldest durable job age by bounded job type and status.",
+                "gauge",
+                age_seconds,
+                {"job_type": job_type, "status": status},
+            )
         _add_item_rows(
             builder,
             rows=await _query_rows(
@@ -304,6 +422,52 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
         indexed = indexed_rows[0] if indexed_rows else {}
         builder.metric("palace_indexed_items", "Items with at least one embedding chunk.", "gauge", indexed.get("indexed_items", 0))
         builder.metric("palace_embedding_chunks", "Total embedding chunks for non-deleted items.", "gauge", indexed.get("embedding_chunks", 0))
+
+        source_rows = await _query_rows(
+            db,
+            """
+            SELECT kind, status,
+                   COUNT(*) AS count,
+                   EXTRACT(EPOCH FROM (NOW() - MIN(last_success_at)))::bigint
+                     AS oldest_success_age_seconds,
+                   COUNT(*) FILTER (WHERE last_success_at IS NULL) AS never_success_count,
+                   COUNT(*) FILTER (WHERE next_due_at IS NOT NULL AND next_due_at <= NOW()) AS due_count,
+                   COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - next_due_at))) FILTER (
+                     WHERE next_due_at IS NOT NULL AND next_due_at <= NOW()
+                   ), 0)::bigint AS oldest_due_age_seconds
+            FROM source_resources
+            GROUP BY kind, status
+            """,
+        )
+        for row in source_rows:
+            labels = {
+                "kind": _allowlisted_label(row["kind"], _SOURCE_KIND_LABEL_ALLOWLIST),
+                "status": _allowlisted_label(row["status"], _SOURCE_STATUS_LABEL_ALLOWLIST),
+            }
+            builder.metric("palace_source_resources", "Source resources by kind and status.", "gauge", row["count"], labels)
+            if row["oldest_success_age_seconds"] is not None:
+                builder.metric(
+                    "palace_source_last_success_age_seconds",
+                    "Oldest successful source refresh age by kind and status.",
+                    "gauge",
+                    row["oldest_success_age_seconds"],
+                    labels,
+                )
+            builder.metric(
+                "palace_source_never_succeeded",
+                "Source resources with no successful refresh by kind and status.",
+                "gauge",
+                row["never_success_count"],
+                labels,
+            )
+            builder.metric("palace_source_refresh_due", "Source resources currently due for refresh.", "gauge", row["due_count"], labels)
+            builder.metric(
+                "palace_source_refresh_oldest_due_age_seconds",
+                "Oldest overdue source refresh age by kind and status.",
+                "gauge",
+                row["oldest_due_age_seconds"],
+                labels,
+            )
 
         dirty_rows = await _query_rows(
             db,

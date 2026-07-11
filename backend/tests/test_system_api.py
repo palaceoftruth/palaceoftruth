@@ -8,6 +8,7 @@ from app.auth import AuthContext, verify_memory_auth
 from app.database import get_db
 from app.services.memory_telemetry import (
     record_embedding_request,
+    record_retrieval,
     record_retention_extraction,
     record_scope_guard_violation,
     record_semantic_recall,
@@ -94,6 +95,14 @@ class MetricsSession:
             return _MappingsResult([{"status": "queued", "count": 3}, {"status": "failed", "count": 1}])
         if "from jobs" in sql and "where webhook_url is not null" in sql:
             return _MappingsResult([{"status": "failed", "count": 2}, {"status": "completed", "count": 5}])
+        if "min(created_at)" in sql and "from jobs" in sql:
+            return _MappingsResult(
+                [
+                    {"job_type": "memory_artifact", "status": "queued", "age_seconds": 91},
+                    {"job_type": "private-a", "status": "queued", "age_seconds": 50},
+                    {"job_type": "private-b", "status": "queued", "age_seconds": 80},
+                ]
+            )
         if "from jobs" in sql and "group by job_type, status" in sql:
             return _MappingsResult(
                 [
@@ -117,12 +126,46 @@ class MetricsSession:
             return _MappingsResult([{"indexed_items": 6, "embedding_chunks": 42}])
         if "from palace_tenant_state" in sql:
             return _MappingsResult([{"dirty_items": 5, "backlog_generation": 9}])
+        if "from source_resources" in sql:
+            return _MappingsResult(
+                [
+                    {
+                        "kind": "http",
+                        "status": "active",
+                        "count": 8,
+                        "oldest_success_age_seconds": 7200,
+                        "never_success_count": 2,
+                        "due_count": 3,
+                        "oldest_due_age_seconds": 600,
+                    }
+                ]
+            )
         raise AssertionError(f"Unexpected SQL: {sql}")
 
 
 class BrokenMetricsSession:
     async def execute(self, _statement):
         raise RuntimeError("database unavailable")
+
+
+class NeverSuccessfulSourceMetricsSession(MetricsSession):
+    async def execute(self, statement):
+        sql = str(statement).lower()
+        if "from source_resources" in sql:
+            return _MappingsResult(
+                [
+                    {
+                        "kind": "http",
+                        "status": "active",
+                        "count": 2,
+                        "oldest_success_age_seconds": None,
+                        "never_success_count": 2,
+                        "due_count": 1,
+                        "oldest_due_age_seconds": 30,
+                    }
+                ]
+            )
+        return await super().execute(statement)
 
 
 def _client(session: StatsSession) -> TestClient:
@@ -255,7 +298,34 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     record_semantic_recall(status="empty", scope_type="agent")
     record_retention_extraction(status="written", mode="extracted_write")
     record_scope_guard_violation(reason="agent_scope_not_allowlisted")
-    record_embedding_request(status="retry", failure_kind="timeout", retryable=True)
+    record_embedding_request(
+        status="retry",
+        failure_kind="timeout",
+        retryable=True,
+        provider="openai",
+        input_type="query",
+        duration_seconds=0.2,
+        batch_size=2,
+        input_tokens=128,
+    )
+    record_retrieval(
+        endpoint="retrieve_agent",
+        outcome="success",
+        intent="latest_status",
+        route_confidence="high",
+        fallback_used=True,
+        empty=False,
+        budget_truncated=True,
+        stage_seconds={"scoped_search": 0.5, "total": 0.75},
+        results=[SimpleNamespace(freshness="stale", trust_class="curated_memory", source_support_state="unknown")],
+    )
+    record_retrieval(
+        endpoint="tenant-a/private/query",
+        outcome="secret-outcome",
+        intent="raw user query",
+        route_confidence="customer-123",
+        results=[SimpleNamespace(freshness="https://private.example", trust_class="item-123", source_support_state="query-fingerprint")],
+    )
     record_relationship_extraction(
         provider="openrouter",
         retry_provider="openrouter",
@@ -279,6 +349,9 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
         in body
     )
     assert 'palace_memory_jobs{status="failed"} 1' in body
+    assert 'palace_jobs_oldest_age_seconds{job_type="memory_artifact",status="queued"} 91' in body
+    assert body.count('palace_jobs_oldest_age_seconds{job_type="other",status="queued"}') == 1
+    assert 'palace_jobs_oldest_age_seconds{job_type="other",status="queued"} 80' in body
     assert 'palace_items{source_type="note",status="ready"} 7' in body
     assert 'palace_items{source_type="other",status="ready"} 3' in body
     assert "palace_indexed_items 6" in body
@@ -299,8 +372,30 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
         in body
     )
     assert 'palace_relationship_edges_extracted_total{provider="openrouter"} 0' in body
+    assert (
+        'palace_retrieval_requests_total{endpoint="retrieve_agent",outcome="success"} 1'
+        in body
+    )
+    assert (
+        'palace_retrieval_classifications_total{dimension="intent",endpoint="retrieve_agent",value="latest_status"} 1'
+        in body
+    )
+    assert (
+        'palace_retrieval_classifications_total{dimension="budget_truncated",endpoint="retrieve_agent",value="true"} 1'
+        in body
+    )
+    assert 'palace_retrieval_stage_duration_seconds_bucket{endpoint="retrieve_agent",le="0.5",stage="scoped_search"} 1' in body
+    assert 'palace_retrieval_results_total{endpoint="retrieve_agent",freshness="stale",rank_band="1",source_support_state="unknown",trust_class="curated_memory"} 1' in body
+    assert 'palace_embedding_duration_seconds_bucket{failure_kind="timeout",input_type="query",le="0.25",provider="openai",status="retry"} 1' in body
+    assert 'palace_source_refresh_due{kind="http",status="active"} 3' in body
+    assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert "tenant-a" not in body
+    assert "query_fingerprint" not in body
+    assert "item_id" not in body
+    assert "private.example" not in body
+    assert "customer-123" not in body
+    assert "raw user query" not in body
 
 
 def test_metrics_degrades_to_error_gauge_when_database_scrape_fails() -> None:
@@ -312,3 +407,12 @@ def test_metrics_degrades_to_error_gauge_when_database_scrape_fails() -> None:
     body = response.text
     assert "palace_metrics_scrape 1" in body
     assert "palace_metrics_database_scrape_error 1" in body
+
+
+def test_metrics_do_not_treat_source_creation_as_a_successful_refresh() -> None:
+    response = _metrics_client(NeverSuccessfulSourceMetricsSession()).get("/api/v1/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
+    assert 'palace_source_last_success_age_seconds{kind="http",status="active"}' not in body
