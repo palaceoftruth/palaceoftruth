@@ -632,6 +632,60 @@ def test_kubernetes_check_fails_closed_when_worker_logs_cannot_be_read() -> None
     ]
 
 
+def test_runtime_dependencies_require_api_readiness_and_started_workers() -> None:
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {"name": "worker-abc", "labels": {"app": "palaceoftruth-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {"phase": "Running"},
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return "Redis Sentinel startup dependency ready: master=valkey:6379\nStarting worker for 1 functions"
+
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        dependency_timeout_seconds=1,
+        dependency_interval_seconds=0.01,
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args, kube=FakeKube())
+
+    assert report["alerts"] == []
+    assert report["checks"] == [
+        {
+            "name": "runtime_dependencies",
+            "status": "passed",
+            "api": {"ready": True, "http_status": 200, "status": "ok", "dependencies": {"database": "ok", "queue": "ok"}},
+            "workers": {"ready": True, "selected_pods": ["worker-abc"], "non_running": [], "missing_markers": []},
+        }
+    ]
+
+
 def test_build_report_combines_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_sentinel(report: dict[str, Any]) -> None:
         rollout_smoke._record_check(report, "sentinel_valkey", "passed", master="valkey-primary:6379")
@@ -655,6 +709,7 @@ def test_build_report_combines_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(rollout_smoke, "check_sentinel", fake_sentinel)
     monkeypatch.setattr(rollout_smoke, "HttpClient", FakeClient)
+    monkeypatch.setattr(rollout_smoke, "check_runtime_dependencies", lambda client, report, args, kube=None: rollout_smoke._record_check(report, "runtime_dependencies", "passed"))
     monkeypatch.setattr(rollout_smoke, "check_mcp_reachable", lambda url, report, *, timeout: rollout_smoke._record_check(report, "mcp_health", "passed"))
     monkeypatch.setattr(rollout_smoke, "check_kubernetes", lambda report, args, kube=None: rollout_smoke._record_check(report, "kubernetes_alerts", "passed"))
     monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "secret")

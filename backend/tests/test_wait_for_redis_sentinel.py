@@ -9,6 +9,7 @@ from scripts.wait_for_redis_sentinel import (
     verify_sentinel_master,
     wait_for_sentinel_master,
 )
+from scripts import wait_for_worker_dependencies
 from scripts.check_redis_sentinel_rollout_gate import check_rollout_gate
 
 
@@ -147,6 +148,33 @@ async def test_wait_for_sentinel_master_retries_dependency_startup_errors() -> N
 
     assert await wait_for_sentinel_master(config, verifier=flaky_verifier) == ("valkey-primary", 6379)
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_gate_waits_for_database_before_sentinel_and_arq(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://example")
+
+    async def fake_database_wait(*args, **kwargs) -> None:
+        events.append("database")
+
+    async def fake_sentinel_wait(config) -> None:
+        assert config is not None
+        events.append("sentinel")
+
+    def fake_execvp(command: str, args: list[str]) -> None:
+        events.append(f"exec:{command}:{args[-1]}")
+        raise RuntimeError("exec called")
+
+    monkeypatch.setattr(wait_for_worker_dependencies, "wait_for_writable_database", fake_database_wait)
+    monkeypatch.setattr(wait_for_worker_dependencies, "load_config_from_env", lambda: object())
+    monkeypatch.setattr(wait_for_worker_dependencies, "wait_for_sentinel_master", fake_sentinel_wait)
+    monkeypatch.setattr(wait_for_worker_dependencies.os, "execvp", fake_execvp)
+
+    with pytest.raises(RuntimeError, match="exec called"):
+        await wait_for_worker_dependencies.async_main(["--", "arq", "app.workers.worker.WorkerSettings"])
+
+    assert events == ["database", "sentinel", "exec:arq:app.workers.worker.WorkerSettings"]
 
 
 @pytest.mark.asyncio

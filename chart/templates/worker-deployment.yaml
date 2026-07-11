@@ -26,7 +26,7 @@ spec:
         - name: worker
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.WorkerSettings"]
+          command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.WorkerSettings"]
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
           envFrom:
@@ -121,7 +121,7 @@ spec:
         - name: palace-worker
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "scripts/wait_for_redis_sentinel.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]
+          command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
           envFrom:
