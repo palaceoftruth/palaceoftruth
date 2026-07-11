@@ -167,6 +167,16 @@ manifest. Hermes release selection is driven by
 `third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` and the matching
 `palaceoftruth-hermes-memory-plugin-v<version>.json` manifest asset.
 
+Merges that change this package publish deterministic GitHub release assets
+under `agent-memory-plugin-v<version>`. The release contains tar and zip
+archives, an immutable file/artifact manifest, and SHA-256 checksums. Install
+through the Codex marketplace at the matching release tag; do not hand-copy
+individual cached skills. Verify checksums before installation, keep runtime
+credentials in the Codex secret/config surface, and restart Codex only after a
+secret-safe setup check reports the intended API resource and explicit default
+scope. Roll back by reinstalling the prior verified tag; Palace memory is not
+deleted or rewritten during install or rollback.
+
 After `PALACEOFTRUTH_API_KEY` is available in the Codex runtime environment,
 add `--live-smoke` to launch the stdio adapter and write exactly one scoped
 `agent/codex` memory. The live setup smoke disables relationship backfill and

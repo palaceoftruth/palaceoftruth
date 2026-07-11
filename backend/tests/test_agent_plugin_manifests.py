@@ -20,7 +20,7 @@ def test_codex_plugin_manifest_points_to_palace_mcp_package() -> None:
     manifest = load_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
 
     assert manifest["name"] == "palaceoftruth-memory"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.2.0"
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert "[TODO:" not in json.dumps(manifest)
@@ -43,7 +43,7 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
         REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth" / "plugin.yaml"
     ).read_text(encoding="utf-8")
 
-    assert codex_manifest["version"] == "0.1.0"
+    assert codex_manifest["version"] == "0.2.0"
     assert "version: 1.0.24" in hermes_plugin_yaml
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
