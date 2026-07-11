@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.wait_for_redis_sentinel import (
@@ -175,6 +180,24 @@ async def test_worker_gate_waits_for_database_before_sentinel_and_arq(monkeypatc
         await wait_for_worker_dependencies.async_main(["--", "arq", "app.workers.worker.WorkerSettings"])
 
     assert events == ["database", "sentinel", "exec:arq:app.workers.worker.WorkerSettings"]
+
+
+def test_worker_gate_script_execution_resolves_backend_package() -> None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.pop("DATABASE_URL", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.WorkerSettings"],
+        cwd=backend_dir,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "DATABASE_URL is required for ARQ worker startup" in result.stderr
 
 
 @pytest.mark.asyncio
