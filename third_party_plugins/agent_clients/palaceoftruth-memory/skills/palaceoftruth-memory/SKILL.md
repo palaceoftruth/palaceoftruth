@@ -106,6 +106,32 @@ Use tags only as secondary filters. Use `relationship_policy="immediate"` for
 normal notes and `relationship_policy="deferred"` only for bulk imports that
 will explicitly call `backfill_deferred_relationships`.
 
+## Agent Write Contract
+
+Use MCP `palace_remember` for a normal single-memory agent write and pass both
+`scope_type` and `scope_key` for every non-`tenant_shared` automated write,
+plus a stable idempotency key. Scope ownership is explicit:
+
+- `agent/orchestrator` for orchestrator-owned operating learning.
+- `agent/<stable-agent-key>` for a named standalone agent.
+- `workspace/<stable-project-key>` for project implementation, landing,
+  research, and decision records.
+- `session/<thread-or-run-id>` for one-run resume state.
+- `tenant_shared` only for an explicit publication.
+
+Use `palace_checkpoint` for handoff or compaction, not a normal project note.
+Reserve low-level `create_memory_entry` for imports, bulk/programmatic tools,
+compatibility smokes, protocol tests, or advanced fields unavailable through
+the alias. Raw REST is only for operator integration/authentication diagnostics;
+it is never an automatic agent fallback. MCP uses the configured transport
+authentication; it does not bypass OAuth.
+
+When MCP is unavailable or unauthenticated, record a local `deferred` outcome
+with the exact non-secret error. Do not claim durability from an accepted or
+queued response: wait for terminal completion and retrieve from the expected
+scope. Subagents return evidence and a proposed capture payload unless direct
+write-back is explicitly delegated.
+
 ## Safe Tool Boundary
 
 Allowed tools are the adapter's current memory, wake-up, job-list, search,

@@ -219,7 +219,25 @@ Use `get_wakeup_context` for startup recall when an agent needs a bounded
 hot-cache package: wake-up readiness, selected agent/workspace/session memory
 summaries, recent checkpoint pointers, provenance IDs, and safe next probes.
 Use `palace_search` or `retrieve_agent_memory` for a specific follow-up query,
-and use `capture_checkpoint` only when writing a reviewed checkpoint.
+and use `palace_checkpoint` only when writing a reviewed handoff or compaction
+checkpoint.
+
+For normal single-memory agent write-back, use `palace_remember` with explicit
+scope and a stable idempotency key. Use `agent/orchestrator` for an
+orchestrator's operating learning, `agent/<stable-agent-key>` for a named
+agent, `workspace/<stable-project-key>` for project decisions and outcomes,
+and `session/<thread-or-run-id>` for resumable run state. Publish to
+`tenant_shared` only when explicitly intended. Reserve
+`create_memory_entry` for imports, bulk/programmatic tooling, compatibility
+smokes, protocol tests, or advanced fields the alias cannot express.
+
+MCP uses its configured transport authentication; it does not bypass OAuth.
+Raw REST is reserved for operator integration/authentication diagnostics and
+must never become an automatic agent fallback. If MCP is unavailable or
+unauthenticated, record a local `deferred` outcome with the exact non-secret
+error. An accepted or queued result is not durable until its job completes and
+the entry is retrievable from the expected scope. Subagents return proposed
+capture payloads unless direct write-back is explicitly delegated.
 
 If semantic retrieval tools such as `retrieve_memory`, `retrieve_agent_memory`,
 or `palace_search` are temporarily failing, agents should not treat the whole
@@ -330,10 +348,10 @@ manual memory habits:
 1. Start with `whoami`, `get_wakeup_context`, and route-aware
    `retrieve_agent_memory` using `agent_scope_key="codex"` and the stable
    workspace key.
-2. Before handoff or compaction, dry-run `capture_checkpoint` with sanitized
+2. Before handoff or compaction, dry-run `palace_checkpoint` with sanitized
    summary/evidence snippets, then write only after review.
-3. After substantial work, write concise durable learning with
-   `create_memory_entry` or `palace_remember`.
+3. After substantial work, write concise durable learning with explicit-scoped
+   `palace_remember` and a stable idempotency key.
 
 Generate copyable dry-run payloads without connecting to Palace:
 

@@ -39,13 +39,16 @@ def test_lifecycle_payloads_use_scoped_dry_run_defaults() -> None:
     assert steps["get_wakeup_context"]["arguments"]["workspace_scope_keys"] == ["palaceoftruth"]
     assert steps["retrieve_agent_memory"]["arguments"]["workspace_scope_keys"] == ["palaceoftruth"]
     assert steps["retrieve_agent_memory"]["arguments"]["include_broad_corpus"] is False
-    checkpoint_args = steps["capture_checkpoint"]["arguments"]
+    checkpoint_args = steps["palace_checkpoint"]["arguments"]
     assert checkpoint_args["dry_run"] is True
     assert checkpoint_args["scope_type"] == "session"
     assert checkpoint_args["scope_key"] == "run-123"
-    writeback_args = steps["create_memory_entry"]["arguments"]
+    assert checkpoint_args["idempotency_key"] == "codex-checkpoint:<stable-thread-or-run-id>"
+    writeback_args = steps["palace_remember"]["arguments"]
     assert writeback_args["scope_type"] == "workspace"
     assert writeback_args["scope_key"] == "palaceoftruth"
+    assert writeback_args["idempotency_key"] == "codex-learning:<stable-run-or-commit-id>"
+    assert checkpoint_args["relationship_policy"] == "immediate"
     assert writeback_args["relationship_policy"] == "immediate"
 
 
@@ -80,8 +83,8 @@ def test_plugin_readme_references_core_mcp_tools_and_fallback() -> None:
     assert "get_wakeup_context" in text
     assert "palace_context" in text
     assert "retrieve_agent_memory" in text
-    assert "capture_checkpoint" in text
-    assert "create_memory_entry" in text
+    assert "palace_checkpoint" in text
+    assert "palace_remember" in text
     assert "normalize_agent_transcripts.py dry-run" in text
     assert "Use local Codex memory files only when Palace MCP is unavailable" in text
     assert "semantic retrieval is\ndegraded" in text

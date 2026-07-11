@@ -108,14 +108,18 @@ Tags are secondary filters, not access boundaries.
 
 ## Safe Write-Back
 
-Use `create_memory_entry` for durable learning that should affect future Codex
-runs. Keep entries concise and operational:
+Use `palace_remember` for every normal single-memory agent write. Keep entries
+concise and operational, and always pass an explicit scope plus a deterministic
+idempotency key for automated work:
 
 - Store decisions, stable conventions, verified outcomes, and non-sensitive
   handoff facts.
 - Use `scope_type="agent"` and `scope_key="codex"` for Codex-wide memory.
 - Use `scope_type="workspace"` with a stable repo key for project memory.
 - Use `scope_type="session"` for one-off run handoffs.
+- Use `scope_type="tenant_shared"` only for an intentional shared publication.
+- Derive idempotency from a stable task, run, commit, or source identifier; do
+  not randomize a duplicate key to bypass a replay or conflict.
 - Use `relationship_policy="immediate"` for normal notes.
 - Use `relationship_policy="deferred"` only for bulk imports that will
   explicitly call `backfill_deferred_relationships`.
@@ -123,20 +127,36 @@ runs. Keep entries concise and operational:
 Never store raw secrets, API keys, bearer tokens, client secrets, private
 transcript text, sensitive user content, or unredacted credential locations.
 
-Use `palace_remember` for concise durable write-back only when the adapter's
-configured default scope is the desired target, or pass both `scope_type` and
-`scope_key` explicitly. Calls without either complete destination return the
+Calls without a complete explicit/configured destination return the
 non-retryable `scope_not_configured` contract and do not write; scope-key-only
-agent inference is unsupported. `tenant_shared` requires an explicit
-`scope_type="tenant_shared"` request. The wrapper uses `source="codex"` and
-`created_by_role="agent"` defaults, but it must not be treated as an
-`agent/codex` scope override when a host such as Iris is configured for
-`agent/iris`.
+agent inference is unsupported. A configured default is a visible runtime
+setting, not a substitute for explicit automated scope routing.
+`tenant_shared` requires an explicit `scope_type="tenant_shared"` request.
+The wrapper uses `source="codex"` and `created_by_role="agent"` defaults, but
+it must not be treated as an `agent/codex` scope override when a host such as
+Iris is configured for `agent/iris`.
+
+Reserve low-level `create_memory_entry` for imports, bulk/programmatic tools,
+compatibility smokes, protocol tests, or advanced fields the alias cannot
+express. Raw REST is only for operator integration or authentication
+diagnostics; never use it as an automatic agent fallback. If MCP is unavailable
+or unauthenticated, record a local `deferred` outcome with the exact non-secret
+error instead.
+
+`accepted` or `queued` means the server accepted work, not that the memory is
+durable. Check the returned job/entry pointer until terminal completion and
+retrieve from the expected scope before reporting a persisted write. Preserve
+typed duplicate outcomes: safe replay is `already_present`; a different
+payload/scope is `blocked`; an untyped duplicate rejection is
+`duplicate_rejected`.
 
 ## Checkpoints
 
-Use `capture_checkpoint` before handoff, compaction, or long-running session
-boundaries when a future agent should resume from Palace memory.
+Use `palace_checkpoint` before handoff, compaction, or long-running session
+boundaries when a future agent should resume from Palace memory. Pass the
+explicit `session/<thread-or-run-id>` scope and a deterministic idempotency key
+for automated checkpoints. Reserve `capture_checkpoint` for low-level or
+advanced checkpoint tooling.
 
 Checkpoint bodies should contain concise state, decisions, changed files,
 validation, caveats, and next steps. Do not pass raw transcripts or large logs.
@@ -145,8 +165,9 @@ Use dry-run preview when the payload might contain sensitive content.
 If `PALACEOFTRUTH_MCP_CHECKPOINT_CAPTURE_DISABLED=true`, do not work around the
 kill switch. Fall back to local handoff or project-manager memory instead.
 
-Use `palace_checkpoint` as the shorter alias when the checkpoint should default
-to `agent/codex` scope.
+Subagents should return evidence plus a proposed capture payload by default.
+The orchestrator writes reviewed project synthesis to its explicit scope unless
+direct write-back was explicitly delegated.
 
 ## Local Fallback
 
