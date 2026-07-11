@@ -77,12 +77,12 @@ def test_backend_startup_probe_allows_database_retry_budget() -> None:
     backend = _backend_deployment(_render_chart())
     container = backend["spec"]["template"]["spec"]["containers"][0]
 
-    assert container["startupProbe"] == {
-        "httpGet": {"path": "/api/v1/health", "port": 8000},
-        "periodSeconds": 5,
-        "timeoutSeconds": 5,
-        "failureThreshold": 60,
-    }
+    startup_probe = container["startupProbe"]
+    assert startup_probe["httpGet"] == {"path": "/api/v1/health", "port": 8000}
+    assert startup_probe["periodSeconds"] == 5
+    assert startup_probe["timeoutSeconds"] == 5
+    assert startup_probe["failureThreshold"] == 90
+    assert startup_probe["periodSeconds"] * startup_probe["failureThreshold"] > 300
 
 
 def test_readiness_timeout_must_leave_time_for_alembic() -> None:

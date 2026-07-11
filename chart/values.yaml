@@ -353,7 +353,9 @@ backend:
   startupProbe:
     periodSeconds: 5
     timeoutSeconds: 5
-    failureThreshold: 60
+    # Leave room after the 300s writable-primary gate for Alembic, idempotent
+    # seed work, and ARQ pool initialization before liveness takes over.
+    failureThreshold: 90
   replicas: 1
   rollingUpdate:
     maxUnavailable: 0
