@@ -14,7 +14,7 @@ from app.api.items import router as items_router
 from app.auth import AuthContext, verify_memory_auth
 from app.database import get_db
 from app.models.item import Item
-from app.models.job import Job
+from app.models.job import Job, JobAttempt
 from app.pipelines.image import ImagePipeline
 from app.services.image_analysis import ImageAnalysisError
 from app.services.embedder import EmbeddingRequestError
@@ -40,7 +40,16 @@ class RowsResult:
         return self.rows
 
     def scalar_one_or_none(self):
-        return 1
+        return self.rows[0] if self.rows else None
+
+    def scalar_one(self):
+        return self.rows[0]
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.rows[0] if self.rows else None
 
 
 class MappingResult:
@@ -164,9 +173,16 @@ class FakeFeedTaskSession:
     def __init__(self, stale_rows: list[SimpleNamespace], jobs: dict[uuid.UUID, Job]) -> None:
         self.stale_rows = stale_rows
         self.jobs = jobs
+        self.attempts: list[JobAttempt] = []
 
     async def execute(self, statement, params=None):
         sql = str(statement)
+        if "FROM job_attempts" in sql:
+            if "coalesce(max" in sql.lower():
+                return RowsResult([max((a.attempt_number for a in self.attempts), default=0) + 1])
+            if "WHERE job_attempts.id" in sql:
+                return RowsResult(self.attempts)
+            return RowsResult([a for a in self.attempts if a.status in {"queued", "processing"}])
         assert "SELECT j.id" in sql
         return RowsResult(self.stale_rows)
 
@@ -175,6 +191,15 @@ class FakeFeedTaskSession:
         return self.jobs.get(key)
 
     async def commit(self):
+        return None
+
+    def add(self, value):
+        if isinstance(value, JobAttempt):
+            if value.id is None:
+                value.id = uuid.uuid4()
+            self.attempts.append(value)
+
+    async def flush(self):
         return None
 
 
@@ -520,6 +545,32 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
     assert stale_job.progress == 0
     assert stale_job.error_message is None
     assert stale_item.status == "processing"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_memory_jobs_dead_letters_missing_source_attempt(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    job = Job(id=job_id, item_id=item_id, job_type="memory_artifact", tenant_id="tenant-a", status="processing", progress=40, created_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    item = Item(id=item_id, tenant_id="tenant-a", title="Missing", source_type="note", status="processing", raw_content=None)
+    session = FakeFeedTaskSession(
+        [SimpleNamespace(id=job_id, status="processing", item_id=item_id, tenant_id="tenant-a", payload={})],
+        {job_id: job, item_id: item},
+    )
+    attempt = JobAttempt(id=uuid.uuid4(), job_id=job_id, tenant_id="tenant-a", attempt_number=1, trigger="initial", status="processing")
+    session.attempts.append(attempt)
+
+    async def requeueable(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(tasks, "_memory_job_is_requeueable", requeueable)
+
+    await tasks.recover_stale_memory_jobs({"redis": FakeArqPool()})
+
+    assert job.status == "failed"
+    assert attempt.status == "dead_lettered"
+    assert attempt.failure_kind == "non_retryable"
 
 
 @pytest.mark.asyncio

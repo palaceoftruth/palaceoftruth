@@ -2757,6 +2757,9 @@ async def retry_memory_job(
     if not item or not item.raw_content:
         raise HTTPException(status_code=409, detail="Memory source note content is unavailable; re-submit the memory entry")
 
+    from app.services.job_attempts import create_job_attempt
+
+    await create_job_attempt(db, job_id=job.id, tenant_id=job.tenant_id, trigger="manual_retry")
     job.status = "queued"
     job.progress = 0
     job.error_message = None

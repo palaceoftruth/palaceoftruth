@@ -61,11 +61,16 @@ class FakeSession:
             return self.scalar_results.pop(0)
         return None
 
-    async def get(self, model, key):
+    async def get(self, model, key, **_kwargs):
         return self.objects.get((model, key), self.get_results.get(key))
 
     async def execute(self, statement, *_args, **_kwargs):
-        self.executed.append(str(statement.compile(compile_kwargs={"literal_binds": True})))
+        sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        self.executed.append(sql)
+        if "FROM job_attempts" in sql:
+            if "coalesce(max" in sql.lower():
+                return _ScalarsResult([1])
+            return _ScalarsResult([])
         if self.execute_results:
             return _ScalarsResult(self.execute_results.pop(0))
         return _ScalarsResult([])
@@ -134,6 +139,9 @@ class _ScalarsResult:
 
     def scalar_one(self):
         return self.values
+
+    def scalar_one_or_none(self):
+        return self.values[0] if self.values else None
 
 
 def test_source_project_metadata_uses_normalized_agent_workspace() -> None:

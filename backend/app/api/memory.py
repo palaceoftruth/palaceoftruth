@@ -135,6 +135,13 @@ def _tenant_mismatch_detail() -> dict[str, Any]:
 
 
 async def _mark_memory_enqueue_unavailable(db: AsyncSession, *, job: Job, error: Exception) -> None:
+    from app.services.job_attempts import active_job_attempt, mark_job_attempt_failed
+
+    attempt = await active_job_attempt(db, job_id=job.id)
+    if attempt is not None:
+        await mark_job_attempt_failed(
+            db, attempt_id=attempt.id, failure_kind="enqueue_failed", error=error
+        )
     payload = dict(job.payload or {})
     payload["contract_status"] = "dependency_unavailable"
     job.payload = payload

@@ -14,6 +14,14 @@ from app.services.chunker import chunk_text
 from app.services.embedder import EmbeddingService
 from app.services.embedding_storage import embedding_record_for_profile
 from app.services.job_progress import job_event_status_for_job_status, record_job_progress_event
+from app.services.job_attempts import (
+    active_job_attempt,
+    ensure_active_job_attempt,
+    mark_job_attempt_completed,
+    mark_job_attempt_dead_lettered,
+    mark_job_attempt_failed,
+    mark_job_attempt_started,
+)
 from app.services.item_dates import apply_effective_date
 from app.services.llm import LLMService
 from app.utils.hash import compute_content_hash
@@ -163,6 +171,9 @@ class BasePipeline:
                         message="Duplicate content detected",
                         metadata={"duplicate_of": str(existing_id)},
                     )
+                    attempt = await active_job_attempt(self.db, job_id=job.id)
+                    if attempt is not None:
+                        await mark_job_attempt_completed(self.db, attempt_id=attempt.id)
                 await self.db.commit()
                 logger.info(
                     "Job %s: duplicate of item %s (content hash collision)",
@@ -239,7 +250,7 @@ class BasePipeline:
             logger.info("Job %s completed: item %s", job_id, item.id)
             return item.id
 
-        except asyncio.CancelledError as exc:
+        except asyncio.CancelledError:
             await self.db.rollback()
             logger.warning("Job %s cancelled during pipeline processing", job_id)
             job = await self.db.get(Job, job_id)
@@ -306,6 +317,15 @@ class BasePipeline:
             logger.exception("Job %s failed: %s", job_id, exc)
             job = await self.db.get(Job, job_id)
             if job:
+                if getattr(exc, "retryable", True) is False:
+                    attempt = await active_job_attempt(self.db, job_id=job.id)
+                    if attempt is not None:
+                        await mark_job_attempt_dead_lettered(
+                            self.db,
+                            attempt_id=attempt.id,
+                            failure_kind="non_retryable",
+                            error=exc,
+                        )
                 await self._update_job(
                     job,
                     phase="failed",
@@ -335,6 +355,23 @@ class BasePipeline:
         event_metadata: dict[str, Any] | None = None,
         completed_at: datetime | None = None,
     ) -> None:
+        if status == "processing":
+            attempt = await ensure_active_job_attempt(
+                self.db, job_id=job.id, tenant_id=job.tenant_id
+            )
+            await mark_job_attempt_started(self.db, attempt_id=attempt.id)
+        elif status in {"completed", "duplicate", "failed", "cancelled"}:
+            attempt = await active_job_attempt(self.db, job_id=job.id)
+            if attempt is not None:
+                if status in {"completed", "duplicate"}:
+                    await mark_job_attempt_completed(self.db, attempt_id=attempt.id)
+                else:
+                    await mark_job_attempt_failed(
+                        self.db,
+                        attempt_id=attempt.id,
+                        failure_kind="worker_cancelled" if status == "cancelled" else "worker_error",
+                        error=error_message,
+                    )
         if status is not None:
             job.status = status
         if progress is not None:
