@@ -1,4 +1,7 @@
 {{- if .Values.migrations.enabled }}
+{{- if and .Values.migrations.readiness.enabled (ge (int .Values.migrations.readiness.timeoutSeconds) (int .Values.migrations.activeDeadlineSeconds)) }}
+{{- fail "migrations.readiness.timeoutSeconds must be less than migrations.activeDeadlineSeconds" }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,6 +26,23 @@ spec:
       restartPolicy: Never
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
+      {{- if .Values.migrations.readiness.enabled }}
+      initContainers:
+        - name: wait-for-writable-database
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "app.wait_for_database"]
+          env:
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            - name: MIGRATION_DB_WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.migrations.readiness.timeoutSeconds | quote }}
+            - name: MIGRATION_DB_WAIT_INTERVAL_SECONDS
+              value: {{ .Values.migrations.readiness.intervalSeconds | quote }}
+            - name: MIGRATION_DB_CONNECT_TIMEOUT_SECONDS
+              value: {{ .Values.migrations.readiness.connectTimeoutSeconds | quote }}
+          resources:
+            {{- toYaml .Values.migrations.readiness.resources | nindent 12 }}
+      {{- end }}
       containers:
         - name: migrate
           image: {{ include "palaceoftruth.backendImage" . }}
