@@ -37,6 +37,34 @@ def test_smoke_matrix_covers_rest_and_mcp_memory_flow() -> None:
     assert "retry" not in steps["jobs"]["proves"]
 
 
+def test_mcp_auth_mode_prefers_oauth_client_credentials() -> None:
+    env = {
+        "PALACEOFTRUTH_API_KEY": "legacy-secret",
+        "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET": "oauth-secret",
+    }
+
+    assert smoke_module.mcp_auth_mode_from_env(env) == "oauth_client_credentials"
+
+
+def test_oauth_whoami_requires_identity_and_grant_evidence() -> None:
+    summary = smoke_module.mcp_whoami_summary(
+        {
+            "tenant_id": "tenant-a",
+            "auth_mode": "mcp_oauth",
+            "mcp_client_key": "codex-remote",
+            "resource": "https://api.palaceoftruth.test/api/v1",
+            "allowed_scopes": ["read", "write"],
+        }
+    )
+
+    assert summary["mcp_client_key"] == "codex-remote"
+    assert summary["allowed_scopes"] == ["read", "write"]
+    with pytest.raises(RuntimeError, match="resource"):
+        smoke_module.mcp_whoami_summary(
+            {"tenant_id": "tenant-a", "auth_mode": "mcp_oauth", "mcp_client_key": "codex-remote", "allowed_scopes": ["read"]}
+        )
+
+
 def test_make_memory_entry_builds_scoped_canonical_payload() -> None:
     entry = smoke_module.make_memory_entry(
         tenant_id="tenant-a",
@@ -999,13 +1027,18 @@ def test_run_mcp_smoke_exercises_streamable_http_sequence(monkeypatch: pytest.Mo
             args = arguments or {}
             calls.append((name, args))
             if name == "whoami":
-                return {"status": "ok", "tenant_id": "tenant-a"}
-            if name == "create_memory_entry":
+                return {"status": "ok", "tenant_id": "tenant-a", "auth_mode": "api_key"}
+            if name == "palace_remember":
                 assert "tenant_id" not in args
                 assert args["scope_type"] == "workspace"
                 assert args["scope_key"] == "agent-memory-smoke"
                 assert args["relationship_policy"] == "deferred"
-                return {"job_id": "job-1", "status": "queued", "accepted_as": "canonical"}
+                return {
+                    "job_id": "job-1",
+                    "status": "queued",
+                    "accepted_as": "canonical",
+                    "scope": {"type": "workspace", "key": "agent-memory-smoke"},
+                }
             if name == "get_memory_job":
                 assert args == {"job_id": "job-1"}
                 return {"job_id": "job-1", "status": "complete"}
@@ -1056,14 +1089,14 @@ def test_run_mcp_smoke_exercises_streamable_http_sequence(monkeypatch: pytest.Mo
 
     result = smoke_module.run_mcp_smoke(args)
 
-    assert result["steps"]["whoami"] == {"status": "ok"}
+    assert result["steps"]["whoami"] == {"status": "ok", "auth_mode": "api_key", "tenant_id": "tenant-a"}
     assert result["steps"]["poll"] == {"status": "complete"}
     assert result["steps"]["backfill"] == {"status": "queued", "limit": 1, "defer_seconds": 0}
     assert result["steps"]["retrieve"] == {"status": "ok", "hit_count": 1}
     assert result["steps"]["list_entries"] == {"status": "ok", "returned": 1}
     assert [name for name, _ in calls] == [
         "whoami",
-        "create_memory_entry",
+        "palace_remember",
         "get_memory_job",
         "backfill_deferred_relationships",
         "retrieve_memory",
@@ -1089,9 +1122,9 @@ def test_run_mcp_smoke_skips_backfill_for_immediate_policy(monkeypatch: pytest.M
         async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
             calls.append(name)
             if name == "whoami":
-                return {"tenant_id": "tenant-a"}
-            if name == "create_memory_entry":
-                return {"job_id": "job-1", "status": "queued"}
+                return {"tenant_id": "tenant-a", "auth_mode": "api_key"}
+            if name == "palace_remember":
+                return {"job_id": "job-1", "status": "queued", "scope": {"type": "workspace", "key": "agent-memory-smoke"}}
             if name == "get_memory_job":
                 return {"job_id": "job-1", "status": "complete"}
             if name == "retrieve_memory":
@@ -1156,10 +1189,15 @@ def test_run_mcp_stdio_smoke_launches_local_adapter_and_reuses_sequence(
             args = arguments or {}
             calls.append((name, args))
             if name == "whoami":
-                return {"status": "ok", "tenant_id": "tenant-a"}
-            if name == "create_memory_entry":
+                return {"status": "ok", "tenant_id": "tenant-a", "auth_mode": "api_key"}
+            if name == "palace_remember":
                 assert args["relationship_policy"] == "deferred"
-                return {"job_id": "job-1", "status": "queued", "accepted_as": "canonical"}
+                return {
+                    "job_id": "job-1",
+                    "status": "queued",
+                    "accepted_as": "canonical",
+                    "scope": {"type": "workspace", "key": "agent-memory-smoke"},
+                }
             if name == "get_memory_job":
                 return {"job_id": "job-1", "status": "complete"}
             if name == "backfill_deferred_relationships":
@@ -1209,7 +1247,7 @@ def test_run_mcp_stdio_smoke_launches_local_adapter_and_reuses_sequence(
     assert result["steps"]["retrieve"] == {"status": "ok", "hit_count": 1}
     assert [name for name, _ in calls] == [
         "whoami",
-        "create_memory_entry",
+        "palace_remember",
         "get_memory_job",
         "backfill_deferred_relationships",
         "retrieve_memory",
@@ -1217,6 +1255,64 @@ def test_run_mcp_stdio_smoke_launches_local_adapter_and_reuses_sequence(
         "get_wakeup_brief",
         "list_memory_jobs",
     ]
+
+
+def test_mcp_stdio_optional_no_scope_probe_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeStdioMcpClient:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeStdioMcpClient":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+            calls.append(name)
+            if name == "whoami":
+                return {"tenant_id": "tenant-a", "auth_mode": "api_key"}
+            if name == "palace_remember" and arguments and arguments.get("scope_type") == "workspace":
+                return {"job_id": "job-1", "status": "queued", "scope": {"type": "workspace", "key": "agent-memory-smoke"}}
+            if name == "palace_remember":
+                return {"status": "rejected", "reason_code": "scope_not_configured", "retryable": False}
+            if name == "get_memory_job":
+                return {"job_id": "job-1", "status": "complete"}
+            if name == "retrieve_memory":
+                return {"results": [{"title": "Agent memory compatibility smoke"}]}
+            if name == "list_memory_entries":
+                return {"entries": [{"title": "Agent memory compatibility smoke"}]}
+            if name == "list_memory_jobs":
+                return {"jobs": []}
+            raise AssertionError(f"Unexpected MCP tool: {name}")
+
+    monkeypatch.setattr(smoke_module, "StdioMcpClient", FakeStdioMcpClient)
+    args = smoke_module.build_parser().parse_args(
+        [
+            "--api-key",
+            "secret",
+            "mcp-stdio",
+            "--run-id",
+            "20260430-smoke",
+            "--relationship-policy",
+            "immediate",
+            "--skip-wakeup-brief",
+            "--verify-no-scope-fail-closed",
+            "--job-interval-seconds",
+            "0",
+        ]
+    )
+
+    result = smoke_module.run_mcp_stdio_smoke(args)
+
+    assert result["steps"]["no_scope_fail_closed"] == {
+        "status": "rejected",
+        "reason_code": "scope_not_configured",
+        "retryable": False,
+    }
+    assert calls.count("palace_remember") == 2
 
 
 def test_scorecard_dry_run_scores_all_transports_without_live_calls() -> None:

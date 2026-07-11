@@ -84,6 +84,11 @@ are present.
 
 ## Raw REST Scripts
 
+Raw REST is an operator integration and auth-diagnostics path. It is not a
+conversational-agent fallback: agents use the MCP `palace_remember` contract
+with explicit scope and deterministic idempotency, while MCP encapsulates the
+OAuth transport authorization. Keep token requests and diagnostics secret-safe.
+
 Raw REST callers must request the API resource, not the MCP resource. Discover
 the exact resource identifier instead of guessing an `audience` value:
 
