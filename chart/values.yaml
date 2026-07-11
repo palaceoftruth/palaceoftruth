@@ -348,6 +348,14 @@ migrations:
       cpu: "500m"
 
 backend:
+  # CNPG may take several minutes to promote a writable primary after a
+  # configuration rollout. Keep liveness disabled until startup succeeds.
+  startupProbe:
+    periodSeconds: 5
+    timeoutSeconds: 5
+    # Leave room after the 300s writable-primary gate for Alembic, idempotent
+    # seed work, and ARQ pool initialization before liveness takes over.
+    failureThreshold: 90
   replicas: 1
   rollingUpdate:
     maxUnavailable: 0

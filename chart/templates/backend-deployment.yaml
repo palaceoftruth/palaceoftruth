@@ -69,6 +69,13 @@ spec:
           volumeMounts:
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            periodSeconds: {{ .Values.backend.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.backend.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.backend.startupProbe.failureThreshold }}
           readinessProbe:
             httpGet:
               path: /api/v1/health

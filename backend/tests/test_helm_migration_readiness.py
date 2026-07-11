@@ -30,6 +30,13 @@ def _migration_job(manifests: list[dict[str, Any]]) -> dict[str, Any]:
     raise AssertionError("migration Job was not rendered")
 
 
+def _backend_deployment(manifests: list[dict[str, Any]]) -> dict[str, Any]:
+    for manifest in manifests:
+        if manifest.get("kind") == "Deployment" and manifest.get("metadata", {}).get("name") == "palaceoftruth-backend":
+            return manifest
+    raise AssertionError("backend Deployment was not rendered")
+
+
 def test_migration_job_waits_for_writable_database_before_alembic() -> None:
     job = _migration_job(
         _render_chart(
@@ -64,6 +71,18 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
 def test_migration_readiness_gate_can_be_disabled() -> None:
     job = _migration_job(_render_chart("migrations.readiness.enabled=false"))
     assert "initContainers" not in job["spec"]["template"]["spec"]
+
+
+def test_backend_startup_probe_allows_database_retry_budget() -> None:
+    backend = _backend_deployment(_render_chart())
+    container = backend["spec"]["template"]["spec"]["containers"][0]
+
+    startup_probe = container["startupProbe"]
+    assert startup_probe["httpGet"] == {"path": "/api/v1/health", "port": 8000}
+    assert startup_probe["periodSeconds"] == 5
+    assert startup_probe["timeoutSeconds"] == 5
+    assert startup_probe["failureThreshold"] == 90
+    assert startup_probe["periodSeconds"] * startup_probe["failureThreshold"] > 300
 
 
 def test_readiness_timeout_must_leave_time_for_alembic() -> None:

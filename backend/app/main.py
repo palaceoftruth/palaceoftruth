@@ -36,6 +36,7 @@ from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
 from app.services.palace import create_sync_source
 from app.services.prometheus_metrics import HttpMetricsRecorder, monotonic_seconds
+from app.wait_for_database import wait_for_writable_database
 
 logger = logging.getLogger(__name__)
 _HTTP_METRICS = HttpMetricsRecorder()
@@ -124,8 +125,22 @@ def run_migrations() -> None:
     command.upgrade(alembic_cfg, "head")
 
 
+async def wait_for_database_startup() -> None:
+    """Keep Uvicorn alive while CNPG promotes a writable primary during rollout."""
+    await wait_for_writable_database(
+        settings.database_url,
+        timeout_seconds=300,
+        interval_seconds=5,
+        connect_timeout_seconds=5,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # CNPG can briefly fence its primary after a configuration rollout. Do not
+    # let a transient connection refusal terminate Uvicorn before migrations.
+    await wait_for_database_startup()
+
     # Run DB migrations on startup
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_migrations)

@@ -4,12 +4,33 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.main import _parse_default_s3_extensions, _seed_default_palace_sync_source
+from app.main import _parse_default_s3_extensions, _seed_default_palace_sync_source, wait_for_database_startup
 
 
 def test_parse_default_s3_extensions_splits_csv(monkeypatch) -> None:
     monkeypatch.setattr("app.main.settings.palace_default_s3_allowed_extensions", ".md, txt , .md")
     assert _parse_default_s3_extensions() == [".md", "txt", ".md"]
+
+
+@pytest.mark.asyncio
+async def test_backend_startup_waits_for_writable_database(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_wait(database_url: str, **kwargs) -> None:
+        captured["database_url"] = database_url
+        captured.update(kwargs)
+
+    monkeypatch.setattr("app.main.settings.database_url", "postgresql+asyncpg://palace")
+    monkeypatch.setattr("app.main.wait_for_writable_database", fake_wait)
+
+    await wait_for_database_startup()
+
+    assert captured == {
+        "database_url": "postgresql+asyncpg://palace",
+        "timeout_seconds": 300,
+        "interval_seconds": 5,
+        "connect_timeout_seconds": 5,
+    }
 
 
 @pytest.mark.asyncio
