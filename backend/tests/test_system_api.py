@@ -176,6 +176,13 @@ class NeverSuccessfulSourceMetricsSession(MetricsSession):
         return await super().execute(statement)
 
 
+class EmptyJobAttemptMetricsSession(MetricsSession):
+    async def execute(self, statement):
+        if "from job_attempts" in str(statement).lower():
+            return _MappingsResult([])
+        return await super().execute(statement)
+
+
 def _client(session: StatsSession) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -424,3 +431,13 @@ def test_metrics_do_not_treat_source_creation_as_a_successful_refresh() -> None:
     body = response.text
     assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_source_last_success_age_seconds{kind="http",status="active"}' not in body
+
+
+def test_metrics_emit_bounded_zero_job_lineage_series_when_attempts_are_empty() -> None:
+    response = _metrics_client(EmptyJobAttemptMetricsSession()).get("/api/v1/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'palace_job_attempts{job_type="other",status="other",trigger="other"} 0' in body
+    assert 'palace_job_recoveries{job_type="other",outcome="other"} 0' in body
+    assert 'palace_job_dead_letters{failure_kind="other",job_type="other"} 0' in body
