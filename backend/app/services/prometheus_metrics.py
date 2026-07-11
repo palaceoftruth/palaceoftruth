@@ -404,6 +404,14 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 count,
                 {"job_type": job_type, "status": status, "trigger": trigger},
             )
+        if not attempt_counts:
+            builder.metric(
+                "palace_job_attempts",
+                "Durable job attempts by bounded type, status, and trigger.",
+                "gauge",
+                0,
+                {"job_type": "other", "status": "other", "trigger": "other"},
+            )
         for (job_type, outcome), count in sorted(recovery_counts.items()):
             builder.metric(
                 "palace_job_recoveries",
@@ -412,6 +420,14 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 count,
                 {"job_type": job_type, "outcome": outcome},
             )
+        if not recovery_counts:
+            builder.metric(
+                "palace_job_recoveries",
+                "Durable stale-recovery attempts by bounded type and outcome.",
+                "gauge",
+                0,
+                {"job_type": "other", "outcome": "other"},
+            )
         for (job_type, failure_kind), count in sorted(dead_letter_counts.items()):
             builder.metric(
                 "palace_job_dead_letters",
@@ -419,6 +435,14 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 "gauge",
                 count,
                 {"job_type": job_type, "failure_kind": failure_kind},
+            )
+        if not dead_letter_counts:
+            builder.metric(
+                "palace_job_dead_letters",
+                "Durable dead-lettered attempts by bounded type and failure class.",
+                "gauge",
+                0,
+                {"job_type": "other", "failure_kind": "other"},
             )
         job_age_rows = await _query_rows(
                 db,
