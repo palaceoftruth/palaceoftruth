@@ -427,7 +427,10 @@ memoryRolloutSmoke:
   scopeKey: rollout-smoke
   restartAlertThreshold: 3
   logSinceSeconds: 3600
-  logTailLines: 500
+  # Startup markers can be pushed out of a busy worker's short tail before the
+  # post-upgrade smoke runs. Keep enough bounded history to verify the current
+  # process completed its dependency gate and started ARQ.
+  logTailLines: 3000
   jobTimeoutSeconds: 180
   jobIntervalSeconds: 5
   requestTimeoutSeconds: 10
