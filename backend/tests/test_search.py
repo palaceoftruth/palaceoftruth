@@ -151,9 +151,31 @@ def test_vector_search_accepts_candidate_limit_separate_from_display_limit() -> 
 
     assert db.last_params is not None
     assert db.last_params["candidate_limit"] == 80
+    assert db.last_params["semantic_candidate_limit"] == 80
+    assert db.last_params["lexical_candidate_limit"] == 80
     assert service.last_ranking_trace is not None
     assert service.last_ranking_trace["display_limit"] == 3
     assert service.last_ranking_trace["candidate_limit"] == 80
+
+
+def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(service.vector_search(query="bounded hybrid retrieval", candidate_limit=24))
+
+    assert db.last_sql is not None
+    assert "semantic_candidates AS MATERIALIZED" in db.last_sql
+    assert "LIMIT :semantic_candidate_limit" in db.last_sql
+    assert "lexical_items AS MATERIALIZED" in db.last_sql
+    assert "i.search_vector @@ plainto_tsquery('english', :query)" in db.last_sql
+    assert "LIMIT :lexical_candidate_limit" in db.last_sql
+    assert db.last_sql.index("LIMIT :semantic_candidate_limit") < db.last_sql.index("ranked AS")
+    assert db.last_sql.index("LIMIT :lexical_candidate_limit") < db.last_sql.index("ranked AS")
+    assert "UNION\n                SELECT item_id, chunk_text, chunk_index FROM lexical_candidates" in db.last_sql
+    assert db.last_params is not None
+    assert db.last_params["semantic_candidate_limit"] == 24
+    assert db.last_params["lexical_candidate_limit"] == 24
 
 
 def test_vector_search_uses_side_profile_storage_for_non_default_profile() -> None:
@@ -168,7 +190,8 @@ def test_vector_search_uses_side_profile_storage_for_non_default_profile() -> No
     assert "halfvec(768)" in db.last_sql
     assert db.last_params is not None
     assert db.last_params["embedding_profile_name"] == "local-http-gte-modernbert-base"
-    assert db.last_params["embedding_dimensions"] == 768
+    assert "e.dimensions = 768" in db.last_sql
+    assert ":embedding_dimensions" not in db.last_sql
     assert service.last_ranking_trace is not None
     assert service.last_ranking_trace["embedding_profile"]["storage"] == "embedding_profile_vectors"
 

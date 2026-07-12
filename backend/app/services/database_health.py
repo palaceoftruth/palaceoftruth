@@ -91,6 +91,7 @@ EXPECTED_INDEXES = frozenset(
         "idx_embedding_profile_vectors_halfvec_384_hnsw",
         "idx_embedding_profile_vectors_halfvec_768_hnsw",
         "idx_embedding_profile_vectors_halfvec_1024_hnsw",
+        "idx_embedding_profile_vectors_halfvec_1536_hnsw",
         "idx_items_search_vector",
         "idx_items_tenant_status",
         "idx_jobs_tenant_status",
