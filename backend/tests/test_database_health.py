@@ -51,6 +51,7 @@ def test_database_health_expectations_track_palace_critical_surfaces() -> None:
     } <= EXPECTED_TABLES
     assert {
         "idx_embeddings_halfvec_hnsw",
+        "ix_embeddings_item_chunk",
         "idx_embedding_profile_vectors_halfvec_384_hnsw",
         "idx_embedding_profile_vectors_halfvec_768_hnsw",
         "idx_embedding_profile_vectors_halfvec_1024_hnsw",
@@ -109,3 +110,9 @@ def test_live_database_url_is_redacted() -> None:
     assert redact_database_url("postgresql+asyncpg://example.test/palace") == (
         "postgresql+asyncpg://example.test/palace"
     )
+
+
+def test_live_database_health_only_accepts_valid_ready_indexes() -> None:
+    source = (REPO_ROOT / "backend/app/services/database_health.py").read_text()
+
+    assert "index_state.indisvalid and index_state.indisready" in source

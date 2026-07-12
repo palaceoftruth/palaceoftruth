@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector, HALFVEC
-from sqlalchemy import CheckConstraint, Integer, Text, ForeignKey, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, Index, Integer, Text, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,6 +17,7 @@ from app.embedding_profile import (
 
 class Embedding(Base):
     __tablename__ = "embeddings"
+    __table_args__ = (Index("ix_embeddings_item_chunk", "item_id", "chunk_index"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

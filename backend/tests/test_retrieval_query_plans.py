@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from typing import Any, Iterator
 
 import pytest
@@ -12,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.embedding_profile import resolve_embedding_profile
+from app.embedding_profile import EMBEDDING_DIMENSIONS, resolve_embedding_profile
 from app.services.search import SearchService
 
 
@@ -30,6 +29,13 @@ class _LocalEmbedder:
         dimensions=768,
         profile_name="local-http-gte-modernbert-base",
     )
+
+    async def embed_single(self, _query: str) -> list[float]:
+        return [0.1] * self.profile.dimensions
+
+
+class _DefaultEmbedder:
+    profile = resolve_embedding_profile()
 
     async def embed_single(self, _query: str) -> list[float]:
         return [0.1] * self.profile.dimensions
@@ -53,7 +59,7 @@ class _ExplainSession:
         self.statement_text = statement.text
         self.params = params
         result = await self.session.execute(
-            text(f"EXPLAIN (FORMAT JSON, COSTS OFF) {statement.text}"),
+            text(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, TIMING OFF) {statement.text}"),
             params,
         )
         self.plan = result.scalar_one()
@@ -80,6 +86,7 @@ async def plan_session() -> AsyncSession:
     async with engine.connect() as connection:
         session = AsyncSession(bind=connection, expire_on_commit=False)
         vector = "[" + ",".join(["0.1"] * 768) + "]"
+        default_vector = "[" + ",".join(["0.1"] * EMBEDDING_DIMENSIONS) + "]"
         try:
             await session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await session.execute(text("""
@@ -99,18 +106,37 @@ async def plan_session() -> AsyncSession:
                     embedding_half_768 halfvec(768) NOT NULL
                 )
             """))
+            await session.execute(text(f"""
+                CREATE TEMP TABLE embeddings (
+                    item_id uuid NOT NULL, chunk_text text NOT NULL,
+                    chunk_index integer NOT NULL,
+                    embedding_half halfvec({EMBEDDING_DIMENSIONS}) NOT NULL
+                )
+            """))
             await session.execute(text("CREATE TEMP TABLE room_memberships (tenant_id text, item_id uuid, room_id uuid)"))
             await session.execute(text("CREATE INDEX sar1060_items_fts ON items USING gin (search_vector)"))
+            await session.execute(text("""
+                CREATE INDEX sar1060_profile_item_chunk
+                ON embedding_profile_vectors (item_id, chunk_index)
+            """))
+            await session.execute(text("""
+                CREATE INDEX sar1060_default_item_chunk
+                ON embeddings (item_id, chunk_index)
+            """))
             await session.execute(text("""
                 CREATE INDEX sar1060_profile_hnsw
                 ON embedding_profile_vectors USING hnsw (embedding_half_768 halfvec_cosine_ops)
                 WHERE profile_name = 'local-http-gte-modernbert-base' AND dimensions = 768
             """))
+            await session.execute(text("""
+                CREATE INDEX sar1060_default_hnsw
+                ON embeddings USING hnsw (embedding_half halfvec_cosine_ops)
+            """))
             await session.execute(
                 text("""
                     INSERT INTO items (id, tenant_id, status, source_type, search_vector, title)
                     SELECT md5(value::text)::uuid, 'tenant-a', 'ready', 'doc',
-                           to_tsvector('english', CASE WHEN value % 113 = 0 THEN 'current palace retrieval' ELSE 'evergreen documentation ' || value::text END),
+                           to_tsvector('english', CASE WHEN value % 1000 = 0 THEN 'current palace retrieval' ELSE 'evergreen documentation ' || value::text END),
                            'Fixture ' || value::text
                     FROM generate_series(1, 5000) AS value
                 """),
@@ -124,9 +150,19 @@ async def plan_session() -> AsyncSession:
                 """),
                 {"vector": vector},
             )
+            await session.execute(
+                text(f"""
+                    INSERT INTO embeddings (item_id, chunk_text, chunk_index, embedding_half)
+                    SELECT id, title || ' chunk ' || chunk_index::text, chunk_index,
+                           CAST(:vector AS halfvec({EMBEDDING_DIMENSIONS}))
+                    FROM items
+                    CROSS JOIN generate_series(0, 2) AS chunk_index
+                """),
+                {"vector": default_vector},
+            )
             await session.execute(text("ANALYZE items"))
             await session.execute(text("ANALYZE embedding_profile_vectors"))
-            await session.execute(text("SET enable_seqscan = off"))
+            await session.execute(text("ANALYZE embeddings"))
             yield session
         finally:
             await session.close()
@@ -134,7 +170,9 @@ async def plan_session() -> AsyncSession:
 
 
 @pytest.mark.asyncio
-async def test_production_bounded_hybrid_query_uses_hnsw_and_gin(plan_session: AsyncSession) -> None:
+async def test_production_bounded_hybrid_query_uses_indexed_embedding_lookups(
+    plan_session: AsyncSession,
+) -> None:
     explain_session = _ExplainSession(plan_session)
     service = SearchService(explain_session, _LocalEmbedder(), tenant_id="tenant-a")
 
@@ -143,7 +181,14 @@ async def test_production_bounded_hybrid_query_uses_hnsw_and_gin(plan_session: A
     plan = json.loads(explain_session.plan) if isinstance(explain_session.plan, str) else explain_session.plan
     index_names = {node.get("Index Name") for node in _walk_plan_nodes(plan)}
     assert "sar1060_profile_hnsw" in index_names
-    assert "sar1060_items_fts" in index_names
+    assert "sar1060_profile_item_chunk" in index_names
+    repeated_embedding_scans = [
+        node
+        for node in _walk_plan_nodes(plan)
+        if node.get("Node Type") == "Seq Scan"
+        and node.get("Relation Name") == "embedding_profile_vectors"
+    ]
+    assert repeated_embedding_scans == []
     assert explain_session.statement_text is not None
     assert "LIMIT :semantic_candidate_limit" in explain_session.statement_text
     assert "LIMIT :lexical_candidate_limit" in explain_session.statement_text
@@ -154,6 +199,40 @@ async def test_production_bounded_hybrid_query_uses_hnsw_and_gin(plan_session: A
     # survive planning. This prevents the final display LIMIT from masking a
     # removed candidate-lane bound.
     assert sum(node.get("Node Type") == "Limit" for node in _walk_plan_nodes(plan)) >= 4
+
+
+@pytest.mark.asyncio
+async def test_default_embedding_query_uses_item_chunk_index_without_repeated_full_scans(
+    plan_session: AsyncSession,
+) -> None:
+    explain_session = _ExplainSession(plan_session)
+    service = SearchService(explain_session, _DefaultEmbedder(), tenant_id="tenant-a")
+
+    await service.vector_search("current palace retrieval", candidate_limit=40)
+
+    plan = json.loads(explain_session.plan) if isinstance(explain_session.plan, str) else explain_session.plan
+    index_names = {node.get("Index Name") for node in _walk_plan_nodes(plan)}
+    assert "sar1060_default_hnsw" in index_names
+    assert "sar1060_default_item_chunk" in index_names
+    assert [
+        node
+        for node in _walk_plan_nodes(plan)
+        if node.get("Node Type") == "Seq Scan" and node.get("Relation Name") == "embeddings"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_lexical_candidate_predicate_is_gin_eligible(plan_session: AsyncSession) -> None:
+    await plan_session.execute(text("SET LOCAL enable_seqscan = off"))
+    result = await plan_session.execute(text("""
+        EXPLAIN (FORMAT JSON, COSTS OFF)
+        SELECT id
+        FROM items
+        WHERE search_vector @@ plainto_tsquery('english', 'current palace retrieval')
+    """))
+    plan = result.scalar_one()
+    index_names = {node.get("Index Name") for node in _walk_plan_nodes(plan)}
+    assert "sar1060_items_fts" in index_names
 
 
 @pytest.mark.asyncio
