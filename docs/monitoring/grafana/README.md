@@ -14,7 +14,8 @@ datasource. It defaults to example label values:
 The dashboard covers:
 
 - Palace API scrape health, request rate, average latency, and 5xx rate.
-- ARQ queue depth, deferred depth, oldest queued job age, and recent failures.
+- ARQ worker availability/heartbeat freshness, queue depth, deferred depth,
+  oldest queued job age, and recent failures.
 - dirty Palace backlog and indexed corpus size.
 - memory and webhook job health.
 - item source/status mix.
@@ -47,3 +48,25 @@ use tenant, query, URL, item, job, correlation, or fingerprint values as labels.
 Durable database gauges expose oldest job age and source refresh age/due state.
 They intentionally report aggregate bounded classes rather than individual job
 or source identifiers.
+
+## Worker alerting
+
+Worker process liveness, dependency startup, and queue heartbeat freshness are
+separate signals. Kubernetes restarts an exited ARQ process. The startup wrapper
+waits for database and Valkey/Sentinel dependencies. The readiness probe uses
+an ARQ heartbeat keyed to the current pod, so a sibling replica cannot make a
+replacement pod ready. Metrics aggregate those expiring heartbeats by queue;
+an idle queue remains healthy while a missing worker is explicit.
+
+Alert when any scraped worker group has no fresh heartbeat for five minutes:
+
+```promql
+max_over_time(palace_arq_worker_available[5m]) == 0
+```
+
+Use `palace_arq_worker_heartbeat_age_seconds` for dashboards and early warning.
+Use `palace_arq_worker_instances` to compare fresh consumers with the desired
+worker replica count.
+Do not alert on `palace_arq_worker_queue_depth == 0`; zero is the normal idle
+state. The `key` label names a bounded logical worker group and `queue` names
+the ARQ queue. Multiple logical groups may intentionally share one queue.

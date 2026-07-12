@@ -689,6 +689,9 @@ class PalaceWorkerQueueMetrics(BaseModel):
     oldest_queued_age_seconds: int | None = None
     worker_concurrency: int | None = None
     worker_queue_depth: int | None = None
+    worker_available: bool = False
+    worker_instance_count: int = 0
+    worker_heartbeat_age_seconds: float | None = None
     db_queued_depth: int | None = None
     db_processing_depth: int | None = None
     oldest_db_queued_age_seconds: int | None = None

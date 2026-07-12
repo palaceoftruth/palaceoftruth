@@ -7,7 +7,7 @@ from arq.constants import job_key_prefix, result_key_prefix
 from arq.jobs import serialize_job, serialize_result
 
 from app.services.queue_telemetry import build_memory_queue_hint, build_worker_backpressure
-from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
+from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE, worker_health_check_key
 
 
 class FakeArqPool:
@@ -76,9 +76,9 @@ class FakeArqPool:
                 DEFAULT_WORKER_QUEUE,
                 "memory-result",
             ),
-            f"{DEFAULT_WORKER_QUEUE}:health-check": b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=3 queued=2",
-            f"{MEDIA_WORKER_QUEUE}:health-check": b"Apr-26 12:00:00 j_complete=2 j_failed=0 j_retried=0 j_ongoing=1 queued=1",
-            f"{PALACE_WORKER_QUEUE}:health-check": b"Apr-26 12:00:00 j_complete=7 j_failed=0 j_retried=0 j_ongoing=1 queued=1",
+            worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-0"): b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=3 queued=2",
+            worker_health_check_key(MEDIA_WORKER_QUEUE, "media-0"): b"Apr-26 12:00:00 j_complete=2 j_failed=0 j_retried=0 j_ongoing=1 queued=1",
+            worker_health_check_key(PALACE_WORKER_QUEUE, "palace-0"): b"Apr-26 12:00:00 j_complete=7 j_failed=0 j_retried=0 j_ongoing=1 queued=1",
         }
 
     async def zrange(self, queue_name: str, _start: int, _end: int, *, withscores: bool):
@@ -93,11 +93,16 @@ class FakeArqPool:
             key = key.decode("utf-8")
         return self.values.get(key)
 
+    async def pttl(self, key: str | bytes):
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        return 11_000 if key in self.values else -2
+
     async def scan_iter(self, *, match: str, count: int):
-        assert match == f"{result_key_prefix}*"
         assert count == 100
+        prefix = match.removesuffix("*")
         for key in self.values:
-            if key.startswith(result_key_prefix):
+            if key.startswith(prefix):
                 yield key
 
 
@@ -185,6 +190,8 @@ async def test_build_worker_backpressure_groups_arq_queue_metrics() -> None:
     assert by_key["memory"].oldest_queued_age_seconds >= 100
     assert by_key["memory"].worker_concurrency == 3
     assert by_key["memory"].worker_queue_depth == 2
+    assert by_key["memory"].worker_available is True
+    assert by_key["memory"].worker_heartbeat_age_seconds == 5.0
     assert by_key["memory"].recent_completed == 1
     assert by_key["memory"].recent_avg_latency_seconds == 18.0
 
@@ -192,6 +199,7 @@ async def test_build_worker_backpressure_groups_arq_queue_metrics() -> None:
     assert by_key["media_ingest"].queue_name == MEDIA_WORKER_QUEUE
     assert by_key["media_ingest"].worker_concurrency == 1
     assert by_key["media_ingest"].worker_queue_depth == 1
+    assert by_key["media_ingest"].worker_available is True
     assert by_key["media_ingest"].unexpected_function_count == 1
     assert by_key["media_ingest"].unexpected_functions == ["extract_relationships"]
     assert by_key["media_ingest"].db_queued_depth == 12
@@ -228,6 +236,61 @@ async def test_build_worker_backpressure_groups_arq_queue_metrics() -> None:
     assert by_key["relationships"].unexpected_function_count == 0
     assert by_key["palace_builds"].queued_depth == 1
     assert by_key["palace_builds"].worker_concurrency == 1
+    assert by_key["palace_builds"].worker_available is True
+
+
+@pytest.mark.asyncio
+async def test_build_worker_backpressure_distinguishes_missing_worker_from_idle_worker() -> None:
+    pool = FakeArqPool()
+    pool.values.pop(worker_health_check_key(MEDIA_WORKER_QUEUE, "media-0"))
+
+    summary = await build_worker_backpressure(pool, db=FakeDb())
+    by_key = {queue.key: queue for queue in summary.queues}
+
+    assert by_key["media_ingest"].queued_depth == 1
+    assert by_key["media_ingest"].worker_available is False
+    assert by_key["media_ingest"].worker_concurrency is None
+    assert by_key["media_ingest"].worker_queue_depth is None
+    assert by_key["media_ingest"].worker_heartbeat_age_seconds is None
+    assert by_key["memory"].worker_available is True
+
+
+@pytest.mark.asyncio
+async def test_build_worker_backpressure_rejects_expired_or_malformed_heartbeats() -> None:
+    class UnhealthyHeartbeatPool(FakeArqPool):
+        async def pttl(self, key: str | bytes):
+            if isinstance(key, bytes):
+                key = key.decode("utf-8")
+            if key == worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-0"):
+                return -1
+            return await super().pttl(key)
+
+    pool = UnhealthyHeartbeatPool()
+    pool.values[worker_health_check_key(PALACE_WORKER_QUEUE, "palace-0")] = b"not-an-arq-heartbeat"
+
+    summary = await build_worker_backpressure(pool, db=FakeDb())
+    by_key = {queue.key: queue for queue in summary.queues}
+
+    assert by_key["memory"].worker_available is False
+    assert by_key["relationships"].worker_available is False
+    assert by_key["palace_builds"].worker_available is False
+    assert by_key["media_ingest"].worker_available is True
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_aggregation_keeps_instances_isolated() -> None:
+    pool = FakeArqPool()
+    pool.values[worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-1")] = (
+        b"Apr-26 12:00:01 j_complete=8 j_failed=0 j_retried=0 j_ongoing=2 queued=7"
+    )
+
+    summary = await build_worker_backpressure(pool, db=FakeDb())
+    by_key = {queue.key: queue for queue in summary.queues}
+
+    assert by_key["memory"].worker_instance_count == 2
+    assert by_key["memory"].worker_concurrency == 5
+    assert by_key["memory"].worker_queue_depth == 7
+    assert by_key["media_ingest"].worker_instance_count == 1
 
 
 class SaturatedMemoryArqPool(FakeArqPool):
@@ -244,7 +307,7 @@ class SaturatedMemoryArqPool(FakeArqPool):
                 None,
                 score,
             )
-        self.values[f"{DEFAULT_WORKER_QUEUE}:health-check"] = (
+        self.values[worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-0")] = (
             b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=8 queued=101"
         )
 

@@ -456,6 +456,11 @@ memoryRolloutSmoke:
 
 worker:
   replicas: 1
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
   resources:
     requests:
       memory: "256Mi"
@@ -472,6 +477,11 @@ mediaWorker:
   queueName: "arq:queue:media"
   maxJobs: 1
   command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.MediaWorkerSettings"]
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
   resources:
     requests:
       memory: "512Mi"
@@ -484,6 +494,11 @@ mediaWorker:
 
 palaceWorker:
   replicas: 1
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
   resources:
     requests:
       memory: "256Mi"
