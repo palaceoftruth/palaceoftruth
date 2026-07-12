@@ -173,6 +173,27 @@ postgres:
       interval: 30s
       scrapeTimeout: 10s
       labels: {}
+  # Optional CNPG-I/Barman Cloud backups. The Barman Cloud plugin and its CRDs
+  # must already be installed; keep destination and credential references in
+  # the environment-specific values repository.
+  backup:
+    enabled: false
+    pluginName: barman-cloud.cloudnative-pg.io
+    objectStore:
+      # name defaults to <postgres cluster name>-backup when empty.
+      name: ""
+      # Passed to ObjectStore.spec.configuration. When backups are enabled,
+      # destinationPath and the provider-specific credential references belong
+      # here (or use workload identity supported by the provider).
+      configuration: {}
+      # Barman recovery-window retention, for example "30d". Empty delegates
+      # retention to the environment's object-store lifecycle policy.
+      retentionPolicy: ""
+    scheduledBackup:
+      # CNPG schedules use six cron fields, including seconds.
+      schedule: "0 0 0 * * *"
+      immediate: false
+      backupOwnerReference: self
 
 # Bundled Valkey (Redis-compatible) deployment
 valkey:

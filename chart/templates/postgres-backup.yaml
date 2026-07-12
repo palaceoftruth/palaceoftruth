@@ -1,0 +1,37 @@
+{{- if and .Values.postgres.enabled .Values.postgres.backup.enabled }}
+{{- $configuration := required "postgres.backup.objectStore.configuration is required when postgres.backup.enabled=true" .Values.postgres.backup.objectStore.configuration }}
+{{- $destinationPath := required "postgres.backup.objectStore.configuration.destinationPath is required when postgres.backup.enabled=true" (get $configuration "destinationPath") }}
+{{- $objectStoreName := default (printf "%s-backup" (include "palaceoftruth.postgresClusterName" .)) .Values.postgres.backup.objectStore.name }}
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ $objectStoreName }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  configuration:
+    {{- toYaml (merge (dict "destinationPath" $destinationPath) $configuration) | nindent 4 }}
+  {{- with .Values.postgres.backup.objectStore.retentionPolicy }}
+  retentionPolicy: {{ . | quote }}
+  {{- end }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ include "palaceoftruth.postgresClusterName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  schedule: {{ required "postgres.backup.scheduledBackup.schedule is required when postgres.backup.enabled=true" .Values.postgres.backup.scheduledBackup.schedule | quote }}
+  immediate: {{ .Values.postgres.backup.scheduledBackup.immediate }}
+  backupOwnerReference: {{ .Values.postgres.backup.scheduledBackup.backupOwnerReference | quote }}
+  cluster:
+    name: {{ include "palaceoftruth.postgresClusterName" . }}
+  method: plugin
+  pluginConfiguration:
+    name: {{ .Values.postgres.backup.pluginName | quote }}
+{{- end }}

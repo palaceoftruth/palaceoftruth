@@ -382,6 +382,40 @@ postgres:
     max_connections: "100"
 ```
 
+### CNPG-I Backups with Barman Cloud
+
+The chart can render a default-off Barman Cloud `ObjectStore`, attach it as the
+cluster WAL archiver, and create a CNPG `ScheduledBackup`. Install a compatible
+[Barman Cloud plugin](https://cloudnative-pg.io/plugin-barman-cloud/docs/intro/)
+and its CRDs before enabling this feature. Keep bucket endpoints, credential
+secret references, schedules, and retention policy in environment-owned values.
+
+```yaml
+postgres:
+  backup:
+    enabled: true
+    objectStore:
+      configuration:
+        destinationPath: s3://example-palace-backups/palace
+        endpointURL: https://object-storage.example.com
+        s3Credentials:
+          accessKeyId:
+            name: palace-backup-credentials
+            key: ACCESS_KEY_ID
+          secretAccessKey:
+            name: palace-backup-credentials
+            key: SECRET_ACCESS_KEY
+      retentionPolicy: "30d"
+    scheduledBackup:
+      schedule: "0 0 0 * * *" # six fields: seconds through day-of-week
+      immediate: true
+```
+
+Backups do not include database credential Secrets. Protect those through the
+cluster's normal secret-management path. Recovery must create a separate CNPG
+cluster that reads the source `ObjectStore`; never point a restore drill's WAL
+archiver at the source backup path.
+
 ### Using an External PostgreSQL
 
 If you prefer to bring your own PostgreSQL (with pgvector), disable the in-chart cluster and point the app at your instance:

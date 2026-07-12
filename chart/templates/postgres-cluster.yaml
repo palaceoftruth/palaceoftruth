@@ -10,6 +10,13 @@ metadata:
 spec:
   instances: {{ include "palaceoftruth.postgresInstances" . }}
   imageName: {{ .Values.postgres.image }}
+  {{- if .Values.postgres.backup.enabled }}
+  plugins:
+    - name: {{ required "postgres.backup.pluginName is required when postgres.backup.enabled=true" .Values.postgres.backup.pluginName | quote }}
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ default (printf "%s-backup" (include "palaceoftruth.postgresClusterName" .)) .Values.postgres.backup.objectStore.name | quote }}
+  {{- end }}
 
   storage:
     size: {{ .Values.postgres.storage.size }}
