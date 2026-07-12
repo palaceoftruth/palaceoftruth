@@ -793,6 +793,110 @@ def test_vector_search_reranks_live_retained_rmf_title_above_adjacent_risk_doc()
     assert results[0].score > results[1].score
 
 
+def test_vector_search_latest_fact_prefers_current_version_and_rejects_stale_top1() -> None:
+    current_id = uuid.uuid4()
+    stale_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=stale_id,
+                title="Palace deployment 0.1.480 superseded",
+                summary="An older Palace deployment.",
+                source_type="note",
+                source_url=None,
+                tags=["deployment"],
+                created_at=now - timedelta(days=30),
+                effective_date=now - timedelta(days=30),
+                effective_date_source="fixture",
+                effective_date_quality="high",
+                chunk_text="Palace deployment 0.1.480 was superseded.",
+                chunk_index=0,
+                score=0.70,
+                item_metadata={"superseded": True},
+            ),
+            SimpleNamespace(
+                item_id=current_id,
+                title="Current Palace deployment 0.1.481",
+                summary="The latest Palace deployment.",
+                source_type="note",
+                source_url=None,
+                tags=["deployment"],
+                created_at=now,
+                effective_date=now,
+                effective_date_source="fixture",
+                effective_date_quality="high",
+                chunk_text="Current Palace deployment is 0.1.481.",
+                chunk_index=0,
+                score=0.64,
+                item_metadata={},
+            ),
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="latest current Palace deployment", limit=2))
+
+    assert [result.item_id for result in results] == [current_id, stale_id]
+    assert results[0].item_id != stale_id
+
+
+def test_vector_search_exact_version_prefers_requested_release() -> None:
+    expected_id = uuid.uuid4()
+    adjacent_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=adjacent_id, title="Palace release 0.1.480", summary=None,
+                source_type="doc", source_url=None, tags=["release"], created_at=now,
+                chunk_text="Previous release 0.1.480.", chunk_index=0, score=0.66, item_metadata={},
+            ),
+            SimpleNamespace(
+                item_id=expected_id, title="Palace release 0.1.481", summary=None,
+                source_type="doc", source_url=None, tags=["release"], created_at=now,
+                chunk_text="Requested release 0.1.481.", chunk_index=0, score=0.63, item_metadata={},
+            ),
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="Palace release 0.1.481", limit=2))
+
+    assert [result.item_id for result in results] == [expected_id, adjacent_id]
+
+
+def test_vector_search_evergreen_exact_doc_is_not_displaced_by_recent_unrelated_item() -> None:
+    evergreen_id = uuid.uuid4()
+    recent_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=recent_id, title="Recent unrelated release note", summary=None,
+                source_type="doc", source_url=None, tags=[], created_at=now,
+                effective_date=now, effective_date_source="fixture", effective_date_quality="high",
+                chunk_text="A recent but unrelated update.", chunk_index=0, score=0.69, item_metadata={},
+            ),
+            SimpleNamespace(
+                item_id=evergreen_id, title="PostgreSQL full-text search documentation", summary=None,
+                source_type="doc", source_url="https://www.postgresql.org/docs/current/textsearch.html",
+                tags=["documentation"], created_at=now - timedelta(days=1000),
+                effective_date=now - timedelta(days=1000), effective_date_source="fixture",
+                effective_date_quality="high", chunk_text="PostgreSQL full-text search documentation.",
+                chunk_index=0, score=0.58, item_metadata={},
+            ),
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(
+        service.vector_search(query="PostgreSQL full-text search documentation", limit=2)
+    )
+
+    assert [result.item_id for result in results] == [evergreen_id, recent_id]
+
+
 def test_vector_search_source_ranking_is_disabled_by_default(monkeypatch) -> None:
     monkeypatch.setattr("app.services.search.settings.retrieval_source_ranking_enabled", False)
     official_id = uuid.uuid4()

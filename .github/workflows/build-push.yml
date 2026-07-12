@@ -23,6 +23,21 @@ jobs:
     permissions:
       contents: read
 
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: palace
+          POSTGRES_PASSWORD: palace
+          POSTGRES_DB: palace_plan_gate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U palace -d palace_plan_gate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -41,7 +56,12 @@ jobs:
             tests/test_agent_plugin_release.py \
             tests/test_agent_plugin_manifests.py \
             tests/test_retrieval_replay.py \
+            tests/test_search.py \
+            tests/test_memory_service.py \
             -q
+          PLAN_GATE_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_plan_gate \
+            uv run --python 3.12 --with pytest --with pytest-asyncio python -m pytest \
+            tests/test_retrieval_query_plans.py -q
           uv run --python 3.12 python ../scripts/check_database_health.py
           uv run --python 3.12 python ../scripts/replay_retrieval_capture.py gate \
             --baseline tests/fixtures/retrieval_replay/baseline.ndjson \
