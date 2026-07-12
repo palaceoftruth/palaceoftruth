@@ -176,6 +176,7 @@ def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() 
     assert db.last_params is not None
     assert db.last_params["semantic_candidate_limit"] == 24
     assert db.last_params["lexical_candidate_limit"] == 24
+    assert "ORDER BY score DESC, item_id ASC" in db.last_sql
 
 
 def test_vector_search_uses_side_profile_storage_for_non_default_profile() -> None:

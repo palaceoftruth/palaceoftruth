@@ -1260,7 +1260,7 @@ class SearchService:
                 (:vw * vec_score + :tw * text_score) AS score
             FROM ranked
             WHERE rn = 1
-            ORDER BY score DESC
+            ORDER BY score DESC, item_id ASC
             LIMIT :candidate_limit
         """)
 

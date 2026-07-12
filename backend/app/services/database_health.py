@@ -88,6 +88,7 @@ EXPECTED_TABLES = frozenset(
 EXPECTED_INDEXES = frozenset(
     {
         "idx_embeddings_halfvec_hnsw",
+        "ix_embeddings_item_chunk",
         "idx_embedding_profile_vectors_halfvec_384_hnsw",
         "idx_embedding_profile_vectors_halfvec_768_hnsw",
         "idx_embedding_profile_vectors_halfvec_1024_hnsw",
@@ -435,7 +436,14 @@ async def _inspect_live_database(database_url: str, local_head: str) -> list[Hea
             )
             indexes = set(
                 (await conn.execute(
-                    text("select indexname from pg_indexes where schemaname = 'public'")
+                    text(
+                        "select index_class.relname "
+                        "from pg_index index_state "
+                        "join pg_class index_class on index_class.oid = index_state.indexrelid "
+                        "join pg_namespace index_namespace on index_namespace.oid = index_class.relnamespace "
+                        "where index_namespace.nspname = 'public' "
+                        "and index_state.indisvalid and index_state.indisready"
+                    )
                 )).scalars().all()
             )
             constraints = set(
