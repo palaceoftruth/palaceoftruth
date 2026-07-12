@@ -607,6 +607,28 @@ async def _add_queue_metrics(builder: PrometheusTextBuilder, arq_pool: Any | Non
             )
             builder.metric("palace_arq_worker_queue_depth", "Worker-reported ARQ queue depth.", "gauge", queue.worker_queue_depth or 0, labels)
             builder.metric("palace_arq_worker_concurrency", "Worker-reported active job count.", "gauge", queue.worker_concurrency or 0, labels)
+            builder.metric(
+                "palace_arq_worker_available",
+                "Whether a fresh ARQ worker heartbeat is available for this queue group.",
+                "gauge",
+                queue.worker_available,
+                labels,
+            )
+            builder.metric(
+                "palace_arq_worker_instances",
+                "Number of ARQ worker instances with a fresh heartbeat for this queue group.",
+                "gauge",
+                queue.worker_instance_count,
+                labels,
+            )
+            if queue.worker_heartbeat_age_seconds is not None:
+                builder.metric(
+                    "palace_arq_worker_heartbeat_age_seconds",
+                    "Age of the latest ARQ worker heartbeat for this queue group.",
+                    "gauge",
+                    queue.worker_heartbeat_age_seconds,
+                    labels,
+                )
             builder.metric("palace_arq_recent_failures", "Recent failed jobs by Palace queue group.", "gauge", queue.recent_failed, labels)
             builder.metric("palace_arq_recent_latency_seconds", "Recent average successful job latency.", "gauge", queue.recent_avg_latency_seconds or 0, labels)
         builder.metric("palace_metrics_queue_scrape_error", "Queue metric scrape failure state.", "gauge", 0)

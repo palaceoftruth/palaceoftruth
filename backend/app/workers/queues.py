@@ -1,12 +1,22 @@
 import hashlib
+import os
 import re
 
 DEFAULT_WORKER_QUEUE = "arq:queue"
 MEDIA_WORKER_QUEUE = "arq:queue:media"
 PALACE_WORKER_QUEUE = "arq:queue:palace"
+WORKER_HEALTH_CHECK_INTERVAL_SECONDS = 15
+WORKER_HEALTH_CHECK_TTL_SECONDS = WORKER_HEALTH_CHECK_INTERVAL_SECONDS + 1
 
 MEDIA_TASK_NAMES = frozenset({"process_media", "process_youtube"})
 MEDIA_FAIR_DISPATCH_TASK_NAME = "dispatch_tenant_fair_media_jobs"
+
+
+def worker_health_check_key(queue_name: str, instance_name: str | None = None) -> str:
+    """Return a pod-specific ARQ health key so sibling workers cannot satisfy readiness."""
+    raw_instance = instance_name if instance_name is not None else os.getenv("HOSTNAME", "local")
+    safe_instance = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw_instance.strip()).strip("-") or "local"
+    return f"{queue_name}:health-check:{safe_instance[:128]}"
 
 
 def queue_kwargs_for_task(name: str) -> dict[str, str]:

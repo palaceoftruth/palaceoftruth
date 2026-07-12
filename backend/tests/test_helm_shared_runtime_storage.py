@@ -328,9 +328,23 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
 
 def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
     manifests = _render_chart("valkey.sentinel.enabled=true")
-    for name in ("palaceoftruth-worker", "palaceoftruth-media-worker", "palaceoftruth-palace-worker"):
-        command = _deployment_by_name(manifests, name)["spec"]["template"]["spec"]["containers"][0]["command"]
+    worker_settings = {
+        "palaceoftruth-worker": "app.workers.worker.WorkerSettings",
+        "palaceoftruth-media-worker": "app.workers.worker.MediaWorkerSettings",
+        "palaceoftruth-palace-worker": "app.workers.worker.PalaceWorkerSettings",
+    }
+    for name, settings_path in worker_settings.items():
+        container = _deployment_by_name(manifests, name)["spec"]["template"]["spec"]["containers"][0]
+        command = container["command"]
         assert command[:3] == ["python", "scripts/wait_for_worker_dependencies.py", "--"]
+        assert container["readinessProbe"] == {
+            "exec": {"command": ["arq", settings_path, "--check"]},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10,
+            "timeoutSeconds": 5,
+            "failureThreshold": 3,
+        }
+        assert "livenessProbe" not in container
 
     job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
     annotations = job["metadata"]["annotations"]

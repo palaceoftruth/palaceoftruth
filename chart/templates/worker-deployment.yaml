@@ -27,6 +27,10 @@ spec:
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.WorkerSettings"]
+          readinessProbe:
+            exec:
+              command: ["arq", "app.workers.worker.WorkerSettings", "--check"]
+            {{- toYaml .Values.worker.readinessProbe | nindent 12 }}
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
           envFrom:
@@ -73,6 +77,10 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             {{- toYaml .Values.mediaWorker.command | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["arq", "app.workers.worker.MediaWorkerSettings", "--check"]
+            {{- toYaml .Values.mediaWorker.readinessProbe | nindent 12 }}
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             - name: ARQ_QUEUE_NAME
@@ -122,6 +130,10 @@ spec:
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]
+          readinessProbe:
+            exec:
+              command: ["arq", "app.workers.worker.PalaceWorkerSettings", "--check"]
+            {{- toYaml .Values.palaceWorker.readinessProbe | nindent 12 }}
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
           envFrom:

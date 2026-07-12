@@ -280,6 +280,19 @@ and `GET /api/v1/ready` for dependency-aware readiness. `GET /api/v1/health`
 remains the simple Kubernetes-compatible probe and intentionally returns only
 `{"status":"ok"}`.
 
+Worker health has three deliberately separate signals. Kubernetes process
+supervision is the liveness signal: if an ARQ process exits, its container is
+restarted. `wait_for_worker_dependencies.py` remains the startup gate for the
+database and Valkey/Sentinel dependencies. Once started, each worker deployment
+uses ARQ's read-only `--check` command as its readiness probe, backed by a
+15-second pod-specific queue heartbeat so a sibling replica cannot satisfy the
+probe. Prometheus aggregates those heartbeats by bounded queue group and exports
+`palace_arq_worker_available` and
+`palace_arq_worker_instances` plus
+`palace_arq_worker_heartbeat_age_seconds`; a missing heartbeat means worker
+availability is unknown/unavailable, while a zero queue depth can still be a
+healthy idle worker.
+
 Every plugin behavior change should bump `third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` so CI can publish a new release artifact.
 
 Release assets are tagged as:

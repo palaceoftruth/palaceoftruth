@@ -11,7 +11,12 @@ from arq.jobs import DeserializationError, deserialize_job, deserialize_result
 from sqlalchemy import text
 
 from app.schemas.palace import PalaceWorkerBackpressureSummary, PalaceWorkerQueueMetrics
-from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
+from app.workers.queues import (
+    DEFAULT_WORKER_QUEUE,
+    MEDIA_WORKER_QUEUE,
+    PALACE_WORKER_QUEUE,
+    WORKER_HEALTH_CHECK_TTL_SECONDS,
+)
 
 
 _HEALTH_RE = re.compile(r"\bj_ongoing=(?P<ongoing>\d+)\s+queued=(?P<queued>\d+)\b")
@@ -92,19 +97,37 @@ async def _job_functions(arq_pool: Any, job_ids: list[str]) -> dict[str, str]:
     return functions
 
 
-async def _health_by_queue(arq_pool: Any, queue_names: set[str]) -> dict[str, tuple[int | None, int | None]]:
-    result: dict[str, tuple[int | None, int | None]] = {}
+async def _health_by_queue(
+    arq_pool: Any, queue_names: set[str]
+) -> dict[str, tuple[int | None, int | None, int, float | None]]:
+    result: dict[str, tuple[int | None, int | None, int, float | None]] = {}
     for queue_name in queue_names:
-        raw = await arq_pool.get(f"{queue_name}:health-check")
-        if raw is None:
-            result[queue_name] = (None, None)
+        samples: list[tuple[int, int, float]] = []
+        async for raw_key in arq_pool.scan_iter(match=f"{queue_name}:health-check:*", count=100):
+            if len(samples) >= 100:
+                break
+            health_key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else str(raw_key)
+            raw = await arq_pool.get(health_key)
+            if raw is None:
+                continue
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            match = _HEALTH_RE.search(text)
+            if not match:
+                continue
+            ttl_ms = await arq_pool.pttl(health_key)
+            if ttl_ms <= 0:
+                continue
+            age = max(0.0, WORKER_HEALTH_CHECK_TTL_SECONDS - (ttl_ms / 1000))
+            samples.append((int(match.group("ongoing")), int(match.group("queued")), age))
+        if not samples:
+            result[queue_name] = (None, None, 0, None)
             continue
-        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-        match = _HEALTH_RE.search(text)
-        if not match:
-            result[queue_name] = (None, None)
-            continue
-        result[queue_name] = (int(match.group("ongoing")), int(match.group("queued")))
+        result[queue_name] = (
+            sum(sample[0] for sample in samples),
+            max(sample[1] for sample in samples),
+            len(samples),
+            round(min(sample[2] for sample in samples), 3),
+        )
     return result
 
 
@@ -320,7 +343,7 @@ async def build_worker_backpressure(arq_pool: Any | None, db: Any | None = None)
         ready_scores = [score for score in matched_scores if score <= now_ms]
         deferred_count = len(matched_scores) - len(ready_scores)
         oldest_age = int(max((now_ms - score) / 1000 for score in ready_scores)) if ready_scores else None
-        worker_ongoing, worker_queued = health[group.queue_name]
+        worker_ongoing, worker_queued, worker_instance_count, heartbeat_age = health[group.queue_name]
         recent_rows = sorted(
             [
                 row
@@ -343,6 +366,9 @@ async def build_worker_backpressure(arq_pool: Any | None, db: Any | None = None)
                 oldest_queued_age_seconds=oldest_age,
                 worker_concurrency=worker_ongoing,
                 worker_queue_depth=worker_queued,
+                worker_available=worker_instance_count > 0,
+                worker_instance_count=worker_instance_count,
+                worker_heartbeat_age_seconds=heartbeat_age,
                 db_queued_depth=media_pressure.get("db_queued_depth") if group.key == "media_ingest" else None,
                 db_processing_depth=media_pressure.get("db_processing_depth") if group.key == "media_ingest" else None,
                 oldest_db_queued_age_seconds=(

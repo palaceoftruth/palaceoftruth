@@ -405,6 +405,8 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert 'palace_source_refresh_due{kind="http",status="active"} 3' in body
     assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
+    assert 'palace_arq_worker_available{key="memory",queue="arq:queue"} 0' in body
+    assert 'palace_arq_worker_heartbeat_age_seconds{key="memory",queue="arq:queue"}' not in body
     assert "tenant-a" not in body
     assert "query_fingerprint" not in body
     assert "item_id" not in body

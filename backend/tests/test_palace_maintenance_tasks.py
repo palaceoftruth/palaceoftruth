@@ -834,6 +834,11 @@ def test_worker_settings_split_palace_maintenance_recovery() -> None:
     palace_cron_names = {job.name for job in PalaceWorkerSettings.cron_jobs}
 
     assert WorkerSettings.queue_name == "arq:queue"
+    assert WorkerSettings.health_check_interval == 15
+    assert WorkerSettings.health_check_key.startswith(f"{WorkerSettings.queue_name}:health-check:")
+    assert MediaWorkerSettings.health_check_interval == 15
+    assert PalaceWorkerSettings.health_check_interval == 15
+    assert len({WorkerSettings.health_check_key, MediaWorkerSettings.health_check_key, PalaceWorkerSettings.health_check_key}) == 3
     assert MediaWorkerSettings.queue_name == MEDIA_WORKER_QUEUE
     assert PalaceWorkerSettings.queue_name == PALACE_WORKER_QUEUE
     assert WorkerSettings.on_startup.__name__ == "startup"
