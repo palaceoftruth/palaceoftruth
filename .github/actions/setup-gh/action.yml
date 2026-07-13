@@ -1,0 +1,41 @@
+name: Set up pinned GitHub CLI
+description: Install and verify the GitHub CLI used by trusted ARC publishing jobs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install GitHub CLI v2.96.0
+      shell: bash
+      env:
+        GH_CLI_VERSION: 2.96.0
+        GH_CLI_SHA256: 83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
+      run: |
+        set -euo pipefail
+
+        if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
+          echo "Pinned GitHub CLI setup supports only the linux/amd64 trusted runner." >&2
+          exit 1
+        fi
+
+        ARCHIVE="gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+        DOWNLOAD_URL="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${ARCHIVE}"
+        DOWNLOAD_DIR=$(mktemp -d "${RUNNER_TEMP}/gh-cli-download-${GH_CLI_VERSION}.XXXXXX")
+        INSTALL_DIR=$(mktemp -d "${RUNNER_TEMP}/gh-cli-${GH_CLI_VERSION}.XXXXXX")
+        trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
+
+        curl --fail --location --silent --show-error --retry 3 \
+          --proto '=https' --tlsv1.2 \
+          --output "${DOWNLOAD_DIR}/${ARCHIVE}" \
+          "$DOWNLOAD_URL"
+        printf '%s  %s\n' "$GH_CLI_SHA256" "${DOWNLOAD_DIR}/${ARCHIVE}" | sha256sum --check --strict
+        tar --extract --gzip --file "${DOWNLOAD_DIR}/${ARCHIVE}" --directory "$DOWNLOAD_DIR"
+        mv "${DOWNLOAD_DIR}/gh_${GH_CLI_VERSION}_linux_amd64/bin" "$INSTALL_DIR/bin"
+
+        "$INSTALL_DIR/bin/gh" version
+        INSTALLED_VERSION=$("$INSTALL_DIR/bin/gh" version | awk 'NR == 1 { print $3 }')
+        if [ "$INSTALLED_VERSION" != "$GH_CLI_VERSION" ]; then
+          echo "Installed GitHub CLI ${INSTALLED_VERSION}; expected ${GH_CLI_VERSION}." >&2
+          exit 1
+        fi
+
+        echo "$INSTALL_DIR/bin" >> "$GITHUB_PATH"
