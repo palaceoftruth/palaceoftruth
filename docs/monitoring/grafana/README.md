@@ -70,3 +70,43 @@ worker replica count.
 Do not alert on `palace_arq_worker_queue_depth == 0`; zero is the normal idle
 state. The `key` label names a bounded logical worker group and `queue` names
 the ARQ queue. Multiple logical groups may intentionally share one queue.
+
+## Valkey and Sentinel telemetry
+
+The chart can add `oliver006/redis_exporter` sidecars to bundled Valkey pods.
+Telemetry is disabled by default. Set `valkey.metrics.enabled=true` to cover the
+standalone Valkey pod or every primary, replica, and Sentinel pod; also set
+`valkey.metrics.serviceMonitor.enabled=true` when the Prometheus Operator CRD is
+installed. The generated ServiceMonitor selects only Services labeled
+`palaceoftruth.io/valkey-metrics=true` and scrapes their named `metrics` port.
+
+Unauthenticated Valkey deployments need no credential values. When ACL auth is
+enabled, configure `valkey.metrics.existingSecret` and
+`valkey.metrics.passwordFileKey` together. That Secret key must contain
+redis_exporter's JSON address-to-password map, not a raw password. The Secret
+directory is mounted read-only without `subPath`, allowing Kubernetes Secret
+projection updates to reach the container after rotation. The exporter reads
+the password file at startup, so roll the affected pods after rotating the
+Secret. Credential values are not included in exporter arguments, environment
+values, labels, or monitoring resources.
+
+Use the exact localhost target keys rendered by the chart. A standalone
+deployment needs the Valkey key; Sentinel mode needs both keys because its
+exporters scrape Valkey and Sentinel processes separately:
+
+```json
+{
+  "redis://127.0.0.1:6379": "<valkey-password>",
+  "redis://127.0.0.1:26379": "<sentinel-password>"
+}
+```
+
+Alert on exporter scrape failure or `redis_up == 0`, and use the exported role,
+replication, and Sentinel families to diagnose quorum or replica health. These
+signals are observational: dashboards and alerts must never issue `SENTINEL
+RESET`, prune peer records, or trigger failover automatically. A stale Sentinel
+peer can remain visible after pod replacement while the live quorum is healthy,
+so pair peer-count anomalies with quorum and current-peer health before paging.
+Set `valkey.metrics.prometheusRule.enabled=true` to render release- and
+namespace-bounded alerts for missing/down exporter targets, `redis_up == 0`, and
+failed Sentinel CKQUORUM telemetry when that Sentinel metric family exists.
