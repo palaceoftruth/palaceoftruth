@@ -128,6 +128,8 @@ _ARTIFACT_PROVENANCE_LABELS = {
 _DERIVED_ARTIFACT_PENALTY = 0.45
 _INTENT_RECENCY_MAX_BONUS = 0.12
 _INTENT_RECENCY_HALF_LIFE_DAYS = 14.0
+_STALE_CURRENTNESS_PENALTY = 0.55
+_EXACT_IDENTIFIER_MATCH_BONUS = 0.40
 _EFFECTIVE_DATE_QUALITY_WEIGHT = {
     "high": 1.0,
     "medium": 0.75,
@@ -157,6 +159,7 @@ _CATCH_UP_QUERY_PHRASES = (
 _LATEST_STATUS_QUERY_TERMS = {
     "latest",
     "current",
+    "currently",
     "status",
     "recent",
     "newest",
@@ -167,6 +170,21 @@ _LATEST_STATUS_QUERY_TERMS = {
     "updates",
     "now",
 }
+_EXPLICIT_HISTORICAL_QUERY_PHRASES = (
+    "as of",
+    "at the time",
+    "prior version",
+    "previous version",
+    "historical version",
+    "used to",
+)
+_EXPLICIT_HISTORICAL_QUERY_TERMS = {"former", "formerly", "historical", "history", "prior", "previous"}
+_EXACT_VERSION_RE = re.compile(r"(?<![\w.])v?\d+\.\d+(?:\.\d+)+(?![\w.])", re.IGNORECASE)
+_REVISION_QUERY_RE = re.compile(
+    r"\b(?:sha|commit|revision|rev)\b(?:\s+(?:is|was|at))?\s*[:#]?\s*[0-9a-f]{7,40}\b",
+    re.IGNORECASE,
+)
+_REVISION_ID_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _TEMPORAL_QUERY_TERMS = {
     "before",
     "after",
@@ -374,6 +392,7 @@ class QueryIntent:
     allow_derived_artifacts: bool
     allow_graph_expansion: bool
     allow_strict_source_boosts: bool
+    currentness_mode: str = "current"
 
 
 _QUERY_INTENTS = {
@@ -408,6 +427,7 @@ _QUERY_INTENTS = {
         allow_derived_artifacts=False,
         allow_graph_expansion=False,
         allow_strict_source_boosts=False,
+        currentness_mode="historical",
     ),
     "exploratory": QueryIntent(
         name="exploratory",
@@ -525,6 +545,31 @@ def _metadata_value(candidate: _SearchCandidate, key: str) -> Any:
     return metadata.get(key) or memory_entry.get(key)
 
 
+def _with_canonical_currentness(row: Any) -> dict[str, Any]:
+    """Overlay DB-owned memory temporal fields without trusting item metadata."""
+    metadata = dict(row.item_metadata or {})
+    memory_entry = dict(metadata.get("memory_entry") or {})
+    for key in ("valid_until", "superseded_by_entry_id", "superseded", "source_status"):
+        metadata.pop(key, None)
+        memory_entry.pop(key, None)
+    valid_until = getattr(row, "canonical_valid_until", None)
+    superseded_by = getattr(row, "canonical_superseded_by_entry_id", None)
+    source_status = getattr(row, "canonical_source_status", None)
+    if valid_until is not None:
+        memory_entry["valid_until"] = valid_until
+    else:
+        memory_entry.pop("valid_until", None)
+    if superseded_by is not None:
+        memory_entry["superseded_by_entry_id"] = superseded_by
+    else:
+        memory_entry.pop("superseded_by_entry_id", None)
+    if source_status is not None:
+        memory_entry["source_status"] = source_status
+    if memory_entry:
+        metadata["memory_entry"] = memory_entry
+    return metadata
+
+
 def _retrieved_scope_from_metadata(item_metadata: dict[str, Any] | None) -> tuple[str | None, str | None, str]:
     memory_entry = (item_metadata or {}).get("memory_entry")
     if not isinstance(memory_entry, dict):
@@ -633,9 +678,17 @@ def classify_query_intent(query: str) -> QueryIntent:
         return _QUERY_INTENTS["startup_context"]
     if _contains_normalized_phrase(normalized, _CATCH_UP_QUERY_PHRASES):
         return _QUERY_INTENTS["catch_up_summary"]
+    if (
+        _contains_normalized_phrase(normalized, _EXPLICIT_HISTORICAL_QUERY_PHRASES)
+        or tokens & _EXPLICIT_HISTORICAL_QUERY_TERMS
+        or _YEAR_RE.search(normalized)
+        or _EXACT_VERSION_RE.search(query)
+        or _REVISION_QUERY_RE.search(query)
+    ):
+        return _QUERY_INTENTS["temporal"]
     if tokens & _LATEST_STATUS_QUERY_TERMS:
         return _QUERY_INTENTS["latest_status"]
-    if tokens & _TEMPORAL_QUERY_TERMS or _YEAR_RE.search(normalized):
+    if tokens & _TEMPORAL_QUERY_TERMS:
         return _QUERY_INTENTS["temporal"]
     if _contains_normalized_phrase(normalized, _EXPLORATORY_QUERY_PHRASES):
         return _QUERY_INTENTS["exploratory"]
@@ -670,6 +723,39 @@ def _token_set(value: str | None) -> set[str]:
 
 def _token_list(value: str | None) -> list[str]:
     return _TOKEN_RE.findall((value or "").lower())
+
+
+def _requested_identifiers(query: str) -> set[str]:
+    identifiers = {
+        match.group(0).lower().removeprefix("v")
+        for match in _EXACT_VERSION_RE.finditer(query)
+    }
+    if _REVISION_QUERY_RE.search(query):
+        identifiers.update(match.group(0).lower() for match in _REVISION_ID_RE.finditer(query))
+    return identifiers
+
+
+def _candidate_contains_identifier(candidate: _SearchCandidate, identifiers: set[str]) -> bool:
+    candidate_text = " ".join(
+        part for part in (candidate.title, candidate.summary, candidate.chunk_text, candidate.source_url) if part
+    ).lower()
+    return any(identifier in candidate_text for identifier in identifiers)
+
+
+def _candidate_matches_or_is_identifier_neutral(
+    candidate: _SearchCandidate,
+    requested_identifiers: set[str],
+) -> bool:
+    candidate_text = " ".join(
+        part for part in (candidate.title, candidate.summary, candidate.chunk_text, candidate.source_url) if part
+    ).lower()
+    advertised = {
+        match.group(0).lower().removeprefix("v")
+        for match in _EXACT_VERSION_RE.finditer(candidate_text)
+    }
+    if _REVISION_QUERY_RE.search(candidate_text):
+        advertised.update(match.group(0).lower() for match in _REVISION_ID_RE.finditer(candidate_text))
+    return not advertised or bool(advertised & requested_identifiers)
 
 
 def _normalize_nist_publication_id(value: str | None) -> str | None:
@@ -896,6 +982,45 @@ def _recency_adjustment(candidate: _SearchCandidate, *, now: datetime | None = N
     return _INTENT_RECENCY_MAX_BONUS * quality_weight * freshness
 
 
+def _metadata_datetime(candidate: _SearchCandidate, key: str) -> datetime | None:
+    value = _metadata_value(candidate, key)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _candidate_currentness(candidate: _SearchCandidate, *, now: datetime | None = None) -> dict[str, Any]:
+    """Interpret only canonical temporal metadata; absence remains an evergreen item."""
+    reference = now or datetime.now(timezone.utc)
+    valid_until = _metadata_datetime(candidate, "valid_until")
+    superseded_by = _metadata_value(candidate, "superseded_by_entry_id")
+    superseded = superseded_by is not None
+    source_status = str(_metadata_value(candidate, "source_status") or "").lower()
+    expired = valid_until is not None and valid_until <= reference
+    last_verified = _metadata_datetime(candidate, "last_verified_at") or _metadata_datetime(candidate, "last_verified")
+    if superseded:
+        state = "superseded"
+    elif expired:
+        state = "expired"
+    elif source_status in {"stale", "failed", "deleted", "superseded"}:
+        state = "stale"
+    else:
+        state = "current"
+    return {
+        "state": state,
+        "last_verified_at": last_verified,
+        "valid_until": valid_until,
+        "superseded_by_entry_id": str(superseded_by) if superseded_by is not None else None,
+    }
+
+
 def _score_candidate(
     candidate: _SearchCandidate,
     query: str,
@@ -913,6 +1038,9 @@ def _score_candidate(
     lexical_rescue_bonus = _lexical_rescue_bonus(query, candidate)
     if lexical_rescue_bonus:
         adjustments["lexical_rescue"] = lexical_rescue_bonus
+    requested_identifiers = _requested_identifiers(query)
+    if requested_identifiers and _candidate_contains_identifier(candidate, requested_identifiers):
+        adjustments["exact_identifier"] = _EXACT_IDENTIFIER_MATCH_BONUS
     if _is_agent_self_note(candidate):
         adjustments["self_memory_note"] = -_SELF_MEMORY_NOTE_PENALTY
         if _looks_like_negative_self_memory(candidate):
@@ -921,6 +1049,9 @@ def _score_candidate(
         adjustments["derived_artifact"] = -_DERIVED_ARTIFACT_PENALTY
     if intent.allow_recency:
         adjustments["intent_recency"] = _recency_adjustment(candidate)
+    currentness = _candidate_currentness(candidate)
+    if intent.currentness_mode != "historical" and currentness["state"] != "current":
+        adjustments["stale_currentness"] = -_STALE_CURRENTNESS_PENALTY
     if source_ranking_enabled and intent.allow_strict_source_boosts:
         adjustments.update(_source_aware_adjustments(candidate))
         adjustments.update(_nist_source_role_adjustments(query, candidate))
@@ -1076,6 +1207,7 @@ class SearchService:
         date_from: datetime | None,
         date_to: datetime | None,
         exclude_private_memory_scopes: bool,
+        historical_mode: bool,
     ) -> list[Any]:
         """Return bounded lexical results when query embedding is unavailable."""
         sql = text(f"""
@@ -1088,6 +1220,27 @@ class SearchService:
                   AND i.deleted_at IS NULL
                   AND i.tenant_id = :tenant_id
                   AND i.search_vector @@ plainto_tsquery('english', :query)
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM memory_entries current_me
+                          WHERE current_me.tenant_id = i.tenant_id
+                            AND current_me.item_id = i.id
+                            AND (
+                                current_me.superseded_by_entry_id IS NOT NULL
+                                OR current_me.valid_until <= CURRENT_TIMESTAMP
+                            )
+                      )
+                  )
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM source_records current_sr
+                          WHERE current_sr.tenant_id = i.tenant_id
+                            AND current_sr.item_id = i.id
+                            AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
+                      )
+                  )
                   AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
                   AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
                   AND (
@@ -1145,9 +1298,16 @@ class SearchService:
                 i.effective_date_source,
                 i.effective_date_quality,
                 i.metadata AS item_metadata,
+                me.valid_until AS canonical_valid_until,
+                me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
+                (SELECT sr.status FROM source_records sr
+                 WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
+                 ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status,
                 li.text_score AS score
             FROM lexical_items li
             JOIN items i ON i.id = li.item_id
+            LEFT JOIN memory_entries me
+              ON me.tenant_id = i.tenant_id AND me.item_id = i.id
             JOIN LATERAL (
                 SELECT e.chunk_text, e.chunk_index
                 FROM {embedding_plan.table_name} e
@@ -1176,6 +1336,7 @@ class SearchService:
                     "date_to": date_to,
                     "candidate_limit": candidate_limit,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
+                    "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,
                 },
             )
@@ -1206,6 +1367,12 @@ class SearchService:
         include_derived_artifacts: bool = False,
     ) -> list[SearchResult]:
         lens_profile = resolve_retrieval_lens(retrieval_lens)
+        derived_artifacts_requested = include_derived_artifacts or _tags_request_derived_artifacts(tags)
+        query_intent = _apply_derived_artifact_policy(
+            classify_query_intent(query),
+            include_derived_artifacts=derived_artifacts_requested,
+        )
+        historical_mode = query_intent.currentness_mode == "historical"
         effective_candidate_limit = _candidate_fetch_limit(limit, candidate_limit)
         embedding_plan = _embedding_search_plan(self.embedding_profile)
         embedding_error = query_embedding_error
@@ -1242,6 +1409,27 @@ class SearchService:
                   AND i.deleted_at IS NULL
                   AND i.tenant_id = :tenant_id
                   {embedding_plan.profile_filter}
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM memory_entries current_me
+                          WHERE current_me.tenant_id = i.tenant_id
+                            AND current_me.item_id = i.id
+                            AND (
+                                current_me.superseded_by_entry_id IS NOT NULL
+                                OR current_me.valid_until <= CURRENT_TIMESTAMP
+                            )
+                      )
+                  )
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM source_records current_sr
+                          WHERE current_sr.tenant_id = i.tenant_id
+                            AND current_sr.item_id = i.id
+                            AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
+                      )
+                  )
                   AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
                   AND (CAST(:item_ids AS uuid[]) IS NULL OR e.item_id = ANY(CAST(:item_ids AS uuid[])))
                   AND (
@@ -1296,6 +1484,27 @@ class SearchService:
                   AND i.deleted_at IS NULL
                   AND i.tenant_id = :tenant_id
                   AND i.search_vector @@ plainto_tsquery('english', :query)
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM memory_entries current_me
+                          WHERE current_me.tenant_id = i.tenant_id
+                            AND current_me.item_id = i.id
+                            AND (
+                                current_me.superseded_by_entry_id IS NOT NULL
+                                OR current_me.valid_until <= CURRENT_TIMESTAMP
+                            )
+                      )
+                  )
+                  AND (
+                      CAST(:historical_mode AS boolean) IS TRUE
+                      OR NOT EXISTS (
+                          SELECT 1 FROM source_records current_sr
+                          WHERE current_sr.tenant_id = i.tenant_id
+                            AND current_sr.item_id = i.id
+                            AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
+                      )
+                  )
                   AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
                   AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
                   AND (
@@ -1380,7 +1589,12 @@ class SearchService:
                     COALESCE(i.effective_date, i.created_at) AS effective_date,
                     i.effective_date_source,
                     i.effective_date_quality,
-                    i.metadata AS item_metadata
+                    i.metadata AS item_metadata,
+                    me.valid_until AS canonical_valid_until,
+                    me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
+                    (SELECT sr.status FROM source_records sr
+                     WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
+                     ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status
                 FROM candidate_chunks candidate
                 JOIN {embedding_plan.table_name} e
                   ON e.item_id = candidate.item_id
@@ -1388,6 +1602,8 @@ class SearchService:
                  AND e.chunk_text = candidate.chunk_text
                  {embedding_plan.profile_filter}
                 JOIN items i ON i.id = e.item_id
+                LEFT JOIN memory_entries me
+                  ON me.tenant_id = i.tenant_id AND me.item_id = i.id
             ),
             ranked AS (
                 SELECT
@@ -1402,6 +1618,7 @@ class SearchService:
                 item_id, chunk_text, chunk_index,
                 title, summary, source_type, source_url, tags, created_at,
                 effective_date, effective_date_source, effective_date_quality, item_metadata,
+                canonical_valid_until, canonical_superseded_by_entry_id, canonical_source_status,
                 (:vw * vec_score + :tw * text_score) AS score
             FROM ranked
             WHERE rn = 1
@@ -1424,6 +1641,7 @@ class SearchService:
                 date_from=date_from,
                 date_to=date_to,
                 exclude_private_memory_scopes=exclude_private_memory_scopes,
+                historical_mode=historical_mode,
             )
         else:
             rows = (
@@ -1448,6 +1666,7 @@ class SearchService:
                     "semantic_candidate_limit": effective_candidate_limit,
                     "lexical_candidate_limit": effective_candidate_limit,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
+                    "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,
                     },
                 )
@@ -1468,15 +1687,10 @@ class SearchService:
                 chunk_text=r.chunk_text,
                 chunk_index=r.chunk_index,
                 score=float(r.score),
-                item_metadata=r.item_metadata or {},
+                item_metadata=_with_canonical_currentness(r),
             )
             for r in rows
         ]
-        derived_artifacts_requested = include_derived_artifacts or _tags_request_derived_artifacts(tags)
-        query_intent = _apply_derived_artifact_policy(
-            classify_query_intent(query),
-            include_derived_artifacts=derived_artifacts_requested,
-        )
         relationship_graph_scores: dict[Any, float] = {}
         relationship_graph_candidate_count = 0
         relationship_graph_expansion_enabled = (
@@ -1501,6 +1715,7 @@ class SearchService:
                 date_from=date_from,
                 date_to=date_to,
                 exclude_private_memory_scopes=exclude_private_memory_scopes,
+                historical_mode=historical_mode,
             )
             relationship_graph_candidate_count = len(graph_candidates)
             existing_item_ids = {candidate.item_id for candidate in candidates}
@@ -1553,6 +1768,22 @@ class SearchService:
             effective_candidate_limit=effective_candidate_limit,
             scored_candidates=reranked,
         )
+        excluded_currentness_counts: dict[str, int] = {}
+        requested_identifiers = _requested_identifiers(query)
+        if requested_identifiers:
+            reranked = [
+                row for row in reranked
+                if _candidate_matches_or_is_identifier_neutral(row[2], requested_identifiers)
+            ]
+        if query_intent.currentness_mode != "historical":
+            eligible_reranked = []
+            for row in reranked:
+                state = _candidate_currentness(row[2])["state"]
+                if state in {"expired", "superseded"}:
+                    excluded_currentness_counts[state] = excluded_currentness_counts.get(state, 0) + 1
+                    continue
+                eligible_reranked.append(row)
+            reranked = eligible_reranked
 
         results: list[SearchResult] = []
         ranking_trace_rows: list[dict[str, Any]] = []
@@ -1593,6 +1824,7 @@ class SearchService:
                 effective_date_quality=candidate.effective_date_quality,
                 source_support_level=_source_support_level(candidate),
             )
+            currentness = _candidate_currentness(candidate)
             ranking_trace_rows.append(
                 {
                     "item_id": str(candidate.item_id),
@@ -1630,6 +1862,15 @@ class SearchService:
                     "base_score": round(candidate.score, 6),
                     "effective_date_source": candidate.effective_date_source,
                     "effective_date_quality": candidate.effective_date_quality,
+                    "currentness": currentness["state"],
+                    "last_verified_at": (
+                        currentness["last_verified_at"].isoformat()
+                        if currentness["last_verified_at"] else None
+                    ),
+                    "valid_until": (
+                        currentness["valid_until"].isoformat() if currentness["valid_until"] else None
+                    ),
+                    "superseded_by_entry_id": currentness["superseded_by_entry_id"],
                     "adjustments": {
                         name: round(value, 6)
                         for name, value in adjustments.items()
@@ -1706,6 +1947,10 @@ class SearchService:
                     source_support_state=trust_metadata.source_support_state,
                     freshness=trust_metadata.freshness,
                     derived_raw_classification=trust_metadata.derived_raw_classification,
+                    currentness=currentness["state"],
+                    last_verified_at=currentness["last_verified_at"],
+                    valid_until=currentness["valid_until"],
+                    superseded_by_entry_id=currentness["superseded_by_entry_id"],
                 )
             )
             if len(results) >= limit:
@@ -1743,6 +1988,8 @@ class SearchService:
                 else None
             ),
             "query_intent": query_intent.name,
+            "currentness_mode": query_intent.currentness_mode,
+            "excluded_currentness_counts": excluded_currentness_counts,
             "retrieval_lens": lens_profile.name,
             "retrieval_lens_profile": lens_profile.as_trace(),
             "source_ranking_enabled": source_ranking_enabled,
@@ -1811,6 +2058,7 @@ class SearchService:
         date_from: datetime | None,
         date_to: datetime | None,
         exclude_private_memory_scopes: bool,
+        historical_mode: bool,
     ) -> tuple[list[_SearchCandidate], dict[Any, float]]:
         seed_item_ids = [candidate.item_id for candidate in seed_candidates]
         if not seed_item_ids:
@@ -1857,6 +2105,11 @@ class SearchService:
                             i.effective_date_source,
                             i.effective_date_quality,
                             i.metadata AS item_metadata,
+                            me.valid_until AS canonical_valid_until,
+                            me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
+                            (SELECT sr.status FROM source_records sr
+                             WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
+                             ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status,
                             (
                                 :vw * (1 - (e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})))) +
                                 :tw * COALESCE(
@@ -1887,6 +2140,8 @@ class SearchService:
                         FROM edges
                         JOIN items seed ON seed.id = edges.seed_item_id
                         JOIN items i ON i.id = edges.related_item_id
+                        LEFT JOIN memory_entries me
+                          ON me.tenant_id = i.tenant_id AND me.item_id = i.id
                         JOIN {embedding_plan.table_name} e ON e.item_id = i.id
                         WHERE seed.tenant_id = :tenant_id
                           AND seed.status = 'ready'
@@ -1894,6 +2149,27 @@ class SearchService:
                           AND i.status = 'ready'
                           AND i.deleted_at IS NULL
                           AND i.tenant_id = :tenant_id
+                          AND (
+                              CAST(:historical_mode AS boolean) IS TRUE
+                              OR NOT EXISTS (
+                                  SELECT 1 FROM memory_entries current_me
+                                  WHERE current_me.tenant_id = i.tenant_id
+                                    AND current_me.item_id = i.id
+                                    AND (
+                                        current_me.superseded_by_entry_id IS NOT NULL
+                                        OR current_me.valid_until <= CURRENT_TIMESTAMP
+                                    )
+                              )
+                          )
+                          AND (
+                              CAST(:historical_mode AS boolean) IS TRUE
+                              OR NOT EXISTS (
+                                  SELECT 1 FROM source_records current_sr
+                                  WHERE current_sr.tenant_id = i.tenant_id
+                                    AND current_sr.item_id = i.id
+                                    AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
+                              )
+                          )
                           {embedding_plan.profile_filter}
                           AND i.id <> ALL(CAST(:seed_item_ids AS uuid[]))
                           AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
@@ -1963,6 +2239,7 @@ class SearchService:
                     "date_from": date_from,
                     "date_to": date_to,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
+                    "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,
                     "embedding_dimensions": embedding_plan.dimensions,
                 },
@@ -1991,7 +2268,7 @@ class SearchService:
                     chunk_text=row.chunk_text,
                     chunk_index=row.chunk_index,
                     score=float(row.score),
-                    item_metadata=row.item_metadata or {},
+                    item_metadata=_with_canonical_currentness(row),
                 )
             )
         return graph_candidates, graph_scores

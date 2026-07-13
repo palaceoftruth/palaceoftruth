@@ -9,7 +9,13 @@ from app.schemas.search import SearchRequest
 from app.embedding_profile import resolve_embedding_profile
 from app.services.embedder import EmbeddingRequestError
 from app.services.retrieval_provenance import classify_retrieval_trust
-from app.services.search import SearchService, classify_query_intent
+from app.services.search import (
+    SearchService,
+    _SearchCandidate,
+    _candidate_currentness,
+    _with_canonical_currentness,
+    classify_query_intent,
+)
 
 
 class _FakeEmbedder:
@@ -135,6 +141,34 @@ def test_classify_query_intent_modes() -> None:
 
     for query, expected_intent in cases.items():
         assert classify_query_intent(query).name == expected_intent
+
+    assert classify_query_intent("Who currently owns incident response?").currentness_mode == "current"
+    assert classify_query_intent("Who owned incident response as of 2024?").currentness_mode == "historical"
+    assert classify_query_intent("Show Palace release 0.1.480").currentness_mode == "historical"
+    assert classify_query_intent("What changed at revision deadbeef?").currentness_mode == "historical"
+
+
+def test_currentness_uses_canonical_temporal_and_supersession_metadata() -> None:
+    candidate = _SearchCandidate(
+        item_id=uuid.uuid4(), title="Prior owner", summary=None, source_type="note",
+        source_url=None, tags=[], created_at=datetime.now(timezone.utc), effective_date=None,
+        effective_date_source=None, effective_date_quality=None, chunk_text="Prior owner",
+        chunk_index=0, score=0.8,
+        item_metadata={"memory_entry": {"superseded_by_entry_id": str(uuid.uuid4())}},
+    )
+    assert _candidate_currentness(candidate)["state"] == "superseded"
+
+    evergreen = SimpleNamespace(**{**candidate.__dict__, "item_metadata": {}})
+    assert _candidate_currentness(evergreen)["state"] == "current"
+
+
+def test_canonical_currentness_ignores_invented_item_metadata() -> None:
+    row = SimpleNamespace(
+        item_metadata={"superseded": True, "valid_until": "2000-01-01T00:00:00Z"},
+        canonical_valid_until=None,
+        canonical_superseded_by_entry_id=None,
+    )
+    assert _with_canonical_currentness(row) == {}
 
 
 def test_vector_search_passes_tags_as_array_param() -> None:
@@ -336,6 +370,7 @@ def test_vector_search_lexical_degradation_preserves_filter_and_scope_contract()
         "date_to": date_to,
         "candidate_limit": 40,
         "exclude_private_memory_scopes": True,
+        "historical_mode": False,
         "embedding_profile_name": None,
     }
 
@@ -989,7 +1024,9 @@ def test_vector_search_latest_fact_prefers_current_version_and_rejects_stale_top
                 chunk_text="Palace deployment 0.1.480 was superseded.",
                 chunk_index=0,
                 score=0.70,
-                item_metadata={"superseded": True},
+                item_metadata={"superseded": False},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=uuid.uuid4(),
             ),
             SimpleNamespace(
                 item_id=current_id,
@@ -1006,6 +1043,8 @@ def test_vector_search_latest_fact_prefers_current_version_and_rejects_stale_top
                 chunk_index=0,
                 score=0.64,
                 item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
             ),
         ]
     )
@@ -1013,8 +1052,15 @@ def test_vector_search_latest_fact_prefers_current_version_and_rejects_stale_top
 
     results = asyncio.run(service.vector_search(query="latest current Palace deployment", limit=2))
 
-    assert [result.item_id for result in results] == [current_id, stale_id]
+    assert [result.item_id for result in results] == [current_id]
     assert results[0].item_id != stale_id
+
+    historical_results = asyncio.run(
+        service.vector_search(query="Palace deployment as of 2024", limit=2)
+    )
+    assert stale_id in {result.item_id for result in historical_results}
+
+    assert db.last_params["historical_mode"] is True
 
 
 def test_vector_search_exact_version_prefers_requested_release() -> None:
@@ -1027,6 +1073,7 @@ def test_vector_search_exact_version_prefers_requested_release() -> None:
                 item_id=adjacent_id, title="Palace release 0.1.480", summary=None,
                 source_type="doc", source_url=None, tags=["release"], created_at=now,
                 chunk_text="Previous release 0.1.480.", chunk_index=0, score=0.66, item_metadata={},
+                canonical_valid_until=None, canonical_superseded_by_entry_id=uuid.uuid4(),
             ),
             SimpleNamespace(
                 item_id=expected_id, title="Palace release 0.1.481", summary=None,
@@ -1039,7 +1086,38 @@ def test_vector_search_exact_version_prefers_requested_release() -> None:
 
     results = asyncio.run(service.vector_search(query="Palace release 0.1.481", limit=2))
 
-    assert [result.item_id for result in results] == [expected_id, adjacent_id]
+    assert [result.item_id for result in results] == [expected_id]
+    assert db.last_params["historical_mode"] is True
+
+    superseded_results = asyncio.run(service.vector_search(query="Palace release 0.1.480", limit=2))
+    assert superseded_results[0].item_id == adjacent_id
+    assert superseded_results[0].currentness == "superseded"
+
+
+def test_currentness_prefilter_precedes_semantic_and_lexical_lane_limits() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(service.vector_search(query="latest Palace deployment", limit=2))
+
+    sql = db.last_sql
+    semantic = sql[sql.index("semantic_candidates AS MATERIALIZED"):sql.index("lexical_items AS MATERIALIZED")]
+    lexical = sql[sql.index("lexical_items AS MATERIALIZED"):sql.index("lexical_candidates AS MATERIALIZED")]
+    for lane, limit_name in ((semantic, ":semantic_candidate_limit"), (lexical, ":lexical_candidate_limit")):
+        assert "NOT EXISTS" in lane
+        assert "FROM memory_entries current_me" in lane
+        assert "FROM source_records current_sr" in lane
+        assert lane.index("NOT EXISTS") < lane.index(f"LIMIT {limit_name}")
+
+
+def test_source_record_status_is_canonical_currentness() -> None:
+    row = SimpleNamespace(
+        item_metadata={}, canonical_valid_until=None,
+        canonical_superseded_by_entry_id=None, canonical_source_status="stale",
+    )
+    metadata = _with_canonical_currentness(row)
+    candidate = SimpleNamespace(item_metadata=metadata)
+    assert _candidate_currentness(candidate)["state"] == "stale"
 
 
 def test_vector_search_evergreen_exact_doc_is_not_displaced_by_recent_unrelated_item() -> None:

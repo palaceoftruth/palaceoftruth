@@ -2041,10 +2041,14 @@ def test_memory_retrieve_returns_trace_and_scope(monkeypatch) -> None:
         "item_id": "00000000-0000-0000-0000-000000000021",
         "source_type": "note",
         "base_score": 0.82,
-        "adjusted_score": 0.88,
-        "adjustments": {"lexical_rescue": 0.06},
-        "derived_artifact_keys": [],
-    }
+            "adjusted_score": 0.88,
+            "adjustments": {"lexical_rescue": 0.06},
+            "derived_artifact_keys": [],
+            "currentness": "current",
+            "last_verified_at": None,
+            "valid_until": None,
+            "superseded_by_entry_id": None,
+        }
 
 
 def test_agent_memory_retrieve_uses_policy_request(monkeypatch, caplog) -> None:

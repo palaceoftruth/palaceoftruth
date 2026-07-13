@@ -2896,6 +2896,48 @@ def _suppress_low_signal_conversation_notes(
     return filtered, len(results) - len(filtered)
 
 
+def _retrieval_quality_decision(query: str, results: list[SearchResult]) -> dict[str, Any]:
+    """Return a bounded, deterministic rescue decision from already-visible signals."""
+    query_tokens = set(TOKEN_RE.findall(query.lower()))
+    top = results[0] if results else None
+    top_tokens = (
+        set(TOKEN_RE.findall(" ".join((top.title, top.summary or "", top.chunk_text)).lower()))
+        if top else set()
+    )
+    relevance = len(query_tokens & top_tokens) / len(query_tokens) if query_tokens else 1.0
+    margin = top.score - results[1].score if top and len(results) > 1 else (top.score if top else 0.0)
+    current_coverage = (
+        sum(result.currentness == "current" for result in results) / len(results) if results else 0.0
+    )
+    supported_coverage = (
+        sum(
+            result.source_support_state not in {"unsupported", "partial_source"}
+            and not ({"diary-rollup", "memory-dream", "wake-up-brief", "wakeup-brief"} & set(result.tags))
+            for result in results
+        ) / len(results)
+        if results else 0.0
+    )
+    reasons: list[str] = []
+    if relevance < 0.2:
+        reasons.append("weak_relevance")
+    if len(results) > 1 and margin < 0.025:
+        reasons.append("weak_score_margin")
+    if current_coverage < 0.5:
+        reasons.append("weak_currentness_coverage")
+    if supported_coverage < 0.5:
+        reasons.append("weak_source_support_coverage")
+    return {
+        "decision": "rescue" if reasons else "accept",
+        "reasons": reasons[:4],
+        "signals": {
+            "top_relevance": round(relevance, 4),
+            "top_score_margin": round(margin, 4),
+            "currentness_coverage": round(current_coverage, 4),
+            "source_support_coverage": round(supported_coverage, 4),
+        },
+    }
+
+
 def _coerce_trace_float(value: object) -> float | None:
     if isinstance(value, bool):
         return None
@@ -3043,6 +3085,17 @@ def _append_search_ranking_trace(
                 base_score=_coerce_trace_float(row.get("base_score")),
                 adjusted_score=_coerce_trace_float(row.get("adjusted_score")),
                 adjustments=adjustments,
+                currentness=(
+                    str(row["currentness"])
+                    if row.get("currentness") in {"current", "stale", "expired", "superseded"}
+                    else "current"
+                ),
+                last_verified_at=row.get("last_verified_at"),
+                valid_until=row.get("valid_until"),
+                superseded_by_entry_id=(
+                    str(row["superseded_by_entry_id"])
+                    if row.get("superseded_by_entry_id") is not None else None
+                ),
             )
         )
 
@@ -3061,6 +3114,11 @@ def _append_search_ranking_trace(
             query_intent=(
                 str(raw_trace["query_intent"])
                 if isinstance(raw_trace.get("query_intent"), str)
+                else None
+            ),
+            currentness_mode=(
+                str(raw_trace["currentness_mode"])
+                if raw_trace.get("currentness_mode") in {"current", "historical"}
                 else None
             ),
             source_ranking_enabled=(
@@ -3405,6 +3463,8 @@ async def retrieve_palace(
     should_merge_global_results = (
         results and not body.room_id and (route_low_confidence or has_explicit_tag_filter)
     )
+    quality_decision = _retrieval_quality_decision(body.query, results)
+    trace.quality_decision = quality_decision
     should_rescue_explicit_scope = (
         results
         and candidate_room_ids
@@ -3413,6 +3473,7 @@ async def retrieve_palace(
         and bool(body.scope_key)
         and not has_explicit_tag_filter
         and not route_low_confidence
+        and quality_decision["decision"] == "rescue"
     )
     if should_rescue_explicit_scope:
         scoped_rescue_results = await service.vector_search(
@@ -3650,6 +3711,14 @@ async def retrieve_palace(
             failure_kind=query_embedding_error.failure_kind,
         ) from query_embedding_error
 
+    stale_results = [result for result in results if result.currentness != "current"]
+    if stale_results:
+        states = sorted({result.currentness for result in stale_results})
+        trace.stale_warning = (
+            f"{len(stale_results)} result(s) carry {', '.join(states)} currentness metadata; "
+            "inspect last_verified_at and supersession details before reuse."
+        )
+
     trace.search_ranking_trace = getattr(service, "last_ranking_trace", None)
     if isinstance(trace.search_ranking_trace, dict):
         raw_lens = trace.search_ranking_trace.get("retrieval_lens")
@@ -3725,6 +3794,18 @@ async def retrieve_palace(
                 detail=f"Suppressed {suppressed_low_signal_notes} low-signal conversation-turn notes because higher-value shared knowledge was available.",
             )
         )
+    if trace.quality_decision:
+        steps.append(
+            PalaceTraceStep(
+                title="Retrieval quality gate",
+                detail=(
+                    f"Decision: {trace.quality_decision['decision']}; "
+                    f"signals: {', '.join(trace.quality_decision['reasons']) or 'quality sufficient'}."
+                ),
+            )
+        )
+    if trace.stale_warning:
+        steps.append(PalaceTraceStep(title="Currentness warning", detail=trace.stale_warning))
     steps.append(
         PalaceTraceStep(
             title="Scoped retrieval" if not trace.fallback_used else "Global fallback",

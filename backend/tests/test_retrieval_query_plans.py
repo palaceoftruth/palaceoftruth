@@ -114,6 +114,30 @@ async def plan_session() -> AsyncSession:
                 )
             """))
             await session.execute(text("CREATE TEMP TABLE room_memberships (tenant_id text, item_id uuid, room_id uuid)"))
+            await session.execute(text("""
+                CREATE TEMP TABLE memory_entries (
+                    tenant_id text NOT NULL,
+                    item_id uuid NOT NULL,
+                    valid_until timestamptz,
+                    superseded_by_entry_id uuid
+                )
+            """))
+            await session.execute(text("""
+                CREATE UNIQUE INDEX sar1063_memory_entries_tenant_item
+                ON memory_entries (tenant_id, item_id)
+            """))
+            await session.execute(text("""
+                CREATE TEMP TABLE source_records (
+                    id uuid PRIMARY KEY,
+                    tenant_id text NOT NULL,
+                    item_id uuid NOT NULL,
+                    status text NOT NULL
+                )
+            """))
+            await session.execute(text("""
+                CREATE INDEX sar1063_source_records_tenant_item_status
+                ON source_records (tenant_id, item_id, status)
+            """))
             await session.execute(text("CREATE INDEX sar1060_items_fts ON items USING gin (search_vector)"))
             await session.execute(text("""
                 CREATE INDEX sar1060_profile_item_chunk

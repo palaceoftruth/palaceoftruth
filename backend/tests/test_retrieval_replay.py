@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -465,6 +467,31 @@ def test_read_capture_file_rejects_malformed_ndjson(tmp_path) -> None:
 
     with pytest.raises(ReplayInputError, match="missing request.query_fingerprint"):
         read_capture_file(path)
+
+
+def test_currentness_fixture_preserves_latest_and_historical_top_rank_without_scope_leaks(tmp_path) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures" / "retrieval_replay"
+    baseline = read_capture_file(fixture_dir / "currentness_baseline.ndjson")
+    current_path = tmp_path / "currentness_current.ndjson"
+    subprocess.run(
+        [sys.executable, str(Path(__file__).parents[2] / "scripts" / "replay_retrieval_capture.py"),
+         "generate-currentness", "--output", str(current_path)],
+        check=True,
+    )
+    current = read_capture_file(current_path)
+    report = compare_captures(
+        baseline, current, top_k=5, min_mrr=0.98, fail_on_forbidden=True,
+        require_expected_scope=True, required_capture_sets={"currentness-regression"},
+        require_capture_metadata=True,
+        require_current_source_ranking_mode="currentness-aware",
+        # The known-defect baseline contains historical live latency, while this
+        # deterministic fixture validates ranking correctness rather than timing.
+        latency_delta_warn_ms=3_000.0,
+    )
+    assert report["summary"]["failure_counts"] == {}
+    assert [row["current_top1"] for row in report["comparisons"]] == [
+        "deploy-current", "release-0.1.481", "codex-memory", "postgresql-current-doc"
+    ]
 
 
 def test_read_capture_file_loads_valid_ndjson(tmp_path) -> None:

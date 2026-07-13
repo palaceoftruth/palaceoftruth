@@ -69,6 +69,17 @@ jobs:
             --top-k 2 \
             --min-jaccard 1.0 \
             --latency-delta-warn-ms 250
+          mkdir -p ../artifacts/retrieval-replay
+          uv run --python 3.12 python ../scripts/replay_retrieval_capture.py generate-currentness \
+            --output ../artifacts/retrieval-replay/currentness_current.ndjson
+          uv run --python 3.12 python ../scripts/replay_retrieval_capture.py compare \
+            --baseline tests/fixtures/retrieval_replay/currentness_baseline.ndjson \
+            --current ../artifacts/retrieval-replay/currentness_current.ndjson \
+            --top-k 5 --min-jaccard 0 --min-recall 1 --min-mrr 0.98 --min-ndcg 0.98 \
+            --latency-delta-warn-ms 3000 \
+            --fail-on-forbidden --require-expected-scope --require-capture-metadata \
+            --required-capture-set currentness-regression \
+            --require-current-source-ranking-mode currentness-aware
 
       - name: Generate CI-safe agent memory reports
         working-directory: backend
