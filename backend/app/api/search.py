@@ -8,10 +8,34 @@ from app.auth import require_api_capability
 from app.database import get_db
 from app.schemas.search import SearchRequest, SearchResponse, TagsMode
 from app.services.retrieval_capture import build_capture_record, capture_retrieval
-from app.services.search import SearchService
+from app.services.search import RetrievalDependencyUnavailableError, SearchService
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
 router = APIRouter(prefix="/search", tags=["search"], dependencies=[Depends(require_api_capability("read"))])
+
+
+def _retrieval_dependency_http_error(exc: RetrievalDependencyUnavailableError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "type": "retrieval_dependency_unavailable",
+            "dependency": exc.dependency,
+            "failure_kind": exc.failure_kind,
+            "retryable": True,
+        },
+        headers={"Retry-After": "5"},
+    )
+
+
+def _raise_if_degraded_search_is_empty(svc: SearchService, results: list) -> None:
+    trace = svc.last_ranking_trace or {}
+    degradation = trace.get("dependency_degradation")
+    if results or not isinstance(degradation, dict):
+        return
+    raise RetrievalDependencyUnavailableError(
+        dependency=str(degradation.get("dependency") or "embedding_provider"),
+        failure_kind=str(degradation.get("failure_kind") or "unavailable"),
+    )
 
 
 @router.get("", response_model=SearchResponse)
@@ -39,21 +63,28 @@ async def search(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     started = perf_counter()
     svc = SearchService(db, request.app.state.embedder, request.state.tenant_id)
-    results = await svc.vector_search(
-        query=q,
-        limit=limit,
-        candidate_limit=candidate_limit,
-        include_neighbor_chunks=include_neighbor_chunks,
-        neighbor_chunk_window=neighbor_chunk_window,
-        context_budget_chars=context_budget_chars,
-        source_type=source_type,
-        retrieval_lens=retrieval_lens,
-        tags=tag_list,
-        tags_mode=tags_mode,
-        date_from=date_from,
-        date_to=date_to,
-        min_score=min_score,
-    )
+    try:
+        results = await svc.vector_search(
+            query=q,
+            limit=limit,
+            candidate_limit=candidate_limit,
+            include_neighbor_chunks=include_neighbor_chunks,
+            neighbor_chunk_window=neighbor_chunk_window,
+            context_budget_chars=context_budget_chars,
+            source_type=source_type,
+            retrieval_lens=retrieval_lens,
+            tags=tag_list,
+            tags_mode=tags_mode,
+            date_from=date_from,
+            date_to=date_to,
+            min_score=min_score,
+        )
+    except RetrievalDependencyUnavailableError as exc:
+        raise _retrieval_dependency_http_error(exc) from exc
+    try:
+        _raise_if_degraded_search_is_empty(svc, results)
+    except RetrievalDependencyUnavailableError as exc:
+        raise _retrieval_dependency_http_error(exc) from exc
     capture_retrieval(
         build_capture_record(
             endpoint="/api/v1/search",
@@ -89,21 +120,28 @@ async def search_post(
 ):
     started = perf_counter()
     svc = SearchService(db, request.app.state.embedder, request.state.tenant_id)
-    results = await svc.vector_search(
-        query=body.query,
-        limit=body.limit,
-        candidate_limit=body.candidate_limit,
-        include_neighbor_chunks=body.include_neighbor_chunks,
-        neighbor_chunk_window=body.neighbor_chunk_window,
-        context_budget_chars=body.context_budget_chars,
-        source_type=body.source_type,
-        retrieval_lens=body.retrieval_lens,
-        tags=body.tags,
-        tags_mode=body.tags_mode,
-        date_from=body.date_from,
-        date_to=body.date_to,
-        min_score=body.min_score,
-    )
+    try:
+        results = await svc.vector_search(
+            query=body.query,
+            limit=body.limit,
+            candidate_limit=body.candidate_limit,
+            include_neighbor_chunks=body.include_neighbor_chunks,
+            neighbor_chunk_window=body.neighbor_chunk_window,
+            context_budget_chars=body.context_budget_chars,
+            source_type=body.source_type,
+            retrieval_lens=body.retrieval_lens,
+            tags=body.tags,
+            tags_mode=body.tags_mode,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            min_score=body.min_score,
+        )
+    except RetrievalDependencyUnavailableError as exc:
+        raise _retrieval_dependency_http_error(exc) from exc
+    try:
+        _raise_if_degraded_search_is_empty(svc, results)
+    except RetrievalDependencyUnavailableError as exc:
+        raise _retrieval_dependency_http_error(exc) from exc
     capture_retrieval(
         build_capture_record(
             endpoint="/api/v1/search",

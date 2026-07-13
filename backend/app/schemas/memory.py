@@ -844,6 +844,10 @@ class AgentMemoryRetrieveTrace(BaseModel):
     context_budget_truncated: bool = False
     fallback_used: bool = False
     completeness_warnings: list[str] = Field(default_factory=list)
+    retrieval_mode: Literal["hybrid", "lexical_degraded"] = "hybrid"
+    embedding_unavailable: bool = False
+    dependency_failure_kind: str | None = None
+    dependency_retryable: bool | None = None
 
 
 class AgentMemoryRetrieveResponse(BaseModel):
@@ -1050,6 +1054,13 @@ class MemoryRetrievalDoctorCheck(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class MemoryRetrievalDoctorDependencyState(BaseModel):
+    status: DoctorStatus
+    latency_ms: int
+    failure_kind: str | None = None
+    retryable: bool | None = None
+
+
 class MemoryRetrievalDoctorGeneration(BaseModel):
     dirty_generation: int = 0
     indexed_generation: int = 0
@@ -1109,6 +1120,8 @@ class MemoryRetrievalDoctorProbeReport(BaseModel):
     ranking_routes: list[MemoryRetrievalDoctorRankingRoute] = Field(default_factory=list)
     top_results: list[MemoryRetrievalDoctorProbeTopResult] = Field(default_factory=list)
     expected_top_rank: int | None = None
+    failure_kind: str | None = None
+    retryable: bool | None = None
 
 
 class MemoryRetrievalDoctorResponse(BaseModel):
@@ -1120,5 +1133,8 @@ class MemoryRetrievalDoctorResponse(BaseModel):
     queue_health: Any | None = None
     wakeup_briefs: MemoryRetrievalDoctorWakeupState = Field(default_factory=MemoryRetrievalDoctorWakeupState)
     relationships: MemoryRetrievalDoctorRelationshipState = Field(default_factory=MemoryRetrievalDoctorRelationshipState)
+    embedding_dependency: MemoryRetrievalDoctorDependencyState = Field(
+        default_factory=lambda: MemoryRetrievalDoctorDependencyState(status="ok", latency_ms=0)
+    )
     probes: list[MemoryRetrievalDoctorProbeReport] = Field(default_factory=list)
     checks: list[MemoryRetrievalDoctorCheck] = Field(default_factory=list)

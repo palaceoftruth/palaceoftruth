@@ -77,16 +77,32 @@ from app.services.job_progress import record_job_progress_event
 from app.services.queue_telemetry import build_memory_queue_hint
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
 from app.services.source_trust_summary import get_source_trust_summaries
+from app.services.search import RetrievalDependencyUnavailableError
 from app.workers.queues import enqueue_singleton_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 logger = logging.getLogger(__name__)
 
 
+def _retrieval_dependency_http_error(exc: RetrievalDependencyUnavailableError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "type": "retrieval_dependency_unavailable",
+            "dependency": exc.dependency,
+            "failure_kind": exc.failure_kind,
+            "retryable": True,
+        },
+        headers={"Retry-After": "5"},
+    )
+
+
 def _record_retrieval_metrics(
     *, endpoint: str, outcome: str, latency_ms: float, response: object | None = None
 ) -> None:
     trace = getattr(response, "trace", None)
+    if outcome == "success" and bool(getattr(trace, "embedding_unavailable", False)):
+        outcome = "degraded"
     results = getattr(response, "results", None) or []
     ranking_trace = getattr(trace, "search_ranking_trace", None) or {}
     if not isinstance(ranking_trace, dict):
@@ -1002,6 +1018,8 @@ async def retrieve_memory_artifacts(
                 error_class=exc.__class__.__name__,
             )
         )
+        if isinstance(exc, RetrievalDependencyUnavailableError):
+            raise _retrieval_dependency_http_error(exc) from exc
         raise
     latency_ms = (perf_counter() - started) * 1000
     _record_retrieval_metrics(endpoint="retrieve", outcome="success", latency_ms=latency_ms, response=response)
@@ -1136,6 +1154,8 @@ async def retrieve_agent_memory_artifacts(
                 error_class=exc.__class__.__name__,
             )
         )
+        if isinstance(exc, RetrievalDependencyUnavailableError):
+            raise _retrieval_dependency_http_error(exc) from exc
         raise
 
     latency_ms = (perf_counter() - started) * 1000

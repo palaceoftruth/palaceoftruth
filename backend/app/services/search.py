@@ -14,7 +14,7 @@ from app.config import settings
 from app.embedding_profile import EMBEDDING_DIMENSIONS, EmbeddingProfile, is_default_embedding_profile, resolve_embedding_profile
 from app.schemas.search import SearchContextChunk, SearchResult, split_system_provenance_tags
 from app.services.artifact_citations import build_artifact_citation
-from app.services.embedder import EmbeddingService
+from app.services.embedder import EmbeddingRequestError, EmbeddingService
 from app.services.memory_entries import source_project_from_memory_metadata
 from app.services.retrieval_provenance import build_retrieval_provenance, classify_retrieval_trust
 from app.services.retrieval_hints import report_retrieval_hint_candidates, score_retrieval_hints_for_items
@@ -43,6 +43,16 @@ _MAX_LEXICAL_RESCUE_BONUS = 0.28
 _SOURCE_AUTHORITY_URL_BONUS = 0.04
 _SOURCE_AUTHORITY_METADATA_BONUS = 0.03
 _SOURCE_OPERATIONAL_TAG_BONUS = 0.025
+
+
+class RetrievalDependencyUnavailableError(RuntimeError):
+    """Retryable retrieval failure after safe dependency degradation is exhausted."""
+
+    def __init__(self, *, dependency: str, failure_kind: str) -> None:
+        super().__init__(f"{dependency} is temporarily unavailable")
+        self.dependency = dependency
+        self.failure_kind = failure_kind
+        self.retryable = True
 _NIST_SOURCE_ROLE_MATCH_BONUS = 0.18
 _NIST_SOURCE_ROLE_DECOY_PENALTY = 0.14
 _LOW_SIGNAL_SOURCE_PENALTY = 0.08
@@ -1050,6 +1060,127 @@ class SearchService:
         self.tenant_id = tenant_id
         self.last_ranking_trace: dict[str, Any] | None = None
 
+    async def _lexical_fallback_rows(
+        self,
+        *,
+        query: str,
+        embedding_plan: _EmbeddingSearchPlan,
+        candidate_limit: int,
+        source_type: str | None,
+        item_ids: list | None,
+        room_ids: list | None,
+        scope_type: str | None,
+        scope_key: str | None,
+        tags: list[str] | None,
+        tags_mode: str,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        exclude_private_memory_scopes: bool,
+    ) -> list[Any]:
+        """Return bounded lexical results when query embedding is unavailable."""
+        sql = text(f"""
+            WITH lexical_items AS MATERIALIZED (
+                SELECT
+                    i.id AS item_id,
+                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+                FROM items i
+                WHERE i.status = 'ready'
+                  AND i.deleted_at IS NULL
+                  AND i.tenant_id = :tenant_id
+                  AND i.search_vector @@ plainto_tsquery('english', :query)
+                  AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
+                  AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
+                  AND (
+                      CAST(:room_ids AS uuid[]) IS NULL
+                      OR EXISTS (
+                          SELECT 1 FROM room_memberships rm
+                          WHERE rm.tenant_id = :tenant_id
+                            AND rm.item_id = i.id
+                            AND rm.room_id = ANY(CAST(:room_ids AS uuid[]))
+                      )
+                  )
+                  AND (
+                      CAST(:scope_type AS text) IS NULL
+                      OR COALESCE(
+                          i.metadata->'memory_entry'->'scope'->>'type',
+                          CASE WHEN CAST(:scope_type AS text) = 'tenant_shared' THEN 'tenant_shared' ELSE NULL END
+                      ) = CAST(:scope_type AS text)
+                  )
+                  AND (
+                      CAST(:scope_key AS text) IS NULL
+                      OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
+                  )
+                  AND (
+                      CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
+                      OR i.metadata->'memory_entry' IS NULL
+                      OR COALESCE(i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') = 'tenant_shared'
+                  )
+                  AND (
+                      CAST(:tags AS text[]) IS NULL
+                      OR (CAST(:tags_mode AS text) = 'all' AND i.tags @> CAST(:tags AS text[]))
+                      OR (CAST(:tags_mode AS text) = 'any' AND i.tags && CAST(:tags AS text[]))
+                  )
+                  AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
+                  AND (CAST(:date_to AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM {embedding_plan.table_name} eligible_embedding
+                      WHERE eligible_embedding.item_id = i.id
+                        {embedding_plan.profile_filter.replace('e.', 'eligible_embedding.')}
+                  )
+                ORDER BY text_score DESC, i.id ASC
+                LIMIT :candidate_limit
+            )
+            SELECT
+                i.id AS item_id,
+                best_chunk.chunk_text,
+                best_chunk.chunk_index,
+                i.title,
+                i.summary,
+                i.source_type,
+                i.source_url,
+                i.tags,
+                i.created_at,
+                COALESCE(i.effective_date, i.created_at) AS effective_date,
+                i.effective_date_source,
+                i.effective_date_quality,
+                i.metadata AS item_metadata,
+                li.text_score AS score
+            FROM lexical_items li
+            JOIN items i ON i.id = li.item_id
+            JOIN LATERAL (
+                SELECT e.chunk_text, e.chunk_index
+                FROM {embedding_plan.table_name} e
+                WHERE e.item_id = li.item_id
+                  {embedding_plan.profile_filter}
+                ORDER BY e.chunk_index ASC, e.chunk_text ASC
+                LIMIT 1
+            ) best_chunk ON TRUE
+            ORDER BY score DESC, item_id ASC
+            LIMIT :candidate_limit
+        """)
+        return (
+            await self.db.execute(
+                sql,
+                {
+                    "query": query,
+                    "tenant_id": self.tenant_id,
+                    "source_type": source_type,
+                    "item_ids": item_ids,
+                    "room_ids": room_ids,
+                    "scope_type": scope_type,
+                    "scope_key": scope_key,
+                    "tags": tags,
+                    "tags_mode": tags_mode,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "candidate_limit": candidate_limit,
+                    "exclude_private_memory_scopes": exclude_private_memory_scopes,
+                    "embedding_profile_name": embedding_plan.profile_name,
+                },
+            )
+        ).fetchall()
+
     async def vector_search(
         self,
         query: str,
@@ -1066,6 +1197,7 @@ class SearchService:
         date_to: datetime | None = None,
         min_score: float | None = None,
         query_vector: list[float] | None = None,
+        query_embedding_error: EmbeddingRequestError | None = None,
         exclude_private_memory_scopes: bool = False,
         candidate_limit: int | None = None,
         include_neighbor_chunks: bool = False,
@@ -1074,10 +1206,23 @@ class SearchService:
         include_derived_artifacts: bool = False,
     ) -> list[SearchResult]:
         lens_profile = resolve_retrieval_lens(retrieval_lens)
-        query_vec = query_vector or await self.embedder.embed_single(query)
-        vec_str = "[" + ",".join(str(v) for v in query_vec) + "]"
         effective_candidate_limit = _candidate_fetch_limit(limit, candidate_limit)
         embedding_plan = _embedding_search_plan(self.embedding_profile)
+        embedding_error = query_embedding_error
+        if embedding_error is not None and not embedding_error.retryable:
+            raise embedding_error
+        if embedding_error is not None:
+            query_vec = None
+        else:
+            try:
+                query_vec = query_vector or await self.embedder.embed_single(query)
+            except EmbeddingRequestError as exc:
+                if not exc.retryable:
+                    raise
+                embedding_error = exc
+                query_vec = None
+
+        vec_str = "[" + ",".join(str(v) for v in query_vec) + "]" if query_vec is not None else None
 
         # Generate semantic and lexical candidates independently before applying the
         # existing weighted rerank. The old query ranked the complete eligible corpus,
@@ -1264,8 +1409,25 @@ class SearchService:
             LIMIT :candidate_limit
         """)
 
-        rows = (
-            await self.db.execute(
+        if embedding_error is not None:
+            rows = await self._lexical_fallback_rows(
+                query=query,
+                embedding_plan=embedding_plan,
+                candidate_limit=effective_candidate_limit,
+                source_type=source_type,
+                item_ids=item_ids,
+                room_ids=room_ids,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                tags=tags,
+                tags_mode=tags_mode,
+                date_from=date_from,
+                date_to=date_to,
+                exclude_private_memory_scopes=exclude_private_memory_scopes,
+            )
+        else:
+            rows = (
+                await self.db.execute(
                 sql,
                 {
                     "vec": vec_str,
@@ -1287,9 +1449,9 @@ class SearchService:
                     "lexical_candidate_limit": effective_candidate_limit,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
                     "embedding_profile_name": embedding_plan.profile_name,
-                },
-            )
-        ).fetchall()
+                    },
+                )
+            ).fetchall()
 
         candidates = [
             _SearchCandidate(
@@ -1319,6 +1481,7 @@ class SearchService:
         relationship_graph_candidate_count = 0
         relationship_graph_expansion_enabled = (
             (bool(settings.retrieval_relationship_expansion_enabled) or lens_profile.graph_expansion_enabled)
+            and embedding_error is None
             and query_intent.allow_graph_expansion
             and item_ids is None
             and bool(candidates)
@@ -1569,6 +1732,16 @@ class SearchService:
 
         self.last_ranking_trace = {
             "ranking_features_version": 2,
+            "retrieval_mode": "lexical_degraded" if embedding_error is not None else "hybrid",
+            "dependency_degradation": (
+                {
+                    "dependency": "embedding_provider",
+                    "failure_kind": embedding_error.failure_kind,
+                    "retryable": embedding_error.retryable,
+                }
+                if embedding_error is not None
+                else None
+            ),
             "query_intent": query_intent.name,
             "retrieval_lens": lens_profile.name,
             "retrieval_lens_profile": lens_profile.as_trace(),

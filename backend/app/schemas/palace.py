@@ -476,6 +476,10 @@ class PalaceRetrieveTrace(BaseModel):
     route_global_candidate_count: int | None = None
     global_merge_rescued_results: bool = False
     fallback_used: bool = False
+    embedding_unavailable: bool = False
+    retrieval_mode: Literal["hybrid", "lexical_degraded"] = "hybrid"
+    embedding_failure_kind: str | None = None
+    embedding_failure_retryable: bool | None = None
     completeness_warning: str | None = None
     hint_report: dict | None = None
     retrieval_lens: str | None = None

@@ -98,7 +98,8 @@ from app.services.retrieval_hints import (
     report_retrieval_hint_candidates,
     retrieve_retrieval_hint_rescue_results,
 )
-from app.services.search import SearchService
+from app.services.embedder import EmbeddingRequestError
+from app.services.search import RetrievalDependencyUnavailableError, SearchService
 from app.services.source_trust_summary import build_source_trust_health_summary
 from app.services.wakeup_briefs import build_wakeup_brief_summary
 from app.utils.crypto import decrypt_secret, encrypt_secret
@@ -3195,13 +3196,15 @@ async def retrieve_palace(
     embedder,
     body: PalaceRetrieveRequest,
     query_vector: list[float] | None = None,
+    query_embedding_error: EmbeddingRequestError | None = None,
+    allow_empty_degraded: bool = False,
 ) -> PalaceRetrieveResponse:
     # Canonical read pipeline:
     # query + explicit scope
     #   -> optional Palace room routing
     #   -> one scoped search attempt
     #   -> explicit fallback only if routing/search comes up empty
-    state = await ensure_tenant_state(db, tenant_id)
+    await ensure_tenant_state(db, tenant_id)
     rooms = (
         await db.execute(
             select(Room, Wing.name, RoomSnapshot.summary)
@@ -3319,7 +3322,20 @@ async def retrieve_palace(
     trace.route_confidence = _route_confidence(route_score)
     trace.route_abstain_reason = route_abstain_reason
     service = SearchService(db, embedder, tenant_id=tenant_id)
-    query_vector = query_vector or await embedder.embed_single(body.query)
+    if query_embedding_error is not None and not query_embedding_error.retryable:
+        raise query_embedding_error
+    if query_vector is None and query_embedding_error is None:
+        try:
+            query_vector = await embedder.embed_single(body.query)
+        except EmbeddingRequestError as exc:
+            if not exc.retryable:
+                raise
+            query_embedding_error = exc
+    if query_embedding_error is not None:
+        trace.embedding_unavailable = True
+        trace.retrieval_mode = "lexical_degraded"
+        trace.embedding_failure_kind = query_embedding_error.failure_kind
+        trace.embedding_failure_retryable = True
     results = []
     global_results_merged = False
     shared_results_merged = False
@@ -3350,6 +3366,7 @@ async def retrieve_palace(
             date_to=body.date_to,
             min_score=body.min_score,
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
         )
         activated_tunnel_ids = await _used_expanded_tunnel_ids(
             db,
@@ -3415,6 +3432,7 @@ async def retrieve_palace(
             date_to=body.date_to,
             min_score=body.min_score,
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
         )
         global_candidate_count = len(scoped_rescue_results)
         _append_search_ranking_trace(
@@ -3459,6 +3477,7 @@ async def retrieve_palace(
             date_to=body.date_to,
             min_score=body.min_score,
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
         )
         global_candidate_count = len(global_results)
         _append_search_ranking_trace(
@@ -3525,6 +3544,7 @@ async def retrieve_palace(
             date_to=body.date_to,
             min_score=body.min_score,
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
         )
         global_candidate_count = len(results)
         _append_search_ranking_trace(
@@ -3570,6 +3590,7 @@ async def retrieve_palace(
             date_to=body.date_to,
             min_score=body.min_score,
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
         )
         _append_search_ranking_trace(
             trace,
@@ -3623,6 +3644,12 @@ async def retrieve_palace(
         trace.hint_report["applied_count"] = len(rescue_results)
         trace.hint_report["min_score"] = settings.retrieval_hint_rescue_min_score
         trace.hint_report["rescue_limit"] = settings.retrieval_hint_rescue_limit
+    if query_embedding_error is not None and not results and not allow_empty_degraded:
+        raise RetrievalDependencyUnavailableError(
+            dependency="embedding_provider",
+            failure_kind=query_embedding_error.failure_kind,
+        ) from query_embedding_error
+
     trace.search_ranking_trace = getattr(service, "last_ranking_trace", None)
     if isinstance(trace.search_ranking_trace, dict):
         raw_lens = trace.search_ranking_trace.get("retrieval_lens")

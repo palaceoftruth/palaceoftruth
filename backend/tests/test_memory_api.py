@@ -26,6 +26,7 @@ from app.schemas.memory import (
     MemoryEntryListResponse,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorCheck,
+    MemoryRetrievalDoctorDependencyState,
     MemoryRetrievalDoctorRequest,
     MemoryRetrievalDoctorResponse,
     MemoryRetrievalDoctorProbeReport,
@@ -54,6 +55,7 @@ from app.services.memory import (
     parse_delegated_agent_memory_read_policies,
 )
 from app.services.source_trust_summary import SourceTrustSummary
+from app.services.search import RetrievalDependencyUnavailableError
 from app.workers.queues import singleton_job_id
 
 
@@ -64,6 +66,7 @@ class FakeSession:
         self.mcp_audit_events = []
         self.executed = []
         self.commits = 0
+        self.rollbacks = 0
         self.attempts: list[JobAttempt] = []
 
     async def get(self, model, key, **_kwargs):
@@ -74,6 +77,9 @@ class FakeSession:
             if isinstance(value, Job) and value.job_type == MEMORY_JOB_TYPE and value.tenant_id == "tenant-a":
                 return value
         return None
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
 
     async def execute(self, statement, params=None):
         params = params or {}
@@ -2274,7 +2280,7 @@ async def test_agent_memory_strict_workspace_does_not_leak_other_project_memory(
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         results = []
@@ -2349,7 +2355,7 @@ async def test_delegated_agent_memory_without_policy_denies_requested_agent_scop
     searched_scopes: list[tuple[str, str | None]] = []
     broad_calls: list[dict] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         return MemoryRetrieveResponse(
@@ -2406,7 +2412,7 @@ async def test_delegated_agent_memory_policy_adds_allowlisted_agent_scope(
 ) -> None:
     searched_scopes: list[tuple[str, str | None, int]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, query_vector
         assert tenant_id == "tenant-a"
         searched_scopes.append((body.scope.type, body.scope.key, body.limit))
@@ -2506,7 +2512,7 @@ async def test_agent_scope_pattern_selects_bounded_policy_authorized_scopes(
             limit=100,
         )
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         results = []
@@ -2600,7 +2606,7 @@ async def test_agent_scope_pattern_denies_unauthorized_matches_without_searching
             limit=100,
         )
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         return MemoryRetrieveResponse(
@@ -2654,7 +2660,7 @@ async def test_delegated_agent_memory_results_rank_ahead_of_broad_fallback(
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         results = []
@@ -2781,7 +2787,7 @@ async def test_delegated_agent_memory_results_rank_ahead_of_broad_fallback(
 async def test_delegated_agent_memory_scoped_only_trace_avoids_global_fallback_wording(
     monkeypatch,
 ) -> None:
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         results = []
         warning = None
@@ -2861,7 +2867,7 @@ async def test_delegated_agent_memory_policy_reports_denied_scopes_without_query
     searched_scopes: list[tuple[str, str | None]] = []
     broad_calls: list[dict] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         return MemoryRetrieveResponse(
@@ -2923,7 +2929,7 @@ async def test_delegated_agent_memory_policy_is_same_tenant_only(
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         return MemoryRetrieveResponse(
@@ -2968,7 +2974,7 @@ async def test_agent_memory_uses_tenant_shared_only_as_empty_workspace_fallback(
 ) -> None:
     searched_scopes: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         del db, embedder, tenant_id, query_vector
         searched_scopes.append((body.scope.type, body.scope.key))
         results = []
@@ -3184,6 +3190,9 @@ async def test_memory_retrieval_doctor_builds_healthy_report(monkeypatch) -> Non
     async def fake_relationship_state(*_args, **_kwargs):
         return MemoryRetrievalDoctorRelationshipState()
 
+    async def fake_embedding_dependency(_embedder):
+        return MemoryRetrievalDoctorDependencyState(status="ok", latency_ms=1)
+
     async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body):
         return MemoryRetrieveResponse(
             scope=body.scope,
@@ -3210,6 +3219,7 @@ async def test_memory_retrieval_doctor_builds_healthy_report(monkeypatch) -> Non
     monkeypatch.setattr("app.services.memory.build_worker_backpressure", fake_queue_health)
     monkeypatch.setattr("app.services.memory.build_wakeup_brief_summary", fake_wakeup_summary)
     monkeypatch.setattr("app.services.memory._build_relationship_doctor_state", fake_relationship_state)
+    monkeypatch.setattr("app.services.memory._build_embedding_dependency_state", fake_embedding_dependency)
     monkeypatch.setattr("app.services.memory.retrieve_memory", fake_retrieve_memory)
 
     report = await build_memory_retrieval_doctor(
@@ -3247,6 +3257,9 @@ async def test_memory_retrieval_doctor_marks_empty_probe_unhealthy(monkeypatch) 
     async def fake_relationship_state(*_args, **_kwargs):
         return MemoryRetrievalDoctorRelationshipState()
 
+    async def fake_embedding_dependency(_embedder):
+        return MemoryRetrievalDoctorDependencyState(status="ok", latency_ms=1)
+
     async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body):
         return MemoryRetrieveResponse(
             scope=body.scope,
@@ -3260,6 +3273,7 @@ async def test_memory_retrieval_doctor_marks_empty_probe_unhealthy(monkeypatch) 
     monkeypatch.setattr("app.services.memory.build_worker_backpressure", fake_queue_health)
     monkeypatch.setattr("app.services.memory.build_wakeup_brief_summary", fake_wakeup_summary)
     monkeypatch.setattr("app.services.memory._build_relationship_doctor_state", fake_relationship_state)
+    monkeypatch.setattr("app.services.memory._build_embedding_dependency_state", fake_embedding_dependency)
     monkeypatch.setattr("app.services.memory.retrieve_memory", fake_retrieve_memory)
 
     report = await build_memory_retrieval_doctor(
@@ -3282,6 +3296,107 @@ async def test_memory_retrieval_doctor_marks_empty_probe_unhealthy(monkeypatch) 
     assert report.probes[0].status == "unhealthy"
     assert "probe returned no results" in report.probes[0].reasons
     assert "expected item was not returned" in report.probes[0].reasons
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieval_doctor_isolates_timed_out_probe(monkeypatch) -> None:
+    async def fake_queue_health(_arq_pool):
+        return PalaceWorkerBackpressureSummary(generated_at=datetime.now(timezone.utc), queues=[])
+
+    async def fake_wakeup_summary(*_args, **_kwargs):
+        return {"fresh": 0, "stale": 0, "generated_for_day": None, "last_refreshed_at": None}
+
+    async def fake_relationship_state(*_args, **_kwargs):
+        return MemoryRetrievalDoctorRelationshipState()
+
+    async def fake_embedding_dependency(_embedder):
+        return MemoryRetrievalDoctorDependencyState(
+            status="degraded",
+            latency_ms=5,
+            failure_kind="connection",
+            retryable=True,
+        )
+
+    session = FakeSession()
+    session.poisoned = False
+    calls = 0
+
+    async def recover_session() -> None:
+        session.rollbacks += 1
+        session.poisoned = False
+
+    session.rollback = recover_session
+
+    async def slow_then_healthy_retrieve(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                session.poisoned = True
+                raise
+        assert session.poisoned is False
+        body = kwargs["body"]
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.services.memory.RETRIEVAL_DOCTOR_PROBE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("app.services.memory.build_worker_backpressure", fake_queue_health)
+    monkeypatch.setattr("app.services.memory.build_wakeup_brief_summary", fake_wakeup_summary)
+    monkeypatch.setattr("app.services.memory._build_relationship_doctor_state", fake_relationship_state)
+    monkeypatch.setattr("app.services.memory._build_embedding_dependency_state", fake_embedding_dependency)
+    monkeypatch.setattr("app.services.memory.retrieve_memory", slow_then_healthy_retrieve)
+
+    report = await build_memory_retrieval_doctor(
+        session,
+        embedder=object(),
+        tenant_id="tenant-a",
+        body=MemoryRetrievalDoctorRequest(
+            sample_probes=[
+                {"query": "private timeout text", "scope": {"type": "tenant_shared"}},
+                {"query": "private recovery text", "scope": {"type": "tenant_shared"}},
+            ]
+        ),
+        auth=MemoryRetrievalDoctorAuthShape(auth_mode="mcp_oauth"),
+    )
+
+    payload = report.model_dump(mode="json")
+    assert report.status == "unhealthy"
+    assert report.embedding_dependency.failure_kind == "connection"
+    assert report.probes[0].failure_kind == "timeout"
+    assert report.probes[0].retryable is True
+    assert report.probes[1].status == "unhealthy"
+    assert "probe returned no results" in report.probes[1].reasons
+    assert session.rollbacks == 1
+    assert "private timeout text" not in json.dumps(payload)
+    assert "private recovery text" not in json.dumps(payload)
+
+
+def test_memory_retrieve_maps_exhausted_degradation_to_retryable_503(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def unavailable(*_args, **_kwargs):
+        raise RetrievalDependencyUnavailableError(
+            dependency="embedding_provider",
+            failure_kind="connection",
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_memory", unavailable)
+
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "outage query", "scope": {"type": "tenant_shared"}},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert response.json()["detail"]["failure_kind"] == "connection"
+    assert response.json()["detail"]["retryable"] is True
 
 
 def test_memory_retrieve_capture_records_trace_without_raw_query(monkeypatch, tmp_path) -> None:
@@ -3352,7 +3467,7 @@ def test_memory_retrieve_capture_records_trace_without_raw_query(monkeypatch, tm
 async def test_retrieve_memory_forwards_larger_nist_limit_to_palace(monkeypatch) -> None:
     from app.services.memory import retrieve_memory
 
-    async def fake_retrieve_palace(db, *, tenant_id: str, embedder, body, query_vector=None):
+    async def fake_retrieve_palace(db, *, tenant_id: str, embedder, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         assert tenant_id == "tenant-a"
         assert body.limit == 21
         assert body.candidate_limit == 90
