@@ -19,7 +19,13 @@ env:
 
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    # Untrusted fork code stays on GitHub-hosted infrastructure. Trusted events
+    # use the repository-scoped ephemeral ARC scale set.
+    runs-on: >-
+      ${{ github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository &&
+          'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
 
@@ -130,8 +136,8 @@ jobs:
 
   build-push:
     needs: validate
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: palace-trusted-amd64
     permissions:
       contents: write
       packages: write
@@ -281,8 +287,8 @@ jobs:
 
   publish-agent-plugin:
     needs: validate
-    if: github.event_name == 'push'
-    runs-on: self-hosted
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: palace-trusted-amd64
     permissions:
       contents: write
     steps:
@@ -348,8 +354,8 @@ jobs:
 
   publish-chart:
     needs: build-push
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: palace-trusted-amd64
     permissions:
       contents: write
       packages: write
