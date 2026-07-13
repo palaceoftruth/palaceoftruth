@@ -149,6 +149,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: Set up pinned GitHub CLI
+        uses: ./.github/actions/setup-gh
+
       - name: Detect Hermes plugin release inputs
         id: hermes_plugin
         run: |
@@ -296,6 +299,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up pinned GitHub CLI
+        uses: ./.github/actions/setup-gh
+
       - name: Detect agent-client plugin release inputs
         id: release
         run: |
@@ -365,6 +371,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      - name: Set up pinned GitHub CLI
+        uses: ./.github/actions/setup-gh
 
       - name: Detect chart-only release bump
         id: release_scope
