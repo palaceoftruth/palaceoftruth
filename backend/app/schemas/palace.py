@@ -427,6 +427,10 @@ class PalaceRankingTraceResult(BaseModel):
     base_score: float | None = Field(default=None, exclude_if=lambda value: value is None)
     adjusted_score: float | None = Field(default=None, exclude_if=lambda value: value is None)
     adjustments: dict[str, float] = Field(default_factory=dict)
+    currentness: Literal["current", "stale", "expired", "superseded"] = "current"
+    last_verified_at: datetime | None = None
+    valid_until: datetime | None = None
+    superseded_by_entry_id: str | None = None
 
 
 class PalaceRankingTrace(BaseModel):
@@ -435,6 +439,7 @@ class PalaceRankingTrace(BaseModel):
     retrieval_lens_profile: dict[str, Any] | None = None
     ranking_features_version: int | None = None
     query_intent: str | None = None
+    currentness_mode: Literal["current", "historical"] | None = None
     source_ranking_enabled: bool | None = None
     second_stage_reranker: dict[str, Any] = Field(default_factory=dict)
     ranking_feature_flags: dict[str, bool] = Field(default_factory=dict)
@@ -481,6 +486,8 @@ class PalaceRetrieveTrace(BaseModel):
     embedding_failure_kind: str | None = None
     embedding_failure_retryable: bool | None = None
     completeness_warning: str | None = None
+    quality_decision: dict[str, Any] | None = None
+    stale_warning: str | None = None
     hint_report: dict | None = None
     retrieval_lens: str | None = None
     retrieval_lens_profile: dict[str, Any] | None = None

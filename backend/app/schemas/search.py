@@ -66,6 +66,10 @@ class SearchResult(BaseModel):
     source_support_state: RetrievalSourceSupportState | None = Field(default=None, exclude_if=lambda value: value is None)
     freshness: RetrievalFreshnessClass | None = Field(default=None, exclude_if=lambda value: value is None)
     derived_raw_classification: RetrievalDerivedRawClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    currentness: Literal["current", "stale", "expired", "superseded"] = "current"
+    last_verified_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    valid_until: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    superseded_by_entry_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     context_chunks: list[SearchContextChunk] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

@@ -304,7 +304,12 @@ def compare_captures(
         if expected_route:
             expected_route_match = _route_value(current) == str(expected_route)
         status = "ok"
-        if baseline_top != current_top:
+        repaired_known_defect = (
+            baseline.get("status") == "known-defect"
+            and expectations["expected_top_rank"]
+            and current_top == str(expectations["expected_top_rank"])
+        )
+        if baseline_top != current_top and not repaired_known_defect:
             status = "top1_changed"
             failures[status] += 1
         if require_capture_metadata:

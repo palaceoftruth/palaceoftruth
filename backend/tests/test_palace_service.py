@@ -48,6 +48,7 @@ from app.services.palace import (
     _normalize_sync_prefix,
     _normalized_allowed_extensions,
     _route_room_score,
+    _retrieval_quality_decision,
     _score_consolidation_pair,
     _rebuild_room_closet_artifact,
     _rebuild_tunnels,
@@ -76,6 +77,38 @@ from app.services.retrieval_hints import (
     retrieve_retrieval_hint_rescue_results,
 )
 from app.services.search import RetrievalDependencyUnavailableError
+
+
+def _quality_result(*, title: str, score: float, currentness: str = "current") -> SearchResult:
+    return SearchResult(
+        item_id=uuid.uuid4(),
+        title=title,
+        summary=None,
+        source_type="note",
+        source_url=None,
+        tags=[],
+        created_at=datetime.now(timezone.utc),
+        chunk_text=title,
+        chunk_index=0,
+        score=score,
+        currentness=currentness,
+    )
+
+
+def test_retrieval_quality_gate_rescues_full_irrelevant_results_but_accepts_good_results() -> None:
+    irrelevant = [
+        _quality_result(title="unrelated gardening note", score=0.81 - index * 0.01)
+        for index in range(5)
+    ]
+    weak = _retrieval_quality_decision("current deployment owner", irrelevant)
+    assert weak["decision"] == "rescue"
+    assert "weak_relevance" in weak["reasons"]
+
+    good = [
+        _quality_result(title="current deployment owner", score=0.91),
+        _quality_result(title="deployment history", score=0.72),
+    ]
+    assert _retrieval_quality_decision("current deployment owner", good)["decision"] == "accept"
 
 
 TEST_SYNC_SOURCE_CREDENTIAL_KEY = base64.urlsafe_b64encode(
