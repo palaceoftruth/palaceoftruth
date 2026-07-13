@@ -335,7 +335,7 @@ cd ../extension
 npm test
 ```
 
-CI currently runs a backend smoke subset, the static database health gate, retrieval replay gate, frontend build, and Helm rendering checks on self-hosted Linux x64 runners. Frontend Playwright and extension tests are available local checks but are not enforced in CI yet.
+CI currently runs a backend smoke subset, the static database health gate, retrieval replay gate, frontend build, and Helm rendering checks. Trusted same-repository pull requests and main-branch work use the repository-scoped `palace-trusted-amd64` ARC scale set; external-fork pull requests stay on GitHub-hosted `ubuntu-24.04`. Frontend Playwright and extension tests are available local checks but are not enforced in CI yet.
 
 ## Documentation Map
 
