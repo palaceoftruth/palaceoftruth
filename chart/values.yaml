@@ -209,6 +209,44 @@ valkey:
       memory: "256Mi"
       cpu: "200m"
 
+  metrics:
+    # Opt in to redis_exporter sidecars for standalone Valkey and every
+    # primary, replica, and Sentinel pod in Sentinel mode.
+    enabled: false
+    image: oliver006/redis_exporter:v1.77.0
+    imagePullPolicy: IfNotPresent
+    port: 9121
+    # Optional password-file wiring. Both fields are required when either is
+    # set. The Secret key must contain redis_exporter's JSON address-to-password
+    # map; its credential values are never rendered into pod arguments or labels.
+    existingSecret: ""
+    passwordFileKey: ""
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "10m"
+      limits:
+        memory: "64Mi"
+        cpu: "100m"
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    serviceMonitor:
+      # Enable only when the Prometheus Operator ServiceMonitor CRD exists.
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+    prometheusRule:
+      # Observational alerts only; no rule triggers failover or peer mutation.
+      enabled: false
+      interval: 30s
+      labels: {}
+
   # Sentinel high-availability mode.
   # When enabled, replaces the single Deployment with a primary StatefulSet,
   # a replica StatefulSet, and 3 Sentinel pods. The app connects via Sentinel,

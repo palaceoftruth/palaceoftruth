@@ -1,0 +1,56 @@
+{{- if and .Values.valkey.enabled .Values.valkey.metrics.enabled .Values.valkey.metrics.prometheusRule.enabled }}
+{{- $servicePattern := printf "%s|%s|%s|%s" (include "palaceoftruth.valkeyServiceName" .) (include "palaceoftruth.valkeyPrimaryName" .) (include "palaceoftruth.valkeyReplicaName" .) (include "palaceoftruth.valkeySentinelName" .) -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-valkey
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- with .Values.valkey.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ include "palaceoftruth.fullname" . }}.valkey
+      interval: {{ .Values.valkey.metrics.prometheusRule.interval | quote }}
+      rules:
+        - alert: PalaceValkeyExporterTargetsAbsent
+          expr: absent(up{namespace={{ .Release.Namespace | quote }},service=~{{ $servicePattern | quote }}})
+          for: 5m
+          labels:
+            severity: warning
+            component: valkey
+          annotations:
+            summary: Palace Valkey exporter targets are absent
+            description: Prometheus has discovered no exporter targets for this Palace release.
+        - alert: PalaceValkeyExporterScrapeDown
+          expr: max_over_time(up{namespace={{ .Release.Namespace | quote }},service=~{{ $servicePattern | quote }}}[5m]) == 0
+          for: 5m
+          labels:
+            severity: warning
+            component: valkey
+          annotations:
+            summary: Palace Valkey exporter scrape is down
+            description: Prometheus cannot scrape a Valkey or Sentinel exporter target for this Palace release.
+        - alert: PalaceValkeyInstanceDown
+          expr: redis_up{namespace={{ .Release.Namespace | quote }},service=~{{ $servicePattern | quote }}} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: valkey
+          annotations:
+            summary: Palace Valkey target reports down
+            description: redis_exporter cannot reach its local Valkey or Sentinel target.
+        - alert: PalaceValkeySentinelCkquorumFailed
+          # redis_exporter emits this family only for Sentinel targets. If the
+          # family is unavailable, this observational rule remains inactive.
+          expr: redis_sentinel_master_ckquorum_status{namespace={{ .Release.Namespace | quote }},service={{ include "palaceoftruth.valkeySentinelName" . | quote }}} == 0
+          for: 2m
+          labels:
+            severity: critical
+            component: valkey-sentinel
+          annotations:
+            summary: Palace Valkey Sentinel quorum check failed
+            description: Sentinel reports that CKQUORUM cannot reach failover authorization for a monitored master.
+{{- end }}

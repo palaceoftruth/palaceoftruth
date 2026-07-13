@@ -20,10 +20,16 @@ RUNTIME_DEPLOYMENTS = {
 }
 
 
-def _render_chart(*set_args: str) -> list[dict[str, Any]]:
+def _render_chart(
+    *set_args: str,
+    release_name: str = "palaceoftruth",
+    namespace: str | None = None,
+) -> list[dict[str, Any]]:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
-    command = ["helm", "template", "palaceoftruth", str(CHART_DIR)]
+    command = ["helm", "template", release_name, str(CHART_DIR)]
+    if namespace is not None:
+        command.extend(["--namespace", namespace])
     for arg in set_args:
         command.extend(["--set", arg])
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -488,6 +494,211 @@ def test_backend_servicemonitor_renders_when_enabled() -> None:
             "scrapeTimeout": "5s",
         }
     ]
+
+
+def test_valkey_exporter_is_disabled_by_default() -> None:
+    manifests = _render_chart()
+    deployment = _deployment_by_name(manifests, "palaceoftruth-valkey")
+    service = _manifest_by_kind_name(manifests, "Service", "palaceoftruth-valkey")
+
+    assert [container["name"] for container in deployment["spec"]["template"]["spec"]["containers"]] == [
+        "valkey"
+    ]
+    assert [port["name"] for port in service["spec"]["ports"]] == ["redis"]
+    assert "palaceoftruth.io/valkey-metrics" not in service["metadata"]["labels"]
+    assert not any(
+        manifest.get("kind") == "ServiceMonitor"
+        and manifest.get("metadata", {}).get("name") == "palaceoftruth-valkey"
+        for manifest in manifests
+    )
+    assert not any(
+        manifest.get("kind") == "PrometheusRule"
+        and manifest.get("metadata", {}).get("name") == "palaceoftruth-valkey"
+        for manifest in manifests
+    )
+
+
+def test_standalone_valkey_exporter_renders_hardened_sidecar_and_metrics_service() -> None:
+    manifests = _render_chart("valkey.metrics.enabled=true")
+    deployment = _deployment_by_name(manifests, "palaceoftruth-valkey")
+    service = _manifest_by_kind_name(manifests, "Service", "palaceoftruth-valkey")
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    exporter = next(container for container in containers if container["name"] == "valkey-exporter")
+    env = _container_env(exporter)
+
+    assert exporter["image"] == "oliver006/redis_exporter:v1.77.0"
+    assert env == {"REDIS_ADDR": {"name": "REDIS_ADDR", "value": "redis://127.0.0.1:6379"}}
+    assert exporter["ports"] == [{"name": "metrics", "containerPort": 9121, "protocol": "TCP"}]
+    assert exporter["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+        "runAsNonRoot": True,
+    }
+    assert exporter["resources"]["requests"] == {"memory": "16Mi", "cpu": "10m"}
+    assert exporter["resources"]["limits"] == {"memory": "64Mi", "cpu": "100m"}
+    assert "volumeMounts" not in exporter
+    assert service["metadata"]["labels"]["palaceoftruth.io/valkey-metrics"] == "true"
+    assert service["spec"]["ports"][-1] == {
+        "name": "metrics",
+        "port": 9121,
+        "targetPort": "metrics",
+        "protocol": "TCP",
+    }
+
+
+def test_sentinel_valkey_exporters_and_bounded_servicemonitor_render_when_enabled() -> None:
+    manifests = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "valkey.metrics.enabled=true",
+        "valkey.metrics.serviceMonitor.enabled=true",
+        "valkey.metrics.serviceMonitor.labels.release=kube-prometheus",
+        "valkey.metrics.serviceMonitor.interval=15s",
+        "valkey.metrics.serviceMonitor.scrapeTimeout=5s",
+    )
+    workload_targets = {
+        ("StatefulSet", "palaceoftruth-valkey-primary"): "redis://127.0.0.1:6379",
+        ("StatefulSet", "palaceoftruth-valkey-replica"): "redis://127.0.0.1:6379",
+        ("Deployment", "palaceoftruth-valkey-sentinel"): "redis://127.0.0.1:26379",
+    }
+    for (kind, name), expected_target in workload_targets.items():
+        workload = _manifest_by_kind_name(manifests, kind, name)
+        exporter = next(
+            container
+            for container in workload["spec"]["template"]["spec"]["containers"]
+            if container["name"] == "valkey-exporter"
+        )
+        assert _container_env(exporter)["REDIS_ADDR"]["value"] == expected_target
+        assert "args" not in exporter
+
+    for service_name in (
+        "palaceoftruth-valkey-primary",
+        "palaceoftruth-valkey-replica",
+        "palaceoftruth-valkey-sentinel",
+    ):
+        service = _manifest_by_kind_name(manifests, "Service", service_name)
+        assert service["metadata"]["labels"]["palaceoftruth.io/valkey-metrics"] == "true"
+        assert service["spec"]["ports"][-1]["name"] == "metrics"
+
+    service_monitor = _manifest_by_kind_name(manifests, "ServiceMonitor", "palaceoftruth-valkey")
+    assert service_monitor["metadata"]["labels"]["release"] == "kube-prometheus"
+    assert service_monitor["spec"]["selector"]["matchLabels"] == {
+        "app.kubernetes.io/instance": "palaceoftruth",
+        "palaceoftruth.io/valkey-metrics": "true"
+    }
+    assert service_monitor["spec"]["endpoints"] == [
+        {"port": "metrics", "path": "/metrics", "interval": "15s", "scrapeTimeout": "5s"}
+    ]
+
+
+def test_valkey_servicemonitor_selector_isolates_releases_in_the_same_namespace() -> None:
+    set_args = ("valkey.metrics.enabled=true", "valkey.metrics.serviceMonitor.enabled=true")
+    alpha = _render_chart(*set_args, release_name="palace-alpha", namespace="shared-monitoring")
+    beta = _render_chart(*set_args, release_name="palace-beta", namespace="shared-monitoring")
+
+    alpha_monitor = _manifest_by_kind_name(alpha, "ServiceMonitor", "palace-alpha-palaceoftruth-valkey")
+    beta_monitor = _manifest_by_kind_name(beta, "ServiceMonitor", "palace-beta-palaceoftruth-valkey")
+    assert alpha_monitor["spec"]["selector"]["matchLabels"] == {
+        "app.kubernetes.io/instance": "palace-alpha",
+        "palaceoftruth.io/valkey-metrics": "true",
+    }
+    assert beta_monitor["spec"]["selector"]["matchLabels"] == {
+        "app.kubernetes.io/instance": "palace-beta",
+        "palaceoftruth.io/valkey-metrics": "true",
+    }
+    alpha_service = _manifest_by_kind_name(alpha, "Service", "palace-alpha-palaceoftruth-valkey")
+    beta_service = _manifest_by_kind_name(beta, "Service", "palace-beta-palaceoftruth-valkey")
+    assert alpha_service["metadata"]["labels"]["app.kubernetes.io/instance"] == "palace-alpha"
+    assert beta_service["metadata"]["labels"]["app.kubernetes.io/instance"] == "palace-beta"
+
+
+def test_valkey_prometheus_rules_are_observational_and_release_bounded() -> None:
+    manifests = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "valkey.metrics.enabled=true",
+        "valkey.metrics.prometheusRule.enabled=true",
+        "valkey.metrics.prometheusRule.labels.release=kube-prometheus",
+        release_name="palace-alpha",
+        namespace="palace-a",
+    )
+    prometheus_rule = _manifest_by_kind_name(manifests, "PrometheusRule", "palace-alpha-palaceoftruth-valkey")
+    rules = prometheus_rule["spec"]["groups"][0]["rules"]
+    rules_by_name = {rule["alert"]: rule for rule in rules}
+
+    assert prometheus_rule["metadata"]["labels"]["release"] == "kube-prometheus"
+    assert set(rules_by_name) == {
+        "PalaceValkeyExporterTargetsAbsent",
+        "PalaceValkeyExporterScrapeDown",
+        "PalaceValkeyInstanceDown",
+        "PalaceValkeySentinelCkquorumFailed",
+    }
+    for rule in rules:
+        expression = rule["expr"]
+        assert 'namespace="palace-a"' in expression
+        assert "palace-alpha-palaceoftruth-valkey" in expression
+        assert "SENTINEL RESET" not in expression
+        assert "failover" not in expression.lower()
+    assert "absent(up{" in rules_by_name["PalaceValkeyExporterTargetsAbsent"]["expr"]
+    assert "max_over_time(up{" in rules_by_name["PalaceValkeyExporterScrapeDown"]["expr"]
+    assert "redis_up{" in rules_by_name["PalaceValkeyInstanceDown"]["expr"]
+    assert (
+        "redis_sentinel_master_ckquorum_status{"
+        in rules_by_name["PalaceValkeySentinelCkquorumFailed"]["expr"]
+    )
+
+
+def test_documented_password_map_keys_match_rendered_exporter_targets() -> None:
+    manifests = _render_chart("valkey.sentinel.enabled=true", "valkey.metrics.enabled=true")
+    rendered_targets = {
+        _container_env(container)["REDIS_ADDR"]["value"]
+        for manifest in manifests
+        if manifest.get("kind") in {"Deployment", "StatefulSet"}
+        for container in manifest.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        if container.get("name") == "valkey-exporter"
+    }
+    monitoring_docs = (REPO_ROOT / "docs" / "monitoring" / "grafana" / "README.md").read_text()
+    password_map_block = monitoring_docs.split("```json", 1)[1].split("```", 1)[0]
+    documented_password_map = json.loads(password_map_block)
+
+    assert rendered_targets == {"redis://127.0.0.1:6379", "redis://127.0.0.1:26379"}
+    assert set(documented_password_map) == rendered_targets
+    assert all(value.startswith("<") and value.endswith(">") for value in documented_password_map.values())
+
+
+def test_valkey_exporter_reads_optional_password_from_existing_secret_file() -> None:
+    manifests = _render_chart(
+        "valkey.metrics.enabled=true",
+        "valkey.metrics.existingSecret=valkey-auth",
+        "valkey.metrics.passwordFileKey=exporter-password-map",
+    )
+    deployment = _deployment_by_name(manifests, "palaceoftruth-valkey")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    exporter = next(container for container in pod_spec["containers"] if container["name"] == "valkey-exporter")
+    env = _container_env(exporter)
+
+    assert env["REDIS_PASSWORD_FILE"]["value"] == "/run/secrets/valkey-exporter/password.json"
+    assert "REDIS_PASSWORD" not in env
+    assert exporter["volumeMounts"] == [
+        {
+            "name": "valkey-exporter-password",
+            "mountPath": "/run/secrets/valkey-exporter",
+            "readOnly": True,
+        }
+    ]
+    password_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "valkey-exporter-password")
+    assert password_volume["secret"] == {
+        "secretName": "valkey-auth",
+        "items": [{"key": "exporter-password-map", "path": "password.json"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "partial_config",
+    ["valkey.metrics.existingSecret=valkey-auth", "valkey.metrics.passwordFileKey=exporter-password-map"],
+)
+def test_valkey_exporter_rejects_partial_password_file_configuration(partial_config: str) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _render_chart("valkey.metrics.enabled=true", partial_config)
 
 
 def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled() -> None:

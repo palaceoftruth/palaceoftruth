@@ -5,6 +5,9 @@ metadata:
   name: {{ include "palaceoftruth.valkeySentinelName" . }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- if .Values.valkey.metrics.enabled }}
+    palaceoftruth.io/valkey-metrics: "true"
+    {{- end }}
 spec:
   type: ClusterIP
   selector:
@@ -14,4 +17,10 @@ spec:
       port: 26379
       targetPort: 26379
       protocol: TCP
+    {{- if .Values.valkey.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.valkey.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
 {{- end }}

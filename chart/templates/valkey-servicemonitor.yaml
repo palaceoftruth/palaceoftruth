@@ -1,0 +1,25 @@
+{{- if and .Values.valkey.enabled .Values.valkey.metrics.enabled .Values.valkey.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-valkey
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- with .Values.valkey.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      palaceoftruth.io/valkey-metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.valkey.metrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.valkey.metrics.serviceMonitor.scrapeTimeout | quote }}
+{{- end }}

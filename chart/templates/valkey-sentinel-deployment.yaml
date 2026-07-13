@@ -63,10 +63,16 @@ spec:
               command: ["valkey-cli", "-p", "26379", "ping"]
             initialDelaySeconds: 10
             periodSeconds: 10
+        {{- if .Values.valkey.metrics.enabled }}
+        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:26379") | nindent 8 }}
+        {{- end }}
       volumes:
         - name: sentinel-config-template
           configMap:
             name: {{ include "palaceoftruth.valkeySentinelName" . }}-config
         - name: sentinel-data
           emptyDir: {}
+        {{- if .Values.valkey.metrics.enabled }}
+        {{- include "palaceoftruth.valkeyExporterPasswordVolume" . | nindent 8 }}
+        {{- end }}
 {{- end }}

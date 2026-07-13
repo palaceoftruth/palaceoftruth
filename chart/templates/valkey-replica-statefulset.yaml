@@ -7,6 +7,9 @@ metadata:
   name: {{ include "palaceoftruth.valkeyReplicaName" . }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- if .Values.valkey.metrics.enabled }}
+    palaceoftruth.io/valkey-metrics: "true"
+    {{- end }}
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
@@ -16,6 +19,11 @@ spec:
     - name: redis
       port: 6379
       targetPort: 6379
+    {{- if .Values.valkey.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.valkey.metrics.port }}
+      targetPort: metrics
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -87,6 +95,13 @@ spec:
               command: ["valkey-cli", "ping"]
             initialDelaySeconds: 10
             periodSeconds: 10
+        {{- if .Values.valkey.metrics.enabled }}
+        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:6379") | nindent 8 }}
+        {{- end }}
+      {{- if and .Values.valkey.metrics.enabled (or .Values.valkey.metrics.existingSecret .Values.valkey.metrics.passwordFileKey) }}
+      volumes:
+        {{- include "palaceoftruth.valkeyExporterPasswordVolume" . | nindent 8 }}
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
