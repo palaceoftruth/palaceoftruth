@@ -104,6 +104,21 @@ class ExplodingSearchService:
         raise AssertionError("search service should not be constructed on request validation failures")
 
 
+class EmptyDegradedSearchService:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.last_ranking_trace = {
+            "retrieval_mode": "lexical_degraded",
+            "dependency_degradation": {
+                "dependency": "embedding_provider",
+                "failure_kind": "timeout",
+                "retryable": True,
+            },
+        }
+
+    async def vector_search(self, **_kwargs):
+        return []
+
+
 def _client(monkeypatch, service_cls=RecordingSearchService) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -272,6 +287,21 @@ def test_search_get_accepts_any_and_all_tags_mode_values(monkeypatch) -> None:
         assert response.status_code == 200
         assert len(RecordingSearchService.instances) == 1
         assert RecordingSearchService.instances[0].calls[0]["tags_mode"] == tags_mode
+
+
+def test_search_returns_retryable_503_when_degraded_lexical_search_is_empty(monkeypatch) -> None:
+    client = _client(monkeypatch, service_cls=EmptyDegradedSearchService)
+
+    response = client.post("/api/v1/search", json={"query": "dependency outage"})
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert response.json()["detail"] == {
+        "type": "retrieval_dependency_unavailable",
+        "dependency": "embedding_provider",
+        "failure_kind": "timeout",
+        "retryable": True,
+    }
 
 
 def test_search_get_rejects_invalid_tags_mode_before_service_execution(monkeypatch) -> None:

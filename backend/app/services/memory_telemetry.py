@@ -21,7 +21,7 @@ EMBEDDING_SIZE_BUCKETS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 51
 EMBEDDING_TOKEN_BUCKETS = (64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0, 131072.0, 285000.0)
 
 _ENDPOINTS = {"retrieve", "retrieve_agent", "semantic_recall", "other"}
-_OUTCOMES = {"success", "error"}
+_OUTCOMES = {"success", "degraded", "error"}
 _INTENTS = {"default", "canonical_factual", "latest_status", "historical", "exploratory", "other"}
 _CONFIDENCE = {"high", "medium", "low", "none", "other"}
 _STAGES = {"embedding", "routing", "scoped_search", "broad_rescue", "rerank", "merge", "total"}

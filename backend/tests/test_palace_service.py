@@ -25,6 +25,7 @@ from app.models.palace import (
 from app.schemas.palace import SyncSourceCreate, SyncSourceUpdate
 from app.schemas.search import SearchResult
 from app.services import palace as palace_service
+from app.services.embedder import EmbeddingRequestError
 from app.services.palace import (
     PalaceArtifactRepairPlan,
     PalaceTunnelRecomputeResult,
@@ -70,11 +71,11 @@ from app.services.palace import (
     validate_sync_root,
 )
 from app.services.retrieval_hints import (
-    build_retrieval_hint_artifact,
     rebuild_room_retrieval_hints,
     report_retrieval_hint_candidates,
     retrieve_retrieval_hint_rescue_results,
 )
+from app.services.search import RetrievalDependencyUnavailableError
 
 
 TEST_SYNC_SOURCE_CREDENTIAL_KEY = base64.urlsafe_b64encode(
@@ -755,6 +756,175 @@ def test_route_room_score_rewards_overlap() -> None:
         "Kubernetes and worker operations.",
     )
     assert strong > weak
+
+
+def _degraded_retrieval_body() -> SimpleNamespace:
+    return SimpleNamespace(
+        query="temporary embedding outage",
+        room_id=None,
+        limit=5,
+        candidate_limit=20,
+        include_neighbor_chunks=False,
+        neighbor_chunk_window=1,
+        context_budget_chars=None,
+        include_derived_artifacts=False,
+        retrieval_lens=None,
+        scope_type="workspace",
+        scope_key="palaceoftruth",
+        tags=None,
+        tags_mode="any",
+        min_score=None,
+        date_from=None,
+        date_to=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_palace_reuses_retryable_embedding_degradation_across_searches(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    room = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Temporary Embedding Outage",
+        stable_key="software:temporary-embedding-outage",
+        snapshot_generation=0,
+        membership_generation=0,
+    )
+
+    class FakeDb:
+        async def execute(self, _statement):
+            return _RowsResult([(room, "Software", "Temporary embedding outage operations.")])
+
+        async def get(self, model, key):
+            return room if model is Room and key == room.id else None
+
+    class FailingEmbedder:
+        calls = 0
+
+        async def embed_single(self, _query: str) -> list[float]:
+            self.calls += 1
+            raise EmbeddingRequestError("private provider detail", retryable=True, failure_kind="timeout")
+
+    class FakeSearchService:
+        calls = []
+
+        def __init__(self, db, embedder, tenant_id: str = "default"):
+            self.last_ranking_trace = None
+
+        async def vector_search(self, **kwargs):
+            self.calls.append(kwargs)
+            self.last_ranking_trace = {
+                "retrieval_mode": "lexical_degraded",
+                "dependency_degradation": {
+                    "dependency": "embedding_provider",
+                    "failure_kind": "timeout",
+                    "retryable": True,
+                },
+            }
+            return [
+                SearchResult(
+                    item_id=item_id,
+                    title="Lexical fallback",
+                    summary=None,
+                    source_type="note",
+                    source_url=None,
+                    tags=[],
+                    created_at=datetime.now(timezone.utc),
+                    chunk_text="safe lexical result",
+                    chunk_index=0,
+                    score=0.8,
+                )
+            ]
+
+    async def fake_ensure_tenant_state(db, tenant_id):
+        return SimpleNamespace(indexed_generation=0, active_generation=None)
+
+    monkeypatch.setattr("app.services.palace.ensure_tenant_state", fake_ensure_tenant_state)
+    monkeypatch.setattr("app.services.palace.SearchService", FakeSearchService)
+    embedder = FailingEmbedder()
+
+    response = await retrieve_palace(
+        FakeDb(), tenant_id="default", embedder=embedder, body=_degraded_retrieval_body()
+    )
+
+    assert embedder.calls == 1
+    assert len(FakeSearchService.calls) == 2
+    assert all(call["query_vector"] is None for call in FakeSearchService.calls)
+    error = FakeSearchService.calls[0]["query_embedding_error"]
+    assert isinstance(error, EmbeddingRequestError)
+    assert error.failure_kind == "timeout"
+    assert FakeSearchService.calls[1]["query_embedding_error"] is error
+    assert response.trace.embedding_unavailable is True
+    assert response.trace.retrieval_mode == "lexical_degraded"
+    assert response.trace.embedding_failure_kind == "timeout"
+    assert response.trace.embedding_failure_retryable is True
+    assert "private provider detail" not in response.model_dump_json()
+
+    second_response = await retrieve_palace(
+        FakeDb(),
+        tenant_id="default",
+        embedder=embedder,
+        body=_degraded_retrieval_body(),
+        query_embedding_error=error,
+    )
+    assert embedder.calls == 1
+    assert second_response.trace.retrieval_mode == "lexical_degraded"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_palace_raises_dependency_unavailable_when_degraded_search_is_empty(monkeypatch) -> None:
+    class FakeDb:
+        async def execute(self, _statement):
+            return _RowsResult([])
+
+    class FailingEmbedder:
+        async def embed_single(self, _query: str) -> list[float]:
+            raise EmbeddingRequestError("timeout", retryable=True, failure_kind="timeout")
+
+    class EmptySearchService:
+        def __init__(self, db, embedder, tenant_id: str = "default"):
+            self.last_ranking_trace = {"retrieval_mode": "lexical_degraded"}
+
+        async def vector_search(self, **kwargs):
+            return []
+
+    async def fake_ensure_tenant_state(db, tenant_id):
+        return SimpleNamespace(indexed_generation=0, active_generation=None)
+
+    monkeypatch.setattr("app.services.palace.ensure_tenant_state", fake_ensure_tenant_state)
+    monkeypatch.setattr("app.services.palace.SearchService", EmptySearchService)
+
+    with pytest.raises(RetrievalDependencyUnavailableError) as raised:
+        await retrieve_palace(
+            FakeDb(), tenant_id="default", embedder=FailingEmbedder(), body=_degraded_retrieval_body()
+        )
+
+    assert raised.value.dependency == "embedding_provider"
+    assert raised.value.failure_kind == "timeout"
+    assert raised.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_retrieve_palace_propagates_non_retryable_embedding_failure(monkeypatch) -> None:
+    class FakeDb:
+        async def execute(self, _statement):
+            return _RowsResult([])
+
+    class FailingEmbedder:
+        async def embed_single(self, _query: str) -> list[float]:
+            raise EmbeddingRequestError("bad request", retryable=False, failure_kind="validation")
+
+    async def fake_ensure_tenant_state(db, tenant_id):
+        return SimpleNamespace(indexed_generation=0, active_generation=None)
+
+    monkeypatch.setattr("app.services.palace.ensure_tenant_state", fake_ensure_tenant_state)
+
+    with pytest.raises(EmbeddingRequestError) as raised:
+        await retrieve_palace(
+            FakeDb(), tenant_id="default", embedder=FailingEmbedder(), body=_degraded_retrieval_body()
+        )
+
+    assert raised.value.retryable is False
+    assert raised.value.failure_kind == "validation"
 
 
 @pytest.mark.asyncio

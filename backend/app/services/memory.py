@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -36,6 +37,7 @@ from app.schemas.memory import (
     MemoryWriteContractStatus,
     MemoryRetrievalDoctorAuthShape,
     MemoryRetrievalDoctorCheck,
+    MemoryRetrievalDoctorDependencyState,
     MemoryRetrievalDoctorGeneration,
     MemoryRetrievalDoctorProbeReport,
     MemoryRetrievalDoctorProbeTopResult,
@@ -73,7 +75,8 @@ from app.services.memory_entries import (
 from app.services.memory_telemetry import record_scope_guard_violation, record_semantic_recall
 from app.services.palace import retrieve_palace
 from app.services.queue_telemetry import build_worker_backpressure
-from app.services.search import SearchService
+from app.services.search import RetrievalDependencyUnavailableError, SearchService
+from app.services.embedder import EmbeddingRequestError
 from app.services.source_trust_summary import get_source_trust_summaries
 from app.services.wakeup_briefs import build_wakeup_brief_summary
 from app.utils.webhook import validate_webhook_url
@@ -81,6 +84,7 @@ from app.utils.webhook import validate_webhook_url
 MEMORY_SOURCE_TYPE = "note"
 STALE_MEMORY_PROCESSING_MINUTES = 20
 STALE_MEMORY_QUEUED_MINUTES = 30
+RETRIEVAL_DOCTOR_PROBE_TIMEOUT_SECONDS = 5.0
 
 _MEMORY_STATUS_QUERY_MAP = {
     "queued": "queued",
@@ -1256,6 +1260,8 @@ async def retrieve_memory(
     tenant_id: str,
     body: MemoryRetrieveRequest,
     query_vector: list[float] | None = None,
+    query_embedding_error: EmbeddingRequestError | None = None,
+    allow_empty_degraded: bool = False,
 ) -> MemoryRetrieveResponse:
     result = await retrieve_palace(
         db,
@@ -1280,6 +1286,8 @@ async def retrieve_memory(
             date_to=body.date_to,
         ),
         query_vector=query_vector,
+        query_embedding_error=query_embedding_error,
+        allow_empty_degraded=allow_empty_degraded,
     )
     return MemoryRetrieveResponse(
         scope=body.scope,
@@ -1815,11 +1823,19 @@ def _apply_context_budget(results: list, budget_chars: int | None) -> tuple[list
     return selected, False
 
 
-async def _agent_memory_query_vector(embedder, query: str) -> tuple[list[float] | None, bool]:
+async def _agent_memory_query_vector(
+    embedder,
+    query: str,
+) -> tuple[list[float] | None, bool, EmbeddingRequestError | None]:
     embed_single = getattr(embedder, "embed_single", None)
     if embed_single is None:
-        return None, False
-    return await embed_single(query), True
+        return None, False, None
+    try:
+        return await embed_single(query), True, None
+    except EmbeddingRequestError as exc:
+        if not exc.retryable:
+            raise
+        return None, False, exc
 
 
 def _has_preferred_workspace_tag(result: object, preferred_workspace_keys: set[str]) -> bool:
@@ -2139,7 +2155,9 @@ async def retrieve_agent_memory(
     route_results: list[list] = []
     selected_scope_warnings: list[str] = []
     selected_scope_fallback_used = False
-    query_vector, query_embedding_reused = await _agent_memory_query_vector(embedder, body.query)
+    query_vector, query_embedding_reused, query_embedding_error = await _agent_memory_query_vector(
+        embedder, body.query
+    )
     selected_scopes_started_at = perf_counter()
     for scope in scopes:
         route_candidate_limit = selected_candidate_limit
@@ -2166,6 +2184,8 @@ async def retrieve_agent_memory(
                 scope=scope,
             ),
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
+            allow_empty_degraded=True,
         )
         route_results.append(response.results)
         selected_scope_fallback_used = selected_scope_fallback_used or response.trace.fallback_used
@@ -2204,6 +2224,8 @@ async def retrieve_agent_memory(
                 scope=tenant_shared_scope,
             ),
             query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
+            allow_empty_degraded=True,
         )
         route_results.append(response.results)
         selected_scope_result_count += len(response.results)
@@ -2258,6 +2280,7 @@ async def retrieve_agent_memory(
                 exclude_private_memory_scopes=True,
                 include_derived_artifacts=body.include_derived_artifacts,
                 query_vector=query_vector,
+                query_embedding_error=query_embedding_error,
             )
         )
         broad_corpus_duration_ms = _duration_ms(broad_started_at)
@@ -2276,6 +2299,11 @@ async def retrieve_agent_memory(
         displayed_results,
         body.context_budget_chars,
     )
+    if query_embedding_error is not None and not displayed_results:
+        raise RetrievalDependencyUnavailableError(
+            dependency="embedding_provider",
+            failure_kind=query_embedding_error.failure_kind,
+        ) from query_embedding_error
     merge_duration_ms = _duration_ms(merge_started_at)
     return AgentMemoryRetrieveResponse(
         scopes=scopes,
@@ -2327,6 +2355,14 @@ async def retrieve_agent_memory(
             context_budget_truncated=context_budget_truncated,
             fallback_used=selected_scope_fallback_used,
             completeness_warnings=selected_scope_warnings,
+            retrieval_mode="lexical_degraded" if query_embedding_error is not None else "hybrid",
+            embedding_unavailable=query_embedding_error is not None,
+            dependency_failure_kind=(
+                query_embedding_error.failure_kind if query_embedding_error is not None else None
+            ),
+            dependency_retryable=(
+                query_embedding_error.retryable if query_embedding_error is not None else None
+            ),
         ),
         results=displayed_results,
         total=len(displayed_results),
@@ -2472,6 +2508,43 @@ def _doctor_selected_scopes(body: MemoryRetrievalDoctorRequest) -> list[MemorySc
     return scopes
 
 
+async def _build_embedding_dependency_state(embedder) -> MemoryRetrievalDoctorDependencyState:
+    """Probe query embedding with a synthetic value and a hard outer deadline."""
+    started_at = perf_counter()
+    try:
+        await asyncio.wait_for(
+            embedder.embed_single("palace retrieval dependency probe"),
+            timeout=RETRIEVAL_DOCTOR_PROBE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        return MemoryRetrievalDoctorDependencyState(
+            status="degraded",
+            latency_ms=_duration_ms(started_at),
+            failure_kind="timeout",
+            retryable=True,
+        )
+    except EmbeddingRequestError as exc:
+        return MemoryRetrievalDoctorDependencyState(
+            status="degraded" if exc.retryable else "unhealthy",
+            latency_ms=_duration_ms(started_at),
+            failure_kind=exc.failure_kind,
+            retryable=exc.retryable,
+        )
+    return MemoryRetrievalDoctorDependencyState(
+        status="ok",
+        latency_ms=_duration_ms(started_at),
+    )
+
+
+async def _recover_doctor_probe_session(db: AsyncSession) -> bool:
+    """Clear transaction state after a cancelled or failed diagnostic query."""
+    try:
+        await db.rollback()
+    except Exception:
+        return False
+    return True
+
+
 async def build_memory_retrieval_doctor(
     db: AsyncSession,
     *,
@@ -2481,6 +2554,7 @@ async def build_memory_retrieval_doctor(
     auth: MemoryRetrievalDoctorAuthShape,
     arq_pool=None,
 ) -> MemoryRetrievalDoctorResponse:
+    embedding_dependency = await _build_embedding_dependency_state(embedder)
     state = await db.get(PalaceTenantState, tenant_id)
     backlog_generation = 0
     if state is not None:
@@ -2509,6 +2583,15 @@ async def build_memory_retrieval_doctor(
     relationships = await _build_relationship_doctor_state(db, tenant_id=tenant_id)
 
     checks = [
+        MemoryRetrievalDoctorCheck(
+            name="embedding_dependency",
+            status=embedding_dependency.status,
+            reasons=(
+                []
+                if embedding_dependency.status == "ok"
+                else [f"embedding dependency {embedding_dependency.failure_kind or 'unavailable'}"]
+            ),
+        ),
         _queue_check(queue_health),
         _wakeup_check(wakeup),
         _relationship_check(relationships),
@@ -2526,18 +2609,88 @@ async def build_memory_retrieval_doctor(
 
     probes: list[MemoryRetrievalDoctorProbeReport] = []
     for index, probe in enumerate(body.sample_probes):
-        response = await retrieve_memory(
-            db,
-            embedder=embedder,
-            tenant_id=tenant_id,
-            body=MemoryRetrieveRequest(
-                query=probe.query,
-                limit=probe.limit,
-                tags=probe.tags,
-                tags_mode=probe.tags_mode,
-                scope=probe.scope,
-            ),
-        )
+        try:
+            response = await asyncio.wait_for(
+                retrieve_memory(
+                    db,
+                    embedder=embedder,
+                    tenant_id=tenant_id,
+                    body=MemoryRetrieveRequest(
+                        query=probe.query,
+                        limit=probe.limit,
+                        tags=probe.tags,
+                        tags_mode=probe.tags_mode,
+                        scope=probe.scope,
+                    ),
+                ),
+                timeout=RETRIEVAL_DOCTOR_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            recovered = await _recover_doctor_probe_session(db)
+            probes.append(
+                MemoryRetrievalDoctorProbeReport(
+                    probe_index=index,
+                    query_fingerprint=_query_fingerprint(probe.query),
+                    scope=probe.scope,
+                    tags=probe.tags,
+                    status="degraded",
+                    reasons=[
+                        "probe timed out"
+                        if recovered
+                        else "probe timed out and database session recovery failed"
+                    ],
+                    failure_kind="timeout" if recovered else "database_recovery",
+                    retryable=True,
+                )
+            )
+            continue
+        except EmbeddingRequestError as exc:
+            probes.append(
+                MemoryRetrievalDoctorProbeReport(
+                    probe_index=index,
+                    query_fingerprint=_query_fingerprint(probe.query),
+                    scope=probe.scope,
+                    tags=probe.tags,
+                    status="degraded" if exc.retryable else "unhealthy",
+                    reasons=["embedding dependency unavailable"],
+                    failure_kind=exc.failure_kind,
+                    retryable=exc.retryable,
+                )
+            )
+            continue
+        except RetrievalDependencyUnavailableError as exc:
+            probes.append(
+                MemoryRetrievalDoctorProbeReport(
+                    probe_index=index,
+                    query_fingerprint=_query_fingerprint(probe.query),
+                    scope=probe.scope,
+                    tags=probe.tags,
+                    status="degraded",
+                    reasons=["retrieval dependency unavailable"],
+                    failure_kind=exc.failure_kind,
+                    retryable=True,
+                )
+            )
+            continue
+        except Exception:
+            recovered = await _recover_doctor_probe_session(db)
+            probes.append(
+                MemoryRetrievalDoctorProbeReport(
+                    probe_index=index,
+                    query_fingerprint=_query_fingerprint(probe.query),
+                    scope=probe.scope,
+                    tags=probe.tags,
+                    status="unhealthy",
+                    reasons=[
+                        "probe database operation failed"
+                        if recovered
+                        else "probe database operation and session recovery failed"
+                    ],
+                    failure_kind="database" if recovered else "database_recovery",
+                    retryable=recovered,
+                )
+            )
+            continue
         expected_ids = set(probe.expected_item_ids)
         expected_top_rank = next(
             (rank for rank, result in enumerate(response.results, start=1) if result.item_id in expected_ids),
@@ -2620,6 +2773,7 @@ async def build_memory_retrieval_doctor(
         queue_health=queue_health,
         wakeup_briefs=wakeup,
         relationships=relationships,
+        embedding_dependency=embedding_dependency,
         probes=probes,
         checks=checks,
     )

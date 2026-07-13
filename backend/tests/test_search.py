@@ -3,8 +3,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.schemas.search import SearchRequest
 from app.embedding_profile import resolve_embedding_profile
+from app.services.embedder import EmbeddingRequestError
 from app.services.retrieval_provenance import classify_retrieval_trust
 from app.services.search import SearchService, classify_query_intent
 
@@ -63,6 +66,21 @@ class _FakeLocalEmbedder:
 
     async def embed_single(self, _query: str) -> list[float]:
         return [0.1] * self.profile.dimensions
+
+
+class _FailingEmbedder:
+    profile = resolve_embedding_profile()
+
+    def __init__(self, *, retryable: bool, failure_kind: str) -> None:
+        self.retryable = retryable
+        self.failure_kind = failure_kind
+
+    async def embed_single(self, _query: str) -> list[float]:
+        raise EmbeddingRequestError(
+            "provider detail must not appear in the trace",
+            retryable=self.retryable,
+            failure_kind=self.failure_kind,
+        )
 
 
 def test_search_request_accepts_top_k_alias() -> None:
@@ -177,6 +195,163 @@ def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() 
     assert db.last_params["semantic_candidate_limit"] == 24
     assert db.last_params["lexical_candidate_limit"] == 24
     assert "ORDER BY score DESC, item_id ASC" in db.last_sql
+
+
+def test_vector_search_degrades_to_bounded_lexical_results_on_embedding_failure(
+) -> None:
+    retryable = True
+    failure_kind = "timeout"
+    item_id = uuid.uuid4()
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=item_id,
+                title="Lexical fallback",
+                summary=None,
+                source_type="note",
+                source_url=None,
+                tags=[],
+                created_at=datetime.now(timezone.utc),
+                effective_date=None,
+                effective_date_source=None,
+                effective_date_quality=None,
+                chunk_text="bounded lexical match",
+                chunk_index=0,
+                score=0.75,
+                item_metadata={},
+            )
+        ]
+    )
+    service = SearchService(
+        db,
+        _FailingEmbedder(retryable=retryable, failure_kind=failure_kind),
+        tenant_id="tenant-a",
+    )
+
+    results = asyncio.run(service.vector_search(query="bounded lexical match", limit=3, candidate_limit=17))
+
+    assert [result.item_id for result in results] == [item_id]
+    assert db.last_sql is not None
+    assert "semantic_candidates" not in db.last_sql
+    assert "<=>" not in db.last_sql
+    assert "i.search_vector @@ plainto_tsquery('english', :query)" in db.last_sql
+    assert "ORDER BY score DESC, item_id ASC" in db.last_sql
+    assert db.last_params["candidate_limit"] == 17
+    assert service.last_ranking_trace is not None
+    assert service.last_ranking_trace["retrieval_mode"] == "lexical_degraded"
+    assert service.last_ranking_trace["dependency_degradation"] == {
+        "dependency": "embedding_provider",
+        "failure_kind": failure_kind,
+        "retryable": retryable,
+    }
+    assert "provider detail" not in str(service.last_ranking_trace)
+
+
+def test_vector_search_propagates_non_retryable_embedding_failure() -> None:
+    db = _FakeDB()
+    service = SearchService(
+        db,
+        _FailingEmbedder(retryable=False, failure_kind="validation"),
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(EmbeddingRequestError) as raised:
+        asyncio.run(service.vector_search(query="must not degrade"))
+
+    assert raised.value.retryable is False
+    assert raised.value.failure_kind == "validation"
+    assert db.last_sql is None
+
+
+def test_vector_search_returns_empty_degraded_result_when_lexical_search_is_empty() -> None:
+    db = _FakeDB()
+    service = SearchService(
+        db,
+        _FailingEmbedder(retryable=True, failure_kind="connection"),
+        tenant_id="tenant-a",
+    )
+
+    results = asyncio.run(service.vector_search(query="no lexical match"))
+
+    assert results == []
+    assert service.last_ranking_trace is not None
+    assert service.last_ranking_trace["retrieval_mode"] == "lexical_degraded"
+    assert service.last_ranking_trace["candidate_count"] == 0
+
+
+def test_vector_search_lexical_degradation_preserves_filter_and_scope_contract() -> None:
+    item_id = uuid.uuid4()
+    room_id = uuid.uuid4()
+    db = _FakeDB()
+    service = SearchService(
+        db,
+        _FailingEmbedder(retryable=True, failure_kind="timeout"),
+        tenant_id="tenant-a",
+    )
+    date_from = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    date_to = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    asyncio.run(
+        service.vector_search(
+            query="scoped lexical fallback",
+            source_type="note",
+            item_ids=[item_id],
+            room_ids=[room_id],
+            scope_type="workspace",
+            scope_key="palaceoftruth",
+            tags=["sar-1062"],
+            tags_mode="all",
+            date_from=date_from,
+            date_to=date_to,
+            exclude_private_memory_scopes=True,
+        )
+    )
+
+    assert db.last_sql is not None
+    for fragment in (
+        "i.status = 'ready'",
+        "i.deleted_at IS NULL",
+        "i.tenant_id = :tenant_id",
+        "i.source_type = :source_type",
+        "i.id = ANY(CAST(:item_ids AS uuid[]))",
+        "rm.room_id = ANY(CAST(:room_ids AS uuid[]))",
+        "i.metadata->'memory_entry'->'scope'->>'type'",
+        "i.metadata->'memory_entry'->'scope'->>'key'",
+        "i.tags @> CAST(:tags AS text[])",
+        "COALESCE(i.effective_date, i.created_at) >= :date_from",
+        "COALESCE(i.effective_date, i.created_at) <= :date_to",
+    ):
+        assert fragment in db.last_sql
+    assert db.last_params == {
+        "query": "scoped lexical fallback",
+        "tenant_id": "tenant-a",
+        "source_type": "note",
+        "item_ids": [item_id],
+        "room_ids": [room_id],
+        "scope_type": "workspace",
+        "scope_key": "palaceoftruth",
+        "tags": ["sar-1062"],
+        "tags_mode": "all",
+        "date_from": date_from,
+        "date_to": date_to,
+        "candidate_limit": 40,
+        "exclude_private_memory_scopes": True,
+        "embedding_profile_name": None,
+    }
+
+
+def test_vector_search_healthy_path_remains_hybrid_without_degradation() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(service.vector_search(query="healthy hybrid"))
+
+    assert db.last_sql is not None
+    assert "semantic_candidates AS MATERIALIZED" in db.last_sql
+    assert "<=>" in db.last_sql
+    assert service.last_ranking_trace is not None
+    assert service.last_ranking_trace["retrieval_mode"] == "hybrid"
+    assert service.last_ranking_trace["dependency_degradation"] is None
 
 
 def test_vector_search_uses_side_profile_storage_for_non_default_profile() -> None:

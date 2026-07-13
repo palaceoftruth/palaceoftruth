@@ -1996,7 +1996,7 @@ def test_retrieve_agent_memory_searches_policy_scopes_and_excludes_private_broad
     broad_calls: list[dict] = []
     scoped_vectors: list[list[float] | None] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scope_calls.append((body.scope.type, body.scope.key))
         scoped_vectors.append(query_vector)
         return memory_service.MemoryRetrieveResponse(
@@ -2063,7 +2063,7 @@ def test_retrieve_memory_forwards_explicit_derived_artifact_policy(monkeypatch) 
 
     captured_body = None
 
-    async def fake_retrieve_palace(db, *, tenant_id: str, embedder, body, query_vector=None):
+    async def fake_retrieve_palace(db, *, tenant_id: str, embedder, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         nonlocal captured_body
         captured_body = body
         return PalaceRetrieveResponse(
@@ -2103,7 +2103,7 @@ def test_retrieve_agent_memory_forwards_explicit_derived_artifact_policy(monkeyp
     scoped_flags: list[bool] = []
     broad_flags: list[bool] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scoped_flags.append(body.include_derived_artifacts)
         return memory_service.MemoryRetrieveResponse(
             scope=body.scope,
@@ -2238,7 +2238,7 @@ def test_retrieve_agent_memory_uses_candidate_display_and_context_budgets(monkey
     scope_limits: list[int] = []
     broad_limits: list[int] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scope_limits.append(body.limit)
         score = 0.71 if body.scope.type == "agent" else 0.92
         return memory_service.MemoryRetrieveResponse(
@@ -2317,7 +2317,7 @@ def test_retrieve_agent_memory_uses_candidate_display_and_context_budgets(monkey
 def test_retrieve_agent_memory_context_budget_truncates_first_result(monkeypatch) -> None:
     import app.services.memory as memory_service
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         return memory_service.MemoryRetrieveResponse(
             scope=body.scope,
             routed_room_id=None,
@@ -2365,7 +2365,7 @@ def test_retrieve_agent_memory_demotes_stale_agent_conversation_when_workspace_s
 ) -> None:
     import app.services.memory as memory_service
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         if body.scope.type == "agent":
             results = [
                 _search_result(
@@ -2426,7 +2426,7 @@ def test_retrieve_agent_memory_demotes_stale_agent_conversation_when_workspace_s
 def test_retrieve_agent_memory_prefers_exact_workspace_over_tenant_shared(monkeypatch) -> None:
     import app.services.memory as memory_service
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         if body.scope.type == "workspace":
             results = [
                 _search_result(
@@ -2491,7 +2491,7 @@ def test_retrieve_agent_memory_workspace_strict_skips_agent_session_and_shared_w
 
     scope_calls: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scope_calls.append((body.scope.type, body.scope.key))
         assert body.scope.type == "workspace"
         return memory_service.MemoryRetrieveResponse(
@@ -2557,7 +2557,7 @@ def test_retrieve_agent_memory_workspace_strict_uses_tenant_shared_fallback_only
 
     scope_calls: list[tuple[str, str | None]] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scope_calls.append((body.scope.type, body.scope.key))
         results = []
         if body.scope.type == "tenant_shared":
@@ -2617,7 +2617,7 @@ def test_retrieve_agent_memory_workspace_strict_broad_corpus_requires_explicit_p
     scope_calls: list[tuple[str, str | None]] = []
     broad_calls: list[dict] = []
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         scope_calls.append((body.scope.type, body.scope.key))
         return memory_service.MemoryRetrieveResponse(
             scope=body.scope,
@@ -2672,7 +2672,7 @@ def test_retrieve_agent_memory_skips_broad_corpus_when_workspace_results_satisfy
 ) -> None:
     import app.services.memory as memory_service
 
-    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None):
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
         if body.scope.type != "workspace":
             results = []
         else:
