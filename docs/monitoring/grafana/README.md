@@ -48,13 +48,14 @@ helm template palaceoftruth chart --set metrics.serviceMonitor.enabled=true \
 
 # Run against the Prometheus HTTP API for the deployed Palace environment.
 curl -G "$PROMETHEUS_URL/api/v1/query" \
-  --data-urlencode 'query=sum by (endpoint, stage) (rate(palace_retrieval_stage_duration_seconds_bucket[5m]))'
+  --data-urlencode 'query=count by (endpoint, exported_endpoint, stage) (palace_retrieval_stage_duration_seconds_count)'
 ```
 
-The successful query returns `endpoint` and `stage` labels; it must not return
-`exported_endpoint` in place of the application endpoint label. Use the same
-`sum by (le, endpoint, stage)` grouping for replica-aggregated p50, p95, and
-p99 queries above.
+The successful query returns the bounded application endpoint values
+(`retrieve`, `retrieve_agent`, `semantic_recall`, or `other`) in `endpoint`.
+It must not return `exported_endpoint` in place of that application label.
+After that label-shape check, use the `sum by (le, endpoint, stage)` grouping
+for replica-aggregated p50, p95, and p99 queries above.
 
 Retrieval request labels are limited to endpoint and outcome. Intent,
 route-confidence, fallback, abstain, empty-result, and budget-truncation are
