@@ -490,6 +490,7 @@ def test_backend_servicemonitor_renders_when_enabled() -> None:
         {
             "port": "http",
             "path": "/api/v1/metrics",
+            "honorLabels": True,
             "interval": "15s",
             "scrapeTimeout": "5s",
         }

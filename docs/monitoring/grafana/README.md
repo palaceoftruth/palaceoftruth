@@ -37,6 +37,25 @@ histogram_quantile(0.95, sum by (le, endpoint, stage) (rate(palace_retrieval_sta
 histogram_quantile(0.99, sum by (le, endpoint, stage) (rate(palace_retrieval_stage_duration_seconds_bucket[5m])))
 ```
 
+The backend ServiceMonitor sets `honorLabels: true`. This preserves the
+application's bounded `endpoint` label instead of rewriting it to
+`exported_endpoint` when Prometheus attaches its own scrape-target label.
+After a chart rollout, verify the rendered resource and live label shape:
+
+```bash
+helm template palaceoftruth chart --set metrics.serviceMonitor.enabled=true \
+  | yq 'select(.kind == "ServiceMonitor" and .metadata.name == "palaceoftruth-backend") | .spec.endpoints[0].honorLabels'
+
+# Run against the Prometheus HTTP API for the deployed Palace environment.
+curl -G "$PROMETHEUS_URL/api/v1/query" \
+  --data-urlencode 'query=sum by (endpoint, stage) (rate(palace_retrieval_stage_duration_seconds_bucket[5m]))'
+```
+
+The successful query returns `endpoint` and `stage` labels; it must not return
+`exported_endpoint` in place of the application endpoint label. Use the same
+`sum by (le, endpoint, stage)` grouping for replica-aggregated p50, p95, and
+p99 queries above.
+
 Retrieval request labels are limited to endpoint and outcome. Intent,
 route-confidence, fallback, abstain, empty-result, and budget-truncation are
 separate bounded classification series so their combinations cannot multiply

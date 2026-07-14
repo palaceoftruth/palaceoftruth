@@ -436,6 +436,10 @@ metrics:
   serviceMonitor:
     # Enable in clusters with the Prometheus Operator ServiceMonitor CRD.
     enabled: false
+    # Preserve application metric labels such as `endpoint`; otherwise the
+    # Prometheus scrape target's endpoint label rewrites them to
+    # `exported_endpoint`.
+    honorLabels: true
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
