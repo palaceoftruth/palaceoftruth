@@ -19,6 +19,7 @@ spec:
   endpoints:
     - port: http
       path: {{ .Values.metrics.path | quote }}
+      honorLabels: {{ .Values.metrics.serviceMonitor.honorLabels }}
       interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout | quote }}
 {{- end }}
