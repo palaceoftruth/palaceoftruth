@@ -429,6 +429,7 @@ jobs:
         env:
           RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
           GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+          OCI_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "$RELEASE_PR_TOKEN" ]; then
             echo "RELEASE_PR_TOKEN is required to push a chart release branch and open a PR." >&2
@@ -452,6 +453,25 @@ jobs:
               --json headRefName \
               --jq '.[] | select(.headRefName | startswith("ci/chart-release-")) | .headRefName')
             RESERVED_VERSION_ARGS=()
+
+            OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${{ steps.chart.outputs.name }}"
+            OCI_TOKEN=$(printf 'user = "%s:%s"\n' "$GITHUB_ACTOR" "$OCI_REGISTRY_TOKEN" \
+              | curl --config - --fail --silent --show-error --retry 3 \
+                --get "https://${REGISTRY_HOST}/token" \
+                --data-urlencode "service=${REGISTRY_HOST}" \
+                --data-urlencode "scope=repository:${OCI_REPOSITORY}:pull" \
+              | jq -er '.token // .access_token')
+            PUBLISHED_CHART_VERSIONS=$(OCI_BEARER_TOKEN="$OCI_TOKEN" \
+              python3 scripts/list_oci_tags.py \
+                --registry "$REGISTRY_HOST" \
+                --repository "$OCI_REPOSITORY" \
+                --semver-only)
+            while IFS= read -r PUBLISHED_CHART_VERSION; do
+              if [ -n "$PUBLISHED_CHART_VERSION" ]; then
+                RESERVED_VERSION_ARGS+=(--reserved-version "$PUBLISHED_CHART_VERSION")
+              fi
+            done <<< "$PUBLISHED_CHART_VERSIONS"
+
             while IFS= read -r RELEASE_PR_BRANCH; do
               if [ -z "$RELEASE_PR_BRANCH" ] || [ "$RELEASE_PR_BRANCH" = "$RELEASE_BRANCH" ]; then
                 continue
