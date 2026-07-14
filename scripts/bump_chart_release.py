@@ -10,7 +10,9 @@ from pathlib import Path
 
 VERSION_RE = re.compile(r"^(version:\s*)(\"?)(\d+)\.(\d+)\.(\d+)(\"?)(\s*)$")
 APP_VERSION_RE = re.compile(r"^(appVersion:\s*).*$")
-SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+SEMVER_RE = re.compile(
+    r"^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:[+_][0-9A-Za-z.-]+)?$"
+)
 
 
 def _replace_one_line(
@@ -53,10 +55,12 @@ def bump_chart_release(
         if not match:
             continue
 
-        major, minor, patch = (int(match.group(3)), int(match.group(4)), int(match.group(5)))
+        current = (int(match.group(3)), int(match.group(4)), int(match.group(5)))
+        # Published charts and concurrent release PRs are durable coordinates.
+        # Advance from the greatest one so a stale main branch cannot regress or
+        # collide with a release that was published before its PR was recorded.
+        major, minor, patch = max({current, *reserved})
         next_patch = patch + 1
-        while (major, minor, next_patch) in reserved:
-            next_patch += 1
         new_version = f"{major}.{minor}.{next_patch}"
         chart_lines[index] = f"{match.group(1)}{new_version}{match.group(7)}"
         break
@@ -83,7 +87,7 @@ def main() -> None:
         "--reserved-version",
         action="append",
         default=[],
-        help="Existing chart version to skip when computing the next patch release.",
+        help="Existing chart version that the next patch release must exceed.",
     )
     args = parser.parse_args()
 

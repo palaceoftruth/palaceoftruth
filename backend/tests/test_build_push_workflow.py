@@ -132,3 +132,27 @@ def test_github_cli_setup_is_version_and_checksum_pinned() -> None:
     assert "sha256sum --check --strict" in script
     assert '"$INSTALL_DIR/bin/gh" version | awk' in script
     assert 'echo "$INSTALL_DIR/bin" >> "$GITHUB_PATH"' in script
+
+
+def test_chart_publisher_reserves_every_published_oci_version_before_bump() -> None:
+    publish_chart = _load_workflow()["jobs"]["publish-chart"]
+    publish_step = next(
+        step
+        for step in publish_chart["steps"]
+        if step.get("name") == "Publish chart and prepare release-coordinate PR"
+    )
+    script = publish_step["run"]
+
+    assert publish_step["env"]["OCI_REGISTRY_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert 'OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${{ steps.chart.outputs.name }}"' in script
+    assert "curl --config -" in script
+    assert '--user "${GITHUB_ACTOR}:${OCI_REGISTRY_TOKEN}"' not in script
+    assert "python3 scripts/list_oci_tags.py" in script
+    assert '--repository "$OCI_REPOSITORY"' in script
+    assert "--semver-only" in script
+    assert 'RESERVED_VERSION_ARGS+=(--reserved-version "$PUBLISHED_CHART_VERSION")' in script
+    assert script.index("for attempt in 1 2 3 4 5") < script.index("python3 scripts/list_oci_tags.py")
+    assert script.index("python3 scripts/list_oci_tags.py") < script.index(
+        "python3 scripts/bump_chart_release.py"
+    )
+    assert script.index("python3 scripts/bump_chart_release.py") < script.index("helm push")
