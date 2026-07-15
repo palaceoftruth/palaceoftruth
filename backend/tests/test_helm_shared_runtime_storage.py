@@ -802,6 +802,7 @@ def test_postgres_prometheus_rules_are_observational_and_namespace_bounded() -> 
         assert 'namespace="palace-a"' in rule["expr"]
         assert "reload" not in rule["expr"].lower()
         assert "failover" not in rule["expr"].lower()
+    assert "cnpg_pg_replication_lag" in rules_by_name["PalaceCNPGReplicationLag"]["expr"]
 
 
 def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:

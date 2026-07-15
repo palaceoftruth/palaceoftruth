@@ -51,7 +51,7 @@ spec:
             summary: Palace PostgreSQL has waiting locks
             description: At least one Palace PostgreSQL lock has waited for five minutes.
         - alert: PalaceCNPGReplicationLag
-          expr: max(cnpg_pg_replication_replay_lag_seconds{namespace={{ .Release.Namespace | quote }}}) > 60
+          expr: max(cnpg_pg_replication_lag{namespace={{ .Release.Namespace | quote }}}) > 60
           for: 5m
           labels:
             severity: warning
