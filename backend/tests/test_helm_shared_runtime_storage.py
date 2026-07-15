@@ -778,6 +778,32 @@ def test_postgres_query_statistics_requires_pg_stat_statements() -> None:
         _render_chart("postgres.monitoring.customQueries.enabled=true")
 
 
+def test_postgres_prometheus_rules_are_observational_and_namespace_bounded() -> None:
+    manifests = _render_chart(
+        "postgres.monitoring.prometheusRule.enabled=true",
+        "postgres.monitoring.prometheusRule.labels.release=monitoring-kube-prometheus",
+        release_name="palace-alpha",
+        namespace="palace-a",
+    )
+
+    prometheus_rule = _manifest_by_kind_name(manifests, "PrometheusRule", "palace-alpha-palaceoftruth-postgres")
+    rules = prometheus_rule["spec"]["groups"][0]["rules"]
+    rules_by_name = {rule["alert"]: rule for rule in rules}
+
+    assert prometheus_rule["metadata"]["labels"]["release"] == "monitoring-kube-prometheus"
+    assert set(rules_by_name) == {
+        "PalaceCNPGMetricsAbsent",
+        "PalaceCNPGMetricsScrapeDown",
+        "PalaceCNPGRetrievalTempIoHigh",
+        "PalaceCNPGLockWaits",
+        "PalaceCNPGReplicationLag",
+    }
+    for rule in rules:
+        assert 'namespace="palace-a"' in rule["expr"]
+        assert "reload" not in rule["expr"].lower()
+        assert "failover" not in rule["expr"].lower()
+
+
 def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:
     default_manifests = _render_chart("valkey.sentinel.enabled=true")
     default_primary = _manifest_by_kind_name(default_manifests, "StatefulSet", "palaceoftruth-valkey-primary")

@@ -1,0 +1,62 @@
+{{- if and .Values.postgres.enabled .Values.postgres.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "palaceoftruth.postgresClusterName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- with .Values.postgres.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ include "palaceoftruth.postgresClusterName" . }}.cnpg
+      interval: {{ .Values.postgres.monitoring.prometheusRule.interval | quote }}
+      rules:
+        - alert: PalaceCNPGMetricsAbsent
+          expr: absent(cnpg_collector_up{namespace={{ .Release.Namespace | quote }}})
+          for: 5m
+          labels:
+            severity: warning
+            component: postgres
+          annotations:
+            summary: Palace CNPG metrics are absent
+            description: Prometheus has discovered no CNPG exporter metrics for this Palace namespace.
+        - alert: PalaceCNPGMetricsScrapeDown
+          expr: max_over_time(cnpg_collector_up{namespace={{ .Release.Namespace | quote }}}[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: postgres
+          annotations:
+            summary: Palace CNPG metrics scrape is down
+            description: No Palace CNPG exporter has reported a successful collection for five minutes.
+        - alert: PalaceCNPGRetrievalTempIoHigh
+          expr: sum(rate(cnpg_palace_query_statistics_temp_bytes{namespace={{ .Release.Namespace | quote }}}[15m])) > 174763
+          for: 15m
+          labels:
+            severity: warning
+            component: retrieval
+          annotations:
+            summary: Palace retrieval temp I/O is elevated
+            description: Bounded and legacy retrieval query families are writing more than 10 MiB per minute of temporary data.
+        - alert: PalaceCNPGLockWaits
+          expr: max(cnpg_palace_lock_waits_waiting_locks{namespace={{ .Release.Namespace | quote }}}) > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: postgres
+          annotations:
+            summary: Palace PostgreSQL has waiting locks
+            description: At least one Palace PostgreSQL lock has waited for five minutes.
+        - alert: PalaceCNPGReplicationLag
+          expr: max(cnpg_pg_replication_replay_lag_seconds{namespace={{ .Release.Namespace | quote }}}) > 60
+          for: 5m
+          labels:
+            severity: warning
+            component: postgres
+          annotations:
+            summary: Palace PostgreSQL replica lag is high
+            description: A Palace PostgreSQL replica has exceeded 60 seconds of replay lag.
+{{- end }}

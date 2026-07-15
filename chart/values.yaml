@@ -181,6 +181,11 @@ postgres:
       # queries use only pg_monitor-visible views and aggregate all statements
       # to avoid exposing query text or high-cardinality query identifiers.
       enabled: false
+    prometheusRule:
+      # Observational CNPG alerts only; no rule changes database state.
+      enabled: false
+      interval: 30s
+      labels: {}
   # Optional CNPG-I/Barman Cloud backups. The Barman Cloud plugin and its CRDs
   # must already be installed; keep destination and credential references in
   # the environment-specific values repository.
