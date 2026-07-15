@@ -471,7 +471,23 @@ def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonit
 
     postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
     assert postgres_cluster["spec"]["postgresql"]["parameters"] == {"shared_buffers": "128MB"}
+    assert "resources" not in postgres_cluster["spec"]
     assert not any(manifest.get("kind") == "PodMonitor" for manifest in manifests)
+
+
+def test_postgres_resources_render_only_when_configured() -> None:
+    manifests = _render_chart(
+        "postgres.resources.requests.cpu=250m",
+        "postgres.resources.requests.memory=2Gi",
+        "postgres.resources.limits.cpu=2",
+        "postgres.resources.limits.memory=4Gi",
+    )
+
+    postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    assert postgres_cluster["spec"]["resources"] == {
+        "requests": {"cpu": "250m", "memory": "2Gi"},
+        "limits": {"cpu": 2, "memory": "4Gi"},
+    }
 
 
 def test_backend_servicemonitor_renders_when_enabled() -> None:

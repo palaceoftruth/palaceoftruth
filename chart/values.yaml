@@ -160,6 +160,9 @@ postgres:
   image: ghcr.io/cloudnative-pg/postgresql:16.4
   storage:
     size: 5Gi
+  # CNPG pod requests/limits belong in the environment overlay so each cluster
+  # can be sized from observed workload data.
+  resources: {}
   # These are rendered as CNPG PostgreSQL parameters. Keep deployment-specific
   # tuning in the environment overlay. Setting a pg_stat_statements.* key lets
   # CNPG manage the required preload library and extension safely.

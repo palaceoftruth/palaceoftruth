@@ -21,6 +21,11 @@ spec:
   storage:
     size: {{ .Values.postgres.storage.size }}
 
+  {{- with .Values.postgres.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
   postgresql:
     parameters:
       {{- range $name, $value := .Values.postgres.parameters }}
