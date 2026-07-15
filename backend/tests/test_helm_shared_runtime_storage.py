@@ -749,7 +749,10 @@ def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled(
 
 
 def test_postgres_query_statistics_configmap_is_opt_in_and_safe() -> None:
-    manifests = _render_chart("postgres.monitoring.customQueries.enabled=true")
+    manifests = _render_chart(
+        "postgres.monitoring.customQueries.enabled=true",
+        "postgres.parameters.pg_stat_statements\\.track=top",
+    )
 
     cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
     config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-postgres-monitoring")
@@ -764,7 +767,15 @@ def test_postgres_query_statistics_configmap_is_opt_in_and_safe() -> None:
     assert "public.pg_stat_statements" in queries
     assert "queryid" not in queries
     assert "query_text" not in queries
+    assert "query_family" in queries
+    assert "bounded_hybrid" in queries
+    assert "legacy_hybrid" in queries
     assert "pg_catalog.pg_locks" in queries
+
+
+def test_postgres_query_statistics_requires_pg_stat_statements() -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _render_chart("postgres.monitoring.customQueries.enabled=true")
 
 
 def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:
