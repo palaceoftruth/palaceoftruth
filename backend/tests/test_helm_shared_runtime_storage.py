@@ -748,6 +748,25 @@ def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled(
     }
 
 
+def test_postgres_query_statistics_configmap_is_opt_in_and_safe() -> None:
+    manifests = _render_chart("postgres.monitoring.customQueries.enabled=true")
+
+    cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-postgres-monitoring")
+
+    assert cluster["spec"]["monitoring"] == {
+        "customQueriesConfigMap": [
+            {"name": "palaceoftruth-postgres-monitoring", "key": "custom-queries"},
+        ],
+    }
+    assert config_map["metadata"]["labels"]["cnpg.io/reload"] == ""
+    queries = config_map["data"]["custom-queries"]
+    assert "public.pg_stat_statements" in queries
+    assert "queryid" not in queries
+    assert "query_text" not in queries
+    assert "pg_catalog.pg_locks" in queries
+
+
 def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:
     default_manifests = _render_chart("valkey.sentinel.enabled=true")
     default_primary = _manifest_by_kind_name(default_manifests, "StatefulSet", "palaceoftruth-valkey-primary")

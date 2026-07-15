@@ -26,6 +26,13 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
+  {{- if .Values.postgres.monitoring.customQueries.enabled }}
+  monitoring:
+    customQueriesConfigMap:
+      - name: {{ include "palaceoftruth.postgresClusterName" . }}-monitoring
+        key: custom-queries
+  {{- end }}
+
   postgresql:
     parameters:
       {{- range $name, $value := .Values.postgres.parameters }}

@@ -176,6 +176,11 @@ postgres:
       interval: 30s
       scrapeTimeout: 10s
       labels: {}
+    customQueries:
+      # Keep query-statistics collection opt-in per environment. The rendered
+      # queries use only pg_monitor-visible views and aggregate all statements
+      # to avoid exposing query text or high-cardinality query identifiers.
+      enabled: false
   # Optional CNPG-I/Barman Cloud backups. The Barman Cloud plugin and its CRDs
   # must already be installed; keep destination and credential references in
   # the environment-specific values repository.
