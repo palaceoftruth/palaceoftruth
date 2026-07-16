@@ -471,7 +471,23 @@ def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonit
 
     postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
     assert postgres_cluster["spec"]["postgresql"]["parameters"] == {"shared_buffers": "128MB"}
+    assert "resources" not in postgres_cluster["spec"]
     assert not any(manifest.get("kind") == "PodMonitor" for manifest in manifests)
+
+
+def test_postgres_resources_render_only_when_configured() -> None:
+    manifests = _render_chart(
+        "postgres.resources.requests.cpu=250m",
+        "postgres.resources.requests.memory=2Gi",
+        "postgres.resources.limits.cpu=2",
+        "postgres.resources.limits.memory=4Gi",
+    )
+
+    postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    assert postgres_cluster["spec"]["resources"] == {
+        "requests": {"cpu": "250m", "memory": "2Gi"},
+        "limits": {"cpu": 2, "memory": "4Gi"},
+    }
 
 
 def test_backend_servicemonitor_renders_when_enabled() -> None:
@@ -730,6 +746,63 @@ def test_postgres_podmonitor_and_query_statistics_parameter_render_when_enabled(
             }
         ],
     }
+
+
+def test_postgres_query_statistics_configmap_is_opt_in_and_safe() -> None:
+    manifests = _render_chart(
+        "postgres.monitoring.customQueries.enabled=true",
+        "postgres.parameters.pg_stat_statements\\.track=top",
+    )
+
+    cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
+    config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-postgres-monitoring")
+
+    assert cluster["spec"]["monitoring"] == {
+        "customQueriesConfigMap": [
+            {"name": "palaceoftruth-postgres-monitoring", "key": "custom-queries"},
+        ],
+    }
+    assert config_map["metadata"]["labels"]["cnpg.io/reload"] == ""
+    queries = config_map["data"]["custom-queries"]
+    assert "public.pg_stat_statements" in queries
+    assert "queryid" not in queries
+    assert "query_text" not in queries
+    assert "query_family" in queries
+    assert "bounded_hybrid" in queries
+    assert "legacy_hybrid" in queries
+    assert "pg_catalog.pg_locks" in queries
+
+
+def test_postgres_query_statistics_requires_pg_stat_statements() -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _render_chart("postgres.monitoring.customQueries.enabled=true")
+
+
+def test_postgres_prometheus_rules_are_observational_and_namespace_bounded() -> None:
+    manifests = _render_chart(
+        "postgres.monitoring.prometheusRule.enabled=true",
+        "postgres.monitoring.prometheusRule.labels.release=monitoring-kube-prometheus",
+        release_name="palace-alpha",
+        namespace="palace-a",
+    )
+
+    prometheus_rule = _manifest_by_kind_name(manifests, "PrometheusRule", "palace-alpha-palaceoftruth-postgres")
+    rules = prometheus_rule["spec"]["groups"][0]["rules"]
+    rules_by_name = {rule["alert"]: rule for rule in rules}
+
+    assert prometheus_rule["metadata"]["labels"]["release"] == "monitoring-kube-prometheus"
+    assert set(rules_by_name) == {
+        "PalaceCNPGMetricsAbsent",
+        "PalaceCNPGMetricsScrapeDown",
+        "PalaceCNPGRetrievalTempIoHigh",
+        "PalaceCNPGLockWaits",
+        "PalaceCNPGReplicationLag",
+    }
+    for rule in rules:
+        assert 'namespace="palace-a"' in rule["expr"]
+        assert "reload" not in rule["expr"].lower()
+        assert "failover" not in rule["expr"].lower()
+    assert "cnpg_pg_replication_lag" in rules_by_name["PalaceCNPGReplicationLag"]["expr"]
 
 
 def test_valkey_primary_replica_required_anti_affinity_is_an_explicit_opt_in() -> None:

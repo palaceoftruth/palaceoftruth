@@ -43,6 +43,7 @@ class _FakeDB:
     def __init__(self, rows=None, hint_rows=None, context_rows=None, graph_rows=None) -> None:
         self.last_params = None
         self.graph_params = None
+        self.graph_sql = None
         self.rows = list(rows or [])
         self.hint_rows = list(hint_rows or [])
         self.context_rows = list(context_rows or [])
@@ -57,6 +58,7 @@ class _FakeDB:
             return _FakeResult(self.context_rows)
         if "seed_item_ids" in params:
             self.graph_params = params
+            self.graph_sql = self.last_sql
             return _FakeResult(self.graph_rows)
         self.last_params = params
         return _FakeResult(self.rows)
@@ -219,9 +221,15 @@ def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() 
     assert db.last_sql is not None
     assert "semantic_candidates AS MATERIALIZED" in db.last_sql
     assert "LIMIT :semantic_candidate_limit" in db.last_sql
+    assert "lexical_match_window AS MATERIALIZED" in db.last_sql
     assert "lexical_items AS MATERIALIZED" in db.last_sql
     assert "i.search_vector @@ plainto_tsquery('english', :query)" in db.last_sql
     assert "LIMIT :lexical_candidate_limit" in db.last_sql
+    lexical_window = db.last_sql[
+        db.last_sql.index("lexical_match_window AS MATERIALIZED"):
+        db.last_sql.index("lexical_items AS MATERIALIZED")
+    ]
+    assert "ts_rank" not in lexical_window
     assert db.last_sql.index("LIMIT :semantic_candidate_limit") < db.last_sql.index("ranked AS")
     assert db.last_sql.index("LIMIT :lexical_candidate_limit") < db.last_sql.index("ranked AS")
     assert "UNION\n                SELECT item_id, chunk_text, chunk_index FROM lexical_candidates" in db.last_sql
@@ -269,6 +277,12 @@ def test_vector_search_degrades_to_bounded_lexical_results_on_embedding_failure(
     assert "semantic_candidates" not in db.last_sql
     assert "<=>" not in db.last_sql
     assert "i.search_vector @@ plainto_tsquery('english', :query)" in db.last_sql
+    fallback_window = db.last_sql[
+        db.last_sql.index("lexical_match_window AS MATERIALIZED"):
+        db.last_sql.index("lexical_items AS MATERIALIZED")
+    ]
+    assert "ts_rank" not in fallback_window
+    assert fallback_window.index("LIMIT :candidate_limit") < db.last_sql.index("ts_rank")
     assert "ORDER BY score DESC, item_id ASC" in db.last_sql
     assert db.last_params["candidate_limit"] == 17
     assert service.last_ranking_trace is not None
@@ -1101,8 +1115,8 @@ def test_currentness_prefilter_precedes_semantic_and_lexical_lane_limits() -> No
     asyncio.run(service.vector_search(query="latest Palace deployment", limit=2))
 
     sql = db.last_sql
-    semantic = sql[sql.index("semantic_candidates AS MATERIALIZED"):sql.index("lexical_items AS MATERIALIZED")]
-    lexical = sql[sql.index("lexical_items AS MATERIALIZED"):sql.index("lexical_candidates AS MATERIALIZED")]
+    semantic = sql[sql.index("semantic_candidates AS MATERIALIZED"):sql.index("lexical_match_window AS MATERIALIZED")]
+    lexical = sql[sql.index("lexical_match_window AS MATERIALIZED"):sql.index("lexical_items AS MATERIALIZED")]
     for lane, limit_name in ((semantic, ":semantic_candidate_limit"), (lexical, ":lexical_candidate_limit")):
         assert "NOT EXISTS" in lane
         assert "FROM memory_entries current_me" in lane
@@ -1841,6 +1855,11 @@ def test_vector_search_relationship_graph_expansion_adds_bounded_related_candida
     assert db.graph_params["seed_item_ids"] == [seed_id]
     assert db.graph_params["min_confidence"] == 0.8
     assert db.graph_params["fanout_limit"] == 2
+    assert db.graph_sql is not None
+    assert "CROSS JOIN LATERAL" in db.graph_sql
+    assert db.graph_sql.count("LIMIT :fanout_limit") == 2
+    assert "JOIN LATERAL" in db.graph_sql
+    assert db.graph_sql.index("LIMIT :fanout_limit") < db.graph_sql.index("ROW_NUMBER() OVER")
     assert service.last_ranking_trace is not None
     assert service.last_ranking_trace["ranking_features_version"] == 2
     assert service.last_ranking_trace["relationship_graph_expansion_enabled"] is True

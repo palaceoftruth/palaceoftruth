@@ -21,6 +21,21 @@ spec:
   storage:
     size: {{ .Values.postgres.storage.size }}
 
+  {{- with .Values.postgres.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- if .Values.postgres.monitoring.customQueries.enabled }}
+  {{- if not (hasKey .Values.postgres.parameters "pg_stat_statements.track") }}
+  {{- fail "postgres.monitoring.customQueries.enabled requires postgres.parameters.pg_stat_statements.track" }}
+  {{- end }}
+  monitoring:
+    customQueriesConfigMap:
+      - name: {{ include "palaceoftruth.postgresClusterName" . }}-monitoring
+        key: custom-queries
+  {{- end }}
+
   postgresql:
     parameters:
       {{- range $name, $value := .Values.postgres.parameters }}

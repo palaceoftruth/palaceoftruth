@@ -1211,10 +1211,8 @@ class SearchService:
     ) -> list[Any]:
         """Return bounded lexical results when query embedding is unavailable."""
         sql = text(f"""
-            WITH lexical_items AS MATERIALIZED (
-                SELECT
-                    i.id AS item_id,
-                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+            WITH lexical_match_window AS MATERIALIZED (
+                SELECT i.id AS item_id
                 FROM items i
                 WHERE i.status = 'ready'
                   AND i.deleted_at IS NULL
@@ -1281,8 +1279,15 @@ class SearchService:
                       WHERE eligible_embedding.item_id = i.id
                         {embedding_plan.profile_filter.replace('e.', 'eligible_embedding.')}
                   )
-                ORDER BY text_score DESC, i.id ASC
                 LIMIT :candidate_limit
+            ),
+            lexical_items AS MATERIALIZED (
+                SELECT
+                    i.id AS item_id,
+                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+                FROM lexical_match_window lexical_window
+                JOIN items i ON i.id = lexical_window.item_id
+                ORDER BY text_score DESC, i.id ASC
             )
             SELECT
                 i.id AS item_id,
@@ -1475,10 +1480,8 @@ class SearchService:
                     e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) ASC
                 LIMIT :semantic_candidate_limit
             ),
-            lexical_items AS MATERIALIZED (
-                SELECT
-                    i.id AS item_id,
-                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+            lexical_match_window AS MATERIALIZED (
+                SELECT i.id AS item_id
                 FROM items i
                 WHERE i.status = 'ready'
                   AND i.deleted_at IS NULL
@@ -1545,8 +1548,15 @@ class SearchService:
                       WHERE eligible_embedding.item_id = i.id
                         {embedding_plan.profile_filter.replace('e.', 'eligible_embedding.')}
                   )
-                ORDER BY text_score DESC, i.id ASC
                 LIMIT :lexical_candidate_limit
+            ),
+            lexical_items AS MATERIALIZED (
+                SELECT
+                    i.id AS item_id,
+                    ts_rank(i.search_vector, plainto_tsquery('english', :query)) AS text_score
+                FROM lexical_match_window lexical_window
+                JOIN items i ON i.id = lexical_window.item_id
+                ORDER BY text_score DESC, i.id ASC
             ),
             lexical_candidates AS MATERIALIZED (
                 SELECT
@@ -2068,24 +2078,45 @@ class SearchService:
         rows = (
             await self.db.execute(
                 text(f"""
-                    WITH edges AS (
+                    WITH seed_ids AS MATERIALIZED (
+                        SELECT UNNEST(CAST(:seed_item_ids AS uuid[])) AS seed_item_id
+                    ),
+                    edges AS MATERIALIZED (
                         SELECT
-                            ir.source_item_id AS seed_item_id,
-                            ir.target_item_id AS related_item_id,
-                            ir.confidence,
-                            ir.relationship
-                        FROM item_relationships ir
-                        WHERE ir.source_item_id = ANY(CAST(:seed_item_ids AS uuid[]))
-                          AND ir.confidence >= :min_confidence
+                            seed.seed_item_id,
+                            edge.related_item_id,
+                            edge.confidence,
+                            edge.relationship
+                        FROM seed_ids seed
+                        CROSS JOIN LATERAL (
+                            SELECT
+                                ir.target_item_id AS related_item_id,
+                                ir.confidence,
+                                ir.relationship
+                            FROM item_relationships ir
+                            WHERE ir.source_item_id = seed.seed_item_id
+                              AND ir.confidence >= :min_confidence
+                            ORDER BY ir.confidence DESC, ir.target_item_id ASC, ir.relationship ASC
+                            LIMIT :fanout_limit
+                        ) edge
                         UNION ALL
                         SELECT
-                            ir.target_item_id AS seed_item_id,
-                            ir.source_item_id AS related_item_id,
-                            ir.confidence,
-                            ir.relationship
-                        FROM item_relationships ir
-                        WHERE ir.target_item_id = ANY(CAST(:seed_item_ids AS uuid[]))
-                          AND ir.confidence >= :min_confidence
+                            seed.seed_item_id,
+                            edge.related_item_id,
+                            edge.confidence,
+                            edge.relationship
+                        FROM seed_ids seed
+                        CROSS JOIN LATERAL (
+                            SELECT
+                                ir.source_item_id AS related_item_id,
+                                ir.confidence,
+                                ir.relationship
+                            FROM item_relationships ir
+                            WHERE ir.target_item_id = seed.seed_item_id
+                              AND ir.confidence >= :min_confidence
+                            ORDER BY ir.confidence DESC, ir.source_item_id ASC, ir.relationship ASC
+                            LIMIT :fanout_limit
+                        ) edge
                     ),
                     ranked AS (
                         SELECT
@@ -2142,7 +2173,14 @@ class SearchService:
                         JOIN items i ON i.id = edges.related_item_id
                         LEFT JOIN memory_entries me
                           ON me.tenant_id = i.tenant_id AND me.item_id = i.id
-                        JOIN {embedding_plan.table_name} e ON e.item_id = i.id
+                        JOIN LATERAL (
+                            SELECT e.*
+                            FROM {embedding_plan.table_name} e
+                            WHERE e.item_id = i.id
+                              {embedding_plan.profile_filter}
+                            ORDER BY e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) ASC
+                            LIMIT 1
+                        ) e ON TRUE
                         WHERE seed.tenant_id = :tenant_id
                           AND seed.status = 'ready'
                           AND seed.deleted_at IS NULL
@@ -2170,7 +2208,6 @@ class SearchService:
                                     AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
                               )
                           )
-                          {embedding_plan.profile_filter}
                           AND i.id <> ALL(CAST(:seed_item_ids AS uuid[]))
                           AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
                           AND (

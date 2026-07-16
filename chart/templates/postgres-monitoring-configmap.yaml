@@ -1,0 +1,53 @@
+{{- if and .Values.postgres.enabled .Values.postgres.monitoring.customQueries.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "palaceoftruth.postgresClusterName" . }}-monitoring
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    # CNPG reloads this ConfigMap without requiring an imperative cluster action.
+    cnpg.io/reload: ""
+data:
+  custom-queries: |
+    palace_query_statistics:
+      query: |
+        SELECT
+          CASE
+            WHEN pg_catalog.ltrim(query) LIKE 'WITH semantic_candidate%AS MATERIALIZED%' THEN 'bounded_hybrid'
+            WHEN pg_catalog.ltrim(query) LIKE 'WITH ranked AS (%' THEN 'legacy_hybrid'
+          END AS query_family,
+          pg_catalog.current_database() AS datname,
+          COALESCE(SUM(calls), 0) AS calls,
+          COALESCE(SUM(total_exec_time), 0) AS total_exec_time_ms,
+          COALESCE(SUM(temp_blks_written), 0) * pg_catalog.current_setting('block_size')::bigint AS temp_bytes
+        FROM public.pg_stat_statements
+        WHERE pg_catalog.ltrim(query) LIKE 'WITH semantic_candidate%AS MATERIALIZED%'
+           OR pg_catalog.ltrim(query) LIKE 'WITH ranked AS (%'
+        GROUP BY query_family, datname
+      metrics:
+        - query_family:
+            usage: "LABEL"
+            description: "Bounded retrieval query family without query text or identifiers"
+        - datname:
+            usage: "LABEL"
+            description: "Database whose statement statistics are aggregated"
+        - calls:
+            usage: "COUNTER"
+            description: "Total observed statement calls"
+        - total_exec_time_ms:
+            usage: "COUNTER"
+            description: "Total observed statement execution time in milliseconds"
+        - temp_bytes:
+            usage: "COUNTER"
+            description: "Total temporary bytes written by observed statements"
+    palace_lock_waits:
+      query: |
+        SELECT pg_catalog.count(*) AS waiting_locks
+        FROM pg_catalog.pg_locks
+        WHERE NOT granted
+      metrics:
+        - waiting_locks:
+            usage: "GAUGE"
+            description: "Locks currently waiting for a grant"
+{{- end }}

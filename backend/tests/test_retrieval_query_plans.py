@@ -140,6 +140,22 @@ async def plan_session() -> AsyncSession:
             """))
             await session.execute(text("CREATE INDEX sar1060_items_fts ON items USING gin (search_vector)"))
             await session.execute(text("""
+                CREATE TEMP TABLE item_relationships (
+                    source_item_id uuid NOT NULL,
+                    target_item_id uuid NOT NULL,
+                    confidence double precision NOT NULL,
+                    relationship text NOT NULL
+                )
+            """))
+            await session.execute(text("""
+                CREATE INDEX sar1069_relationship_source_lookup
+                ON item_relationships (source_item_id, confidence DESC, target_item_id, relationship)
+            """))
+            await session.execute(text("""
+                CREATE INDEX sar1069_relationship_target_lookup
+                ON item_relationships (target_item_id, confidence DESC, source_item_id, relationship)
+            """))
+            await session.execute(text("""
                 CREATE INDEX sar1060_profile_item_chunk
                 ON embedding_profile_vectors (item_id, chunk_index)
             """))
@@ -187,6 +203,14 @@ async def plan_session() -> AsyncSession:
             await session.execute(text("ANALYZE items"))
             await session.execute(text("ANALYZE embedding_profile_vectors"))
             await session.execute(text("ANALYZE embeddings"))
+            await session.execute(text("""
+                INSERT INTO item_relationships (source_item_id, target_item_id, confidence, relationship)
+                SELECT md5(seed::text)::uuid, md5(target::text)::uuid,
+                       0.5 + (target % 50)::float / 100, 'related'
+                FROM generate_series(1, 100) AS seed
+                CROSS JOIN generate_series(101, 300) AS target
+            """))
+            await session.execute(text("ANALYZE item_relationships"))
             yield session
         finally:
             await session.close()
@@ -257,6 +281,44 @@ async def test_lexical_candidate_predicate_is_gin_eligible(plan_session: AsyncSe
     plan = result.scalar_one()
     index_names = {node.get("Index Name") for node in _walk_plan_nodes(plan)}
     assert "sar1060_items_fts" in index_names
+
+
+@pytest.mark.asyncio
+async def test_relationship_graph_candidate_lookups_use_bounded_directional_indexes(
+    plan_session: AsyncSession,
+) -> None:
+    await plan_session.execute(text("SET LOCAL enable_seqscan = off"))
+    result = await plan_session.execute(text("""
+        EXPLAIN (FORMAT JSON, COSTS OFF)
+        WITH seed_ids AS MATERIALIZED (
+            SELECT UNNEST(ARRAY[md5('1')::uuid, md5('2')::uuid]) AS seed_item_id
+        )
+        SELECT seed.seed_item_id, edge.related_item_id
+        FROM seed_ids seed
+        CROSS JOIN LATERAL (
+            SELECT ir.target_item_id AS related_item_id
+            FROM item_relationships ir
+            WHERE ir.source_item_id = seed.seed_item_id
+              AND ir.confidence >= 0.8
+            ORDER BY ir.confidence DESC, ir.target_item_id ASC, ir.relationship ASC
+            LIMIT 5
+        ) edge
+        UNION ALL
+        SELECT seed.seed_item_id, edge.related_item_id
+        FROM seed_ids seed
+        CROSS JOIN LATERAL (
+            SELECT ir.source_item_id AS related_item_id
+            FROM item_relationships ir
+            WHERE ir.target_item_id = seed.seed_item_id
+              AND ir.confidence >= 0.8
+            ORDER BY ir.confidence DESC, ir.source_item_id ASC, ir.relationship ASC
+            LIMIT 5
+        ) edge
+    """))
+    plan = result.scalar_one()
+    index_names = {node.get("Index Name") for node in _walk_plan_nodes(plan)}
+    assert "sar1069_relationship_source_lookup" in index_names
+    assert "sar1069_relationship_target_lookup" in index_names
 
 
 @pytest.mark.asyncio
