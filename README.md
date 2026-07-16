@@ -99,6 +99,25 @@ arq app.workers.worker.MediaWorkerSettings
 arq app.workers.worker.PalaceWorkerSettings
 ```
 
+### Disposable pgvector migration harness
+
+Run Alembic `upgrade -> downgrade -> upgrade` only against a disposable, loopback
+database whose name begins with `palace_migration_`. The harness requires an
+explicit destructive acknowledgement, verifies that pgvector is available after
+each upgrade, and runs cross-tenant foreign-key probes.
+
+```bash
+MIGRATION_TEST_ALLOW_DESTRUCTIVE=1 \
+MIGRATION_TEST_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_migration_local \
+  uv run --directory backend python ../scripts/verify_migration_roundtrip.py
+```
+
+The harness downgrades to the first intentionally irreversible data-shape
+migration (`016_temporal_fact_registry`) and then upgrades back to head. The CI
+service database is named `palace_migration_gate`; the harness rejects any other
+database name and refuses non-loopback hosts or an omitted acknowledgement, so it
+cannot run its destructive downgrade against a normal deployed database.
+
 Optional Firecrawl webpage scraping:
 
 - `WEBPAGE_SCRAPER_PROVIDER=local` keeps the built-in trafilatura/Playwright scraper.

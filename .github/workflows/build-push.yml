@@ -35,7 +35,7 @@ jobs:
         env:
           POSTGRES_USER: palace
           POSTGRES_PASSWORD: palace
-          POSTGRES_DB: palace_plan_gate
+          POSTGRES_DB: palace_migration_gate
         ports:
           - 5432:5432
         options: >-
@@ -65,9 +65,12 @@ jobs:
             tests/test_search.py \
             tests/test_memory_service.py \
             -q
-          PLAN_GATE_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_plan_gate \
+          PLAN_GATE_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_migration_gate \
             uv run --python 3.12 --with pytest --with pytest-asyncio python -m pytest \
             tests/test_retrieval_query_plans.py -q
+          MIGRATION_TEST_ALLOW_DESTRUCTIVE=1 \
+          MIGRATION_TEST_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_migration_gate \
+            uv run --python 3.12 python ../scripts/verify_migration_roundtrip.py
           uv run --python 3.12 python ../scripts/check_database_health.py
           uv run --python 3.12 python ../scripts/replay_retrieval_capture.py gate \
             --baseline tests/fixtures/retrieval_replay/baseline.ndjson \
