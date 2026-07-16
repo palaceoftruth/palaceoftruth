@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_id": "sar-1083-relationship-telemetry-canary-v1",
+  "artifact_metadata": {
+    "source": "SAR-1083",
+    "tenant_scope": "canary",
+    "synthetic": true,
+    "operator_approved": true,
+    "network_calls": false,
+    "raw_content_reported": false,
+    "cleanup": "retain"
+  },
+  "cases": [
+    {
+      "id": "valid_related",
+      "records": [
+        {
+          "alias": "telemetry-vocabulary",
+          "title": "Canary telemetry vocabulary",
+          "summary": "Synthetic canary vocabulary defines the labels provider, validation outcome, retry count, and fallback use. It exists only to exercise bounded relationship telemetry."
+        },
+        {
+          "alias": "metrics-reference",
+          "title": "Canary metrics reference",
+          "summary": "Synthetic canary metrics reference explains how the bounded telemetry vocabulary is exposed for a relationship extraction. It is a non-sensitive test record."
+        }
+      ],
+      "expected": {
+        "allowed_relationships": ["related_to", "expands_on", "example_of"],
+        "minimum_confidence": 0.5,
+        "minimum_edges": 1,
+        "validation_outcome": "valid"
+      }
+    },
+    {
+      "id": "empty_unrelated",
+      "records": [
+        {
+          "alias": "seasonal-palette",
+          "title": "Canary seasonal palette",
+          "summary": "Synthetic color swatches describe a neutral seasonal palette for an imaginary poster. This record contains no operational guidance."
+        },
+        {
+          "alias": "archival-index",
+          "title": "Canary archival index",
+          "summary": "Synthetic archive labels describe a fictional box-numbering convention for paper folders. This record is intentionally unrelated to colors."
+        }
+      ],
+      "expected": {
+        "allowed_relationships": ["none"],
+        "maximum_edges": 0,
+        "validation_outcome": "empty"
+      }
+    },
+    {
+      "id": "malformed_fallback_observation",
+      "records": [
+        {
+          "alias": "fallback-vocabulary",
+          "title": "Canary fallback vocabulary",
+          "summary": "Synthetic canary vocabulary names a retry and a fallback as bounded telemetry events. It deliberately contains no provider instruction or prompt-like content."
+        },
+        {
+          "alias": "fallback-reference",
+          "title": "Canary fallback reference",
+          "summary": "Synthetic canary reference describes observing retry and fallback attribution without requesting a malformed model response. It is safe test content."
+        }
+      ],
+      "expected_observations": {
+        "validation_outcomes": ["malformed", "provider_error", "timeout"],
+        "require_retry_or_fallback_attribution_if_observed": true,
+        "execution_mode": "observation_only"
+      }
+    }
+  ]
+}
