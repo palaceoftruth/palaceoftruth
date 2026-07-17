@@ -436,6 +436,70 @@ def test_record_mcp_request_audit_accepts_api_key_with_scope_header() -> None:
     assert len(session.mcp_audit_events) == 1
 
 
+def test_mcp_oauth_audit_uses_registered_client_identity_without_upserting_it() -> None:
+    session = FakeSession()
+    client = _build_app(session, auth_mode="mcp_oauth", mcp_client_key="hermes-iris", mcp_allowed_scopes=["write"])
+    client_id = uuid.uuid4()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_id = client_id
+        request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_client_name = "Registered Hermes Iris"
+        request.state.mcp_allowed_scopes = ["write"]
+        return "token"
+
+    client.app.dependency_overrides[verify_memory_auth] = override_verify
+    response = client.post(
+        "/api/v1/memory/mcp/audit",
+        json={
+            "client": {
+                "client_key": "hermes-iris",
+                "display_name": "Attacker-controlled display name",
+                "allowed_scopes": ["admin"],
+                "metadata": {"agent_scope_key": "vera"},
+            },
+            "operation": "retrieve_agent_memory",
+            "required_scope": "write",
+            "params_summary": {},
+            "status": "success",
+        },
+    )
+
+    assert response.status_code == 201
+    assert session.mcp_clients == []
+    assert session.mcp_audit_events[0]["client_id"] == client_id
+    assert session.mcp_audit_events[0]["client_name"] == "Registered Hermes Iris"
+
+
+def test_hermes_oauth_direct_retrieval_rejects_noncanonical_scope(monkeypatch) -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_client_key="hermes-iris", mcp_allowed_scopes=["read"])
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_agent_scope_key = "iris"
+        request.state.mcp_allowed_scopes = ["read"]
+        return "token"
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("noncanonical Hermes retrieval must not reach search")
+
+    client.app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.retrieve_memory", reject_if_retrieved)
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "scope probe", "scope": {"type": "tenant_shared", "key": None}},
+    )
+
+    assert response.status_code == 403
+    assert "canonical agent scope" in response.json()["detail"]
+
+
 def test_memory_whoami_returns_authenticated_tenant() -> None:
     client = _build_app(FakeSession())
 
