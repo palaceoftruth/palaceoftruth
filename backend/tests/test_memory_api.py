@@ -1679,6 +1679,29 @@ def test_memory_artifacts_reject_tenant_mismatch() -> None:
     assert response.json()["detail"]["retryable"] is False
 
 
+def test_memory_artifacts_reject_hermes_oauth_client(monkeypatch) -> None:
+    client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["write"])
+
+    async def reject_if_stored(*args, **kwargs):
+        raise AssertionError("Hermes OAuth artifact writes must not reach storage")
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_allowed_scopes = ["write"]
+        return "token"
+
+    client.app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_memory_artifact", reject_if_stored)
+
+    response = client.post("/api/v1/memory/artifacts", json=_legacy_payload())
+
+    assert response.status_code == 403
+    assert "canonical agent-scoped" in response.json()["detail"]
+
+
 def test_memory_job_endpoint_maps_completed_to_complete() -> None:
     job_id = uuid.uuid4()
     client = _build_app(

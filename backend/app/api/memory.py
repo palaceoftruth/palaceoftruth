@@ -843,6 +843,16 @@ async def create_memory_artifact(
 ) -> MemoryArtifactAcceptedResponse:
     if body.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
+    # Legacy artifacts are normalized into tenant_shared memory. Hermes OAuth
+    # clients are bound to an agent scope and must never use this bypass path.
+    if (
+        getattr(request.state, "auth_mode", None) == "mcp_oauth"
+        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Hermes OAuth clients must use canonical agent-scoped memory entries",
+        )
 
     result = await accept_memory_artifact(
         db,
