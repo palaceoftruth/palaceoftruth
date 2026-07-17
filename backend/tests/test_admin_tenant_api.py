@@ -126,6 +126,8 @@ class FakeSession:
                     "display_name": params["display_name"],
                     "allowed_scopes": json.loads(params["allowed_scopes"]),
                     "metadata": json.loads(params["metadata"]),
+                    "agent_scope_key": params["agent_scope_key"],
+                    "allow_all_agent_scope_reads": params["allow_all_agent_scope_reads"],
                     "oauth_client_secret_hash": params["secret_hash"],
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": params["token_ttl_seconds"],
@@ -543,6 +545,8 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
             "display_name": "Codex remote MCP",
             "allowed_scopes": ["read", "write"],
             "metadata": {"owner": "codex"},
+            "agent_scope_key": "iris",
+            "allow_all_agent_scope_reads": True,
             "token_ttl_seconds": 1800,
         },
     )
@@ -552,10 +556,13 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
     assert body["tenant_id"] == "tenant-a"
     assert body["client"]["client_key"] == "codex-remote"
     assert body["client"]["allowed_scopes"] == ["read", "write"]
+    assert body["client"]["agent_scope_key"] == "iris"
+    assert body["client"]["allow_all_agent_scope_reads"] is True
     assert isinstance(body["client_secret"], str) and len(body["client_secret"]) > 30
     stored = session.mcp_clients[0]
     assert stored["oauth_client_secret_hash"] != body["client_secret"]
     assert stored["oauth_token_ttl_seconds"] == 1800
+    assert stored["agent_scope_key"] == "iris"
 
 
 def test_register_mcp_oauth_client_rejects_duplicate_without_rotating_secret() -> None:

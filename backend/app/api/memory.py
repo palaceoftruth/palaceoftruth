@@ -470,37 +470,47 @@ async def record_mcp_request_audit(
     db: AsyncSession = Depends(get_db),
 ) -> McpRequestAuditResponse:
     tenant_id = request.state.tenant_id
-    if (
-        getattr(request.state, "auth_mode", None) == "mcp_oauth"
-        and body.client.client_key != getattr(request.state, "mcp_client_key", None)
-    ):
-        raise HTTPException(status_code=403, detail="MCP audit client does not match bearer token")
-    client_metadata = {
-        **body.client.metadata,
-        "allowed_scopes": body.client.allowed_scopes,
-    }
-    client_result = await db.execute(
-        text(
+    is_oauth = getattr(request.state, "auth_mode", None) == "mcp_oauth"
+    if is_oauth:
+        # A bearer token already identifies a registered confidential client.
+        # Audit payload fields are client-supplied observability data, not an
+        # authority to alter that client's server-owned grants or metadata.
+        client_id = getattr(request.state, "mcp_client_id", None)
+        client_key = getattr(request.state, "mcp_client_key", None)
+        if client_id is None or not isinstance(client_key, str) or not client_key:
+            raise HTTPException(status_code=403, detail="MCP bearer token has no registered client binding")
+        if body.client.client_key != client_key:
+            raise HTTPException(status_code=403, detail="MCP audit client does not match bearer token")
+        client_name = getattr(request.state, "mcp_client_name", None) or body.client.display_name
+    else:
+        client_metadata = {
+            **body.client.metadata,
+            "allowed_scopes": body.client.allowed_scopes,
+        }
+        client_result = await db.execute(
+            text(
+                """
+            INSERT INTO mcp_clients (tenant_id, client_key, display_name, allowed_scopes, metadata, last_seen_at)
+            VALUES (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb), CAST(:metadata AS jsonb), CURRENT_TIMESTAMP)
+            ON CONFLICT (tenant_id, client_key) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                allowed_scopes = EXCLUDED.allowed_scopes,
+                metadata = EXCLUDED.metadata,
+                last_seen_at = CURRENT_TIMESTAMP
+            RETURNING id
             """
-        INSERT INTO mcp_clients (tenant_id, client_key, display_name, allowed_scopes, metadata, last_seen_at)
-        VALUES (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb), CAST(:metadata AS jsonb), CURRENT_TIMESTAMP)
-        ON CONFLICT (tenant_id, client_key) DO UPDATE
-        SET display_name = EXCLUDED.display_name,
-            allowed_scopes = EXCLUDED.allowed_scopes,
-            metadata = EXCLUDED.metadata,
-            last_seen_at = CURRENT_TIMESTAMP
-        RETURNING id
-        """
-        ),
-        {
-            "tenant_id": tenant_id,
-            "client_key": body.client.client_key,
-            "display_name": body.client.display_name,
-            "allowed_scopes": json.dumps(body.client.allowed_scopes),
-            "metadata": json.dumps(client_metadata),
-        },
-    )
-    client_id = client_result.mappings().one()["id"]
+            ),
+            {
+                "tenant_id": tenant_id,
+                "client_key": body.client.client_key,
+                "display_name": body.client.display_name,
+                "allowed_scopes": json.dumps(body.client.allowed_scopes),
+                "metadata": json.dumps(client_metadata),
+            },
+        )
+        client_id = client_result.mappings().one()["id"]
+        client_key = body.client.client_key
+        client_name = body.client.display_name
     audit_result = await db.execute(
         text(
             """
@@ -516,8 +526,8 @@ async def record_mcp_request_audit(
         {
             "tenant_id": tenant_id,
             "client_id": client_id,
-            "client_key": body.client.client_key,
-            "client_name": body.client.display_name,
+            "client_key": client_key,
+            "client_name": client_name,
             "operation": body.operation,
             "required_scope": body.required_scope,
             "params_summary": json.dumps(body.params_summary),
@@ -843,6 +853,16 @@ async def create_memory_artifact(
 ) -> MemoryArtifactAcceptedResponse:
     if body.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
+    # Legacy artifacts are normalized into tenant_shared memory. Hermes OAuth
+    # clients are bound to an agent scope and must never use this bypass path.
+    if (
+        getattr(request.state, "auth_mode", None) == "mcp_oauth"
+        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Hermes OAuth clients must use canonical agent-scoped memory entries",
+        )
 
     result = await accept_memory_artifact(
         db,
@@ -974,6 +994,19 @@ async def retrieve_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryRetrieveResponse:
+    is_hermes_client = (
+        getattr(request.state, "auth_mode", None) == "mcp_oauth"
+        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
+    )
+    if is_hermes_client:
+        bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
+        if not isinstance(bound_agent_scope_key, str) or not bound_agent_scope_key:
+            raise HTTPException(status_code=403, detail="Hermes OAuth client has no canonical agent binding")
+        if body.scope.type != "agent" or body.scope.key != bound_agent_scope_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Hermes OAuth client must retrieve through its canonical agent scope",
+            )
     started = perf_counter()
     request_params = {
         "limit": body.limit,
