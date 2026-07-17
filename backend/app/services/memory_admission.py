@@ -136,15 +136,17 @@ def _scope_write_decision(
 ) -> str | None:
     if auth_mode not in {"mcp_oauth", "api_key"}:
         return None
-    if "admin" in allowed_scopes:
-        return None
     is_hermes_oauth_client = bool(mcp_client_key and mcp_client_key.startswith("hermes-"))
     if is_hermes_oauth_client and scope.type == "tenant_shared":
         return "hermes_agent_write_requires_agent_scope"
+    # The broad admin capability is never a bypass for a Hermes OAuth client:
+    # its server-owned canonical agent binding remains the write authority.
+    if "admin" in allowed_scopes and not is_hermes_oauth_client:
+        return None
     if scope.type == "tenant_shared":
         return None
     required_grant = _SCOPED_WRITE_GRANTS[scope.type]
-    if required_grant not in allowed_scopes:
+    if required_grant not in allowed_scopes and (is_hermes_oauth_client or "admin" not in allowed_scopes):
         return f"missing_{required_grant.replace(':', '_')}"
     if is_hermes_oauth_client:
         # OAuth client names are not authority. The server-owned binding must
