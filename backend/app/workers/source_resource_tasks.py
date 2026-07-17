@@ -29,6 +29,7 @@ from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
     claim_refresh_lease,
+    decide_alias,
     persist_refresh_observation,
     refresh_lease_job_id,
 )
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _host_fairness = HostFairness()
 _ROBOTS_CACHE_TTL = timedelta(hours=1)
+_MAX_REDIRECTS = 5
 
 
 async def claim_due_source_resources(
@@ -142,22 +144,13 @@ async def refresh_source_resource(
         etag = resource.validator_etag
         last_modified = resource.validator_last_modified
 
-    async with _host_fairness.acquire(url):
-        cached_robots = (
-            resource.robots_allowed is not None
-            and resource.robots_cached_at is not None
-            and resource.robots_cached_at >= now - _ROBOTS_CACHE_TTL
-        )
-        robots = (
-            RobotsDecision(bool(resource.robots_allowed), resource.robots_decision or "robots_cached")
-            if cached_robots
-            else await evaluate_robots(url)
-        )
-        result = (
-            await fetch_http_resource(url, etag=etag, last_modified=last_modified)
-            if robots.allowed
-            else None
-        )
+    result, robots = await _fetch_with_robots(
+        resource=resource,
+        url=url,
+        etag=etag,
+        last_modified=last_modified,
+        now=now,
+    )
 
     async with async_session() as db:
         # Do not reuse the pre-fetch timestamp here: a slow robots or document
@@ -217,6 +210,20 @@ async def refresh_source_resource(
                     robots_decision=robots.decision,
                     robots_cached_at=now,
                 )
+        elif result.outcome == "not_found":
+            # A single 404 is often eventual consistency or a temporary edge
+            # response.  Only a second consecutive 404 tombstones the source.
+            observation = RefreshObservation(
+                outcome="gone" if resource.last_failure_reason == "http_404" else "failure",
+                http_status=result.status_code,
+                validator_etag=result.etag,
+                validator_last_modified=result.last_modified,
+                failure_reason=result.failure_reason,
+                retry_after_seconds=result.retry_after_seconds,
+                robots_allowed=True,
+                robots_decision=robots.decision,
+                robots_cached_at=now,
+            )
         else:
             observation = RefreshObservation(
                 outcome=result.outcome,  # type: ignore[arg-type]
@@ -272,7 +279,14 @@ async def _activate_resource_content(
     item.metadata_ = {**(item.metadata_ or {}), "source_resource_id": str(resource.id), "final_url": final_url}
     item.status = "ready"
     await db.flush()
-    await backfill_source_records_and_chunks(db, tenant_id=resource.tenant_id, item_ids=[item.id], limit=1, dry_run=False)
+    await backfill_source_records_and_chunks(
+        db,
+        tenant_id=resource.tenant_id,
+        item_ids=[item.id],
+        limit=1,
+        dry_run=False,
+        commit=False,
+    )
     record = await db.scalar(
         select(SourceRecord)
         .where(SourceRecord.tenant_id == resource.tenant_id)
@@ -283,3 +297,43 @@ async def _activate_resource_content(
     if record is None:
         raise RuntimeError("source record activation did not create a version")
     return record.id
+
+
+async def _fetch_with_robots(
+    *,
+    resource: SourceResource,
+    url: str,
+    etag: str | None,
+    last_modified: str | None,
+    now: datetime,
+):
+    """Fetch only same-origin, robots-allowed redirect targets."""
+
+    current_url = url
+    cached_robots = (
+        resource.robots_allowed is not None
+        and resource.robots_cached_at is not None
+        and resource.robots_cached_at >= now - _ROBOTS_CACHE_TTL
+    )
+    for hop in range(_MAX_REDIRECTS + 1):
+        robots = (
+            RobotsDecision(bool(resource.robots_allowed), resource.robots_decision or "robots_cached")
+            if cached_robots and hop == 0
+            else await evaluate_robots(current_url)
+        )
+        if not robots.allowed:
+            return None, robots
+        async with _host_fairness.acquire(current_url):
+            result = await fetch_http_resource(current_url, etag=etag, last_modified=last_modified)
+        if result.outcome != "redirect":
+            return result, robots
+        if result.redirect_url is None:
+            return result, robots
+        alias = decide_alias(canonical_url=resource.canonical_url, observed_url=result.redirect_url, signal="final")
+        if alias.decision != "accepted":
+            return (
+                type(result)("failure", result.status_code, final_url=result.redirect_url, failure_reason=alias.reason),
+                robots,
+            )
+        current_url = result.redirect_url
+    return type(result)("failure", result.status_code, final_url=current_url, failure_reason="too_many_redirects"), robots

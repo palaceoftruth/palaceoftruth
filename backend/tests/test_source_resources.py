@@ -181,6 +181,22 @@ def test_failure_backoff_honors_retry_after_but_never_exceeds_refresh_slo() -> N
     assert resource.backoff_until == NOW + timedelta(seconds=300)
 
 
+def test_repeated_404_can_tombstone_only_after_a_prior_404() -> None:
+    resource = make_resource()
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=404, failure_reason="http_404"),
+        checked_at=NOW,
+    )
+    assert resource.status == "unreachable"
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="gone", http_status=404, failure_reason="http_404"),
+        checked_at=NOW + timedelta(seconds=60),
+    )
+    assert resource.status == "gone"
+
+
 def test_not_modified_verifies_without_collapsing_temporal_meanings() -> None:
     record_id = uuid.uuid4()
     resource = make_resource(

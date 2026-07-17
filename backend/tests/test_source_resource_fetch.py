@@ -47,7 +47,7 @@ async def test_conditional_get_uses_last_modified_when_no_etag() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "outcome"), [(404, "gone"), (410, "gone"), (429, "failure"), (503, "failure")])
+@pytest.mark.parametrize(("status", "outcome"), [(404, "not_found"), (410, "gone"), (429, "failure"), (503, "failure")])
 async def test_non_success_responses_preserve_a_typed_outcome(status: int, outcome: str) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(status)
@@ -69,3 +69,17 @@ async def test_retry_after_is_preserved_for_bounded_worker_backoff() -> None:
 
     assert result.retry_after_seconds == 120
     assert parse_retry_after("not-a-date") is None
+
+
+@pytest.mark.asyncio
+async def test_redirect_is_returned_for_worker_policy_validation() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/document":
+            return httpx.Response(302, headers={"Location": "/moved"})
+        raise AssertionError("fetch helper must not follow the redirect")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+        result = await fetch_http_resource("https://example.test/document", client=client)
+
+    assert result.outcome == "redirect"
+    assert result.redirect_url == "https://example.test/moved"

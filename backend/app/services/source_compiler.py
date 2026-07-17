@@ -489,6 +489,7 @@ async def backfill_source_records_and_chunks(
     item_ids: Iterable[uuid.UUID] | None = None,
     limit: int = 500,
     dry_run: bool = True,
+    commit: bool = True,
 ) -> SourceBackfillReport:
     rows = (await db.scalars(_backfill_item_query(tenant_id, item_ids=item_ids, limit=limit))).all()
     report, projections = plan_source_backfill(rows, tenant_id=tenant_id, dry_run=dry_run)
@@ -511,7 +512,12 @@ async def backfill_source_records_and_chunks(
         claims_marked_stale += invalidation.claims_marked_stale
         for chunk in projection.chunks:
             await _upsert_source_chunk(db, projection=projection, source_record_id=record_id, chunk=chunk)
-    await db.commit()
+    # Most callers run a standalone compiler job and want the historical
+    # commit behavior.  Resource refresh activation composes this projection
+    # with its resource pointer and audit row, so it deliberately keeps all
+    # three changes in one transaction.
+    if commit:
+        await db.commit()
     return SourceBackfillReport(
         tenant_id=report.tenant_id,
         dry_run=report.dry_run,

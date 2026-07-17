@@ -26,6 +26,7 @@ class HttpRefreshResult:
     last_modified: str | None = None
     failure_reason: str | None = None
     retry_after_seconds: int | None = None
+    redirect_url: str | None = None
 
 
 def parse_retry_after(value: str | None, *, now: datetime | None = None) -> int | None:
@@ -66,9 +67,11 @@ async def fetch_http_resource(
         headers["If-Modified-Since"] = last_modified
 
     owns_client = client is None
-    request_client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True)
+    # Redirects are followed by the worker one hop at a time so each target
+    # receives its own robots and source-identity check before it is fetched.
+    request_client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False)
     try:
-        response = await request_client.get(url, headers=headers)
+        response = await request_client.get(url, headers=headers, follow_redirects=False)
     except httpx.TimeoutException:
         return HttpRefreshResult("failure", None, failure_reason="timeout")
     except httpx.RequestError as exc:
@@ -79,6 +82,13 @@ async def fetch_http_resource(
 
     final_url = str(response.url)
     response_headers = response.headers
+    if 300 <= response.status_code < 400 and response_headers.get("Location"):
+        return HttpRefreshResult(
+            "redirect",
+            response.status_code,
+            final_url=final_url,
+            redirect_url=str(response.url.join(response_headers["Location"])),
+        )
     if response.status_code == 304:
         return HttpRefreshResult(
             "not_modified",
@@ -87,7 +97,11 @@ async def fetch_http_resource(
             etag=response_headers.get("ETag") or etag,
             last_modified=response_headers.get("Last-Modified") or last_modified,
         )
-    if response.status_code in {404, 410}:
+    if response.status_code == 404:
+        # The worker requires a repeated observation before tombstoning a
+        # resource; one transient 404 only enters bounded retry/backoff.
+        return HttpRefreshResult("not_found", 404, final_url=final_url, failure_reason="http_404")
+    if response.status_code == 410:
         return HttpRefreshResult("gone", response.status_code, final_url=final_url, failure_reason=f"http_{response.status_code}")
     if response.status_code < 200 or response.status_code >= 300:
         return HttpRefreshResult(
