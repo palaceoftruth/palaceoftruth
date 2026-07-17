@@ -567,6 +567,8 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
             GROUP BY next_snapshot->>'outcome', next_snapshot->>'validator', next_snapshot->>'change'
             """,
         )
+        change_to_index_count = 0
+        change_to_index_sum = 0.0
         for row in source_refresh_rows:
             labels = {
                 "outcome": _allowlisted_label(row["outcome"], frozenset({"success", "not_modified", "failure", "gone"})),
@@ -576,9 +578,11 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
             builder.metric("palace_source_refreshes_total", "Durably committed HTTP source refreshes.", "counter", row["count"], labels)
             builder.metric("palace_source_refresh_duration_seconds_sum", "Durable source refresh latency sum.", "counter", row["refresh_duration_sum"], labels)
             builder.metric("palace_source_refresh_duration_seconds_count", "Durable source refresh latency sample count.", "counter", row["count"], labels)
-            if int(row["change_to_index_count"] or 0):
-                builder.metric("palace_source_change_to_index_duration_seconds_sum", "Durable changed-content activation latency sum.", "counter", row["change_to_index_sum"])
-                builder.metric("palace_source_change_to_index_duration_seconds_count", "Durable changed-content activation latency sample count.", "counter", row["change_to_index_count"])
+            change_to_index_count += int(row["change_to_index_count"] or 0)
+            change_to_index_sum += float(row["change_to_index_sum"] or 0)
+        if change_to_index_count:
+            builder.metric("palace_source_change_to_index_duration_seconds_sum", "Durable changed-content activation latency sum.", "counter", change_to_index_sum)
+            builder.metric("palace_source_change_to_index_duration_seconds_count", "Durable changed-content activation latency sample count.", "counter", change_to_index_count)
 
         dirty_rows = await _query_rows(
             db,

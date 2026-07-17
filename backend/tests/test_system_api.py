@@ -93,7 +93,10 @@ class MetricsSession:
         sql = str(statement).lower()
         if "from source_resource_audit_snapshots" in sql:
             return _MappingsResult(
-                [{"outcome": "success", "validator": "etag", "change": "changed", "count": 1, "refresh_duration_sum": 0.3, "change_to_index_count": 1, "change_to_index_sum": 0.02}]
+                [
+                    {"outcome": "success", "validator": "etag", "change": "changed", "count": 1, "refresh_duration_sum": 0.3, "change_to_index_count": 1, "change_to_index_sum": 0.02},
+                    {"outcome": "success", "validator": "last_modified", "change": "changed", "count": 1, "refresh_duration_sum": 0.2, "change_to_index_count": 1, "change_to_index_sum": 0.01},
+                ]
             )
         if "from job_attempts" in sql:
             return _MappingsResult(
@@ -409,7 +412,7 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert 'palace_source_refresh_due{kind="http",status="active"} 3' in body
     assert 'palace_source_refreshes_total{change="changed",outcome="success",validator="etag"} 1' in body
     assert 'palace_source_refresh_duration_seconds_count{change="changed",outcome="success",validator="etag"} 1' in body
-    assert 'palace_source_change_to_index_duration_seconds_count 1' in body
+    assert body.count("palace_source_change_to_index_duration_seconds_count 2") == 1
     assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert 'palace_arq_worker_available{key="memory",queue="arq:queue"} 0' in body
