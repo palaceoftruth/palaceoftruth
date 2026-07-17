@@ -12,6 +12,17 @@ from app.services.memory_telemetry import memory_telemetry_snapshot
 from app.services.queue_telemetry import build_worker_backpressure
 from app.services.relationship_telemetry import relationship_telemetry_snapshot
 
+_SOURCE_DURATION_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+
+
+def _source_duration_bucket_select(*, field: str, prefix: str) -> str:
+    """Build fixed, replica-aggregatable histogram bucket projections."""
+
+    return ",\n              ".join(
+        f"COUNT(*) FILTER (WHERE ({field})::double precision <= {boundary}) AS {prefix}_{_format_value(boundary).replace('.', '_')}"
+        for boundary in _SOURCE_DURATION_BUCKETS
+    )
+
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _SOURCE_TYPE_LABEL_ALLOWLIST = frozenset(
     {
@@ -551,17 +562,25 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 labels,
             )
 
+        refresh_bucket_select = _source_duration_bucket_select(
+            field="next_snapshot->>'refresh_duration_seconds'", prefix="refresh_duration_le"
+        )
+        change_to_index_bucket_select = _source_duration_bucket_select(
+            field="next_snapshot->>'change_to_index_seconds'", prefix="change_to_index_le"
+        )
         source_refresh_rows = await _query_rows(
             db,
-            """
+            f"""
             SELECT
               next_snapshot->>'outcome' AS outcome,
               next_snapshot->>'validator' AS validator,
               next_snapshot->>'change' AS change,
               COUNT(*) AS count,
               COALESCE(SUM((next_snapshot->>'refresh_duration_seconds')::double precision), 0) AS refresh_duration_sum,
+              {refresh_bucket_select},
               COUNT(next_snapshot->>'change_to_index_seconds') AS change_to_index_count,
-              COALESCE(SUM((next_snapshot->>'change_to_index_seconds')::double precision), 0) AS change_to_index_sum
+              COALESCE(SUM((next_snapshot->>'change_to_index_seconds')::double precision), 0) AS change_to_index_sum,
+              {change_to_index_bucket_select}
             FROM source_resource_audit_snapshots
             WHERE event_kind = 'refresh_telemetry'
             GROUP BY next_snapshot->>'outcome', next_snapshot->>'validator', next_snapshot->>'change'
@@ -569,6 +588,7 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
         )
         change_to_index_count = 0
         change_to_index_sum = 0.0
+        change_to_index_bucket_counts = [0] * len(_SOURCE_DURATION_BUCKETS)
         for row in source_refresh_rows:
             labels = {
                 "outcome": _allowlisted_label(row["outcome"], frozenset({"success", "not_modified", "failure", "gone"})),
@@ -576,13 +596,31 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 "change": _allowlisted_label(row["change"], frozenset({"changed", "unchanged", "unknown"})),
             }
             builder.metric("palace_source_refreshes_total", "Durably committed HTTP source refreshes.", "counter", row["count"], labels)
-            builder.metric("palace_source_refresh_duration_seconds_sum", "Durable source refresh latency sum.", "counter", row["refresh_duration_sum"], labels)
-            builder.metric("palace_source_refresh_duration_seconds_count", "Durable source refresh latency sample count.", "counter", row["count"], labels)
+            builder.histogram(
+                "palace_source_refresh_duration_seconds",
+                "Durable source refresh latency using fixed replica-aggregatable buckets.",
+                buckets=_SOURCE_DURATION_BUCKETS,
+                counts=[int(row.get(f"refresh_duration_le_{_format_value(boundary).replace('.', '_')}") or 0) for boundary in _SOURCE_DURATION_BUCKETS],
+                count=int(row["count"]),
+                value_sum=float(row["refresh_duration_sum"]),
+                labels=labels,
+            )
             change_to_index_count += int(row["change_to_index_count"] or 0)
             change_to_index_sum += float(row["change_to_index_sum"] or 0)
+            for index, boundary in enumerate(_SOURCE_DURATION_BUCKETS):
+                change_to_index_bucket_counts[index] += int(
+                    row.get(f"change_to_index_le_{_format_value(boundary).replace('.', '_')}") or 0
+                )
         if change_to_index_count:
-            builder.metric("palace_source_change_to_index_duration_seconds_sum", "Durable changed-content activation latency sum.", "counter", change_to_index_sum)
-            builder.metric("palace_source_change_to_index_duration_seconds_count", "Durable changed-content activation latency sample count.", "counter", change_to_index_count)
+            builder.histogram(
+                "palace_source_change_to_index_duration_seconds",
+                "Durable changed-content activation latency using fixed replica-aggregatable buckets.",
+                buckets=_SOURCE_DURATION_BUCKETS,
+                counts=change_to_index_bucket_counts,
+                count=change_to_index_count,
+                value_sum=change_to_index_sum,
+                labels={},
+            )
 
         dirty_rows = await _query_rows(
             db,
