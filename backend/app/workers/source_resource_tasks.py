@@ -23,6 +23,7 @@ from app.models.source_resource import SourceResource
 from app.services.chunker import chunk_text
 from app.services.source_compiler import backfill_source_records_and_chunks
 from app.services.source_resource_fetch import fetch_http_resource
+from app.services.source_resource_fairness import HostFairness
 from app.services.source_resource_robots import evaluate_robots
 from app.services.source_resources import (
     RefreshLease,
@@ -34,6 +35,8 @@ from app.services.source_resources import (
 from app.utils.hash import compute_content_hash
 
 logger = logging.getLogger(__name__)
+
+_host_fairness = HostFairness()
 
 
 async def claim_due_source_resources(
@@ -138,12 +141,13 @@ async def refresh_source_resource(
         etag = resource.validator_etag
         last_modified = resource.validator_last_modified
 
-    robots = await evaluate_robots(url)
-    result = (
-        await fetch_http_resource(url, etag=etag, last_modified=last_modified)
-        if robots.allowed
-        else None
-    )
+    async with _host_fairness.acquire(url):
+        robots = await evaluate_robots(url)
+        result = (
+            await fetch_http_resource(url, etag=etag, last_modified=last_modified)
+            if robots.allowed
+            else None
+        )
 
     async with async_session() as db:
         resource = await db.scalar(
