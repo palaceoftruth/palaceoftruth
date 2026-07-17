@@ -11,13 +11,26 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import trafilatura
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session
+from app.models.item import Item
+from app.models.palace import SourceRecord
 from app.models.source_resource import SourceResource
-from app.services.source_resources import RefreshLease, claim_refresh_lease, refresh_lease_job_id
+from app.services.chunker import chunk_text
+from app.services.source_compiler import backfill_source_records_and_chunks
+from app.services.source_resource_fetch import fetch_http_resource
+from app.services.source_resources import (
+    RefreshLease,
+    RefreshObservation,
+    claim_refresh_lease,
+    persist_refresh_observation,
+    refresh_lease_job_id,
+)
+from app.utils.hash import compute_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +116,128 @@ async def refresh_source_resource(
     tenant_id: str,
     lease_token: str,
 ) -> None:
-    """Reserved per-resource entrypoint; no network fetch occurs in this slice."""
+    """Refresh one leased HTTP resource without replacing its last-good version."""
 
-    # Parse identifiers early so a malformed queued payload cannot be treated as
-    # a future provider request.  The next child task owns HTTP policy.
-    uuid.UUID(resource_id)
-    uuid.UUID(lease_token)
-    logger.info(
-        "source resource refresh provider is not installed resource_id=%s tenant_id=%s",
-        resource_id,
-        tenant_id,
+    parsed_resource_id = uuid.UUID(resource_id)
+    parsed_lease_token = uuid.UUID(lease_token)
+    now = datetime.now(timezone.utc)
+    async with async_session() as db:
+        resource = await db.scalar(
+            select(SourceResource)
+            .where(SourceResource.id == parsed_resource_id)
+            .where(SourceResource.tenant_id == tenant_id)
+            .where(SourceResource.refresh_lease_token == parsed_lease_token)
+            .where(SourceResource.refresh_lease_expires_at > now)
+            .with_for_update()
+        )
+        if resource is None:
+            logger.info("source resource refresh ignored stale lease resource_id=%s", resource_id)
+            return
+        url = resource.canonical_url
+        etag = resource.validator_etag
+        last_modified = resource.validator_last_modified
+
+    result = await fetch_http_resource(url, etag=etag, last_modified=last_modified)
+
+    async with async_session() as db:
+        resource = await db.scalar(
+            select(SourceResource)
+            .where(SourceResource.id == parsed_resource_id)
+            .where(SourceResource.tenant_id == tenant_id)
+            .where(SourceResource.refresh_lease_token == parsed_lease_token)
+            .where(SourceResource.refresh_lease_expires_at > now)
+            .with_for_update()
+        )
+        if resource is None:
+            logger.info("source resource result ignored after lease expiry resource_id=%s", resource_id)
+            return
+
+        if result.outcome == "success":
+            assert result.body is not None
+            digest = compute_content_hash(result.body.decode("utf-8", errors="replace"))
+            if digest == resource.content_digest:
+                observation = RefreshObservation(
+                    outcome="not_modified",
+                    http_status=result.status_code,
+                    content_digest=digest,
+                    validator_etag=result.etag,
+                    validator_last_modified=result.last_modified,
+                )
+            else:
+                source_record_id = await _activate_resource_content(
+                    db,
+                    resource=resource,
+                    content=result.body.decode("utf-8", errors="replace"),
+                    final_url=result.final_url or resource.canonical_url,
+                )
+                observation = RefreshObservation(
+                    outcome="success",
+                    http_status=result.status_code,
+                    source_record_id=source_record_id,
+                    content_digest=digest,
+                    validator_etag=result.etag,
+                    validator_last_modified=result.last_modified,
+                    captured_at=datetime.now(timezone.utc),
+                )
+        else:
+            observation = RefreshObservation(
+                outcome=result.outcome,  # type: ignore[arg-type]
+                http_status=result.status_code,
+                validator_etag=result.etag,
+                validator_last_modified=result.last_modified,
+                failure_reason=result.failure_reason,
+            )
+
+        await persist_refresh_observation(
+            db,
+            resource=resource,
+            tenant_id=tenant_id,
+            observation=observation,
+        )
+        resource.refresh_lease_token = None
+        resource.refresh_lease_expires_at = None
+        await db.commit()
+
+
+async def _activate_resource_content(
+    db: AsyncSession,
+    *,
+    resource: SourceResource,
+    content: str,
+    final_url: str,
+) -> uuid.UUID:
+    """Update the stable resource Item and append its SourceRecord version."""
+
+    readable_content = trafilatura.extract(content, include_comments=False, include_tables=True, output_format="txt") or content
+    current_record = None
+    if resource.last_successful_source_record_id is not None:
+        current_record = await db.get(SourceRecord, resource.last_successful_source_record_id)
+    item = await db.get(Item, current_record.item_id) if current_record is not None else None
+    if item is None:
+        item = Item(
+            tenant_id=resource.tenant_id,
+            source_type="webpage",
+            source_url=resource.canonical_url,
+            title=final_url,
+            status="ready",
+        )
+        db.add(item)
+        await db.flush()
+
+    item.raw_content = readable_content
+    item.content_hash = compute_content_hash(readable_content)
+    item.content_chunks = chunk_text(readable_content)
+    item.metadata_ = {**(item.metadata_ or {}), "source_resource_id": str(resource.id), "final_url": final_url}
+    item.status = "ready"
+    await db.flush()
+    await backfill_source_records_and_chunks(db, tenant_id=resource.tenant_id, item_ids=[item.id], limit=1, dry_run=False)
+    record = await db.scalar(
+        select(SourceRecord)
+        .where(SourceRecord.tenant_id == resource.tenant_id)
+        .where(SourceRecord.item_id == item.id)
+        .order_by(SourceRecord.updated_at.desc(), SourceRecord.created_at.desc())
+        .limit(1)
     )
+    if record is None:
+        raise RuntimeError("source record activation did not create a version")
+    return record.id
