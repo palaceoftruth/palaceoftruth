@@ -1,6 +1,6 @@
 """Bind Hermes OAuth clients to canonical agent scopes.
 
-Revision ID: 047_mcp_client_agent_scope_bindings
+Revision ID: 047_mcp_agent_bindings
 Revises: 046_relationship_graph_lookup_indexes
 Create Date: 2026-07-17
 """
@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "047_mcp_client_agent_scope_bindings"
+revision: str = "047_mcp_agent_bindings"
 down_revision: Union[str, None] = "046"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
