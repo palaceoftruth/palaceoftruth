@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 import trafilatura
 from sqlalchemy import or_, select
@@ -25,6 +26,7 @@ from app.services.source_compiler import backfill_source_records_and_chunks
 from app.services.source_resource_fetch import fetch_http_resource
 from app.services.source_resource_fairness import HostFairness
 from app.services.source_resource_robots import RobotsDecision, evaluate_robots
+from app.services.source_refresh_telemetry import record_source_refresh
 from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
@@ -126,6 +128,7 @@ async def refresh_source_resource(
 ) -> None:
     """Refresh one leased HTTP resource without replacing its last-good version."""
 
+    refresh_started = monotonic()
     parsed_resource_id = uuid.UUID(resource_id)
     parsed_lease_token = uuid.UUID(lease_token)
     now = datetime.now(timezone.utc)
@@ -177,6 +180,7 @@ async def refresh_source_resource(
         if result is not None and result.final_url:
             await _record_final_alias(db, resource=resource, final_url=result.final_url)
 
+        change_to_index_seconds: float | None = None
         if result is None:
             observation = RefreshObservation(
                 outcome="failure",
@@ -200,12 +204,14 @@ async def refresh_source_resource(
                     robots_cached_at=now,
                 )
             else:
+                change_detected_at = monotonic()
                 source_record_id = await _activate_resource_content(
                     db,
                     resource=resource,
                     content=result.body.decode("utf-8", errors="replace"),
                     final_url=result.final_url or resource.canonical_url,
                 )
+                change_to_index_seconds = monotonic() - change_detected_at
                 observation = RefreshObservation(
                     outcome="success",
                     http_status=result.status_code,
@@ -254,6 +260,23 @@ async def refresh_source_resource(
         resource.refresh_lease_token = None
         resource.refresh_lease_expires_at = None
         await db.commit()
+
+    validator = "etag" if etag else "last_modified" if last_modified else "none"
+    change = "changed" if observation.outcome == "success" else "unchanged" if observation.outcome == "not_modified" else "unknown"
+    record_source_refresh(
+        outcome=observation.outcome,
+        validator=validator,
+        change=change,
+        refresh_duration_seconds=monotonic() - refresh_started,
+        change_to_index_seconds=change_to_index_seconds,
+    )
+    logger.info(
+        "source_refresh_committed resource_id=%s outcome=%s change=%s source_record_id=%s",
+        resource_id,
+        observation.outcome,
+        change,
+        observation.source_record_id,
+    )
 
 
 async def _activate_resource_content(

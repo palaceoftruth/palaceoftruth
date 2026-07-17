@@ -19,6 +19,7 @@ from app.services.relationship_telemetry import (
     record_relationship_extraction,
     reset_relationship_telemetry_for_tests,
 )
+from app.services.source_refresh_telemetry import record_source_refresh, reset_source_refresh_telemetry_for_tests
 
 
 class _ScalarResult:
@@ -310,6 +311,7 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
 def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     reset_memory_telemetry_for_tests()
     reset_relationship_telemetry_for_tests()
+    reset_source_refresh_telemetry_for_tests()
     record_semantic_recall(status="empty", scope_type="agent")
     record_retention_extraction(status="written", mode="extracted_write")
     record_scope_guard_violation(reason="agent_scope_not_allowlisted")
@@ -349,6 +351,13 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
         retry_count=2,
         duration_seconds=0.25,
         edges_extracted=0,
+    )
+    record_source_refresh(
+        outcome="success",
+        validator="etag",
+        change="changed",
+        refresh_duration_seconds=0.3,
+        change_to_index_seconds=0.02,
     )
     client = _metrics_client(MetricsSession())
 
@@ -403,6 +412,9 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert 'palace_retrieval_results_total{endpoint="retrieve_agent",freshness="stale",rank_band="1",source_support_state="unknown",trust_class="curated_memory"} 1' in body
     assert 'palace_embedding_duration_seconds_bucket{failure_kind="timeout",input_type="query",le="0.25",provider="openai",status="retry"} 1' in body
     assert 'palace_source_refresh_due{kind="http",status="active"} 3' in body
+    assert 'palace_source_refreshes_total{change="changed",outcome="success",validator="etag"} 1' in body
+    assert 'palace_source_refresh_duration_seconds_count{change="changed",outcome="success",validator="etag"} 1' in body
+    assert 'palace_source_change_to_index_duration_seconds_count 1' in body
     assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert 'palace_arq_worker_available{key="memory",queue="arq:queue"} 0' in body

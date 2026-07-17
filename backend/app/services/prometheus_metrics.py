@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.services.memory_telemetry import memory_telemetry_snapshot
 from app.services.queue_telemetry import build_worker_backpressure
 from app.services.relationship_telemetry import relationship_telemetry_snapshot
+from app.services.source_refresh_telemetry import source_refresh_telemetry_snapshot
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _SOURCE_TYPE_LABEL_ALLOWLIST = frozenset(
@@ -256,6 +257,38 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
     }
     for snapshot_name, labels, state in snapshot["histograms"]:
         metric_name, help_text, label_names = histogram_specs[snapshot_name]
+        builder.histogram(
+            metric_name,
+            help_text,
+            buckets=state["buckets"],
+            counts=state["counts"],
+            count=state["count"],
+            value_sum=state["sum"],
+            labels=dict(zip(label_names, labels, strict=True)),
+        )
+    source_refresh_snapshot = source_refresh_telemetry_snapshot()
+    for (outcome, validator, change), count in source_refresh_snapshot["counts"]:
+        builder.metric(
+            "palace_source_refreshes_total",
+            "Committed HTTP source refreshes by bounded outcome, validator, and change classification.",
+            "counter",
+            count,
+            {"outcome": outcome, "validator": validator, "change": change},
+        )
+    source_histogram_specs = {
+        "refresh_duration": (
+            "palace_source_refresh_duration_seconds",
+            "HTTP source refresh duration through committed observation.",
+            ("outcome", "validator", "change"),
+        ),
+        "change_to_index_duration": (
+            "palace_source_change_to_index_duration_seconds",
+            "Changed-content latency from digest detection to completed SourceRecord and SourceChunk activation.",
+            (),
+        ),
+    }
+    for snapshot_name, labels, state in source_refresh_snapshot["histograms"]:
+        metric_name, help_text, label_names = source_histogram_specs[snapshot_name]
         builder.histogram(
             metric_name,
             help_text,
