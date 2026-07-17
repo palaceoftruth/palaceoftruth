@@ -125,12 +125,30 @@ class McpOAuthClientRegisterRequest(BaseModel):
     display_name: str
     allowed_scopes: list[McpOperationScope] = Field(default_factory=lambda: ["read"])
     metadata: dict[str, Any] = Field(default_factory=dict)
+    agent_scope_key: str | None = None
+    allow_all_agent_scope_reads: bool = False
     token_ttl_seconds: int = Field(3600, ge=60, le=86400)
 
     @field_validator("client_key", "display_name")
     @classmethod
     def required_strings_not_blank(cls, value: str, info) -> str:
         return _validate_not_blank(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_agent_scope_read_binding(self) -> "McpOAuthClientRegisterRequest":
+        if self.allow_all_agent_scope_reads and not self.agent_scope_key:
+            raise ValueError("allow_all_agent_scope_reads requires agent_scope_key")
+        return self
+
+
+class McpOAuthClientAgentScopeBindingRequest(BaseModel):
+    agent_scope_key: str
+    allow_all_agent_scope_reads: bool = False
+
+    @field_validator("agent_scope_key")
+    @classmethod
+    def agent_scope_key_not_blank(cls, value: str) -> str:
+        return _validate_not_blank(value, "agent_scope_key")
 
 
 class McpOAuthClientSummary(BaseModel):
@@ -140,6 +158,8 @@ class McpOAuthClientSummary(BaseModel):
     display_name: str
     allowed_scopes: list[McpOperationScope]
     metadata: dict[str, Any] = Field(default_factory=dict)
+    agent_scope_key: str | None = None
+    allow_all_agent_scope_reads: bool = False
     token_ttl_seconds: int
     created_at: datetime | None = None
     last_seen_at: datetime | None = None

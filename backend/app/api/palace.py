@@ -20,6 +20,7 @@ from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
     McpClientConfigSnippets,
+    McpOAuthClientAgentScopeBindingRequest,
     McpOAuthClientListResponse,
     McpOAuthClientRegisterRequest,
     McpOAuthClientRegisterResponse,
@@ -188,6 +189,8 @@ def _serialize_mcp_client(row) -> McpOAuthClientSummary:
         display_name=row["display_name"],
         allowed_scopes=allowed_scopes,
         metadata=metadata,
+        agent_scope_key=row.get("agent_scope_key"),
+        allow_all_agent_scope_reads=bool(row.get("allow_all_agent_scope_reads")),
         token_ttl_seconds=row["oauth_token_ttl_seconds"],
         created_at=row.get("created_at"),
         last_seen_at=row.get("last_seen_at"),
@@ -300,6 +303,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
             text(
                 """
                 SELECT c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata,
+                       c.agent_scope_key, c.allow_all_agent_scope_reads,
                        c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at,
                        COUNT(e.id) AS request_count,
                        COUNT(e.id) FILTER (WHERE e.status = 'success') AS success_count,
@@ -309,7 +313,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
                 FROM mcp_clients c
                 LEFT JOIN mcp_request_audit_events e ON e.client_id = c.id AND e.tenant_id = c.tenant_id
                 WHERE c.tenant_id = :tenant_id
-                GROUP BY c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata,
+                GROUP BY c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata, c.agent_scope_key, c.allow_all_agent_scope_reads,
                          c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at
                 ORDER BY COALESCE(MAX(e.created_at), c.last_seen_at, c.created_at) DESC
                 """
@@ -337,13 +341,13 @@ async def register_palace_mcp_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                  oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :secret_hash, NULL, :token_ttl_seconds)
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                       oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
             """
         ),
@@ -353,6 +357,8 @@ async def register_palace_mcp_client(
             "display_name": body.display_name,
             "allowed_scopes": json.dumps(body.allowed_scopes),
             "metadata": json.dumps(body.metadata),
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
             "secret_hash": hash_secret(raw_secret),
             "token_ttl_seconds": body.token_ttl_seconds,
         },
@@ -374,6 +380,44 @@ async def register_palace_mcp_client(
         client_secret=raw_secret,
         config_snippets=_config_snippets(request, client_key=client.client_key, scopes=client.allowed_scopes),
     )
+
+
+@router.patch(
+    "/mcp-clients/{client_id}/agent-scope-binding",
+    response_model=McpOAuthClientSummary,
+    dependencies=[Depends(require_api_capability("admin"))],
+)
+async def bind_palace_mcp_client_agent_scope(
+    client_id: uuid.UUID,
+    body: McpOAuthClientAgentScopeBindingRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientSummary:
+    """Bind an existing OAuth client without exposing or rotating its secret."""
+    result = await db.execute(
+        text(
+            """
+            UPDATE mcp_clients
+            SET agent_scope_key = :agent_scope_key,
+                allow_all_agent_scope_reads = :allow_all_agent_scope_reads
+            WHERE tenant_id = :tenant_id AND id = :client_id
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                      agent_scope_key, allow_all_agent_scope_reads, oauth_revoked_at,
+                      oauth_token_ttl_seconds, created_at, last_seen_at
+            """
+        ),
+        {
+            "tenant_id": request.state.tenant_id,
+            "client_id": client_id,
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
+        },
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth client not found")
+    await db.commit()
+    return _serialize_mcp_client(row)
 
 
 @router.post("/mcp-clients/{client_id}/revoke", response_model=McpOAuthClientRevokeResponse, dependencies=[Depends(require_api_capability("admin"))])

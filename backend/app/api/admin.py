@@ -17,6 +17,7 @@ from app.models.job import Job
 from app.schemas.bundle import AdminImportResponse, AdminJobResponse
 from app.auth import hash_secret
 from app.schemas.memory import (
+    McpOAuthClientAgentScopeBindingRequest,
     McpOAuthClientRegisterRequest,
     McpOAuthClientRegisterResponse,
     McpOAuthClientRevokeResponse,
@@ -197,6 +198,8 @@ def _serialize_mcp_oauth_client(row) -> McpOAuthClientSummary:
         display_name=row["display_name"],
         allowed_scopes=allowed_scopes,
         metadata=metadata,
+        agent_scope_key=row.get("agent_scope_key"),
+        allow_all_agent_scope_reads=bool(row.get("allow_all_agent_scope_reads")),
         token_ttl_seconds=row["oauth_token_ttl_seconds"],
         created_at=row.get("created_at"),
         last_seen_at=row.get("last_seen_at"),
@@ -316,7 +319,7 @@ async def _list_mcp_oauth_client_rows(db: AsyncSession, *, tenant_id: str) -> li
     result = await db.execute(
         text(
             """
-            SELECT id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+            SELECT id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                    oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds,
                    created_at, last_seen_at
             FROM mcp_clients
@@ -629,13 +632,13 @@ async def register_mcp_oauth_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                  oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :secret_hash, NULL, :token_ttl_seconds)
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                       oauth_revoked_at, oauth_token_ttl_seconds
             """
         ),
@@ -645,6 +648,8 @@ async def register_mcp_oauth_client(
             "display_name": body.display_name,
             "allowed_scopes": json.dumps(body.allowed_scopes),
             "metadata": json.dumps(body.metadata),
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
             "secret_hash": hash_secret(raw_secret),
             "token_ttl_seconds": body.token_ttl_seconds,
         },
@@ -665,6 +670,45 @@ async def register_mcp_oauth_client(
         client=_serialize_mcp_oauth_client(row),
         client_secret=raw_secret,
     )
+
+
+@router.patch(
+    "/tenants/{tenant_id}/mcp-clients/{client_id}/agent-scope-binding",
+    response_model=McpOAuthClientSummary,
+    dependencies=[Depends(_verify_admin)],
+)
+async def bind_mcp_oauth_client_agent_scope(
+    tenant_id: str,
+    client_id: uuid.UUID,
+    body: McpOAuthClientAgentScopeBindingRequest,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientSummary:
+    """Bind an existing OAuth client without rotating its credential."""
+    tenant_id = _tenant_id_from_path(tenant_id)
+    result = await db.execute(
+        text(
+            """
+            UPDATE mcp_clients
+            SET agent_scope_key = :agent_scope_key,
+                allow_all_agent_scope_reads = :allow_all_agent_scope_reads
+            WHERE tenant_id = :tenant_id AND id = :client_id
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                      agent_scope_key, allow_all_agent_scope_reads, oauth_revoked_at,
+                      oauth_token_ttl_seconds, created_at, last_seen_at
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
+        },
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth client not found")
+    await db.commit()
+    return _serialize_mcp_oauth_client(row)
 
 
 @router.post(

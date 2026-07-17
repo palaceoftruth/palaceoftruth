@@ -49,11 +49,18 @@ def evaluate_memory_write_admission(
     auth_mode: str | None,
     allowed_scopes: list[str],
     mcp_client_key: str | None,
+    mcp_agent_scope_key: str | None = None,
 ) -> MemoryWriteAdmissionDecision:
     """Gate durable memory writes before item/job storage."""
     audit = _base_audit(body, auth_mode=auth_mode, allowed_scopes=allowed_scopes, mcp_client_key=mcp_client_key)
 
-    scope_decision = _scope_write_decision(scope=body.scope, auth_mode=auth_mode, allowed_scopes=allowed_scopes)
+    scope_decision = _scope_write_decision(
+        scope=body.scope,
+        auth_mode=auth_mode,
+        allowed_scopes=allowed_scopes,
+        mcp_client_key=mcp_client_key,
+        mcp_agent_scope_key=mcp_agent_scope_key,
+    )
     if scope_decision is not None:
         decision = MemoryWriteAdmissionDecision(
             status="rejected",
@@ -119,17 +126,38 @@ def log_memory_write_admission(decision: MemoryWriteAdmissionDecision) -> None:
     )
 
 
-def _scope_write_decision(*, scope: MemoryScope, auth_mode: str | None, allowed_scopes: list[str]) -> str | None:
+def _scope_write_decision(
+    *,
+    scope: MemoryScope,
+    auth_mode: str | None,
+    allowed_scopes: list[str],
+    mcp_client_key: str | None,
+    mcp_agent_scope_key: str | None,
+) -> str | None:
     if auth_mode not in {"mcp_oauth", "api_key"}:
         return None
-    if "admin" in allowed_scopes:
+    is_hermes_oauth_client = bool(mcp_client_key and mcp_client_key.startswith("hermes-"))
+    if is_hermes_oauth_client and scope.type == "tenant_shared":
+        return "hermes_agent_write_requires_agent_scope"
+    # The broad admin capability is never a bypass for a Hermes OAuth client:
+    # its server-owned canonical agent binding remains the write authority.
+    if "admin" in allowed_scopes and not is_hermes_oauth_client:
         return None
     if scope.type == "tenant_shared":
         return None
     required_grant = _SCOPED_WRITE_GRANTS[scope.type]
-    if required_grant in allowed_scopes:
-        return None
-    return f"missing_{required_grant.replace(':', '_')}"
+    if required_grant not in allowed_scopes and (is_hermes_oauth_client or "admin" not in allowed_scopes):
+        return f"missing_{required_grant.replace(':', '_')}"
+    if is_hermes_oauth_client:
+        # OAuth client names are not authority. The server-owned binding must
+        # match the requested agent scope before a Hermes client can write.
+        if not mcp_agent_scope_key:
+            return "unbound_hermes_agent_client"
+        if scope.type != "agent":
+            return "hermes_agent_write_requires_agent_scope"
+        if scope.key != mcp_agent_scope_key:
+            return "hermes_agent_write_requires_canonical_scope"
+    return None
 
 
 def _scope_grant_summary(scope: MemoryScope, allowed_scopes: list[str]) -> dict[str, Any]:
