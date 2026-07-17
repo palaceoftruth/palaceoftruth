@@ -3,11 +3,12 @@ import asyncio
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embedding_profile import resolve_embedding_profile
 from app.models.feed import Feed
+from app.models.embedding import Embedding
 from app.models.item import Item
 from app.pipelines.base import BasePipeline, stable_merge_tags
 from app.pipelines.webpage import WebpagePipeline
@@ -41,36 +42,9 @@ class FeedPipeline(BasePipeline):
     ) -> uuid.UUID | None:
         """Process a single feed entry. Returns item.id on success, None if skipped/failed."""
 
-        # 1. Deduplication check by source_url (scoped to tenant)
-        existing = (await self.db.execute(
-            select(Item).where(Item.source_url == entry_url).where(Item.tenant_id == tenant_id)
-        )).scalar_one_or_none()
-        if existing:
-            logger.debug("Skipping duplicate entry: %s", entry_url)
-            return None
-
-        # 2. Create item with status=processing
-        item = Item(
-            source_type="feed_article",
-            source_url=entry_url,
-            title=entry_title or entry_url,
-            status="processing",
-            tenant_id=tenant_id,
-            metadata_={
-                "feed_id": str(feed.id),
-                "feed_url": feed.url,
-                "feed_name": feed.name,
-                "feed_guid": entry_guid,
-                "author": entry_author,
-                "published": entry_published,
-            },
-        )
-        apply_effective_date(item)
-        self.db.add(item)
-        await self.db.flush()  # populate item.id
-
         try:
-            # 3. Extract full article text via trafilatura; fallback to feed summary
+            # Extract before deciding whether an existing identity changed.  A
+            # permanent URL skip would hide edited feed entries forever.
             loop = asyncio.get_event_loop()
             _html, article_text, scrape_meta = await loop.run_in_executor(
                 None, WebpagePipeline._scrape, entry_url
@@ -85,14 +59,45 @@ class FeedPipeline(BasePipeline):
                 raise ValueError(f"No content extractable for {entry_url}")
 
         except Exception as exc:
-            item.status = "failed"
-            item.metadata_["extract_error"] = str(exc)[:500]
-            await self.db.commit()
             logger.warning("FeedPipeline: failed to extract content for %s: %s", entry_url, exc)
             return None
 
-        # Dedup: check for existing item with same content hash (scoped to tenant)
         content_hash = compute_content_hash(article_text)
+        identity_filters = [Item.source_url == entry_url]
+        if entry_guid:
+            identity_filters.append(
+                (Item.metadata_["feed_id"].astext == str(feed.id))
+                & (Item.metadata_["feed_guid"].astext == entry_guid)
+            )
+        existing = await self.db.scalar(
+            select(Item)
+            .where(Item.tenant_id == tenant_id)
+            .where(or_(*identity_filters))
+            .order_by(Item.updated_at.desc())
+            .limit(1)
+        )
+        if existing is not None and existing.content_hash == content_hash:
+            logger.debug("Skipping unchanged feed entry: %s", entry_url)
+            return None
+
+        # A changed GUID/canonical URL reuses its stable item identity and
+        # replaces its derived embeddings only after the new extraction works.
+        item = existing or Item(
+            source_type="feed_article",
+            source_url=entry_url,
+            title=entry_title or entry_url,
+            status="processing",
+            tenant_id=tenant_id,
+            metadata_={},
+        )
+        if existing is None:
+            self.db.add(item)
+            await self.db.flush()  # populate item.id
+        else:
+            await self.db.execute(delete(Embedding).where(Embedding.item_id == item.id))
+
+        # Deduplication by content still protects the corpus, but never treats
+        # the item being refreshed as its own duplicate.
         existing_by_hash = await self.db.scalar(
             select(Item.id)
             .where(Item.content_hash == content_hash)
@@ -100,18 +105,21 @@ class FeedPipeline(BasePipeline):
             .where(Item.status != "failed")
             .where(Item.status != "deleted")
             .where(Item.deleted_at.is_(None))
+            .where(Item.id != item.id)
             .limit(1)
         )
         if existing_by_hash:
-            # Silent skip — consistent with URL dedup above; no job to mark
-            item.status = "failed"
-            await self.db.commit()
+            if existing is None:
+                # The new row is not useful when another current item already
+                # owns identical content; preserve existing records instead.
+                await self.db.delete(item)
+                await self.db.commit()
             logger.info(
                 "Feed article duplicate (hash collision): matches item %s", existing_by_hash
             )
             return None
 
-        # 4. Chunk → embed → AI enrich
+        # Chunk → embed → AI enrich.
         chunks = chunk_text(article_text)
         chunk_texts_list = [c["text"] for c in chunks]
         embeddings_data = await self.embedder.embed_texts(chunk_texts_list) if chunk_texts_list else []
@@ -132,12 +140,24 @@ class FeedPipeline(BasePipeline):
         # 5. Merge feed auto_tags with LLM tags in stable provenance order.
         merged_tags = stable_merge_tags(feed.auto_tags or [], llm_tags)
 
+        item.source_url = entry_url
+        item.title = entry_title or entry_url
+        item.source_type = "feed_article"
         item.raw_content = article_text
         item.content_chunks = chunks
         item.summary = summary
         item.tags = merged_tags
         item.categories = stable_merge_tags(categories)
-        merged_metadata = {**item.metadata_, **scrape_meta}
+        merged_metadata = {
+            **(item.metadata_ or {}),
+            "feed_id": str(feed.id),
+            "feed_url": feed.url,
+            "feed_name": feed.name,
+            "feed_guid": entry_guid,
+            "author": entry_author,
+            "published": entry_published,
+            **scrape_meta,
+        }
         if entities_dict:
             merged_metadata["entities"] = entities_dict
         item.metadata_ = merged_metadata
