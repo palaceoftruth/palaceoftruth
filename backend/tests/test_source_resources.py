@@ -163,6 +163,24 @@ def test_success_and_failure_transitions_preserve_last_successful_version() -> N
     assert failure_audit.previous_snapshot["status"] == "active"
 
 
+def test_failure_backoff_honors_retry_after_but_never_exceeds_refresh_slo() -> None:
+    resource = make_resource(refresh_slo_seconds=300)
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=429, failure_reason="http_429", retry_after_seconds=120),
+        checked_at=NOW,
+    )
+    assert resource.backoff_until == NOW + timedelta(seconds=120)
+
+    resource = make_resource(refresh_slo_seconds=300)
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=429, failure_reason="http_429", retry_after_seconds=900),
+        checked_at=NOW,
+    )
+    assert resource.backoff_until == NOW + timedelta(seconds=300)
+
+
 def test_not_modified_verifies_without_collapsing_temporal_meanings() -> None:
     record_id = uuid.uuid4()
     resource = make_resource(

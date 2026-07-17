@@ -8,6 +8,8 @@ append-only SourceRecord version.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -23,6 +25,25 @@ class HttpRefreshResult:
     etag: str | None = None
     last_modified: str | None = None
     failure_reason: str | None = None
+    retry_after_seconds: int | None = None
+
+
+def parse_retry_after(value: str | None, *, now: datetime | None = None) -> int | None:
+    """Parse a positive Retry-After value without trusting unbounded delays."""
+
+    if not value:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if target.tzinfo is None:
+            return None
+        seconds = int((target - (now or datetime.now(timezone.utc))).total_seconds())
+    return max(0, seconds)
 
 
 async def fetch_http_resource(
@@ -69,7 +90,13 @@ async def fetch_http_resource(
     if response.status_code in {404, 410}:
         return HttpRefreshResult("gone", response.status_code, final_url=final_url, failure_reason=f"http_{response.status_code}")
     if response.status_code < 200 or response.status_code >= 300:
-        return HttpRefreshResult("failure", response.status_code, final_url=final_url, failure_reason=f"http_{response.status_code}")
+        return HttpRefreshResult(
+            "failure",
+            response.status_code,
+            final_url=final_url,
+            failure_reason=f"http_{response.status_code}",
+            retry_after_seconds=parse_retry_after(response_headers.get("Retry-After")),
+        )
     return HttpRefreshResult(
         "success",
         response.status_code,

@@ -186,6 +186,7 @@ async def refresh_source_resource(
                 validator_etag=result.etag,
                 validator_last_modified=result.last_modified,
                 failure_reason=result.failure_reason,
+                retry_after_seconds=result.retry_after_seconds,
             )
 
         await persist_refresh_observation(

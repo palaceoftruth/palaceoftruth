@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.services.source_resource_fetch import fetch_http_resource
+from app.services.source_resource_fetch import fetch_http_resource, parse_retry_after
 
 
 @pytest.mark.asyncio
@@ -57,3 +57,15 @@ async def test_non_success_responses_preserve_a_typed_outcome(status: int, outco
 
     assert result.outcome == outcome
     assert result.failure_reason == f"http_{status}"
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_preserved_for_bounded_worker_backoff() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "120"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_http_resource("https://example.test/document", client=client)
+
+    assert result.retry_after_seconds == 120
+    assert parse_retry_after("not-a-date") is None

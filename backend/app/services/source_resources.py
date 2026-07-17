@@ -58,6 +58,7 @@ class RefreshObservation:
     robots_cached_at: datetime | None = None
     published_at: datetime | None = None
     captured_at: datetime | None = None
+    retry_after_seconds: int | None = None
 
 
 def normalize_http_url(raw_url: str) -> str:
@@ -341,7 +342,9 @@ def apply_refresh_observation(
         resource.last_failure_reason = observation.failure_reason
         resource.consecutive_failures = (resource.consecutive_failures or 0) + 1
         # Bounded exponential backoff avoids overflow and never exceeds the freshness SLO.
-        delay_seconds = min(resource.refresh_slo_seconds, 60 * (2 ** min(resource.consecutive_failures - 1, 16)))
+        exponential_delay = 60 * (2 ** min(resource.consecutive_failures - 1, 16))
+        retry_after = observation.retry_after_seconds or 0
+        delay_seconds = min(resource.refresh_slo_seconds, max(exponential_delay, retry_after))
         resource.backoff_until = checked_at + timedelta(seconds=delay_seconds)
         resource.next_due_at = resource.backoff_until
 
