@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import trafilatura
 from sqlalchemy import or_, select
@@ -24,7 +24,7 @@ from app.services.chunker import chunk_text
 from app.services.source_compiler import backfill_source_records_and_chunks
 from app.services.source_resource_fetch import fetch_http_resource
 from app.services.source_resource_fairness import HostFairness
-from app.services.source_resource_robots import evaluate_robots
+from app.services.source_resource_robots import RobotsDecision, evaluate_robots
 from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
@@ -37,6 +37,7 @@ from app.utils.hash import compute_content_hash
 logger = logging.getLogger(__name__)
 
 _host_fairness = HostFairness()
+_ROBOTS_CACHE_TTL = timedelta(hours=1)
 
 
 async def claim_due_source_resources(
@@ -142,7 +143,16 @@ async def refresh_source_resource(
         last_modified = resource.validator_last_modified
 
     async with _host_fairness.acquire(url):
-        robots = await evaluate_robots(url)
+        cached_robots = (
+            resource.robots_allowed is not None
+            and resource.robots_cached_at is not None
+            and resource.robots_cached_at >= now - _ROBOTS_CACHE_TTL
+        )
+        robots = (
+            RobotsDecision(bool(resource.robots_allowed), resource.robots_decision or "robots_cached")
+            if cached_robots
+            else await evaluate_robots(url)
+        )
         result = (
             await fetch_http_resource(url, etag=etag, last_modified=last_modified)
             if robots.allowed
