@@ -259,17 +259,19 @@ async def refresh_source_resource(
         )
         resource.refresh_lease_token = None
         resource.refresh_lease_expires_at = None
+        validator = "etag" if etag else "last_modified" if last_modified else "none"
+        change = "changed" if observation.outcome == "success" else "unchanged" if observation.outcome == "not_modified" else "unknown"
+        record_source_refresh(
+            db,
+            resource=resource,
+            outcome=observation.outcome,
+            validator=validator,
+            change=change,
+            refresh_duration_seconds=monotonic() - refresh_started,
+            change_to_index_seconds=change_to_index_seconds,
+        )
         await db.commit()
 
-    validator = "etag" if etag else "last_modified" if last_modified else "none"
-    change = "changed" if observation.outcome == "success" else "unchanged" if observation.outcome == "not_modified" else "unknown"
-    record_source_refresh(
-        outcome=observation.outcome,
-        validator=validator,
-        change=change,
-        refresh_duration_seconds=monotonic() - refresh_started,
-        change_to_index_seconds=change_to_index_seconds,
-    )
     logger.info(
         "source_refresh_committed resource_id=%s outcome=%s change=%s source_record_id=%s",
         resource_id,

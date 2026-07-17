@@ -11,7 +11,6 @@ from sqlalchemy import text
 from app.services.memory_telemetry import memory_telemetry_snapshot
 from app.services.queue_telemetry import build_worker_backpressure
 from app.services.relationship_telemetry import relationship_telemetry_snapshot
-from app.services.source_refresh_telemetry import source_refresh_telemetry_snapshot
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _SOURCE_TYPE_LABEL_ALLOWLIST = frozenset(
@@ -257,38 +256,6 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
     }
     for snapshot_name, labels, state in snapshot["histograms"]:
         metric_name, help_text, label_names = histogram_specs[snapshot_name]
-        builder.histogram(
-            metric_name,
-            help_text,
-            buckets=state["buckets"],
-            counts=state["counts"],
-            count=state["count"],
-            value_sum=state["sum"],
-            labels=dict(zip(label_names, labels, strict=True)),
-        )
-    source_refresh_snapshot = source_refresh_telemetry_snapshot()
-    for (outcome, validator, change), count in source_refresh_snapshot["counts"]:
-        builder.metric(
-            "palace_source_refreshes_total",
-            "Committed HTTP source refreshes by bounded outcome, validator, and change classification.",
-            "counter",
-            count,
-            {"outcome": outcome, "validator": validator, "change": change},
-        )
-    source_histogram_specs = {
-        "refresh_duration": (
-            "palace_source_refresh_duration_seconds",
-            "HTTP source refresh duration through committed observation.",
-            ("outcome", "validator", "change"),
-        ),
-        "change_to_index_duration": (
-            "palace_source_change_to_index_duration_seconds",
-            "Changed-content latency from digest detection to completed SourceRecord and SourceChunk activation.",
-            (),
-        ),
-    }
-    for snapshot_name, labels, state in source_refresh_snapshot["histograms"]:
-        metric_name, help_text, label_names = source_histogram_specs[snapshot_name]
         builder.histogram(
             metric_name,
             help_text,
@@ -583,6 +550,35 @@ async def _add_database_metrics(builder: PrometheusTextBuilder, db: Any) -> None
                 row["oldest_due_age_seconds"],
                 labels,
             )
+
+        source_refresh_rows = await _query_rows(
+            db,
+            """
+            SELECT
+              next_snapshot->>'outcome' AS outcome,
+              next_snapshot->>'validator' AS validator,
+              next_snapshot->>'change' AS change,
+              COUNT(*) AS count,
+              COALESCE(SUM((next_snapshot->>'refresh_duration_seconds')::double precision), 0) AS refresh_duration_sum,
+              COUNT(next_snapshot->>'change_to_index_seconds') AS change_to_index_count,
+              COALESCE(SUM((next_snapshot->>'change_to_index_seconds')::double precision), 0) AS change_to_index_sum
+            FROM source_resource_audit_snapshots
+            WHERE event_kind = 'refresh_telemetry'
+            GROUP BY next_snapshot->>'outcome', next_snapshot->>'validator', next_snapshot->>'change'
+            """,
+        )
+        for row in source_refresh_rows:
+            labels = {
+                "outcome": _allowlisted_label(row["outcome"], frozenset({"success", "not_modified", "failure", "gone"})),
+                "validator": _allowlisted_label(row["validator"], frozenset({"etag", "last_modified", "none"})),
+                "change": _allowlisted_label(row["change"], frozenset({"changed", "unchanged", "unknown"})),
+            }
+            builder.metric("palace_source_refreshes_total", "Durably committed HTTP source refreshes.", "counter", row["count"], labels)
+            builder.metric("palace_source_refresh_duration_seconds_sum", "Durable source refresh latency sum.", "counter", row["refresh_duration_sum"], labels)
+            builder.metric("palace_source_refresh_duration_seconds_count", "Durable source refresh latency sample count.", "counter", row["count"], labels)
+            if int(row["change_to_index_count"] or 0):
+                builder.metric("palace_source_change_to_index_duration_seconds_sum", "Durable changed-content activation latency sum.", "counter", row["change_to_index_sum"])
+                builder.metric("palace_source_change_to_index_duration_seconds_count", "Durable changed-content activation latency sample count.", "counter", row["change_to_index_count"])
 
         dirty_rows = await _query_rows(
             db,

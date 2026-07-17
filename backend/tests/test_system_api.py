@@ -19,7 +19,6 @@ from app.services.relationship_telemetry import (
     record_relationship_extraction,
     reset_relationship_telemetry_for_tests,
 )
-from app.services.source_refresh_telemetry import record_source_refresh, reset_source_refresh_telemetry_for_tests
 
 
 class _ScalarResult:
@@ -92,6 +91,10 @@ class StatsSession:
 class MetricsSession:
     async def execute(self, statement):
         sql = str(statement).lower()
+        if "from source_resource_audit_snapshots" in sql:
+            return _MappingsResult(
+                [{"outcome": "success", "validator": "etag", "change": "changed", "count": 1, "refresh_duration_sum": 0.3, "change_to_index_count": 1, "change_to_index_sum": 0.02}]
+            )
         if "from job_attempts" in sql:
             return _MappingsResult(
                 [
@@ -311,7 +314,6 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
 def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     reset_memory_telemetry_for_tests()
     reset_relationship_telemetry_for_tests()
-    reset_source_refresh_telemetry_for_tests()
     record_semantic_recall(status="empty", scope_type="agent")
     record_retention_extraction(status="written", mode="extracted_write")
     record_scope_guard_violation(reason="agent_scope_not_allowlisted")
@@ -351,13 +353,6 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
         retry_count=2,
         duration_seconds=0.25,
         edges_extracted=0,
-    )
-    record_source_refresh(
-        outcome="success",
-        validator="etag",
-        change="changed",
-        refresh_duration_seconds=0.3,
-        change_to_index_seconds=0.02,
     )
     client = _metrics_client(MetricsSession())
 
