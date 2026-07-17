@@ -23,6 +23,7 @@ from app.models.source_resource import SourceResource
 from app.services.chunker import chunk_text
 from app.services.source_compiler import backfill_source_records_and_chunks
 from app.services.source_resource_fetch import fetch_http_resource
+from app.services.source_resource_robots import evaluate_robots
 from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
@@ -137,7 +138,12 @@ async def refresh_source_resource(
         etag = resource.validator_etag
         last_modified = resource.validator_last_modified
 
-    result = await fetch_http_resource(url, etag=etag, last_modified=last_modified)
+    robots = await evaluate_robots(url)
+    result = (
+        await fetch_http_resource(url, etag=etag, last_modified=last_modified)
+        if robots.allowed
+        else None
+    )
 
     async with async_session() as db:
         resource = await db.scalar(
@@ -152,7 +158,15 @@ async def refresh_source_resource(
             logger.info("source resource result ignored after lease expiry resource_id=%s", resource_id)
             return
 
-        if result.outcome == "success":
+        if result is None:
+            observation = RefreshObservation(
+                outcome="failure",
+                failure_reason=robots.decision,
+                robots_allowed=False,
+                robots_decision=robots.decision,
+                robots_cached_at=now,
+            )
+        elif result.outcome == "success":
             assert result.body is not None
             digest = compute_content_hash(result.body.decode("utf-8", errors="replace"))
             if digest == resource.content_digest:
@@ -162,6 +176,9 @@ async def refresh_source_resource(
                     content_digest=digest,
                     validator_etag=result.etag,
                     validator_last_modified=result.last_modified,
+                    robots_allowed=True,
+                    robots_decision=robots.decision,
+                    robots_cached_at=now,
                 )
             else:
                 source_record_id = await _activate_resource_content(
@@ -178,6 +195,9 @@ async def refresh_source_resource(
                     validator_etag=result.etag,
                     validator_last_modified=result.last_modified,
                     captured_at=datetime.now(timezone.utc),
+                    robots_allowed=True,
+                    robots_decision=robots.decision,
+                    robots_cached_at=now,
                 )
         else:
             observation = RefreshObservation(
@@ -187,6 +207,9 @@ async def refresh_source_resource(
                 validator_last_modified=result.last_modified,
                 failure_reason=result.failure_reason,
                 retry_after_seconds=result.retry_after_seconds,
+                robots_allowed=True,
+                robots_decision=robots.decision,
+                robots_cached_at=now,
             )
 
         await persist_refresh_observation(
