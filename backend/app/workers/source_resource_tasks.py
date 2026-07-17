@@ -160,12 +160,16 @@ async def refresh_source_resource(
         )
 
     async with async_session() as db:
+        # Do not reuse the pre-fetch timestamp here: a slow robots or document
+        # request may outlive the durable lease, in which case another worker
+        # is entitled to retry the resource and this result must be discarded.
+        result_now = datetime.now(timezone.utc)
         resource = await db.scalar(
             select(SourceResource)
             .where(SourceResource.id == parsed_resource_id)
             .where(SourceResource.tenant_id == tenant_id)
             .where(SourceResource.refresh_lease_token == parsed_lease_token)
-            .where(SourceResource.refresh_lease_expires_at > now)
+            .where(SourceResource.refresh_lease_expires_at > result_now)
             .with_for_update()
         )
         if resource is None:
