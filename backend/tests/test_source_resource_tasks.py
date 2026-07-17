@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.models.source_resource import SourceResource
+from app.services.source_refresh_telemetry import record_source_refresh
 from app.services.source_resources import canonical_http_identity
 from app.services.source_resources import RefreshLease, refresh_lease_job_id
 from app.workers import source_resource_tasks
@@ -62,6 +63,39 @@ def _resource(*, status: str = "active", due_at=None, backoff_until=None) -> Sou
         backoff_until=backoff_until,
         consecutive_failures=0,
     )
+
+
+def test_refresh_telemetry_is_staged_in_the_worker_transaction() -> None:
+    class _TelemetrySession:
+        def __init__(self) -> None:
+            self.added = []
+
+        def add(self, value) -> None:
+            self.added.append(value)
+
+    resource = _resource()
+    session = _TelemetrySession()
+
+    record_source_refresh(
+        session,  # type: ignore[arg-type]
+        resource=resource,
+        outcome="success",
+        validator="etag",
+        change="changed",
+        refresh_duration_seconds=0.3,
+        change_to_index_seconds=0.02,
+    )
+
+    assert len(session.added) == 1
+    telemetry = session.added[0]
+    assert telemetry.event_kind == "refresh_telemetry"
+    assert telemetry.next_snapshot == {
+        "outcome": "success",
+        "validator": "etag",
+        "change": "changed",
+        "refresh_duration_seconds": 0.3,
+        "change_to_index_seconds": 0.02,
+    }
 
 
 @pytest.mark.asyncio

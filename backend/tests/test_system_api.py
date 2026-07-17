@@ -91,6 +91,13 @@ class StatsSession:
 class MetricsSession:
     async def execute(self, statement):
         sql = str(statement).lower()
+        if "from source_resource_audit_snapshots" in sql:
+            return _MappingsResult(
+                [
+                    {"outcome": "success", "validator": "etag", "change": "changed", "count": 1, "refresh_duration_sum": 0.3, "refresh_duration_le_0_5": 1, "change_to_index_count": 1, "change_to_index_sum": 0.02, "change_to_index_le_0_05": 1},
+                    {"outcome": "success", "validator": "last_modified", "change": "changed", "count": 1, "refresh_duration_sum": 0.2, "refresh_duration_le_0_5": 1, "change_to_index_count": 1, "change_to_index_sum": 0.01, "change_to_index_le_0_05": 1},
+                ]
+            )
         if "from job_attempts" in sql:
             return _MappingsResult(
                 [
@@ -403,6 +410,11 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert 'palace_retrieval_results_total{endpoint="retrieve_agent",freshness="stale",rank_band="1",source_support_state="unknown",trust_class="curated_memory"} 1' in body
     assert 'palace_embedding_duration_seconds_bucket{failure_kind="timeout",input_type="query",le="0.25",provider="openai",status="retry"} 1' in body
     assert 'palace_source_refresh_due{kind="http",status="active"} 3' in body
+    assert 'palace_source_refreshes_total{change="changed",outcome="success",validator="etag"} 1' in body
+    assert 'palace_source_refresh_duration_seconds_bucket{change="changed",le="0.5",outcome="success",validator="etag"} 1' in body
+    assert 'palace_source_refresh_duration_seconds_count{change="changed",outcome="success",validator="etag"} 1' in body
+    assert 'palace_source_change_to_index_duration_seconds_bucket{le="0.05"} 2' in body
+    assert body.count("palace_source_change_to_index_duration_seconds_count 2") == 1
     assert 'palace_source_never_succeeded{kind="http",status="active"} 2' in body
     assert 'palace_arq_queue_depth{key="memory",queue="arq:queue"} 0' in body
     assert 'palace_arq_worker_available{key="memory",queue="arq:queue"} 0' in body
