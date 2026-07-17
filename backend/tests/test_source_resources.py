@@ -81,11 +81,15 @@ def test_alias_builder_enforces_tenant_isolation() -> None:
         tenant_id="tenant-a",
         observed_url="https://example.com/final",
         signal="final",
+        final_url="https://example.com/final",
+        provenance={"refresh": "conditional_http"},
     )
     assert alias.tenant_id == "tenant-a"
     assert alias.signal == "final"
     assert alias.decision == "accepted"
     assert alias.resource is resource
+    assert alias.final_url == "https://example.com/final"
+    assert alias.provenance == {"refresh": "conditional_http"}
 
     with pytest.raises(ValueError, match="does not belong"):
         build_alias(
@@ -161,6 +165,40 @@ def test_success_and_failure_transitions_preserve_last_successful_version() -> N
     assert success_audit.next_snapshot["status"] == "active"
     assert success_audit.next_snapshot["last_failure_reason"] is None
     assert failure_audit.previous_snapshot["status"] == "active"
+
+
+def test_failure_backoff_honors_retry_after_but_never_exceeds_refresh_slo() -> None:
+    resource = make_resource(refresh_slo_seconds=300)
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=429, failure_reason="http_429", retry_after_seconds=120),
+        checked_at=NOW,
+    )
+    assert resource.backoff_until == NOW + timedelta(seconds=120)
+
+    resource = make_resource(refresh_slo_seconds=300)
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=429, failure_reason="http_429", retry_after_seconds=900),
+        checked_at=NOW,
+    )
+    assert resource.backoff_until == NOW + timedelta(seconds=300)
+
+
+def test_repeated_404_can_tombstone_only_after_a_prior_404() -> None:
+    resource = make_resource()
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="failure", http_status=404, failure_reason="http_404"),
+        checked_at=NOW,
+    )
+    assert resource.status == "unreachable"
+    apply_refresh_observation(
+        resource,
+        RefreshObservation(outcome="gone", http_status=404, failure_reason="http_404"),
+        checked_at=NOW + timedelta(seconds=60),
+    )
+    assert resource.status == "gone"
 
 
 def test_not_modified_verifies_without_collapsing_temporal_meanings() -> None:
