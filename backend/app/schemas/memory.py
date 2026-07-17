@@ -141,6 +141,16 @@ class McpOAuthClientRegisterRequest(BaseModel):
         return self
 
 
+class McpOAuthClientAgentScopeBindingRequest(BaseModel):
+    agent_scope_key: str
+    allow_all_agent_scope_reads: bool = False
+
+    @field_validator("agent_scope_key")
+    @classmethod
+    def agent_scope_key_not_blank(cls, value: str) -> str:
+        return _validate_not_blank(value, "agent_scope_key")
+
+
 class McpOAuthClientSummary(BaseModel):
     id: uuid.UUID
     tenant_id: str

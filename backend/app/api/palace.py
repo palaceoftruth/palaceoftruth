@@ -20,6 +20,7 @@ from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
     McpClientConfigSnippets,
+    McpOAuthClientAgentScopeBindingRequest,
     McpOAuthClientListResponse,
     McpOAuthClientRegisterRequest,
     McpOAuthClientRegisterResponse,
@@ -378,6 +379,44 @@ async def register_palace_mcp_client(
         client_secret=raw_secret,
         config_snippets=_config_snippets(request, client_key=client.client_key, scopes=client.allowed_scopes),
     )
+
+
+@router.patch(
+    "/mcp-clients/{client_id}/agent-scope-binding",
+    response_model=McpOAuthClientSummary,
+    dependencies=[Depends(require_api_capability("admin"))],
+)
+async def bind_palace_mcp_client_agent_scope(
+    client_id: uuid.UUID,
+    body: McpOAuthClientAgentScopeBindingRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientSummary:
+    """Bind an existing OAuth client without exposing or rotating its secret."""
+    result = await db.execute(
+        text(
+            """
+            UPDATE mcp_clients
+            SET agent_scope_key = :agent_scope_key,
+                allow_all_agent_scope_reads = :allow_all_agent_scope_reads
+            WHERE tenant_id = :tenant_id AND id = :client_id
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                      agent_scope_key, allow_all_agent_scope_reads, oauth_revoked_at,
+                      oauth_token_ttl_seconds, created_at, last_seen_at
+            """
+        ),
+        {
+            "tenant_id": request.state.tenant_id,
+            "client_id": client_id,
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
+        },
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth client not found")
+    await db.commit()
+    return _serialize_mcp_client(row)
 
 
 @router.post("/mcp-clients/{client_id}/revoke", response_model=McpOAuthClientRevokeResponse, dependencies=[Depends(require_api_capability("admin"))])
