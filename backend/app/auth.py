@@ -28,6 +28,8 @@ class AuthContext:
     client_id: Any | None = None
     client_key: str | None = None
     client_name: str | None = None
+    agent_scope_key: str | None = None
+    allow_all_agent_scope_reads: bool = False
     scopes: tuple[str, ...] = ()
     capabilities: frozenset[str] = field(default_factory=frozenset)
     resource: str | None = None
@@ -192,6 +194,8 @@ def _context_from_scopes(
     client_id: object | None = None,
     client_key: str | None = None,
     client_name: str | None = None,
+    agent_scope_key: str | None = None,
+    allow_all_agent_scope_reads: bool = False,
     scopes: list[str] | tuple[str, ...] | None = None,
     resource: object | None = None,
     audit_metadata: Mapping[str, Any] | None = None,
@@ -205,6 +209,8 @@ def _context_from_scopes(
         client_id=client_id,
         client_key=client_key,
         client_name=client_name,
+        agent_scope_key=agent_scope_key,
+        allow_all_agent_scope_reads=allow_all_agent_scope_reads,
         scopes=normalized_scopes,
         capabilities=frozenset(normalized_scopes),
         resource=resource_value,
@@ -222,6 +228,8 @@ def _attach_auth_context(request: Request, context: AuthContext) -> AuthContext:
     request.state.mcp_client_id = context.client_id
     request.state.mcp_client_key = context.client_key
     request.state.mcp_client_name = context.client_name
+    request.state.mcp_agent_scope_key = context.agent_scope_key
+    request.state.mcp_allow_all_agent_scope_reads = context.allow_all_agent_scope_reads
     request.state.mcp_allowed_scopes = list(context.scopes) if context.scopes else None
     request.state.mcp_token_resource = context.resource
     return context
@@ -331,6 +339,8 @@ async def verify_memory_auth(
                     c.client_key,
                     c.display_name,
                     c.allowed_scopes,
+                    c.agent_scope_key,
+                    c.allow_all_agent_scope_reads,
                     c.oauth_revoked_at AS client_revoked_at
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
@@ -446,6 +456,8 @@ async def verify_memory_auth(
             client_id=result["client_id"],
             client_key=result["client_key"],
             client_name=result.get("display_name") or result["client_key"],
+            agent_scope_key=result.get("agent_scope_key"),
+            allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
             scopes=token_scopes,
             resource=result.get("token_resource"),
             audit_metadata={"token_id": str(result["token_id"])},

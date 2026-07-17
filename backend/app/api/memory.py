@@ -52,6 +52,7 @@ from app.schemas.memory import (
     TagsMode,
 )
 from app.services.memory import (
+    DelegatedAgentMemoryReadPolicy,
     MEMORY_JOB_TYPE,
     accept_canonical_memory_entry,
     accept_memory_artifact,
@@ -554,6 +555,7 @@ async def create_memory_entry(
         auth_mode=getattr(request.state, "auth_mode", None),
         allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
+        mcp_agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
     )
     if not admission.accepted:
         raise HTTPException(status_code=admission.http_status_code, detail=admission.response_detail())
@@ -615,6 +617,7 @@ async def create_memory_entries_batch(
             auth_mode=getattr(request.state, "auth_mode", None),
             allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
             mcp_client_key=getattr(request.state, "mcp_client_key", None),
+            mcp_agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
         )
         if not admission.accepted:
             failed_count += 1
@@ -1057,6 +1060,18 @@ async def retrieve_agent_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> AgentMemoryRetrieveResponse:
+    is_hermes_client = (
+        getattr(request.state, "auth_mode", None) == "mcp_oauth"
+        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
+    )
+    bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
+    if is_hermes_client:
+        if not isinstance(bound_agent_scope_key, str) or not bound_agent_scope_key:
+            raise HTTPException(status_code=403, detail="Hermes OAuth client has no canonical agent binding")
+        if body.agent_scope_key != bound_agent_scope_key:
+            raise HTTPException(status_code=403, detail="Hermes OAuth client must retrieve through its canonical agent scope")
+        if body.workspace_scope_keys or body.session_scope_key or body.include_tenant_shared or body.include_broad_corpus:
+            raise HTTPException(status_code=403, detail="Hermes OAuth client may retrieve only same-tenant agent scopes")
     started = perf_counter()
     request_params = {
         "agent_scope_key": body.agent_scope_key,
@@ -1100,11 +1115,26 @@ async def retrieve_agent_memory_artifacts(
     }
     try:
         try:
-            delegated_policy = delegated_agent_memory_policy_from_config(
-                tenant_id=request.state.tenant_id,
-                agent_scope_key=body.agent_scope_key,
-                raw_policies=settings.palaceoftruth_delegated_agent_memory_read_policies,
+            delegated_policy = (
+                DelegatedAgentMemoryReadPolicy(
+                    tenant_id=request.state.tenant_id,
+                    subject_agent_scope_key=bound_agent_scope_key,
+                    read_agent_scope_keys=(),
+                    allow_all_agent_scopes=True,
+                    policy_id=f"oauth-client:{getattr(request.state, 'mcp_client_key', 'unknown')}",
+                    policy_source="mcp_client_binding",
+                    require_access_reason=True,
+                    max_cross_agent_scopes=100,
+                )
+                if is_hermes_client and bool(getattr(request.state, "mcp_allow_all_agent_scope_reads", False))
+                else delegated_agent_memory_policy_from_config(
+                    tenant_id=request.state.tenant_id,
+                    agent_scope_key=body.agent_scope_key,
+                    raw_policies=settings.palaceoftruth_delegated_agent_memory_read_policies,
+                )
             )
+            if is_hermes_client and delegated_policy is None:
+                raise HTTPException(status_code=403, detail="Hermes OAuth client is not permitted to read agent scopes")
         except ValueError as config_error:
             logger.error("invalid delegated agent memory policy config: %s", config_error)
             raise HTTPException(

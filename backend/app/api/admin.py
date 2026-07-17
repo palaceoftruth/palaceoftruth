@@ -197,6 +197,8 @@ def _serialize_mcp_oauth_client(row) -> McpOAuthClientSummary:
         display_name=row["display_name"],
         allowed_scopes=allowed_scopes,
         metadata=metadata,
+        agent_scope_key=row.get("agent_scope_key"),
+        allow_all_agent_scope_reads=bool(row.get("allow_all_agent_scope_reads")),
         token_ttl_seconds=row["oauth_token_ttl_seconds"],
         created_at=row.get("created_at"),
         last_seen_at=row.get("last_seen_at"),
@@ -316,7 +318,7 @@ async def _list_mcp_oauth_client_rows(db: AsyncSession, *, tenant_id: str) -> li
     result = await db.execute(
         text(
             """
-            SELECT id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+            SELECT id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                    oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds,
                    created_at, last_seen_at
             FROM mcp_clients
@@ -629,13 +631,13 @@ async def register_mcp_oauth_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                  oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :secret_hash, NULL, :token_ttl_seconds)
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
                       oauth_revoked_at, oauth_token_ttl_seconds
             """
         ),
@@ -645,6 +647,8 @@ async def register_mcp_oauth_client(
             "display_name": body.display_name,
             "allowed_scopes": json.dumps(body.allowed_scopes),
             "metadata": json.dumps(body.metadata),
+            "agent_scope_key": body.agent_scope_key,
+            "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
             "secret_hash": hash_secret(raw_secret),
             "token_ttl_seconds": body.token_ttl_seconds,
         },
