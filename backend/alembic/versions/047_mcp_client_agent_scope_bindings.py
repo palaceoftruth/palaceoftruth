@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "047_mcp_client_agent_scope_bindings"
-down_revision: Union[str, None] = "046_relationship_graph_lookup_indexes"
+down_revision: Union[str, None] = "046"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
