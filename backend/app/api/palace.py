@@ -303,6 +303,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
             text(
                 """
                 SELECT c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata,
+                       c.agent_scope_key, c.allow_all_agent_scope_reads,
                        c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at,
                        COUNT(e.id) AS request_count,
                        COUNT(e.id) FILTER (WHERE e.status = 'success') AS success_count,

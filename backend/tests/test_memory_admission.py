@@ -47,3 +47,15 @@ def test_unbound_hermes_client_cannot_write_tenant_shared_memory() -> None:
     )
 
     assert decision.reason_code == "hermes_agent_write_requires_agent_scope"
+
+
+def test_hermes_admin_scope_does_not_bypass_canonical_agent_write_binding() -> None:
+    decision = evaluate_memory_write_admission(
+        body=_entry("tenant_shared"),
+        auth_mode="mcp_oauth",
+        allowed_scopes=["write", "admin"],
+        mcp_client_key="hermes-iris",
+        mcp_agent_scope_key="iris",
+    )
+
+    assert decision.reason_code == "hermes_agent_write_requires_agent_scope"
