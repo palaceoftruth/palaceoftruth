@@ -81,11 +81,15 @@ def test_alias_builder_enforces_tenant_isolation() -> None:
         tenant_id="tenant-a",
         observed_url="https://example.com/final",
         signal="final",
+        final_url="https://example.com/final",
+        provenance={"refresh": "conditional_http"},
     )
     assert alias.tenant_id == "tenant-a"
     assert alias.signal == "final"
     assert alias.decision == "accepted"
     assert alias.resource is resource
+    assert alias.final_url == "https://example.com/final"
+    assert alias.provenance == {"refresh": "conditional_http"}
 
     with pytest.raises(ValueError, match="does not belong"):
         build_alias(

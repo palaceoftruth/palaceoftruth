@@ -19,7 +19,7 @@ from app.config import settings
 from app.database import async_session
 from app.models.item import Item
 from app.models.palace import SourceRecord
-from app.models.source_resource import SourceResource
+from app.models.source_resource import SourceResource, SourceResourceAlias
 from app.services.chunker import chunk_text
 from app.services.source_compiler import backfill_source_records_and_chunks
 from app.services.source_resource_fetch import fetch_http_resource
@@ -28,6 +28,7 @@ from app.services.source_resource_robots import RobotsDecision, evaluate_robots
 from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
+    build_alias,
     claim_refresh_lease,
     decide_alias,
     persist_refresh_observation,
@@ -168,6 +169,13 @@ async def refresh_source_resource(
         if resource is None:
             logger.info("source resource result ignored after lease expiry resource_id=%s", resource_id)
             return
+
+        # Retain the observed final URL even for 304s and failures.  A unique
+        # final alias is immutable provenance, while a new conflicting signal
+        # is retained as an explicit conflict instead of silently changing the
+        # source identity.
+        if result is not None and result.final_url:
+            await _record_final_alias(db, resource=resource, final_url=result.final_url)
 
         if result is None:
             observation = RefreshObservation(
@@ -337,3 +345,23 @@ async def _fetch_with_robots(
             )
         current_url = result.redirect_url
     return type(result)("failure", result.status_code, final_url=current_url, failure_reason="too_many_redirects"), robots
+
+
+async def _record_final_alias(db: AsyncSession, *, resource: SourceResource, final_url: str) -> None:
+    alias = build_alias(
+        resource=resource,
+        tenant_id=resource.tenant_id,
+        observed_url=final_url,
+        signal="final",
+        final_url=final_url,
+        provenance={"refresh": "conditional_http"},
+    )
+    existing = await db.scalar(
+        select(SourceResourceAlias)
+        .where(SourceResourceAlias.tenant_id == resource.tenant_id)
+        .where(SourceResourceAlias.resource_id == resource.id)
+        .where(SourceResourceAlias.signal == alias.signal)
+        .where(SourceResourceAlias.normalized_url == alias.normalized_url)
+    )
+    if existing is None:
+        db.add(alias)
