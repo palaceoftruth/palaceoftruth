@@ -50,6 +50,9 @@ async function mockPalaceControlTower(page: Parameters<typeof test>[0]["page"], 
       },
     });
   });
+  await page.route("**/api/v1/palace/mcp-grants", async (route) => {
+    await route.fulfill({ json: { tenant_id: "default", grants: [] } });
+  });
 }
 
 async function expectNoHorizontalOverflow(page: Parameters<typeof test>[0]["page"]) {
@@ -1001,6 +1004,49 @@ test.describe("Palace smoke", () => {
 
     await page.getByRole("button", { name: "Revoke" }).first().click();
     await expect.poll(() => revokedClientId).toBe("mcp-client-1");
+  });
+
+  test("control tower lists constrained delegated grants and revokes one", async ({ page }, testInfo) => {
+    let revokedGrantId: string | null = null;
+    await mockPalaceControlTower(page, {
+      tenant_id: "default", dirty_generation: 0, indexed_generation: 0, backlog_generation: 0, active_palace_run: null,
+      memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+      webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+      fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+      diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+      wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+      sync_sources: [], sync_runs: [], palace_runs: [],
+    });
+    await page.route("**/api/v1/palace/mcp-grants**", async (route) => {
+      if (route.request().method() === "POST") {
+        revokedGrantId = route.request().url().split("/").at(-2) ?? null;
+        await route.fulfill({ json: { tenant_id: "default", revoked: true, grant: {} } });
+        return;
+      }
+      await route.fulfill({ json: {
+        tenant_id: "default",
+        grants: [{
+          id: "grant-1", client_id: "client-1", client_key: "nebulaios", client_name: "NebulaiOS", resource: "https://api.palace.sarvent.cloud/mcp",
+          scopes: ["read", "write:agent"], agent_scope_keys: ["nebulaios"], workspace_scope_keys: ["palaceoftruth"], authorized_by: "tenant-admin-browser", revoked_at: null,
+        }],
+      } });
+    });
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+
+    await expect(page.getByText("Delegated grants")).toBeVisible();
+    await expect(page.getByText("NebulaiOS", { exact: true })).toBeVisible();
+    await expect(page.getByText(/agents nebulaios.*workspaces palaceoftruth/)).toBeVisible();
+    const delegatedGrantPanel = page.getByText("Delegated grants").locator("..").locator("..");
+    await delegatedGrantPanel.screenshot({ path: testInfo.outputPath("sar-1142-delegated-grant-desktop.png") });
+    await page.screenshot({ path: testInfo.outputPath("sar-1142-control-tower-desktop.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 820 });
+    await expectNoHorizontalOverflow(page);
+    await delegatedGrantPanel.screenshot({ path: testInfo.outputPath("sar-1142-delegated-grant-mobile.png") });
+    await page.screenshot({ path: testInfo.outputPath("sar-1142-control-tower-mobile.png"), fullPage: true });
+    await page.getByRole("button", { name: "Revoke grant" }).click();
+    await expect.poll(() => revokedGrantId).toBe("grant-1");
+    await expectNoHorizontalOverflow(page);
   });
 
   test("control tower handles long operator labels without horizontal overflow", async ({ page }) => {
