@@ -38,8 +38,10 @@ from app.schemas.palace import (
     PalaceControlTower,
     PalaceItemSourceSummary,
     PalaceSourceResourceAliasSummary,
+    PalaceSourceResourceActionResponse,
     PalaceSourceResourceDetail,
     PalaceSourceResourceListResponse,
+    PalaceSourceResourcePolicyUpdate,
     PalaceSourceResourceSummary,
     PalaceTemporalFactSummary,
     PalaceOverview,
@@ -83,8 +85,16 @@ from app.services.source_compiler import (
     get_item_source_summary,
     review_decision_claim,
 )
-from app.services.source_resources import compute_freshness
-from app.workers.queues import enqueue_palace_job
+from app.services.source_resources import (
+    SourceResourceTransitionError,
+    apply_operator_action,
+    apply_operator_policy_update,
+    cancel_operator_refresh_lease,
+    compute_freshness,
+    persist_operator_transition,
+    refresh_lease_job_id,
+)
+from app.workers.queues import enqueue_palace_job, enqueue_worker_job
 
 router = APIRouter(prefix="/palace", tags=["palace"])
 logger = logging.getLogger(__name__)
@@ -878,6 +888,132 @@ async def get_source_resource(
             for alias in aliases
         ],
     )
+
+
+async def _operator_source_resource(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    resource_id: uuid.UUID,
+) -> SourceResource:
+    resource = await db.scalar(
+        select(SourceResource)
+        .where(SourceResource.id == resource_id)
+        .where(SourceResource.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if resource is None or resource.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Source resource not found")
+    return resource
+
+
+def _transition_error(exc: SourceResourceTransitionError) -> HTTPException:
+    return HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message})
+
+
+@router.patch("/source-resources/{resource_id}", response_model=PalaceSourceResourceSummary, dependencies=[Depends(require_api_capability("write"))])
+async def update_source_resource_policy(
+    resource_id: uuid.UUID,
+    body: PalaceSourceResourcePolicyUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceSummary:
+    resource = await _operator_source_resource(db, tenant_id=request.state.tenant_id, resource_id=resource_id)
+    audit = apply_operator_policy_update(
+        resource,
+        refresh_policy=body.refresh_policy,
+        refresh_slo_seconds=body.refresh_slo_seconds,
+    )
+    await persist_operator_transition(db, resource=resource, audit=audit)
+    await db.commit()
+    return _source_resource_summary(resource)
+
+
+@router.post("/source-resources/{resource_id}/pause", response_model=PalaceSourceResourceActionResponse, dependencies=[Depends(require_api_capability("write"))])
+async def pause_source_resource(
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceActionResponse:
+    resource = await _operator_source_resource(db, tenant_id=request.state.tenant_id, resource_id=resource_id)
+    try:
+        audit, _ = apply_operator_action(resource, action="pause")
+    except SourceResourceTransitionError as exc:
+        raise _transition_error(exc) from exc
+    await persist_operator_transition(db, resource=resource, audit=audit)
+    await db.commit()
+    return PalaceSourceResourceActionResponse(resource=_source_resource_summary(resource), action="paused")
+
+
+@router.post("/source-resources/{resource_id}/resume", response_model=PalaceSourceResourceActionResponse, dependencies=[Depends(require_api_capability("write"))])
+async def resume_source_resource(
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceActionResponse:
+    resource = await _operator_source_resource(db, tenant_id=request.state.tenant_id, resource_id=resource_id)
+    try:
+        audit, _ = apply_operator_action(resource, action="resume")
+    except SourceResourceTransitionError as exc:
+        raise _transition_error(exc) from exc
+    await persist_operator_transition(db, resource=resource, audit=audit)
+    await db.commit()
+    return PalaceSourceResourceActionResponse(resource=_source_resource_summary(resource), action="resumed")
+
+
+@router.post("/source-resources/{resource_id}/refresh", response_model=PalaceSourceResourceActionResponse, dependencies=[Depends(require_api_capability("write"))])
+async def refresh_source_resource_now(
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceActionResponse:
+    resource = await _operator_source_resource(db, tenant_id=request.state.tenant_id, resource_id=resource_id)
+    try:
+        audit, lease = apply_operator_action(resource, action="refresh")
+    except SourceResourceTransitionError as exc:
+        raise _transition_error(exc) from exc
+    assert lease is not None
+    await persist_operator_transition(db, resource=resource, audit=audit)
+    await db.commit()
+    try:
+        await enqueue_worker_job(
+            request.app.state.arq_pool,
+            "refresh_source_resource",
+            resource_id=str(lease.resource_id),
+            tenant_id=lease.tenant_id,
+            lease_token=str(lease.token),
+            _job_id=refresh_lease_job_id(lease),
+        )
+    except Exception as exc:
+        # The lease is durable before enqueueing so a worker never sees
+        # uncommitted state. If Redis rejects the job, clear that lease in a
+        # second audited transaction so manual resources can be retried.
+        logger.exception("operator refresh enqueue failed resource_id=%s", resource_id)
+        audit = cancel_operator_refresh_lease(resource, lease=lease)
+        if audit is not None:
+            await persist_operator_transition(db, resource=resource, audit=audit)
+            await db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "refresh_enqueue_failed", "message": "Refresh was not queued; retry the request"},
+        ) from exc
+    return PalaceSourceResourceActionResponse(resource=_source_resource_summary(resource), action="refresh_requested")
+
+
+@router.post("/source-resources/{resource_id}/restore", response_model=PalaceSourceResourceActionResponse, dependencies=[Depends(require_api_capability("write"))])
+async def restore_source_resource(
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PalaceSourceResourceActionResponse:
+    resource = await _operator_source_resource(db, tenant_id=request.state.tenant_id, resource_id=resource_id)
+    try:
+        audit, _ = apply_operator_action(resource, action="restore")
+    except SourceResourceTransitionError as exc:
+        raise _transition_error(exc) from exc
+    await persist_operator_transition(db, resource=resource, audit=audit)
+    await db.commit()
+    return PalaceSourceResourceActionResponse(resource=_source_resource_summary(resource), action="restored")
 
 
 @router.get("/sources/{item_id}", response_model=PalaceItemSourceSummary, dependencies=[Depends(require_api_capability("read"))])

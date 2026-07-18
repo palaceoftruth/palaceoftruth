@@ -133,6 +133,11 @@ class FakeArqPool:
         self.enqueued.append((name, kwargs))
 
 
+class FailingArqPool:
+    async def enqueue_job(self, _name: str, **_kwargs) -> None:
+        raise RuntimeError("redis unavailable")
+
+
 def _build_app(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -214,6 +219,83 @@ def test_source_resource_detail_rejects_other_tenants_and_returns_safe_aliases()
     other = _source_resource(tenant_id="tenant-b")
     forbidden_client = _build_app(FakeSession(objects={(SourceResource, other.id): other}))
     assert forbidden_client.get(f"/api/v1/palace/source-resources/{other.id}").status_code == 404
+
+
+def test_source_resource_operator_controls_are_tenant_scoped_and_enqueue_only_refresh() -> None:
+    resource = _source_resource()
+    session = FakeSession(
+        objects={(SourceResource, resource.id): resource},
+        scalar_results=[resource, resource, resource, resource],
+    )
+    client = _build_app(session)
+
+    policy = client.patch(
+        f"/api/v1/palace/source-resources/{resource.id}",
+        json={"refresh_policy": "manual", "refresh_slo_seconds": 7200},
+    )
+    assert policy.status_code == 200
+    assert resource.refresh_policy == "manual"
+    assert resource.next_due_at is None
+
+    pause = client.post(f"/api/v1/palace/source-resources/{resource.id}/pause")
+    assert pause.status_code == 200
+    assert pause.json()["action"] == "paused"
+    assert resource.status == "paused"
+
+    resume = client.post(f"/api/v1/palace/source-resources/{resource.id}/resume")
+    assert resume.status_code == 200
+    assert resource.status == "active"
+
+    refresh = client.post(f"/api/v1/palace/source-resources/{resource.id}/refresh")
+    assert refresh.status_code == 200
+    assert refresh.json()["action"] == "refresh_requested"
+    assert client.app.state.arq_pool.enqueued[0][0] == "refresh_source_resource"
+    assert resource.status == "active"
+
+
+def test_source_resource_restore_requires_tombstone_and_stays_tenant_scoped() -> None:
+    resource = _source_resource()
+    client = _build_app(
+        FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[resource, resource])
+    )
+
+    assert client.post(f"/api/v1/palace/source-resources/{resource.id}/restore").status_code == 409
+    resource.status = "gone"
+    restored = client.post(f"/api/v1/palace/source-resources/{resource.id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["action"] == "restored"
+    assert resource.status == "active"
+
+
+def test_source_resource_mutations_reject_other_tenants_without_queueing_or_audit() -> None:
+    resource = _source_resource(tenant_id="tenant-b")
+    session = FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[None])
+    client = _build_app(session)
+
+    response = client.post(f"/api/v1/palace/source-resources/{resource.id}/refresh")
+
+    assert response.status_code == 404
+    assert session.added == []
+    assert client.app.state.arq_pool.enqueued == []
+
+
+def test_source_resource_refresh_enqueue_failure_releases_manual_lease_for_retry() -> None:
+    resource = _source_resource()
+    resource.refresh_policy = "manual"
+    session = FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[resource])
+    client = _build_app(session)
+    client.app.state.arq_pool = FailingArqPool()
+
+    response = client.post(f"/api/v1/palace/source-resources/{resource.id}/refresh")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "refresh_enqueue_failed"
+    assert resource.refresh_lease_token is None
+    assert resource.next_due_at is None
+    assert [row.event_kind for row in session.added if hasattr(row, "event_kind")] == [
+        "operator_refresh_requested",
+        "operator_refresh_enqueue_failed",
+    ]
 
 
 def test_palace_overview_endpoint_returns_reviewed_shape(monkeypatch) -> None:

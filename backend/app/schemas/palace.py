@@ -210,6 +210,24 @@ class PalaceSourceResourceListResponse(BaseModel):
     total: int
 
 
+class PalaceSourceResourcePolicyUpdate(BaseModel):
+    """Operator-controlled scheduling policy; this never changes source identity."""
+
+    refresh_policy: Literal["manual", "interval", "adaptive"] | None = None
+    refresh_slo_seconds: int | None = Field(default=None, ge=60, le=31_536_000)
+
+    @model_validator(mode="after")
+    def require_change(self) -> "PalaceSourceResourcePolicyUpdate":
+        if self.refresh_policy is None and self.refresh_slo_seconds is None:
+            raise ValueError("at least one refresh policy field is required")
+        return self
+
+
+class PalaceSourceResourceActionResponse(BaseModel):
+    resource: PalaceSourceResourceSummary
+    action: Literal["paused", "resumed", "refresh_requested", "restored"]
+
+
 class PalaceClaimSourceSupportSummary(BaseModel):
     id: uuid.UUID
     source_record_id: uuid.UUID

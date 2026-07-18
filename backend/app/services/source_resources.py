@@ -61,6 +61,15 @@ class RefreshObservation:
     retry_after_seconds: int | None = None
 
 
+class SourceResourceTransitionError(ValueError):
+    """A requested operator action is incompatible with the current state."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 def normalize_http_url(raw_url: str) -> str:
     """Normalize only equivalences that are safe for HTTP resource identity.
 
@@ -275,6 +284,156 @@ def resource_snapshot(resource: SourceResource) -> dict:
             str(resource.last_successful_source_record_id) if resource.last_successful_source_record_id else None
         ),
     }
+
+
+def _operator_audit(resource: SourceResource, *, event_kind: str, previous_snapshot: dict, now: datetime) -> SourceResourceAuditSnapshot:
+    return SourceResourceAuditSnapshot(
+        tenant_id=resource.tenant_id,
+        event_kind=event_kind,
+        previous_snapshot=previous_snapshot,
+        next_snapshot=resource_snapshot(resource),
+        recorded_at=now,
+    )
+
+
+def apply_operator_policy_update(
+    resource: SourceResource,
+    *,
+    refresh_policy: str | None = None,
+    refresh_slo_seconds: int | None = None,
+    now: datetime | None = None,
+) -> SourceResourceAuditSnapshot:
+    """Apply a scheduling-only policy change and retain an immutable audit row."""
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    if refresh_policy is None and refresh_slo_seconds is None:
+        raise ValueError("at least one refresh policy field is required")
+    if refresh_policy is not None and refresh_policy not in {"manual", "interval", "adaptive"}:
+        raise ValueError("unsupported refresh policy")
+    if refresh_slo_seconds is not None and refresh_slo_seconds <= 0:
+        raise ValueError("refresh_slo_seconds must be positive")
+
+    previous_snapshot = resource_snapshot(resource)
+    if refresh_policy is not None:
+        resource.refresh_policy = refresh_policy
+    if refresh_slo_seconds is not None:
+        resource.refresh_slo_seconds = refresh_slo_seconds
+    # A queued worker must not apply a refresh under a policy the operator has
+    # just replaced. Clearing its lease makes the worker discard any late result.
+    resource.refresh_lease_token = None
+    resource.refresh_lease_expires_at = None
+    if resource.refresh_policy == "manual" or resource.status in {"paused", "gone"}:
+        resource.next_due_at = None
+        resource.backoff_until = None
+    elif resource.status == "active":
+        resource.next_due_at = now + timedelta(seconds=resource.refresh_slo_seconds)
+        resource.backoff_until = None
+    return _operator_audit(resource, event_kind="operator_policy_updated", previous_snapshot=previous_snapshot, now=now)
+
+
+def apply_operator_action(
+    resource: SourceResource,
+    *,
+    action: Literal["pause", "resume", "refresh", "restore"],
+    now: datetime | None = None,
+    lease_seconds: int = 300,
+) -> tuple[SourceResourceAuditSnapshot, RefreshLease | None]:
+    """Apply one reversible control action without fetching or deleting content."""
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+    previous_snapshot = resource_snapshot(resource)
+    lease: RefreshLease | None = None
+
+    if action == "pause":
+        if resource.status == "gone":
+            raise SourceResourceTransitionError("gone_requires_restore", "Tombstoned resources must be restored explicitly")
+        if resource.status == "paused":
+            raise SourceResourceTransitionError("already_paused", "Source resource is already paused")
+        resource.status = "paused"
+        resource.next_due_at = None
+        resource.backoff_until = None
+        resource.refresh_lease_token = None
+        resource.refresh_lease_expires_at = None
+        event_kind = "operator_paused"
+    elif action == "resume":
+        if resource.status != "paused":
+            raise SourceResourceTransitionError("not_paused", "Only paused source resources can be resumed")
+        resource.status = "active"
+        resource.next_due_at = None if resource.refresh_policy == "manual" else now
+        resource.backoff_until = None
+        event_kind = "operator_resumed"
+    elif action == "restore":
+        if resource.status != "gone":
+            raise SourceResourceTransitionError("not_tombstoned", "Only tombstoned source resources can be restored")
+        resource.status = "active"
+        resource.consecutive_failures = 0
+        resource.last_failure_reason = None
+        resource.backoff_until = None
+        resource.refresh_lease_token = None
+        resource.refresh_lease_expires_at = None
+        resource.next_due_at = None if resource.refresh_policy == "manual" else now
+        event_kind = "operator_restored"
+    else:
+        if resource.status not in {"active", "unreachable"}:
+            raise SourceResourceTransitionError("not_refreshable", "Only active or unreachable source resources can be refreshed")
+        if resource.refresh_lease_expires_at is not None and resource.refresh_lease_expires_at > now:
+            raise SourceResourceTransitionError("refresh_in_progress", "Source resource already has an active refresh lease")
+        resource.backoff_until = None
+        resource.next_due_at = now
+        resource.refresh_lease_token = uuid.uuid4()
+        resource.refresh_lease_expires_at = now + timedelta(seconds=lease_seconds)
+        lease = RefreshLease(
+            resource_id=resource.id,
+            tenant_id=resource.tenant_id,
+            token=resource.refresh_lease_token,
+            expires_at=resource.refresh_lease_expires_at,
+        )
+        event_kind = "operator_refresh_requested"
+
+    return _operator_audit(resource, event_kind=event_kind, previous_snapshot=previous_snapshot, now=now), lease
+
+
+def cancel_operator_refresh_lease(
+    resource: SourceResource,
+    *,
+    lease: RefreshLease,
+    now: datetime | None = None,
+) -> SourceResourceAuditSnapshot | None:
+    """Make a failed enqueue retryable without leaving a manual source stranded."""
+
+    now = now or datetime.now(timezone.utc)
+    if resource.refresh_lease_token != lease.token:
+        return None
+    previous_snapshot = resource_snapshot(resource)
+    resource.refresh_lease_token = None
+    resource.refresh_lease_expires_at = None
+    if resource.refresh_policy == "manual":
+        resource.next_due_at = None
+    return _operator_audit(
+        resource,
+        event_kind="operator_refresh_enqueue_failed",
+        previous_snapshot=previous_snapshot,
+        now=now,
+    )
+
+
+async def persist_operator_transition(
+    db: AsyncSession,
+    *,
+    resource: SourceResource,
+    audit: SourceResourceAuditSnapshot,
+) -> None:
+    """Persist a state mutation and its audit snapshot in the caller transaction."""
+
+    audit.resource = resource
+    db.add(resource)
+    db.add(audit)
 
 
 def apply_refresh_observation(
