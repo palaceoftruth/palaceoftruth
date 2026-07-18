@@ -6,6 +6,10 @@ import pytest
 from app.models.source_resource import SourceResource
 from app.services.source_resources import (
     RefreshObservation,
+    SourceResourceTransitionError,
+    apply_operator_action,
+    apply_operator_policy_update,
+    cancel_operator_refresh_lease,
     apply_refresh_observation,
     build_alias,
     canonical_http_identity,
@@ -322,6 +326,73 @@ def test_model_uses_tenant_qualified_foreign_keys() -> None:
     constraint_names = {constraint.name for constraint in SourceResource.__table__.constraints}
     assert "fk_source_resources_current_record_tenant" in constraint_names
     assert "fk_source_resources_last_success_record_tenant" in constraint_names
+
+
+def test_operator_policy_update_records_audit_and_never_changes_identity() -> None:
+    resource = make_resource(next_due_at=NOW + timedelta(hours=2))
+    resource.refresh_lease_token = uuid.uuid4()
+    resource.refresh_lease_expires_at = NOW + timedelta(minutes=5)
+
+    audit = apply_operator_policy_update(
+        resource,
+        refresh_policy="manual",
+        refresh_slo_seconds=7200,
+        now=NOW,
+    )
+
+    assert resource.canonical_url == "https://example.com/story?a=1&b=2"
+    assert resource.refresh_policy == "manual"
+    assert resource.refresh_slo_seconds == 7200
+    assert resource.next_due_at is None
+    assert resource.refresh_lease_token is None
+    assert resource.refresh_lease_expires_at is None
+    assert audit.event_kind == "operator_policy_updated"
+    assert audit.previous_snapshot["canonical_identity"] == resource.canonical_identity
+
+
+def test_operator_actions_pause_resume_refresh_and_restore_are_audited() -> None:
+    resource = make_resource(next_due_at=NOW + timedelta(hours=2))
+
+    pause, _ = apply_operator_action(resource, action="pause", now=NOW)
+    assert resource.status == "paused"
+    assert pause.event_kind == "operator_paused"
+    resume, _ = apply_operator_action(resource, action="resume", now=NOW)
+    assert resource.status == "active"
+    assert resource.next_due_at == NOW
+    assert resume.event_kind == "operator_resumed"
+    refresh, lease = apply_operator_action(resource, action="refresh", now=NOW, lease_seconds=90)
+    assert lease is not None
+    assert resource.refresh_lease_token == lease.token
+    assert refresh.event_kind == "operator_refresh_requested"
+
+    resource.status = "gone"
+    restore, _ = apply_operator_action(resource, action="restore", now=NOW)
+    assert resource.status == "active"
+    assert resource.consecutive_failures == 0
+    assert restore.event_kind == "operator_restored"
+
+
+def test_operator_actions_reject_invalid_state_transitions() -> None:
+    resource = make_resource()
+
+    with pytest.raises(SourceResourceTransitionError, match="Only paused"):
+        apply_operator_action(resource, action="resume", now=NOW)
+    resource.status = "gone"
+    with pytest.raises(SourceResourceTransitionError, match="must be restored"):
+        apply_operator_action(resource, action="pause", now=NOW)
+
+
+def test_operator_refresh_rejects_an_active_lease_and_can_cancel_enqueue_failure() -> None:
+    resource = make_resource(next_due_at=NOW)
+    _, lease = apply_operator_action(resource, action="refresh", now=NOW, lease_seconds=90)
+    assert lease is not None
+    with pytest.raises(SourceResourceTransitionError, match="active refresh lease"):
+        apply_operator_action(resource, action="refresh", now=NOW, lease_seconds=90)
+
+    audit = cancel_operator_refresh_lease(resource, lease=lease, now=NOW)
+    assert audit is not None
+    assert audit.event_kind == "operator_refresh_enqueue_failed"
+    assert resource.refresh_lease_token is None
 
 
 def test_model_has_expiring_refresh_lease_fields() -> None:
