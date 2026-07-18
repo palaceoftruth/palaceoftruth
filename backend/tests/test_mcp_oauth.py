@@ -208,6 +208,56 @@ def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifie
     assert code_row["used_at"] is None
 
 
+def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(monkeypatch) -> None:
+    client_row = _client_row()
+    refresh_row = {
+        "refresh_id": uuid.uuid4(),
+        "used_at": None,
+        "token_revoked_at": None,
+        "token_expires_at": datetime.now(timezone.utc) + timedelta(days=1),
+        "family_id": uuid.uuid4(),
+        "family_revoked_at": None,
+        "grant_id": uuid.uuid4(),
+        "client_id": client_row["id"],
+        "resource": "https://testserver/mcp",
+        "scopes": ["read", "write"],
+        "grant_revoked_at": None,
+    }
+
+    class RefreshSession(FakeSession):
+        async def execute(self, statement, params=None):
+            sql = str(statement).lower()
+            if "from mcp_oauth_refresh_tokens r" in sql:
+                return _Result([refresh_row])
+            if "update mcp_oauth_refresh_tokens set used_at" in sql:
+                if refresh_row["used_at"] is not None:
+                    return _Result([])
+                refresh_row["used_at"] = params["now"]
+                return _Result([{"id": refresh_row["refresh_id"]}])
+            return await super().execute(statement, params)
+
+    session = RefreshSession(client_row)
+    client = _client(session, monkeypatch)
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": "codex-remote",
+        "client_secret": "client-secret",
+        "refresh_token": "opaque-refresh-token",
+        "scope": "read",
+    }
+
+    rotated = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+    replay = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+
+    assert rotated.status_code == 200
+    assert rotated.json()["scope"] == "read"
+    assert rotated.json()["refresh_token"]
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "invalid_grant"
+    assert any("update mcp_oauth_refresh_token_families set revoked_at" in sql.lower() for sql, _ in session.statements)
+    assert any("update mcp_oauth_access_tokens set revoked_at" in sql.lower() for sql, _ in session.statements)
+
+
 def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypatch) -> None:
     client_row = _client_row(
         client_type="confidential_web",
