@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import base64
+import hashlib
 from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -95,6 +96,16 @@ def _requested_scopes(raw_scope: str | None, allowed_scopes: list[str]) -> list[
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unsupported requested scope: {', '.join(invalid)}")
     return requested
+
+
+def _matches_s256_pkce_verifier(*, verifier: str, challenge: str) -> bool:
+    """Compare RFC 7636 S256 values without persisting or logging the verifier."""
+    if not 43 <= len(verifier) <= 128:
+        return False
+    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~" for character in verifier):
+        return False
+    derived = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    return secrets.compare_digest(derived, challenge)
 
 
 def _client_credentials_from_request(

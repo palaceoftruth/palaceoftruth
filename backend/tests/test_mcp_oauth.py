@@ -1,5 +1,6 @@
 import uuid
 import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
@@ -100,6 +101,16 @@ def _client_row(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def test_s256_pkce_verifier_validation_is_exact_and_fail_closed() -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+
+    assert mcp_oauth._matches_s256_pkce_verifier(verifier=verifier, challenge=challenge) is True
+    assert mcp_oauth._matches_s256_pkce_verifier(verifier="short", challenge=challenge) is False
+    assert mcp_oauth._matches_s256_pkce_verifier(verifier=("A" * 42) + "!", challenge=challenge) is False
+    assert mcp_oauth._matches_s256_pkce_verifier(verifier=verifier, challenge=challenge[:-1] + "A") is False
 
 
 def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None:
