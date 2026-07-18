@@ -172,14 +172,21 @@ def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifie
     session = FakeSession(client_row, authorization_code_row=code_row)
     client = _client(session, monkeypatch)
 
-    response = client.post(
+    wrong_redirect = client.post(
         "/api/v1/memory/mcp/oauth/token",
         data={"grant_type": "authorization_code", "client_id": "codex-remote", "client_secret": "client-secret",
               "code": "one-use-code", "code_verifier": verifier, "redirect_uri": "https://wrong.example/callback"},
     )
+    wrong_verifier = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={"grant_type": "authorization_code", "client_id": "codex-remote", "client_secret": "client-secret",
+              "code": "one-use-code", "code_verifier": "B" * 43, "redirect_uri": "https://nebulaios.example/callback"},
+    )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "invalid_grant"
+    assert wrong_redirect.status_code == 400
+    assert wrong_redirect.json()["detail"] == "invalid_grant"
+    assert wrong_verifier.status_code == 400
+    assert wrong_verifier.json()["detail"] == "invalid_grant"
     assert code_row["used_at"] is None
 
 
