@@ -775,7 +775,7 @@ def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
     assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
     assert body["grant_types_supported"] == ["client_credentials", "authorization_code", "refresh_token"]
     assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
-    assert body["code_challenge_methods_supported"] == []
+    assert body["code_challenge_methods_supported"] == ["S256"]
 
 
 def test_mcp_oauth_authorization_server_metadata_supports_issuer_well_known_path(monkeypatch) -> None:

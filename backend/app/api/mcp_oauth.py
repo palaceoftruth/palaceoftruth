@@ -1097,6 +1097,7 @@ def _mcp_oauth_authorization_server_metadata_response(request: Request) -> McpOA
         introspection_endpoint=_metadata_url(request, "introspect_mcp_access_token"),
         grant_types_supported=["client_credentials", "authorization_code", "refresh_token"],
         scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
+        code_challenge_methods_supported=["S256"],
         token_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
         revocation_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
         introspection_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
