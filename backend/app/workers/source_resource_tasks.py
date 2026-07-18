@@ -9,20 +9,25 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 import trafilatura
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session
+from app.embedding_profile import is_default_embedding_profile, resolve_embedding_profile
+from app.models.embedding import Embedding, EmbeddingProfileVector
 from app.models.item import Item
-from app.models.palace import SourceRecord
+from app.models.palace import SourceChunk, SourceRecord
 from app.models.source_resource import SourceResource, SourceResourceAlias
 from app.services.chunker import chunk_text
 from app.services.source_compiler import backfill_source_records_and_chunks
+from app.services.embedding_storage import embedding_record_for_profile
+from app.services.palace import create_or_get_palace_run, mark_item_dirty
 from app.services.source_resource_fetch import fetch_http_resource
 from app.services.source_resource_fairness import HostFairness
 from app.services.source_resource_robots import RobotsDecision, evaluate_robots
@@ -37,12 +42,19 @@ from app.services.source_resources import (
     refresh_lease_job_id,
 )
 from app.utils.hash import compute_content_hash
+from app.workers.queues import enqueue_palace_job
 
 logger = logging.getLogger(__name__)
 
 _host_fairness = HostFairness()
 _ROBOTS_CACHE_TTL = timedelta(hours=1)
 _MAX_REDIRECTS = 5
+
+
+@dataclass(frozen=True)
+class ResourceActivation:
+    source_record_id: uuid.UUID
+    material_change: bool
 
 
 async def claim_due_source_resources(
@@ -156,6 +168,7 @@ async def refresh_source_resource(
         now=now,
     )
 
+    schedule_palace_run = False
     async with async_session() as db:
         # Do not reuse the pre-fetch timestamp here: a slow robots or document
         # request may outlive the durable lease, in which case another worker
@@ -205,17 +218,18 @@ async def refresh_source_resource(
                 )
             else:
                 change_detected_at = monotonic()
-                source_record_id = await _activate_resource_content(
+                activation = await _activate_resource_content(
                     db,
                     resource=resource,
                     content=result.body.decode("utf-8", errors="replace"),
                     final_url=result.final_url or resource.canonical_url,
+                    embedder=_ctx["embedder"],
                 )
                 change_to_index_seconds = monotonic() - change_detected_at
                 observation = RefreshObservation(
                     outcome="success",
                     http_status=result.status_code,
-                    source_record_id=source_record_id,
+                    source_record_id=activation.source_record_id,
                     content_digest=digest,
                     validator_etag=result.etag,
                     validator_last_modified=result.last_modified,
@@ -224,6 +238,7 @@ async def refresh_source_resource(
                     robots_decision=robots.decision,
                     robots_cached_at=now,
                 )
+                schedule_palace_run = activation.material_change
         elif result.outcome == "not_found":
             # A single 404 is often eventual consistency or a temporary edge
             # response.  Only a second consecutive 404 tombstones the source.
@@ -272,6 +287,19 @@ async def refresh_source_resource(
         )
         await db.commit()
 
+    if schedule_palace_run:
+        # The activation transaction already committed its dirty marker.  The
+        # run helper owns its own commit, so invoke it only afterwards rather
+        # than allowing it to split the resource/audit activation transaction.
+        async with async_session() as db:
+            palace_run, created = await create_or_get_palace_run(
+                db,
+                tenant_id=tenant_id,
+                triggered_by="auto",
+            )
+        if created:
+            await enqueue_palace_job(_ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+
     logger.info(
         "source_refresh_committed resource_id=%s outcome=%s change=%s source_record_id=%s",
         resource_id,
@@ -287,14 +315,36 @@ async def _activate_resource_content(
     resource: SourceResource,
     content: str,
     final_url: str,
-) -> uuid.UUID:
-    """Update the stable resource Item and append its SourceRecord version."""
+    embedder,
+) -> ResourceActivation:
+    """Atomically activate a changed resource version and its vector projection.
+
+    The remote embedding request happens before any persistent state changes.  Once
+    it succeeds, source records, vectors, invalidation, and the Palace dirty marker
+    share the caller's transaction, so a failure leaves the previous version live.
+    """
 
     readable_content = trafilatura.extract(content, include_comments=False, include_tables=True, output_format="txt") or content
     current_record = None
     if resource.last_successful_source_record_id is not None:
-        current_record = await db.get(SourceRecord, resource.last_successful_source_record_id)
-    item = await db.get(Item, current_record.item_id) if current_record is not None else None
+        current_record = await db.scalar(
+            select(SourceRecord)
+            .where(SourceRecord.id == resource.last_successful_source_record_id)
+            .where(SourceRecord.tenant_id == resource.tenant_id)
+        )
+        if current_record is None:
+            raise RuntimeError("source resource points to a missing or cross-tenant source record")
+    item = (
+        await db.scalar(
+            select(Item)
+            .where(Item.id == current_record.item_id)
+            .where(Item.tenant_id == resource.tenant_id)
+        )
+        if current_record is not None
+        else None
+    )
+    if current_record is not None and item is None:
+        raise RuntimeError("source record points to a missing or cross-tenant item")
     if item is None:
         item = Item(
             tenant_id=resource.tenant_id,
@@ -306,12 +356,87 @@ async def _activate_resource_content(
         db.add(item)
         await db.flush()
 
+    chunks = chunk_text(readable_content)
+    current_chunks: dict[int, str] = {}
+    if current_record is not None:
+        current_chunks = {
+            row.chunk_index: row.chunk_text
+            for row in (
+                await db.scalars(
+                    select(SourceChunk).where(SourceChunk.source_record_id == current_record.id)
+                )
+            ).all()
+        }
+
+    profile = getattr(embedder, "profile", resolve_embedding_profile())
+    reusable_indices = {
+        chunk["index"]
+        for chunk in chunks
+        if current_chunks.get(chunk["index"]) == chunk["text"]
+    }
+    if is_default_embedding_profile(profile):
+        existing_chunks = {
+            (row.chunk_index, row.chunk_text)
+            for row in (
+                await db.execute(
+                    select(Embedding.chunk_index, Embedding.chunk_text).where(Embedding.item_id == item.id)
+                )
+            ).all()
+        } if item.id else set()
+    else:
+        existing_chunks = {
+            (row.chunk_index, row.chunk_text)
+            for row in (
+                await db.execute(
+                    select(EmbeddingProfileVector.chunk_index, EmbeddingProfileVector.chunk_text)
+                    .where(EmbeddingProfileVector.item_id == item.id)
+                    .where(EmbeddingProfileVector.profile_name == profile.profile_name)
+                )
+            ).all()
+        } if item.id else set()
+    reusable_indices = {
+        chunk["index"]
+        for chunk in chunks
+        if chunk["index"] in reusable_indices and (chunk["index"], chunk["text"]) in existing_chunks
+    }
+    changed_chunks = [chunk for chunk in chunks if chunk["index"] not in reusable_indices]
+    vectors = await embedder.embed_texts([chunk["text"] for chunk in changed_chunks]) if changed_chunks else []
+    if len(vectors) != len(changed_chunks):
+        raise RuntimeError("embedding provider returned an incomplete changed-chunk response")
+
     item.raw_content = readable_content
     item.content_hash = compute_content_hash(readable_content)
-    item.content_chunks = chunk_text(readable_content)
+    item.content_chunks = chunks
     item.metadata_ = {**(item.metadata_ or {}), "source_resource_id": str(resource.id), "final_url": final_url}
     item.status = "ready"
     await db.flush()
+
+    # Keep only verified unchanged vectors in the active profile.  This avoids
+    # re-embedding unchanged chunks while removing vectors for changed/deleted
+    # sections before the new source version becomes current.
+    if is_default_embedding_profile(profile):
+        await db.execute(
+            delete(Embedding)
+            .where(Embedding.item_id == item.id)
+            .where(Embedding.chunk_index.not_in(reusable_indices))
+        )
+    else:
+        await db.execute(
+            delete(EmbeddingProfileVector)
+            .where(EmbeddingProfileVector.item_id == item.id)
+            .where(EmbeddingProfileVector.profile_name == profile.profile_name)
+            .where(EmbeddingProfileVector.chunk_index.not_in(reusable_indices))
+        )
+    for chunk, vector in zip(changed_chunks, vectors):
+        db.add(
+            embedding_record_for_profile(
+                item_id=item.id,
+                chunk_index=chunk["index"],
+                chunk_text=chunk["text"],
+                vector=vector,
+                profile=profile,
+            )
+        )
     await backfill_source_records_and_chunks(
         db,
         tenant_id=resource.tenant_id,
@@ -324,12 +449,24 @@ async def _activate_resource_content(
         select(SourceRecord)
         .where(SourceRecord.tenant_id == resource.tenant_id)
         .where(SourceRecord.item_id == item.id)
+        .where(SourceRecord.status == "active")
         .order_by(SourceRecord.updated_at.desc(), SourceRecord.created_at.desc())
         .limit(1)
     )
     if record is None:
         raise RuntimeError("source record activation did not create a version")
-    return record.id
+    material_change = current_record is None or record.id != current_record.id
+    if material_change:
+        await mark_item_dirty(
+            db,
+            tenant_id=resource.tenant_id,
+            item_id=item.id,
+            reason="source-resource-refresh",
+        )
+    return ResourceActivation(
+        source_record_id=record.id,
+        material_change=material_change,
+    )
 
 
 async def _fetch_with_robots(
