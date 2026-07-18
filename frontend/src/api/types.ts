@@ -806,6 +806,30 @@ export interface McpOAuthClientRegisterResponse {
   config_snippets?: McpClientConfigSnippets | null;
 }
 
+export interface McpOAuthGrantSummary {
+  id: string;
+  client_id: string;
+  client_key: string;
+  client_name: string;
+  resource: string;
+  scopes: McpOperationScope[];
+  agent_scope_keys: string[];
+  workspace_scope_keys: string[];
+  authorized_by: string;
+  revoked_at?: string | null;
+}
+
+export interface McpOAuthGrantListResponse {
+  tenant_id: string;
+  grants: McpOAuthGrantSummary[];
+}
+
+export interface McpOAuthGrantRevokeResponse {
+  tenant_id: string;
+  grant: McpOAuthGrantSummary;
+  revoked: boolean;
+}
+
 export type CandidateArtifactStatus =
   | "draft"
   | "needs_source"

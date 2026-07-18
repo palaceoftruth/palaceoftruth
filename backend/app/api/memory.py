@@ -1285,6 +1285,13 @@ async def semantic_recall_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> SemanticRecallResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.scope_key] if body.scope_type == "agent" and body.scope_key else [],
+        workspace_scope_keys=[body.scope_key] if body.scope_type == "workspace" and body.scope_key else [],
+        tenant_shared=body.scope_type == "tenant_shared",
+        broad=False,
+    )
     return await semantic_recall_memory(
         db,
         tenant_id=request.state.tenant_id,
@@ -1302,6 +1309,13 @@ async def retrieve_memory_trajectory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryTrajectoryResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[key for key in [body.agent_scope_key, *(body.include_agent_scope_keys or [])] if key],
+        workspace_scope_keys=body.workspace_scope_keys or [],
+        tenant_shared=body.include_tenant_shared,
+        broad=body.include_all_permitted_agent_scopes or body.include_broad_corpus or body.session_scope_key is not None,
+    )
     try:
         delegated_policy = delegated_agent_memory_policy_from_config(
             tenant_id=request.state.tenant_id,

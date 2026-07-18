@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
-from app.api.memory import router
+from app.api.memory import _enforce_delegated_grant_retrieval, router
 from app.auth import verify_memory_auth
 from app.database import get_db
 from app.main import app as main_app
@@ -80,6 +80,7 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rollbacks += 1
+
 
     async def execute(self, statement, params=None):
         params = params or {}
@@ -158,6 +159,28 @@ class FakeSession:
 
     async def flush(self) -> None:
         return None
+
+
+def test_delegated_grant_scope_guard_denies_ungranted_semantic_and_trajectory_paths() -> None:
+    """All scoped retrieval endpoints share the same fail-closed grant guard."""
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            auth_context=SimpleNamespace(
+                delegated_grant_id=uuid.uuid4(),
+                delegated_agent_scope_keys=("codex",),
+                delegated_workspace_scope_keys=("palaceoftruth",),
+            )
+        )
+    )
+
+    _enforce_delegated_grant_retrieval(request, agent_scope_keys=["codex"], workspace_scope_keys=["palaceoftruth"], tenant_shared=False, broad=False)
+    for kwargs in (
+        {"agent_scope_keys": ["sibling-agent"], "workspace_scope_keys": [], "tenant_shared": False, "broad": False},
+        {"agent_scope_keys": [], "workspace_scope_keys": ["other-workspace"], "tenant_shared": False, "broad": False},
+        {"agent_scope_keys": [], "workspace_scope_keys": [], "tenant_shared": True, "broad": False},
+    ):
+        with pytest.raises(HTTPException, match="does not permit"):
+            _enforce_delegated_grant_retrieval(request, **kwargs)
 
 
 class _ScalarResult:

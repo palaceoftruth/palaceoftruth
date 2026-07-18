@@ -18,6 +18,8 @@ import type {
   McpOAuthClientListResponse,
   McpOAuthClientRegisterResponse,
   McpOAuthClientRevokeResponse,
+  McpOAuthGrantListResponse,
+  McpOAuthGrantRevokeResponse,
   McpOAuthAuthorizationInteraction,
   McpOperationScope,
   OPMLImportResponse,
@@ -388,6 +390,11 @@ export const api = {
 
   revokePalaceMcpClient: (clientId: string) =>
     req<McpOAuthClientRevokeResponse>(`/palace/mcp-clients/${clientId}/revoke`, { method: "POST" }),
+
+  listPalaceMcpGrants: () => req<McpOAuthGrantListResponse>("/palace/mcp-grants"),
+
+  revokePalaceMcpGrant: (grantId: string) =>
+    req<McpOAuthGrantRevokeResponse>(`/palace/mcp-grants/${grantId}/revoke`, { method: "POST" }),
 
   listPalaceSyncSources: () => req<PalaceSyncSource[]>("/palace/sync-sources"),
 

@@ -9,6 +9,7 @@ import type {
   McpClientConfigSnippets,
   McpOAuthClientRegisterResponse,
   McpOAuthClientSummary,
+  McpOAuthGrantSummary,
   McpOAuthScopeDefinition,
   McpOperationScope,
   PalaceRunSummary,
@@ -214,11 +215,13 @@ export default function PalaceControlTowerPage() {
   const [retryingMemoryJobId, setRetryingMemoryJobId] = useState<string | null>(null);
   const [form, setForm] = useState<SourceFormState>(emptySourceForm);
   const [mcpClients, setMcpClients] = useState<McpOAuthClientSummary[]>([]);
+  const [mcpGrants, setMcpGrants] = useState<McpOAuthGrantSummary[]>([]);
   const [mcpSnippets, setMcpSnippets] = useState<McpClientConfigSnippets | null>(null);
   const [mcpScopeCatalog, setMcpScopeCatalog] = useState<McpOAuthScopeDefinition[]>(FALLBACK_MCP_SCOPE_OPTIONS);
   const [mcpForm, setMcpForm] = useState(DEFAULT_MCP_FORM);
   const [mcpSubmitting, setMcpSubmitting] = useState(false);
   const [mcpRevokingId, setMcpRevokingId] = useState<string | null>(null);
+  const [mcpGrantRevokingId, setMcpGrantRevokingId] = useState<string | null>(null);
   const [mcpRegistration, setMcpRegistration] = useState<McpOAuthClientRegisterResponse | null>(null);
   const navigate = useNavigate();
   const toast = useToast();
@@ -228,14 +231,16 @@ export default function PalaceControlTowerPage() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [controlTower, clients] = await Promise.all([
+      const [controlTower, clients, grants] = await Promise.all([
         api.getPalaceControlTower(),
         api.listPalaceMcpClients(),
+        api.listPalaceMcpGrants(),
       ]);
       setTower(controlTower);
       setMcpClients(clients.clients);
       setMcpSnippets(clients.config_snippets);
       setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
+      setMcpGrants(grants.grants);
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
@@ -391,6 +396,24 @@ export default function PalaceControlTowerPage() {
       toast.error(errorMessage(err));
     } finally {
       setMcpRevokingId(null);
+    }
+  };
+
+  const handleRevokeMcpGrant = async (grant: McpOAuthGrantSummary) => {
+    const confirmed = window.confirm(
+      `Revoke delegated grant for "${grant.client_name}"?\n\nIts access and refresh tokens will stop working immediately.`,
+    );
+    if (!confirmed) return;
+    setMcpGrantRevokingId(grant.id);
+    try {
+      await api.revokePalaceMcpGrant(grant.id);
+      toast.success("Delegated grant revoked");
+      const grants = await api.listPalaceMcpGrants();
+      setMcpGrants(grants.grants);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setMcpGrantRevokingId(null);
     }
   };
 
@@ -1225,6 +1248,45 @@ export default function PalaceControlTowerPage() {
                     />
                   )}
                 </div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Delegated grants</p>
+                <p className="text-xs text-zinc-500">Constraints are enforced server-side.</p>
+              </div>
+              <div className="mt-3 space-y-2">
+                {mcpGrants.length ? mcpGrants.map((grant) => (
+                  <div key={grant.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-sm">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="break-words font-medium text-zinc-100">{grant.client_name}</span>
+                          <span className="rounded-full border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400">
+                            {grant.revoked_at ? "revoked" : "active"}
+                          </span>
+                        </div>
+                        <p className="mt-2 break-all text-xs text-zinc-500">{grant.resource}</p>
+                        <p className="mt-1 text-xs text-zinc-400">scopes {formatScopes(grant.scopes)}</p>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          agents {grant.agent_scope_keys.length ? grant.agent_scope_keys.join(", ") : "none"} • workspaces {grant.workspace_scope_keys.length ? grant.workspace_scope_keys.join(", ") : "none"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleRevokeMcpGrant(grant)}
+                        disabled={Boolean(grant.revoked_at) || mcpGrantRevokingId === grant.id}
+                        className="sb-button-ghost shrink-0 text-rose-200 hover:bg-rose-950/30 hover:text-rose-100"
+                      >
+                        {mcpGrantRevokingId === grant.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        Revoke grant
+                      </button>
+                    </div>
+                  </div>
+                )) : (
+                  <p className="text-xs text-zinc-500">No delegated grants have been approved yet.</p>
+                )}
               </div>
             </div>
 
