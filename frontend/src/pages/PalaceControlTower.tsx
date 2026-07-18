@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Clipboard, Loader2, Pencil, RadioTower, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowLeft, Clipboard, Loader2, Pause, Pencil, RadioTower, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
@@ -13,6 +13,9 @@ import type {
   McpOAuthScopeDefinition,
   McpOperationScope,
   PalaceRunSummary,
+  PalaceSourceRefreshPolicy,
+  PalaceSourceResourceDetail,
+  PalaceSourceResourceSummary,
   PalaceSyncSource,
 } from "../api/types";
 import PageHeader from "../components/PageHeader";
@@ -106,6 +109,12 @@ function formatDurationSeconds(seconds: number | null | undefined): string {
 
 function formatCandidateScore(score: number): string {
   return `${Math.round(score * 100)}%`;
+}
+
+function sourceFreshnessClass(freshness: PalaceSourceResourceSummary["freshness"]): string {
+  if (freshness === "current") return "border-emerald-700/50 bg-emerald-950/30 text-emerald-100";
+  if (freshness === "due" || freshness === "unknown") return "border-amber-700/50 bg-amber-950/30 text-amber-100";
+  return "border-rose-700/50 bg-rose-950/30 text-rose-100";
 }
 
 type SourceFormState = {
@@ -223,6 +232,9 @@ export default function PalaceControlTowerPage() {
   const [mcpRevokingId, setMcpRevokingId] = useState<string | null>(null);
   const [mcpGrantRevokingId, setMcpGrantRevokingId] = useState<string | null>(null);
   const [mcpRegistration, setMcpRegistration] = useState<McpOAuthClientRegisterResponse | null>(null);
+  const [sourceResources, setSourceResources] = useState<PalaceSourceResourceSummary[]>([]);
+  const [resourceDetails, setResourceDetails] = useState<Record<string, PalaceSourceResourceDetail>>({});
+  const [resourceActionId, setResourceActionId] = useState<string | null>(null);
   const navigate = useNavigate();
   const toast = useToast();
   const sourceFormRef = useRef<HTMLFormElement>(null);
@@ -231,16 +243,18 @@ export default function PalaceControlTowerPage() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [controlTower, clients, grants] = await Promise.all([
+      const [controlTower, clients, grants, watchedResources] = await Promise.all([
         api.getPalaceControlTower(),
         api.listPalaceMcpClients(),
         api.listPalaceMcpGrants(),
+        api.listPalaceSourceResources(),
       ]);
       setTower(controlTower);
       setMcpClients(clients.clients);
       setMcpSnippets(clients.config_snippets);
       setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
       setMcpGrants(grants.grants);
+      setSourceResources(watchedResources.resources);
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
@@ -334,6 +348,63 @@ export default function PalaceControlTowerPage() {
       toast.error(errorMessage(err));
     } finally {
       setRetryingMemoryJobId(null);
+    }
+  };
+
+  const updateSourceResource = (resource: PalaceSourceResourceSummary) => {
+    setSourceResources((previous) => previous.map((candidate) => candidate.id === resource.id ? resource : candidate));
+    setResourceDetails((previous) => previous[resource.id] ? { ...previous, [resource.id]: { ...previous[resource.id], ...resource } } : previous);
+  };
+
+  const handleSourceResourceAction = async (resource: PalaceSourceResourceSummary, action: "pause" | "resume" | "refresh" | "restore") => {
+    setResourceActionId(resource.id);
+    try {
+      const result = action === "pause"
+        ? await api.pausePalaceSourceResource(resource.id)
+        : action === "resume"
+          ? await api.resumePalaceSourceResource(resource.id)
+          : action === "refresh"
+            ? await api.refreshPalaceSourceResource(resource.id)
+            : await api.restorePalaceSourceResource(resource.id);
+      updateSourceResource(result.resource);
+      toast.success(result.action.replace("_", " "));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setResourceActionId(null);
+    }
+  };
+
+  const handleSourceResourcePolicy = async (resource: PalaceSourceResourceSummary, refresh_policy: PalaceSourceRefreshPolicy) => {
+    setResourceActionId(resource.id);
+    try {
+      const updated = await api.updatePalaceSourceResourcePolicy(resource.id, { refresh_policy });
+      updateSourceResource(updated);
+      toast.success("Refresh policy updated");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setResourceActionId(null);
+    }
+  };
+
+  const handleResourceHistory = async (resourceId: string) => {
+    if (resourceDetails[resourceId]) {
+      setResourceDetails((previous) => {
+        const next = { ...previous };
+        delete next[resourceId];
+        return next;
+      });
+      return;
+    }
+    setResourceActionId(resourceId);
+    try {
+      const detail = await api.getPalaceSourceResource(resourceId);
+      setResourceDetails((previous) => ({ ...previous, [resourceId]: detail }));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setResourceActionId(null);
     }
   };
 
@@ -547,6 +618,52 @@ export default function PalaceControlTowerPage() {
           </button>
         }
       />
+
+      <section aria-labelledby="watched-source-heading" className="rounded-3xl border border-zinc-800 bg-zinc-900/35 p-5 shadow-sm sm:p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Watched sources</p>
+            <h2 id="watched-source-heading" className="mt-1 text-xl font-semibold text-zinc-100">Freshness and operator controls</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-400">Verification state is separate from publication age. Actions below use the audited watched-source API and never delete a source.</p>
+          </div>
+          <span className="w-fit rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">{sourceResources.length} tracked</span>
+        </div>
+        <div className="mt-5 space-y-3">
+          {sourceResources.length ? sourceResources.map((resource) => {
+            const detail = resourceDetails[resource.id];
+            const busy = resourceActionId === resource.id;
+            const conflicts = detail?.aliases.filter((alias) => alias.decision === "conflict") ?? [];
+            return <article key={resource.id} aria-label={`Watched source ${resource.canonical_url}`} className="rounded-2xl border border-zinc-800 bg-zinc-950/45 p-4">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full border px-2 py-1 text-[11px] font-medium ${sourceFreshnessClass(resource.freshness)}`}>{resource.freshness}</span>
+                    <span className="rounded-full border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300">{resource.status}</span>
+                    {conflicts.length ? <span className="rounded-full border border-rose-700/50 px-2 py-1 text-[11px] text-rose-200">{conflicts.length} canonical conflict{conflicts.length === 1 ? "" : "s"}</span> : null}
+                  </div>
+                  <p className="mt-3 break-all font-medium text-zinc-100">{resource.canonical_url}</p>
+                  <dl className="mt-3 grid gap-x-5 gap-y-2 text-xs text-zinc-400 sm:grid-cols-2 xl:grid-cols-4">
+                    <div><dt className="text-zinc-500">Verified</dt><dd>{relative(resource.last_verified_at)}</dd></div>
+                    <div><dt className="text-zinc-500">Published</dt><dd>{relative(resource.published_at)}</dd></div>
+                    <div><dt className="text-zinc-500">Next due</dt><dd>{relative(resource.next_due_at)}</dd></div>
+                    <div><dt className="text-zinc-500">Failures / backoff</dt><dd>{resource.consecutive_failures}{resource.backoff_until ? ` / until ${relative(resource.backoff_until)}` : ""}</dd></div>
+                  </dl>
+                </div>
+                <div className="flex flex-wrap items-center gap-2" role="group" aria-label={`Actions for watched source ${resource.canonical_url}`}>
+                  <label className="sr-only" htmlFor={`policy-${resource.id}`}>Refresh policy</label>
+                  <select id={`policy-${resource.id}`} value={resource.refresh_policy} disabled={busy} onChange={(event) => void handleSourceResourcePolicy(resource, event.target.value as PalaceSourceRefreshPolicy)} className="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400">
+                    <option value="manual">Manual</option><option value="interval">Interval</option><option value="adaptive">Adaptive</option>
+                  </select>
+                  <button type="button" disabled={busy || !["active", "unreachable"].includes(resource.status)} onClick={() => void handleSourceResourceAction(resource, "refresh")} className="sb-button-ghost px-3 py-1.5 text-xs"><RefreshCw className="h-3.5 w-3.5" />Refresh</button>
+                  {resource.status === "paused" ? <button type="button" disabled={busy} onClick={() => void handleSourceResourceAction(resource, "resume")} className="sb-button-ghost px-3 py-1.5 text-xs"><RotateCcw className="h-3.5 w-3.5" />Resume</button> : resource.status === "gone" ? <button type="button" disabled={busy} onClick={() => void handleSourceResourceAction(resource, "restore")} className="sb-button-ghost px-3 py-1.5 text-xs"><RotateCcw className="h-3.5 w-3.5" />Restore</button> : <button type="button" disabled={busy} onClick={() => void handleSourceResourceAction(resource, "pause")} className="sb-button-ghost px-3 py-1.5 text-xs"><Pause className="h-3.5 w-3.5" />Pause</button>}
+                  <button type="button" disabled={busy} onClick={() => void handleResourceHistory(resource.id)} className="sb-button-ghost px-3 py-1.5 text-xs">{detail ? "Hide history" : "View history"}</button>
+                </div>
+              </div>
+              {detail ? <div className="mt-4 grid gap-4 border-t border-zinc-800 pt-4 lg:grid-cols-2"><div><p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Canonical and redirect history</p>{detail.aliases.length ? <ul className="mt-2 space-y-2">{detail.aliases.map((alias) => <li key={alias.id} className="rounded-xl bg-zinc-900/70 px-3 py-2 text-xs text-zinc-300"><span className={alias.decision === "conflict" ? "text-rose-200" : "text-emerald-200"}>{alias.decision}</span> {alias.signal} · {alias.normalized_url} · {relative(alias.observed_at)}</li>)}</ul> : <p className="mt-2 text-sm text-zinc-400">No canonical redirects or conflicts recorded.</p>}</div><div><p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Operator audit trail</p>{detail.audit_events.length ? <ul className="mt-2 space-y-2">{detail.audit_events.map((event) => <li key={event.id} className="rounded-xl bg-zinc-900/70 px-3 py-2 text-xs text-zinc-300"><span className="text-sky-200">{formatOperation(event.event_kind)}</span> · {event.previous_status ?? "unknown"} → {event.next_status ?? "unknown"} · {relative(event.recorded_at)}</li>)}</ul> : <p className="mt-2 text-sm text-zinc-400">No operator actions recorded.</p>}</div></div> : null}
+            </article>;
+          }) : <StatePanel icon={RadioTower} compact variant="empty" title="No watched sources yet." description="Enrollment creates the source inventory. Once resources are tracked, their verified freshness and safe controls appear here." />}
+        </div>
+      </section>
 
       {tower?.active_palace_run ? (
         <PalaceStateBanner

@@ -33,6 +33,11 @@ import type {
   PalaceSyncRun,
   PalaceSyncSource,
   PalaceSyncSourceDeleteResponse,
+  PalaceSourceRefreshPolicy,
+  PalaceSourceResourceActionResponse,
+  PalaceSourceResourceDetail,
+  PalaceSourceResourceListResponse,
+  PalaceSourceResourceSummary,
   ReviewInboxAction,
   ReviewInboxActionResponse,
   ReviewInboxResponse,
@@ -354,6 +359,26 @@ export const api = {
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
+
+  listPalaceSourceResources: () => req<PalaceSourceResourceListResponse>("/palace/source-resources"),
+
+  getPalaceSourceResource: (resourceId: string) =>
+    req<PalaceSourceResourceDetail>(`/palace/source-resources/${resourceId}`),
+
+  updatePalaceSourceResourcePolicy: (resourceId: string, body: { refresh_policy?: PalaceSourceRefreshPolicy; refresh_slo_seconds?: number }) =>
+    req<PalaceSourceResourceSummary>(`/palace/source-resources/${resourceId}`, { method: "PATCH", body: JSON.stringify(body) }),
+
+  pausePalaceSourceResource: (resourceId: string) =>
+    req<PalaceSourceResourceActionResponse>(`/palace/source-resources/${resourceId}/pause`, { method: "POST" }),
+
+  resumePalaceSourceResource: (resourceId: string) =>
+    req<PalaceSourceResourceActionResponse>(`/palace/source-resources/${resourceId}/resume`, { method: "POST" }),
+
+  refreshPalaceSourceResource: (resourceId: string) =>
+    req<PalaceSourceResourceActionResponse>(`/palace/source-resources/${resourceId}/refresh`, { method: "POST" }),
+
+  restorePalaceSourceResource: (resourceId: string) =>
+    req<PalaceSourceResourceActionResponse>(`/palace/source-resources/${resourceId}/restore`, { method: "POST" }),
 
   getReviewInbox: (params?: { include_deferred?: boolean; limit?: number }) => {
     const query = new URLSearchParams();

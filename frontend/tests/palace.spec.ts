@@ -53,6 +53,9 @@ async function mockPalaceControlTower(page: Parameters<typeof test>[0]["page"], 
   await page.route("**/api/v1/palace/mcp-grants", async (route) => {
     await route.fulfill({ json: { tenant_id: "default", grants: [] } });
   });
+  await page.route("**/api/v1/palace/source-resources", async (route) => {
+    await route.fulfill({ json: { resources: [], total: 0 } });
+  });
 }
 
 async function expectNoHorizontalOverflow(page: Parameters<typeof test>[0]["page"]) {
@@ -875,6 +878,73 @@ test.describe("Palace smoke", () => {
     await page.getByText("Wakeup trust health").scrollIntoViewIfNeeded();
     await expect(page.getByRole("heading", { name: "Source trust counts failed." })).toBeVisible();
     await expect(page.getByText("MCP wakeup remains usable")).toBeVisible();
+  });
+
+  test("control tower shows watched-source freshness, audited controls, and canonical history", async ({ page }) => {
+    const resource = {
+      id: "source-1",
+      kind: "http",
+      canonical_url: "https://docs.example.test/guide",
+      freshness: "due",
+      status: "active",
+      refresh_policy: "adaptive",
+      refresh_slo_seconds: 3600,
+      last_http_status: 200,
+      has_etag: true,
+      has_last_modified: true,
+      consecutive_failures: 2,
+      robots_decision: "allowed",
+      robots_cached_at: "2026-07-18T19:00:00Z",
+      published_at: "2026-07-01T12:00:00Z",
+      captured_at: "2026-07-18T18:00:00Z",
+      last_verified_at: "2026-07-18T18:30:00Z",
+      content_changed_at: null,
+      last_checked_at: "2026-07-18T18:30:00Z",
+      last_success_at: "2026-07-18T18:30:00Z",
+      next_due_at: "2026-07-18T19:30:00Z",
+      backoff_until: "2026-07-18T20:00:00Z",
+      current_source_record_id: "record-1",
+      last_successful_source_record_id: "record-1",
+    };
+    await mockPalaceControlTower(page, {
+      tenant_id: "default", dirty_generation: 0, indexed_generation: 0, backlog_generation: 0, active_palace_run: null,
+      memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+      webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+      fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+      diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+      wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+      sync_sources: [], sync_runs: [], palace_runs: [],
+    });
+    await page.unroute("**/api/v1/palace/source-resources");
+    await page.route("**/api/v1/palace/source-resources/source-1", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({ json: { ...resource, aliases: [{ id: "alias-1", signal: "canonical", decision: "conflict", normalized_url: "https://docs.example.test/old", final_url: null, canonical_signal_url: "https://docs.example.test/guide", observed_at: "2026-07-18T18:00:00Z" }], audit_events: [{ id: "audit-1", event_kind: "operator_policy_updated", previous_status: "active", next_status: "active", previous_refresh_policy: "interval", next_refresh_policy: "adaptive", recorded_at: "2026-07-18T18:30:00Z" }] } });
+      } else {
+        await route.fulfill({ json: resource });
+      }
+    });
+    await page.route("**/api/v1/palace/source-resources", async (route) => {
+      await route.fulfill({ json: { resources: [resource], total: 1 } });
+    });
+    await page.addInitScript(() => localStorage.setItem("sb:browser_api_key", "test-key"));
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+    const card = page.getByRole("article", { name: /Watched source https:\/\/docs.example.test\/guide/ });
+    await expect(card).toContainText("Verified");
+    await expect(card).toContainText("Published");
+    await expect(card.getByRole("button", { name: "Refresh" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Pause" })).toBeVisible();
+    await card.getByRole("button", { name: "View history" }).click();
+    await expect(card).toContainText("1 canonical conflict");
+    await expect(card).toContainText("https://docs.example.test/old");
+    await expect(card).toContainText("Operator audit trail");
+    await expect(card).toContainText("operator policy updated");
+    if (process.env.UI_EVIDENCE_DIR) {
+      await page.screenshot({ path: `${process.env.UI_EVIDENCE_DIR}/sar-1206-desktop.png`, fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(250); // Let the desktop-to-mobile sidebar transition settle before capturing evidence.
+      await expectNoHorizontalOverflow(page);
+      await card.screenshot({ path: `${process.env.UI_EVIDENCE_DIR}/sar-1206-mobile.png` });
+    }
   });
 
   test("control tower registers MCP agents and keeps secrets out of persistent panels", async ({ page }) => {

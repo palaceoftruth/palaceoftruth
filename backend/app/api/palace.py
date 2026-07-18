@@ -15,7 +15,7 @@ from app.auth import hash_secret, require_api_capability
 from app.database import async_session, get_db
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
-from app.models.source_resource import SourceResource, SourceResourceAlias
+from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
@@ -39,6 +39,7 @@ from app.schemas.palace import (
     PalaceItemSourceSummary,
     PalaceSourceResourceAliasSummary,
     PalaceSourceResourceActionResponse,
+    PalaceSourceResourceAuditSummary,
     PalaceSourceResourceDetail,
     PalaceSourceResourceListResponse,
     PalaceSourceResourcePolicyUpdate,
@@ -873,6 +874,15 @@ async def get_source_resource(
             .order_by(SourceResourceAlias.observed_at)
         )
     ).scalars().all()
+    audit_events = (
+        await db.execute(
+            select(SourceResourceAuditSnapshot)
+            .where(SourceResourceAuditSnapshot.tenant_id == request.state.tenant_id)
+            .where(SourceResourceAuditSnapshot.resource_id == resource.id)
+            .order_by(SourceResourceAuditSnapshot.recorded_at.desc())
+            .limit(25)
+        )
+    ).scalars().all()
     return PalaceSourceResourceDetail(
         **summary.model_dump(),
         aliases=[
@@ -886,6 +896,18 @@ async def get_source_resource(
                 observed_at=alias.observed_at,
             )
             for alias in aliases
+        ],
+        audit_events=[
+            PalaceSourceResourceAuditSummary(
+                id=audit.id,
+                event_kind=audit.event_kind,
+                previous_status=audit.previous_snapshot.get("status"),
+                next_status=audit.next_snapshot.get("status"),
+                previous_refresh_policy=audit.previous_snapshot.get("refresh_policy"),
+                next_refresh_policy=audit.next_snapshot.get("refresh_policy"),
+                recorded_at=audit.recorded_at,
+            )
+            for audit in audit_events
         ],
     )
 
