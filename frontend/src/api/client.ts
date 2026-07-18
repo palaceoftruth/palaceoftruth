@@ -18,6 +18,7 @@ import type {
   McpOAuthClientListResponse,
   McpOAuthClientRegisterResponse,
   McpOAuthClientRevokeResponse,
+  McpOAuthAuthorizationInteraction,
   McpOperationScope,
   OPMLImportResponse,
   ConversationDetail,
@@ -111,6 +112,19 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getStats: () => req<StatsResponse>("/stats"),
+
+  getMcpAuthorizationInteraction: (interactionId: string) =>
+    req<McpOAuthAuthorizationInteraction>(`/memory/mcp/oauth/authorize/${encodeURIComponent(interactionId)}`),
+
+  decideMcpAuthorizationInteraction: async (interactionId: string, decision: "approved" | "denied", csrfToken: string) => {
+    const form = new FormData();
+    form.set("decision", decision);
+    form.set("csrf_token", csrfToken);
+    return req<{ redirect_uri: string }>(`/memory/mcp/oauth/authorize/${encodeURIComponent(interactionId)}/decision`, {
+      method: "POST",
+      body: form,
+    });
+  },
 
   listItems: (params: Record<string, string | number>) =>
     req<ItemListResponse>(`/items?${new URLSearchParams(params as Record<string, string>)}`),

@@ -477,6 +477,59 @@ async def begin_mcp_authorization(
     return redirect
 
 
+@router.get("/authorize/{interaction_id}")
+async def get_mcp_authorization_interaction(
+    request: Request,
+    interaction_id: str,
+    browser_session: Annotated[str | None, Cookie(alias="palace_oauth_consent_session")] = None,
+    _: str = Depends(verify_api_key),
+) -> dict[str, object]:
+    """Return a non-secret summary for the tenant-bound consent browser session."""
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id or not browser_session:
+        raise HTTPException(status_code=400, detail="invalid_request")
+
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT i.tenant_id, i.resource, i.scopes, i.agent_scope_keys, i.workspace_scope_keys,
+                       i.browser_session_hash, i.decision, i.consumed_at, i.expires_at,
+                       c.client_key, c.display_name
+                FROM mcp_oauth_authorization_interactions i
+                JOIN mcp_clients c ON c.id = i.client_id AND c.tenant_id = i.tenant_id
+                WHERE i.id = CAST(:id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"id": interaction_id},
+        )
+        interaction = result.mappings().one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if (
+        interaction is None
+        or interaction["tenant_id"] != tenant_id
+        or interaction["decision"] is not None
+        or interaction["consumed_at"] is not None
+        or not isinstance(interaction["expires_at"], datetime)
+        or interaction["expires_at"] <= now
+        or not compare_secret(browser_session, interaction["browser_session_hash"])
+    ):
+        raise HTTPException(status_code=400, detail="invalid_request")
+
+    # Never disclose the callback URI, client state, PKCE challenge, or bindings.
+    return {
+        "client_name": interaction["display_name"] or interaction["client_key"],
+        "tenant_id": tenant_id,
+        "resource": interaction["resource"],
+        "scopes": interaction["scopes"],
+        "agent_scope_keys": interaction["agent_scope_keys"],
+        "workspace_scope_keys": interaction["workspace_scope_keys"],
+        "expires_at": interaction["expires_at"].isoformat(),
+    }
+
+
 @router.post("/authorize/{interaction_id}/decision")
 async def decide_mcp_authorization(
     request: Request,
