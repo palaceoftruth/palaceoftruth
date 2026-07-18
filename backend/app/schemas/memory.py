@@ -222,6 +222,30 @@ class McpOAuthClientRevokeResponse(BaseModel):
     revoked: bool = True
 
 
+class McpOAuthGrantSummary(BaseModel):
+    id: uuid.UUID
+    client_id: uuid.UUID
+    client_key: str
+    client_name: str
+    resource: str
+    scopes: list[McpOperationScope]
+    agent_scope_keys: list[str] = Field(default_factory=list)
+    workspace_scope_keys: list[str] = Field(default_factory=list)
+    authorized_by: str
+    revoked_at: datetime | None = None
+
+
+class McpOAuthGrantListResponse(BaseModel):
+    tenant_id: str
+    grants: list[McpOAuthGrantSummary]
+
+
+class McpOAuthGrantRevokeResponse(BaseModel):
+    tenant_id: str
+    grant: McpOAuthGrantSummary
+    revoked: bool = True
+
+
 class McpOAuthScopeDefinition(BaseModel):
     value: McpOperationScope
     label: str
@@ -242,6 +266,7 @@ class McpOAuthTokenResponse(BaseModel):
     expires_in: int
     scope: str
     resource: str
+    refresh_token: str | None = None
 
 
 class McpOAuthRevokeResponse(BaseModel):

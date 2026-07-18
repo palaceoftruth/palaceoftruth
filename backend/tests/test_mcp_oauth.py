@@ -39,6 +39,8 @@ class FakeSession:
         self.revoked = []
         self.audit_events = []
         self.authorization_interactions = []
+        self.refresh_families = []
+        self.refresh_tokens = []
         self.statements = []
         self.commits = 0
 
@@ -63,11 +65,20 @@ class FakeSession:
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
+        if "insert into mcp_oauth_refresh_token_families" in sql:
+            family = {**params, "id": uuid.uuid4()}
+            self.refresh_families.append(family)
+            return _Result([{"id": family["id"]}])
+        if "insert into mcp_oauth_refresh_tokens" in sql:
+            self.refresh_tokens.append(params)
+            return _Result([])
         if "insert into mcp_oauth_authorization_interactions" in sql:
             self.authorization_interactions.append(params)
             return _Result([])
         if "from mcp_oauth_authorization_codes" in sql:
             return _Result([] if self.authorization_code_row is None else [self.authorization_code_row])
+        if "from mcp_oauth_refresh_tokens" in sql:
+            return _Result([])
         if "update mcp_oauth_authorization_codes" in sql:
             if self.authorization_code_row is None or self.authorization_code_row.get("used_at") is not None:
                 return _Result([])
@@ -84,6 +95,9 @@ class FakeSession:
             ]
             return _Result(rows[:1])
         if "update mcp_oauth_access_tokens" in sql:
+            self.revoked.append(params)
+            return _Result([])
+        if "update mcp_oauth_refresh_token" in sql:
             self.revoked.append(params)
             return _Result([])
         raise AssertionError(f"Unexpected SQL: {sql}")
@@ -192,6 +206,63 @@ def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifie
     assert wrong_verifier.status_code == 400
     assert wrong_verifier.json()["detail"] == "invalid_grant"
     assert code_row["used_at"] is None
+
+
+def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(monkeypatch) -> None:
+    client_row = _client_row()
+    refresh_row = {
+        "refresh_id": uuid.uuid4(),
+        "used_at": None,
+        "token_revoked_at": None,
+        "token_expires_at": datetime.now(timezone.utc) + timedelta(days=1),
+        "family_id": uuid.uuid4(),
+        "family_revoked_at": None,
+        "grant_id": uuid.uuid4(),
+        "client_id": client_row["id"],
+        "resource": "https://testserver/mcp",
+        "scopes": ["read", "write"],
+        "grant_revoked_at": None,
+    }
+
+    class RefreshSession(FakeSession):
+        async def execute(self, statement, params=None):
+            sql = str(statement).lower()
+            if "from mcp_oauth_refresh_tokens r" in sql:
+                return _Result([refresh_row])
+            if "update mcp_oauth_refresh_tokens set used_at" in sql:
+                if refresh_row["used_at"] is not None:
+                    return _Result([])
+                refresh_row["used_at"] = params["now"]
+                return _Result([{"id": refresh_row["refresh_id"]}])
+            return await super().execute(statement, params)
+
+    session = RefreshSession(client_row)
+    client = _client(session, monkeypatch)
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": "codex-remote",
+        "client_secret": "client-secret",
+        "refresh_token": "opaque-refresh-token",
+        "scope": "read",
+    }
+
+    rotated = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+    replay = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+
+    assert rotated.status_code == 200
+    assert rotated.json()["scope"] == "read"
+    assert rotated.json()["refresh_token"]
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "invalid_grant"
+    assert any("update mcp_oauth_refresh_token_families set revoked_at" in sql.lower() for sql, _ in session.statements)
+    assert any("update mcp_oauth_access_tokens set revoked_at" in sql.lower() for sql, _ in session.statements)
+    assert [event["operation"] for event in session.audit_events] == [
+        "oauth.refresh_rotation",
+        "oauth.refresh_reuse_detected",
+    ]
+    assert session.audit_events[1]["status"] == "denied"
+    assert session.audit_events[1]["error_class"] == "invalid_grant"
+    assert "opaque-refresh-token" not in session.audit_events[1]["params_summary"]
 
 
 def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypatch) -> None:
@@ -702,9 +773,9 @@ def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
     assert body["token_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/token"
     assert body["revocation_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/revoke"
     assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
-    assert body["grant_types_supported"] == ["client_credentials"]
+    assert body["grant_types_supported"] == ["client_credentials", "authorization_code", "refresh_token"]
     assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
-    assert body["code_challenge_methods_supported"] == []
+    assert body["code_challenge_methods_supported"] == ["S256"]
 
 
 def test_mcp_oauth_authorization_server_metadata_supports_issuer_well_known_path(monkeypatch) -> None:

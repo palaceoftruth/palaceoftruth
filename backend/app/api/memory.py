@@ -82,6 +82,32 @@ from app.services.search import RetrievalDependencyUnavailableError
 from app.workers.queues import enqueue_singleton_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
+
+
+def _enforce_delegated_grant_retrieval(request: Request, *, agent_scope_keys: list[str], workspace_scope_keys: list[str], tenant_shared: bool, broad: bool) -> None:
+    """Fail closed when a delegated OAuth grant narrows memory retrieval."""
+    context = getattr(request.state, "auth_context", None)
+    if context is None or getattr(context, "delegated_grant_id", None) is None:
+        return
+    allowed_agents = set(getattr(context, "delegated_agent_scope_keys", ()) or ())
+    allowed_workspaces = set(getattr(context, "delegated_workspace_scope_keys", ()) or ())
+    # Empty lists intentionally authorize no scopes; grants never imply tenant-wide access.
+    if tenant_shared or broad or any(key not in allowed_agents for key in agent_scope_keys) or any(key not in allowed_workspaces for key in workspace_scope_keys):
+        raise HTTPException(status_code=403, detail="Delegated OAuth grant does not permit the requested memory scopes")
+
+
+def _delegated_grant_write_denial(request: Request, scope: MemoryScope) -> str | None:
+    """Return a fail-closed denial when a delegated grant narrows a write."""
+    context = getattr(request.state, "auth_context", None)
+    if context is None or getattr(context, "delegated_grant_id", None) is None:
+        return None
+    if scope.type == "agent" and scope.key in set(getattr(context, "delegated_agent_scope_keys", ()) or ()):
+        return None
+    if scope.type == "workspace" and scope.key in set(getattr(context, "delegated_workspace_scope_keys", ()) or ()):
+        return None
+    # Delegated grants are explicit agent/workspace allowlists. Empty lists and
+    # every other scope type intentionally authorize no durable write target.
+    return "Delegated OAuth grant does not permit the requested memory write scope"
 logger = logging.getLogger(__name__)
 
 
@@ -560,6 +586,10 @@ async def create_memory_entry(
     if body.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
 
+    delegated_denial = _delegated_grant_write_denial(request, body.scope)
+    if delegated_denial is not None:
+        raise HTTPException(status_code=403, detail=delegated_denial)
+
     admission = evaluate_memory_write_admission(
         body=body,
         auth_mode=getattr(request.state, "auth_mode", None),
@@ -618,6 +648,25 @@ async def create_memory_entries_batch(
                     contract_status="permanent_tenant_mismatch",
                     retryable=False,
                     error=_tenant_mismatch_detail(),
+                )
+            )
+            continue
+
+        delegated_denial = _delegated_grant_write_denial(request, entry.scope)
+        if delegated_denial is not None:
+            failed_count += 1
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status="rejected",
+                    retryable=False,
+                    error={
+                        "status": "rejected",
+                        "reason_code": "delegated_grant_scope_denied",
+                        "message": delegated_denial,
+                        "retryable": False,
+                    },
                 )
             )
             continue
@@ -994,6 +1043,13 @@ async def retrieve_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryRetrieveResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.scope.key] if body.scope.type == "agent" else [],
+        workspace_scope_keys=[body.scope.key] if body.scope.type == "workspace" else [],
+        tenant_shared=body.scope.type == "tenant_shared",
+        broad=False,
+    )
     is_hermes_client = (
         getattr(request.state, "auth_mode", None) == "mcp_oauth"
         and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
@@ -1093,6 +1149,13 @@ async def retrieve_agent_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> AgentMemoryRetrieveResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.agent_scope_key, *body.include_agent_scope_keys],
+        workspace_scope_keys=body.workspace_scope_keys,
+        tenant_shared=body.include_tenant_shared,
+        broad=body.include_broad_corpus or body.include_all_permitted_agent_scopes or bool(body.include_agent_scope_patterns) or body.session_scope_key is not None,
+    )
     is_hermes_client = (
         getattr(request.state, "auth_mode", None) == "mcp_oauth"
         and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
@@ -1259,6 +1322,13 @@ async def semantic_recall_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> SemanticRecallResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.scope_key] if body.scope_type == "agent" and body.scope_key else [],
+        workspace_scope_keys=[body.scope_key] if body.scope_type == "workspace" and body.scope_key else [],
+        tenant_shared=body.scope_type == "tenant_shared",
+        broad=False,
+    )
     return await semantic_recall_memory(
         db,
         tenant_id=request.state.tenant_id,
@@ -1276,6 +1346,13 @@ async def retrieve_memory_trajectory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryTrajectoryResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[key for key in [body.agent_scope_key, *(body.include_agent_scope_keys or [])] if key],
+        workspace_scope_keys=body.workspace_scope_keys or [],
+        tenant_shared=body.include_tenant_shared,
+        broad=body.include_all_permitted_agent_scopes or body.include_broad_corpus or body.session_scope_key is not None,
+    )
     try:
         delegated_policy = delegated_agent_memory_policy_from_config(
             tenant_id=request.state.tenant_id,

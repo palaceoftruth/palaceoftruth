@@ -14,6 +14,7 @@ from app.models.api_key import (
     McpOAuthAuthorizationInteraction,
     McpOAuthDelegatedGrant,
     McpOAuthRefreshTokenFamily,
+    McpOAuthRefreshToken,
 )
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.models.palace import (
@@ -59,6 +60,7 @@ __all__ = [
     "McpOAuthAuthorizationInteraction",
     "McpOAuthDelegatedGrant",
     "McpOAuthRefreshTokenFamily",
+    "McpOAuthRefreshToken",
     "SourceResource",
     "SourceResourceAlias",
     "SourceResourceAuditSnapshot",
