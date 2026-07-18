@@ -31,9 +31,10 @@ class _Result:
 
 
 class FakeSession:
-    def __init__(self, row=None, rows=None, token_rows=None) -> None:
+    def __init__(self, row=None, rows=None, token_rows=None, authorization_code_row=None) -> None:
         self.rows = rows if rows is not None else ([] if row is None else [row])
         self.token_rows = token_rows or []
+        self.authorization_code_row = authorization_code_row
         self.tokens = []
         self.revoked = []
         self.audit_events = []
@@ -61,6 +62,13 @@ class FakeSession:
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
+        if "from mcp_oauth_authorization_codes" in sql:
+            return _Result([] if self.authorization_code_row is None else [self.authorization_code_row])
+        if "update mcp_oauth_authorization_codes" in sql:
+            if self.authorization_code_row is None or self.authorization_code_row.get("used_at") is not None:
+                return _Result([])
+            self.authorization_code_row["used_at"] = params["used_at"]
+            return _Result([{"id": self.authorization_code_row["id"]}])
         if "insert into mcp_request_audit_events" in sql:
             self.audit_events.append(params)
             return _Result([])
@@ -111,6 +119,68 @@ def test_s256_pkce_verifier_validation_is_exact_and_fail_closed() -> None:
     assert mcp_oauth._matches_s256_pkce_verifier(verifier="short", challenge=challenge) is False
     assert mcp_oauth._matches_s256_pkce_verifier(verifier=("A" * 42) + "!", challenge=challenge) is False
     assert mcp_oauth._matches_s256_pkce_verifier(verifier=verifier, challenge=challenge[:-1] + "A") is False
+
+
+def test_mcp_oauth_authorization_code_exchange_is_pkce_bound_and_one_use(monkeypatch) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    client_row = _client_row(client_type="confidential_web", authorization_code_enabled=True)
+    code_row = {
+        "id": uuid.uuid4(),
+        "grant_id": uuid.uuid4(),
+        "pkce_challenge": challenge,
+        "redirect_uri": "https://nebulaios.example/callback",
+        "client_id": client_row["id"],
+        "resource": "https://testserver/mcp",
+        "scopes": ["read"],
+        "revoked_at": None,
+        "used_at": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+    }
+    session = FakeSession(client_row, authorization_code_row=code_row)
+    client = _client(session, monkeypatch)
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": "codex-remote",
+        "client_secret": "client-secret",
+        "code": "one-use-code",
+        "code_verifier": verifier,
+        "redirect_uri": "https://nebulaios.example/callback",
+    }
+
+    response = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+    replay = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == "https://testserver/mcp"
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "invalid_grant"
+    assert session.tokens[0]["delegated_grant_id"] == code_row["grant_id"]
+    assert session.audit_events[0]["operation"] == "oauth.authorization_code_exchange"
+
+
+def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifier(monkeypatch) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    client_row = _client_row(client_type="confidential_web", authorization_code_enabled=True)
+    code_row = {
+        "id": uuid.uuid4(), "grant_id": uuid.uuid4(), "pkce_challenge": challenge,
+        "redirect_uri": "https://nebulaios.example/callback", "client_id": client_row["id"],
+        "resource": "https://testserver/mcp", "scopes": ["read"], "revoked_at": None,
+        "used_at": None, "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+    }
+    session = FakeSession(client_row, authorization_code_row=code_row)
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={"grant_type": "authorization_code", "client_id": "codex-remote", "client_secret": "client-secret",
+              "code": "one-use-code", "code_verifier": verifier, "redirect_uri": "https://wrong.example/callback"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid_grant"
+    assert code_row["used_at"] is None
 
 
 def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None:

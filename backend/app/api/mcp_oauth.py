@@ -148,7 +148,8 @@ async def _authenticate_oauth_client(
             text(
                 """
                 SELECT id, tenant_id, client_key, allowed_scopes, oauth_client_secret_hash,
-                       oauth_revoked_at, oauth_token_ttl_seconds, display_name
+                       oauth_revoked_at, oauth_token_ttl_seconds, display_name,
+                       client_type, authorization_code_enabled
                 FROM mcp_clients
                 WHERE client_key = :client_key
                   AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
@@ -231,6 +232,115 @@ async def _deny_token_issue(
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+async def _issue_authorization_code_access_token(
+    *,
+    db,
+    client_row,
+    code: str | None,
+    code_verifier: str | None,
+    redirect_uri: str | None,
+) -> McpOAuthTokenResponse:
+    """Redeem one tenant-bound code without exposing which binding failed.
+
+    The row lock and conditional update make successful redemptions one-use
+    even when two token requests race.  Invalid exchanges leave the code
+    unconsumed so an attacker cannot burn a valid user's authorization code.
+    """
+    if (
+        not client_row.get("authorization_code_enabled")
+        or client_row.get("client_type") != "confidential_web"
+        or not code
+        or not code_verifier
+        or not redirect_uri
+    ):
+        raise HTTPException(status_code=400, detail="invalid_grant")
+
+    result = await db.execute(
+        text(
+            """
+            SELECT c.id, c.grant_id, c.pkce_challenge, c.redirect_uri, g.client_id, g.resource, g.scopes,
+                   g.revoked_at, c.used_at, c.expires_at
+            FROM mcp_oauth_authorization_codes c
+            JOIN mcp_oauth_delegated_grants g ON g.id = c.grant_id AND g.tenant_id = c.tenant_id
+            WHERE c.code_hash = :code_hash AND c.tenant_id = :tenant_id
+            FOR UPDATE
+            """
+        ),
+        {"code_hash": hash_secret(code), "tenant_id": client_row["tenant_id"]},
+    )
+    row = result.mappings().one_or_none()
+    now = datetime.now(timezone.utc)
+    if (
+        row is None
+        or row["client_id"] != client_row["id"]
+        or row["used_at"] is not None
+        or row["revoked_at"] is not None
+        or not isinstance(row["expires_at"], datetime)
+        or row["expires_at"] <= now
+        or row["redirect_uri"] != redirect_uri
+        or not _matches_s256_pkce_verifier(verifier=code_verifier, challenge=row["pkce_challenge"])
+    ):
+        raise HTTPException(status_code=400, detail="invalid_grant")
+
+    # Validate every remaining grant and client invariant before consuming the
+    # code, so a malformed durable row cannot turn into a one-request DoS.
+    token_scopes = _parse_scopes(row["scopes"])
+    ttl_seconds = int(client_row["oauth_token_ttl_seconds"] or 3600)
+    if ttl_seconds <= 0:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+
+    consumed = await db.execute(
+        text(
+            """
+            UPDATE mcp_oauth_authorization_codes
+            SET used_at = :used_at
+            WHERE id = :code_id AND used_at IS NULL
+            RETURNING id
+            """
+        ),
+        {"code_id": row["id"], "used_at": now},
+    )
+    if consumed.mappings().one_or_none() is None:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+
+    access_token = secrets.token_urlsafe(48)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+    await db.execute(
+        text(
+            """
+            INSERT INTO mcp_oauth_access_tokens
+                (tenant_id, client_id, token_hash, scopes, resource, delegated_grant_id, expires_at)
+            VALUES
+                (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :resource,
+                 :delegated_grant_id, :expires_at)
+            """
+        ),
+        {
+            "tenant_id": client_row["tenant_id"],
+            "client_id": client_row["id"],
+            "token_hash": hash_secret(access_token),
+            "scopes": json.dumps(token_scopes),
+            "resource": row["resource"],
+            "delegated_grant_id": row["grant_id"] if "grant_id" in row else None,
+            "expires_at": expires_at,
+        },
+    )
+    await _record_oauth_endpoint_audit_event(
+        db,
+        client_row=client_row,
+        operation="oauth.authorization_code_exchange",
+        status="success",
+        params_summary={"grant_type": "authorization_code", "resource": row["resource"], "scopes": token_scopes},
+    )
+    await db.commit()
+    return McpOAuthTokenResponse(
+        access_token=access_token,
+        expires_in=ttl_seconds,
+        scope=" ".join(token_scopes),
+        resource=row["resource"],
+    )
+
+
 @router.post("/token", response_model=McpOAuthTokenResponse)
 async def issue_mcp_access_token(
     request: Request,
@@ -239,15 +349,27 @@ async def issue_mcp_access_token(
     client_secret: Annotated[str | None, Form()] = None,
     scope: Annotated[str | None, Form()] = None,
     resource: Annotated[str | None, Form()] = None,
+    code: Annotated[str | None, Form()] = None,
+    code_verifier: Annotated[str | None, Form()] = None,
+    redirect_uri: Annotated[str | None, Form()] = None,
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> McpOAuthTokenResponse:
-    if grant_type != "client_credentials":
-        raise HTTPException(status_code=400, detail="unsupported_grant_type")
     row = await _authenticate_oauth_client(
         form_client_id=client_id,
         form_client_secret=client_secret,
         authorization=authorization,
     )
+    if grant_type == "authorization_code":
+        async with async_session() as db:
+            return await _issue_authorization_code_access_token(
+                db=db,
+                client_row=row,
+                code=code,
+                code_verifier=code_verifier,
+                redirect_uri=redirect_uri,
+            )
+    if grant_type != "client_credentials":
+        raise HTTPException(status_code=400, detail="unsupported_grant_type")
     try:
         requested_resource = _normalize_resource(resource)
     except HTTPException:
