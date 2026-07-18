@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -127,6 +128,10 @@ class McpOAuthClientRegisterRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    client_type: Literal["service", "confidential_web"] = "service"
+    redirect_uris: list[str] = Field(default_factory=list)
+    allowed_resources: list[str] = Field(default_factory=list)
+    authorization_code_enabled: bool = False
     token_ttl_seconds: int = Field(3600, ge=60, le=86400)
 
     @field_validator("client_key", "display_name")
@@ -138,7 +143,27 @@ class McpOAuthClientRegisterRequest(BaseModel):
     def validate_agent_scope_read_binding(self) -> "McpOAuthClientRegisterRequest":
         if self.allow_all_agent_scope_reads and not self.agent_scope_key:
             raise ValueError("allow_all_agent_scope_reads requires agent_scope_key")
+        if self.client_type == "service" and (self.redirect_uris or self.authorization_code_enabled):
+            raise ValueError("service clients cannot register redirect URIs or authorization-code capability")
+        if self.client_type == "confidential_web" and (not self.redirect_uris or not self.allowed_resources):
+            raise ValueError("confidential web clients require redirect URIs and allowed resources")
         return self
+
+    @field_validator("redirect_uris", "allowed_resources")
+    @classmethod
+    def validate_exact_https_uris(cls, values: list[str], info) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.fragment or parsed.query:
+                raise ValueError(f"{info.field_name} must contain exact HTTPS URIs without query or fragment")
+            canonical = urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
+            if canonical != value or "*" in canonical:
+                raise ValueError(f"{info.field_name} must contain exact HTTPS URIs without wildcards")
+            normalized.append(canonical)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"{info.field_name} must not contain duplicates")
+        return normalized
 
 
 class McpOAuthClientAgentScopeBindingRequest(BaseModel):
@@ -160,6 +185,10 @@ class McpOAuthClientSummary(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    client_type: Literal["service", "confidential_web"] = "service"
+    redirect_uris: list[str] = Field(default_factory=list)
+    allowed_resources: list[str] = Field(default_factory=list)
+    authorization_code_enabled: bool = False
     token_ttl_seconds: int
     created_at: datetime | None = None
     last_seen_at: datetime | None = None

@@ -6,7 +6,15 @@ from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.feed import Feed
 from app.models.source_subscription import SourceSubscription, SourceSubscriptionEntry
-from app.models.api_key import ApiKey, ApiKeyAuditEvent
+from app.models.api_key import (
+    ApiKey,
+    ApiKeyAuditEvent,
+    McpOAuthAccessToken,
+    McpOAuthAuthorizationCode,
+    McpOAuthAuthorizationInteraction,
+    McpOAuthDelegatedGrant,
+    McpOAuthRefreshTokenFamily,
+)
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.models.palace import (
     CandidateCurationArtifact,
@@ -46,6 +54,11 @@ __all__ = [
     "SourceSubscriptionEntry",
     "ApiKey",
     "ApiKeyAuditEvent",
+    "McpOAuthAccessToken",
+    "McpOAuthAuthorizationCode",
+    "McpOAuthAuthorizationInteraction",
+    "McpOAuthDelegatedGrant",
+    "McpOAuthRefreshTokenFamily",
     "SourceResource",
     "SourceResourceAlias",
     "SourceResourceAuditSnapshot",

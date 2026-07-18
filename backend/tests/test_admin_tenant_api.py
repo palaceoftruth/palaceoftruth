@@ -128,6 +128,10 @@ class FakeSession:
                     "metadata": json.loads(params["metadata"]),
                     "agent_scope_key": params["agent_scope_key"],
                     "allow_all_agent_scope_reads": params["allow_all_agent_scope_reads"],
+                    "client_type": params["client_type"],
+                    "redirect_uris": json.loads(params["redirect_uris"]),
+                    "allowed_resources": json.loads(params["allowed_resources"]),
+                    "authorization_code_enabled": params["authorization_code_enabled"],
                     "oauth_client_secret_hash": params["secret_hash"],
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": params["token_ttl_seconds"],
@@ -143,6 +147,10 @@ class FakeSession:
                         "display_name": params["display_name"],
                         "allowed_scopes": json.loads(params["allowed_scopes"]),
                         "metadata": json.loads(params["metadata"]),
+                        "client_type": params["client_type"],
+                        "redirect_uris": json.loads(params["redirect_uris"]),
+                        "allowed_resources": json.loads(params["allowed_resources"]),
+                        "authorization_code_enabled": params["authorization_code_enabled"],
                         "oauth_client_secret_hash": params["secret_hash"],
                         "oauth_revoked_at": None,
                         "oauth_token_ttl_seconds": params["token_ttl_seconds"],
@@ -563,6 +571,39 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
     assert stored["oauth_client_secret_hash"] != body["client_secret"]
     assert stored["oauth_token_ttl_seconds"] == 1800
     assert stored["agent_scope_key"] == "iris"
+
+
+def test_register_confidential_web_client_requires_exact_registered_https_uris() -> None:
+    client = _client(FakeSession())
+
+    rejected = client.post(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/register",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={
+            "client_key": "nebulaios",
+            "display_name": "NebulaiOS",
+            "client_type": "confidential_web",
+            "redirect_uris": ["https://nebulaios.test/callback?unsafe=true"],
+            "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+        },
+    )
+    assert rejected.status_code == 422
+
+    accepted = client.post(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/register",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={
+            "client_key": "nebulaios",
+            "display_name": "NebulaiOS",
+            "client_type": "confidential_web",
+            "redirect_uris": ["https://nebulaios.test/callback"],
+            "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+            "authorization_code_enabled": True,
+        },
+    )
+    assert accepted.status_code == 201
+    assert accepted.json()["client"]["client_type"] == "confidential_web"
+    assert accepted.json()["client"]["redirect_uris"] == ["https://nebulaios.test/callback"]
 
 
 def test_register_mcp_oauth_client_rejects_duplicate_without_rotating_secret() -> None:
