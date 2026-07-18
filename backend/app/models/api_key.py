@@ -42,6 +42,10 @@ class McpClient(Base):
     oauth_client_secret_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_token_ttl_seconds: Mapped[int] = mapped_column(Integer, server_default="3600", nullable=False)
+    client_type: Mapped[str] = mapped_column(Text, server_default="service", nullable=False)
+    redirect_uris: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    allowed_resources: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    authorization_code_enabled: Mapped[bool] = mapped_column(server_default="false", nullable=False)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}", nullable=False)
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     last_seen_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -82,7 +86,66 @@ class McpOAuthAccessToken(Base):
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delegated_grant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_oauth_delegated_grants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     issued_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class McpOAuthAuthorizationInteraction(Base):
+    """Tenant-qualified, short-lived authorization state; never stores a verifier."""
+    __tablename__ = "mcp_oauth_authorization_interactions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_clients.id", ondelete="CASCADE"), nullable=False)
+    resource: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    agent_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    workspace_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    pkce_challenge: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class McpOAuthDelegatedGrant(Base):
+    __tablename__ = "mcp_oauth_delegated_grants"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_clients.id", ondelete="CASCADE"), nullable=False)
+    resource: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    agent_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    workspace_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    authorized_by: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class McpOAuthAuthorizationCode(Base):
+    __tablename__ = "mcp_oauth_authorization_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    grant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_oauth_delegated_grants.id", ondelete="CASCADE"), nullable=False)
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    pkce_challenge: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class McpOAuthRefreshTokenFamily(Base):
+    __tablename__ = "mcp_oauth_refresh_token_families"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    grant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_oauth_delegated_grants.id", ondelete="CASCADE"), nullable=False)
+    current_token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
