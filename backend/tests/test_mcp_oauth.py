@@ -256,6 +256,13 @@ def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(mo
     assert replay.json()["detail"] == "invalid_grant"
     assert any("update mcp_oauth_refresh_token_families set revoked_at" in sql.lower() for sql, _ in session.statements)
     assert any("update mcp_oauth_access_tokens set revoked_at" in sql.lower() for sql, _ in session.statements)
+    assert [event["operation"] for event in session.audit_events] == [
+        "oauth.refresh_rotation",
+        "oauth.refresh_reuse_detected",
+    ]
+    assert session.audit_events[1]["status"] == "denied"
+    assert session.audit_events[1]["error_class"] == "invalid_grant"
+    assert "opaque-refresh-token" not in session.audit_events[1]["params_summary"]
 
 
 def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypatch) -> None:
@@ -766,7 +773,7 @@ def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
     assert body["token_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/token"
     assert body["revocation_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/revoke"
     assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
-    assert body["grant_types_supported"] == ["client_credentials"]
+    assert body["grant_types_supported"] == ["client_credentials", "authorization_code", "refresh_token"]
     assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
     assert body["code_challenge_methods_supported"] == []
 

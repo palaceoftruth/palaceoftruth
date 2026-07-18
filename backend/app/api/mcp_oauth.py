@@ -442,6 +442,14 @@ async def _issue_refresh_access_token(*, db, client_row, refresh_token: str | No
         await db.execute(text("UPDATE mcp_oauth_refresh_token_families SET revoked_at = COALESCE(revoked_at, :now) WHERE id = :id"), {"now": now, "id": row["family_id"]})
         await db.execute(text("UPDATE mcp_oauth_access_tokens SET revoked_at = COALESCE(revoked_at, :now) WHERE refresh_token_family_id = :id"), {"now": now, "id": row["family_id"]})
         await db.execute(text("UPDATE mcp_oauth_refresh_tokens SET revoked_at = COALESCE(revoked_at, :now) WHERE family_id = :id"), {"now": now, "id": row["family_id"]})
+        await _record_oauth_endpoint_audit_event(
+            db,
+            client_row=client_row,
+            operation="oauth.refresh_reuse_detected",
+            status="denied",
+            params_summary={"grant_type": "refresh_token", "refresh_token": {"present": True, "redacted": True}},
+            error_class="invalid_grant",
+        )
         await db.commit()
         raise HTTPException(status_code=400, detail="invalid_grant")
     grant_scopes = _parse_scopes(row["scopes"])
@@ -1087,7 +1095,7 @@ def _mcp_oauth_authorization_server_metadata_response(request: Request) -> McpOA
         token_endpoint=token_url,
         revocation_endpoint=_metadata_url(request, "revoke_mcp_access_token"),
         introspection_endpoint=_metadata_url(request, "introspect_mcp_access_token"),
-        grant_types_supported=["client_credentials"],
+        grant_types_supported=["client_credentials", "authorization_code", "refresh_token"],
         scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
         token_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
         revocation_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
