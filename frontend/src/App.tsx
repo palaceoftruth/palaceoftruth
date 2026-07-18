@@ -17,11 +17,13 @@ const Sources = lazy(() => import("./pages/Sources"));
 const Palace = lazy(() => import("./pages/Palace"));
 const PalaceControlTower = lazy(() => import("./pages/PalaceControlTower"));
 const PalaceReviewInbox = lazy(() => import("./pages/PalaceReviewInbox"));
+const OAuthConsent = lazy(() => import("./pages/OAuthConsent"));
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="oauth/consent" element={<OAuthConsent />} />
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="ingest" element={<Ingest />} />

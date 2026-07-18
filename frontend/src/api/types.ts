@@ -885,6 +885,16 @@ export interface McpOAuthClientRevokeResponse {
   revoked: boolean;
 }
 
+export interface McpOAuthAuthorizationInteraction {
+  client_name: string;
+  tenant_id: string;
+  resource: string;
+  scopes: string[];
+  agent_scope_keys: string[];
+  workspace_scope_keys: string[];
+  expires_at: string;
+}
+
 export interface MemoryJobResponse {
   job_id: string;
   status: string;
