@@ -203,6 +203,19 @@ class PalaceSourceResourceSummary(BaseModel):
 
 class PalaceSourceResourceDetail(PalaceSourceResourceSummary):
     aliases: list[PalaceSourceResourceAliasSummary] = Field(default_factory=list)
+    audit_events: list["PalaceSourceResourceAuditSummary"] = Field(default_factory=list)
+
+
+class PalaceSourceResourceAuditSummary(BaseModel):
+    """Safe, append-only operator transition metadata for the Control Tower."""
+
+    id: uuid.UUID
+    event_kind: str
+    previous_status: str | None = None
+    next_status: str | None = None
+    previous_refresh_policy: str | None = None
+    next_refresh_policy: str | None = None
+    recorded_at: datetime
 
 
 class PalaceSourceResourceListResponse(BaseModel):

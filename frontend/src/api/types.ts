@@ -501,6 +501,71 @@ export interface PalaceMemoryJobScope {
   key?: string | null;
 }
 
+export type PalaceSourceResourceFreshness = "current" | "due" | "stale" | "unreachable" | "gone" | "unknown";
+export type PalaceSourceResourceStatus = "active" | "unreachable" | "gone" | "paused";
+export type PalaceSourceRefreshPolicy = "manual" | "interval" | "adaptive";
+
+export interface PalaceSourceResourceSummary {
+  id: string;
+  kind: "http";
+  canonical_url: string;
+  freshness: PalaceSourceResourceFreshness;
+  status: PalaceSourceResourceStatus;
+  refresh_policy: PalaceSourceRefreshPolicy;
+  refresh_slo_seconds: number;
+  last_http_status: number | null;
+  has_etag: boolean;
+  has_last_modified: boolean;
+  consecutive_failures: number;
+  robots_decision: string | null;
+  robots_cached_at: string | null;
+  published_at: string | null;
+  captured_at: string | null;
+  last_verified_at: string | null;
+  content_changed_at: string | null;
+  last_checked_at: string | null;
+  last_success_at: string | null;
+  next_due_at: string | null;
+  backoff_until: string | null;
+  current_source_record_id: string | null;
+  last_successful_source_record_id: string | null;
+}
+
+export interface PalaceSourceResourceAliasSummary {
+  id: string;
+  signal: "submitted" | "final" | "canonical";
+  decision: "accepted" | "rejected" | "conflict";
+  normalized_url: string;
+  final_url: string | null;
+  canonical_signal_url: string | null;
+  observed_at: string;
+}
+
+export interface PalaceSourceResourceDetail extends PalaceSourceResourceSummary {
+  aliases: PalaceSourceResourceAliasSummary[];
+  audit_events: PalaceSourceResourceAuditSummary[];
+}
+
+export interface PalaceSourceResourceAuditSummary {
+  id: string;
+  event_kind: string;
+  previous_status: string | null;
+  next_status: string | null;
+  previous_refresh_policy: string | null;
+  next_refresh_policy: string | null;
+  recorded_at: string;
+}
+
+export interface PalaceSourceResourceListResponse {
+  resources: PalaceSourceResourceSummary[];
+  total: number;
+}
+
+export interface PalaceSourceResourceActionResponse {
+  resource: PalaceSourceResourceSummary;
+  action: "paused" | "resumed" | "refresh_requested" | "restored";
+}
+
 export interface PalaceMemoryJobSummary {
   job_id: string;
   title: string;

@@ -15,7 +15,7 @@ from app.database import get_db
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 from app.models.item import Item
 from app.models.palace import PalaceRoomEvent, PalaceRun, Room, SyncSource
-from app.models.source_resource import SourceResource, SourceResourceAlias
+from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.schemas.palace import (
     PalaceControlTower,
     PalaceDiaryRollupStatus,
@@ -205,8 +205,17 @@ def test_source_resource_detail_rejects_other_tenants_and_returns_safe_aliases()
         decision="accepted",
         observed_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
     )
+    audit = SourceResourceAuditSnapshot(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        resource_id=resource.id,
+        event_kind="operator_paused",
+        previous_snapshot={"status": "active", "refresh_policy": "interval"},
+        next_snapshot={"status": "paused", "refresh_policy": "interval"},
+        recorded_at=datetime(2026, 7, 11, tzinfo=timezone.utc),
+    )
     client = _build_app(
-        FakeSession(objects={(SourceResource, resource.id): resource}, execute_results=[[alias]])
+        FakeSession(objects={(SourceResource, resource.id): resource}, execute_results=[[alias], [audit]])
     )
 
     response = client.get(f"/api/v1/palace/source-resources/{resource.id}")
@@ -225,6 +234,17 @@ def test_source_resource_detail_rejects_other_tenants_and_returns_safe_aliases()
         }
     ]
     assert "submitted_url" not in body["aliases"][0]
+    assert body["audit_events"] == [
+        {
+            "id": str(audit.id),
+            "event_kind": "operator_paused",
+            "previous_status": "active",
+            "next_status": "paused",
+            "previous_refresh_policy": "interval",
+            "next_refresh_policy": "interval",
+            "recorded_at": body["audit_events"][0]["recorded_at"],
+        }
+    ]
 
     other = _source_resource(tenant_id="tenant-b")
     forbidden_client = _build_app(FakeSession(objects={(SourceResource, other.id): other}))
