@@ -92,12 +92,12 @@ class FakeSession:
         self.commits += 1
 
 
-def _client(session: FakeSession, monkeypatch) -> TestClient:
+def _client(session: FakeSession, monkeypatch, *, base_url: str = "https://testserver") -> TestClient:
     app = FastAPI()
     app.include_router(mcp_oauth.router, prefix="/api/v1")
     app.include_router(mcp_oauth.metadata_router)
     monkeypatch.setattr(mcp_oauth, "async_session", lambda: session)
-    return TestClient(app, base_url="https://testserver")
+    return TestClient(app, base_url=base_url)
 
 
 def _client_row(**overrides) -> dict:
@@ -199,10 +199,10 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
         client_type="confidential_web",
         authorization_code_enabled=True,
         redirect_uris=["https://nebulaios.example/callback"],
-        allowed_resources=["https://testserver/mcp"],
+        allowed_resources=["https://api.palace.sarvent.cloud/mcp"],
     )
     session = FakeSession(client_row)
-    client = _client(session, monkeypatch)
+    client = _client(session, monkeypatch, base_url="https://api.palace.sarvent.cloud")
 
     response = client.get(
         "/api/v1/memory/mcp/oauth/authorize",
@@ -210,7 +210,7 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
             "response_type": "code",
             "client_id": "tenant-a:codex-remote",
             "redirect_uri": "https://nebulaios.example/callback",
-            "resource": "https://testserver/mcp",
+            "resource": "https://api.palace.sarvent.cloud/mcp",
             "scope": "read",
             "state": "opaque-client-state",
             "code_challenge": "A" * 43,
@@ -220,8 +220,9 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
     )
 
     assert response.status_code == 303
-    assert response.headers["location"].startswith("https://testserver/oauth/consent?interaction_id=")
+    assert response.headers["location"].startswith("https://palace.sarvent.cloud/oauth/consent?interaction_id=")
     assert "palace_oauth_consent_session" in response.headers["set-cookie"]
+    assert "Domain=.palace.sarvent.cloud" in response.headers["set-cookie"]
     assert session.authorization_interactions[0]["tenant_id"] == "tenant-a"
     assert session.authorization_interactions[0]["state"] == "opaque-client-state"
     assert session.authorization_interactions[0]["browser_session_hash"]

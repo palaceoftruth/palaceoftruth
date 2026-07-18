@@ -58,6 +58,21 @@ def _browser_consent_url(request: Request, interaction_id: str) -> str:
     return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", ""))
 
 
+def _browser_consent_cookie_domain(request: Request) -> str | None:
+    """Share a consent session only with Palace's paired frontend host.
+
+    The API uses ``api.<base-domain>`` while the consent SPA uses
+    ``<base-domain>``. A host-only API cookie cannot reach the SPA's
+    same-origin API proxy calls, so the known paired-host topology needs their
+    shared parent domain. Ambiguous/local hostnames remain host-only.
+    """
+    host = (urlsplit(str(request.base_url)).hostname or "").lower()
+    if not host.startswith("api."):
+        return None
+    parent_domain = host.removeprefix("api.")
+    return f".{parent_domain}" if "." in parent_domain else None
+
+
 def _authorization_response_uri(*, redirect_uri: str, state: str | None, code: str | None, error: str | None) -> str:
     """Build a response only after the callback URI was read from durable state."""
     parsed = urlsplit(redirect_uri)
@@ -471,8 +486,9 @@ async def begin_mcp_authorization(
     redirect = RedirectResponse(_browser_consent_url(request, interaction_id), status_code=303)
     # The API-key remains only in the browser's existing local-storage path;
     # these short-lived cookies are merely possession and CSRF bindings.
-    redirect.set_cookie("palace_oauth_consent_session", browser_session, max_age=600, secure=True, httponly=True, samesite="lax", path="/api/v1/memory/mcp/oauth")
-    redirect.set_cookie("palace_oauth_consent_csrf", csrf_token, max_age=600, secure=True, httponly=False, samesite="lax", path="/")
+    cookie_domain = _browser_consent_cookie_domain(request)
+    redirect.set_cookie("palace_oauth_consent_session", browser_session, max_age=600, secure=True, httponly=True, samesite="lax", path="/api/v1/memory/mcp/oauth", domain=cookie_domain)
+    redirect.set_cookie("palace_oauth_consent_csrf", csrf_token, max_age=600, secure=True, httponly=False, samesite="lax", path="/", domain=cookie_domain)
     redirect.headers["Referrer-Policy"] = "no-referrer"
     return redirect
 
