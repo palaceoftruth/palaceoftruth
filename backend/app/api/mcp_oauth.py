@@ -8,7 +8,8 @@ from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Header, HTTPException, Request
+from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
 from app.auth import compare_secret, hash_secret
@@ -45,6 +46,16 @@ def _canonical_api_resource(request: Request) -> str:
 
 def _authorization_server_issuer(request: Request) -> str:
     return _metadata_url(request, "issue_mcp_access_token").rsplit("/token", 1)[0]
+
+
+def _browser_consent_url(request: Request, interaction_id: str) -> str:
+    """Return the same-site SPA route without trusting a caller-supplied URI."""
+    parsed = urlsplit(str(request.base_url))
+    host = parsed.hostname or ""
+    if host.startswith("api."):
+        host = host.removeprefix("api.")
+    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", ""))
 
 
 def _supported_resources(request: Request) -> set[str]:
@@ -106,6 +117,16 @@ def _matches_s256_pkce_verifier(*, verifier: str, challenge: str) -> bool:
         return False
     derived = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
     return secrets.compare_digest(derived, challenge)
+
+
+def _valid_s256_challenge(challenge: str | None) -> bool:
+    return isinstance(challenge, str) and len(challenge) == 43 and all(
+        character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in challenge
+    )
+
+
+def _list_of_strings(value: object) -> list[str]:
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 def _client_credentials_from_request(
@@ -339,6 +360,108 @@ async def _issue_authorization_code_access_token(
         scope=" ".join(token_scopes),
         resource=row["resource"],
     )
+
+
+@router.get("/authorize")
+async def begin_mcp_authorization(
+    request: Request,
+    response_type: str = Query(),
+    client_id: str = Query(),
+    redirect_uri: str = Query(),
+    resource: str = Query(),
+    code_challenge: str = Query(),
+    code_challenge_method: str = Query(),
+    scope: str | None = Query(None),
+    state: str | None = Query(None),
+) -> RedirectResponse:
+    """Create a tenant-bound consent interaction for a confidential PKCE client.
+
+    The external client never chooses the consent page or browser authority. The
+    actual tenant identity is proved later by the existing browser API-key path.
+    """
+    tenant_hint, client_key = _split_tenant_qualified_client_id(client_id)
+    if (
+        response_type != "code"
+        or tenant_hint is None
+        or not redirect_uri
+        or code_challenge_method != "S256"
+        or not _valid_s256_challenge(code_challenge)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_request")
+    try:
+        requested_resource = _normalize_resource(resource)
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail="invalid_request") from exc
+    if requested_resource is None or requested_resource not in _supported_resources(request):
+        raise HTTPException(status_code=400, detail="invalid_request")
+
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT id, tenant_id, client_key, display_name, allowed_scopes, redirect_uris,
+                       allowed_resources, client_type, authorization_code_enabled, oauth_revoked_at
+                FROM mcp_clients
+                WHERE tenant_id = :tenant_id AND client_key = :client_key
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_hint, "client_key": client_key},
+        )
+        client_row = result.mappings().one_or_none()
+        if (
+            client_row is None
+            or client_row["oauth_revoked_at"] is not None
+            or client_row["client_type"] != "confidential_web"
+            or not client_row["authorization_code_enabled"]
+            or redirect_uri not in _list_of_strings(client_row["redirect_uris"])
+            or requested_resource not in _list_of_strings(client_row["allowed_resources"])
+        ):
+            raise HTTPException(status_code=400, detail="invalid_request")
+        try:
+            requested_scopes = _requested_scopes(scope, _parse_scopes(client_row["allowed_scopes"]))
+        except HTTPException as exc:
+            raise HTTPException(status_code=400, detail="invalid_scope") from exc
+
+        interaction_id = secrets.token_hex(32)
+        browser_session = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        await db.execute(
+            text(
+                """
+                INSERT INTO mcp_oauth_authorization_interactions
+                    (id, tenant_id, client_id, resource, scopes, agent_scope_keys, workspace_scope_keys,
+                     redirect_uri, state, pkce_challenge, browser_session_hash, csrf_token_hash, expires_at)
+                VALUES
+                    (CAST(:id AS uuid), :tenant_id, :client_id, :resource, CAST(:scopes AS jsonb),
+                     CAST('[]' AS jsonb), CAST('[]' AS jsonb), :redirect_uri, :state, :pkce_challenge,
+                     :browser_session_hash, :csrf_token_hash, :expires_at)
+                """
+            ),
+            {
+                "id": interaction_id,
+                "tenant_id": client_row["tenant_id"],
+                "client_id": client_row["id"],
+                "resource": requested_resource,
+                "scopes": json.dumps(requested_scopes),
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "pkce_challenge": code_challenge,
+                "browser_session_hash": hash_secret(browser_session),
+                "csrf_token_hash": hash_secret(csrf_token),
+                "expires_at": expires_at,
+            },
+        )
+        await db.commit()
+
+    redirect = RedirectResponse(_browser_consent_url(request, interaction_id), status_code=303)
+    # The API-key remains only in the browser's existing local-storage path;
+    # these short-lived cookies are merely possession and CSRF bindings.
+    redirect.set_cookie("palace_oauth_consent_session", browser_session, max_age=600, secure=True, httponly=True, samesite="lax", path="/api/v1/memory/mcp/oauth")
+    redirect.set_cookie("palace_oauth_consent_csrf", csrf_token, max_age=600, secure=True, httponly=False, samesite="lax", path="/")
+    redirect.headers["Referrer-Policy"] = "no-referrer"
+    return redirect
 
 
 @router.post("/token", response_model=McpOAuthTokenResponse)

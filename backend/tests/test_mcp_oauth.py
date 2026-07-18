@@ -38,6 +38,7 @@ class FakeSession:
         self.tokens = []
         self.revoked = []
         self.audit_events = []
+        self.authorization_interactions = []
         self.statements = []
         self.commits = 0
 
@@ -61,6 +62,9 @@ class FakeSession:
             return _Result(rows[:2])
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
+            return _Result([])
+        if "insert into mcp_oauth_authorization_interactions" in sql:
+            self.authorization_interactions.append(params)
             return _Result([])
         if "from mcp_oauth_authorization_codes" in sql:
             return _Result([] if self.authorization_code_row is None else [self.authorization_code_row])
@@ -188,6 +192,62 @@ def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifie
     assert wrong_verifier.status_code == 400
     assert wrong_verifier.json()["detail"] == "invalid_grant"
     assert code_row["used_at"] is None
+
+
+def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypatch) -> None:
+    client_row = _client_row(
+        client_type="confidential_web",
+        authorization_code_enabled=True,
+        redirect_uris=["https://nebulaios.example/callback"],
+        allowed_resources=["https://testserver/mcp"],
+    )
+    session = FakeSession(client_row)
+    client = _client(session, monkeypatch)
+
+    response = client.get(
+        "/api/v1/memory/mcp/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "tenant-a:codex-remote",
+            "redirect_uri": "https://nebulaios.example/callback",
+            "resource": "https://testserver/mcp",
+            "scope": "read",
+            "state": "opaque-client-state",
+            "code_challenge": "A" * 43,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("https://testserver/oauth/consent?interaction_id=")
+    assert "palace_oauth_consent_session" in response.headers["set-cookie"]
+    assert session.authorization_interactions[0]["tenant_id"] == "tenant-a"
+    assert session.authorization_interactions[0]["state"] == "opaque-client-state"
+    assert session.authorization_interactions[0]["browser_session_hash"]
+    assert session.authorization_interactions[0]["csrf_token_hash"]
+
+
+def test_mcp_oauth_authorize_rejects_unregistered_redirect_uri(monkeypatch) -> None:
+    client_row = _client_row(
+        client_type="confidential_web",
+        authorization_code_enabled=True,
+        redirect_uris=["https://nebulaios.example/callback"],
+        allowed_resources=["https://testserver/mcp"],
+    )
+    client = _client(FakeSession(client_row), monkeypatch)
+
+    response = client.get(
+        "/api/v1/memory/mcp/oauth/authorize",
+        params={
+            "response_type": "code", "client_id": "tenant-a:codex-remote",
+            "redirect_uri": "https://attacker.example/callback", "resource": "https://testserver/mcp",
+            "code_challenge": "A" * 43, "code_challenge_method": "S256",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid_request"
 
 
 def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None:
