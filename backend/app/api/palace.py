@@ -989,9 +989,17 @@ async def refresh_source_resource_now(
         # uncommitted state. If Redis rejects the job, clear that lease in a
         # second audited transaction so manual resources can be retried.
         logger.exception("operator refresh enqueue failed resource_id=%s", resource_id)
-        audit = cancel_operator_refresh_lease(resource, lease=lease)
-        if audit is not None:
-            await persist_operator_transition(db, resource=resource, audit=audit)
+        compensated = await db.scalar(
+            select(SourceResource)
+            .where(SourceResource.id == lease.resource_id)
+            .where(SourceResource.tenant_id == lease.tenant_id)
+            .where(SourceResource.refresh_lease_token == lease.token)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        audit = cancel_operator_refresh_lease(compensated, lease=lease) if compensated is not None else None
+        if audit is not None and compensated is not None:
+            await persist_operator_transition(db, resource=compensated, audit=audit)
             await db.commit()
         raise HTTPException(
             status_code=503,

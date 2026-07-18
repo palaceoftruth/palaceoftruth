@@ -138,6 +138,16 @@ class FailingArqPool:
         raise RuntimeError("redis unavailable")
 
 
+class RacingFailingArqPool:
+    def __init__(self, resource: SourceResource) -> None:
+        self.resource = resource
+        self.replacement_lease = uuid.uuid4()
+
+    async def enqueue_job(self, _name: str, **_kwargs) -> None:
+        self.resource.refresh_lease_token = self.replacement_lease
+        raise RuntimeError("redis unavailable")
+
+
 def _build_app(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
@@ -282,7 +292,7 @@ def test_source_resource_mutations_reject_other_tenants_without_queueing_or_audi
 def test_source_resource_refresh_enqueue_failure_releases_manual_lease_for_retry() -> None:
     resource = _source_resource()
     resource.refresh_policy = "manual"
-    session = FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[resource])
+    session = FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[resource, resource])
     client = _build_app(session)
     client.app.state.arq_pool = FailingArqPool()
 
@@ -295,6 +305,22 @@ def test_source_resource_refresh_enqueue_failure_releases_manual_lease_for_retry
     assert [row.event_kind for row in session.added if hasattr(row, "event_kind")] == [
         "operator_refresh_requested",
         "operator_refresh_enqueue_failed",
+    ]
+
+
+def test_source_resource_refresh_failure_never_cancels_a_replacement_lease() -> None:
+    resource = _source_resource()
+    session = FakeSession(objects={(SourceResource, resource.id): resource}, scalar_results=[resource, resource])
+    client = _build_app(session)
+    failing_pool = RacingFailingArqPool(resource)
+    client.app.state.arq_pool = failing_pool
+
+    response = client.post(f"/api/v1/palace/source-resources/{resource.id}/refresh")
+
+    assert response.status_code == 503
+    assert resource.refresh_lease_token == failing_pool.replacement_lease
+    assert [row.event_kind for row in session.added if hasattr(row, "event_kind")] == [
+        "operator_refresh_requested",
     ]
 
 
