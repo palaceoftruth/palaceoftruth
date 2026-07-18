@@ -109,7 +109,15 @@ class McpOAuthAuthorizationInteraction(Base):
     agent_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     workspace_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # These values bind the browser decision to the original authorization
+    # request without ever persisting a PKCE verifier or an API credential.
+    state: Mapped[str | None] = mapped_column(Text, nullable=True)
     pkce_challenge: Mapped[str | None] = mapped_column(Text, nullable=True)
+    browser_session_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    csrf_token_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    authorized_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     consumed_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
@@ -135,6 +143,8 @@ class McpOAuthAuthorizationCode(Base):
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     grant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_oauth_delegated_grants.id", ondelete="CASCADE"), nullable=False)
     code_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # OAuth requires the exchange request to repeat the exact callback URI.
+    redirect_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     pkce_challenge: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
