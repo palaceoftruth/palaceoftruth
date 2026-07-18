@@ -30,6 +30,9 @@ class AuthContext:
     client_name: str | None = None
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    delegated_agent_scope_keys: tuple[str, ...] = ()
+    delegated_workspace_scope_keys: tuple[str, ...] = ()
+    delegated_grant_id: Any | None = None
     scopes: tuple[str, ...] = ()
     capabilities: frozenset[str] = field(default_factory=frozenset)
     resource: str | None = None
@@ -196,6 +199,9 @@ def _context_from_scopes(
     client_name: str | None = None,
     agent_scope_key: str | None = None,
     allow_all_agent_scope_reads: bool = False,
+    delegated_agent_scope_keys: tuple[str, ...] = (),
+    delegated_workspace_scope_keys: tuple[str, ...] = (),
+    delegated_grant_id: object | None = None,
     scopes: list[str] | tuple[str, ...] | None = None,
     resource: object | None = None,
     audit_metadata: Mapping[str, Any] | None = None,
@@ -211,6 +217,9 @@ def _context_from_scopes(
         client_name=client_name,
         agent_scope_key=agent_scope_key,
         allow_all_agent_scope_reads=allow_all_agent_scope_reads,
+        delegated_agent_scope_keys=delegated_agent_scope_keys,
+        delegated_workspace_scope_keys=delegated_workspace_scope_keys,
+        delegated_grant_id=delegated_grant_id,
         scopes=normalized_scopes,
         capabilities=frozenset(normalized_scopes),
         resource=resource_value,
@@ -335,15 +344,20 @@ async def verify_memory_auth(
                     t.resource AS token_resource,
                     t.expires_at,
                     t.revoked_at AS token_revoked_at,
+                    t.delegated_grant_id,
                     c.id AS client_id,
                     c.client_key,
                     c.display_name,
                     c.allowed_scopes,
                     c.agent_scope_key,
                     c.allow_all_agent_scope_reads,
-                    c.oauth_revoked_at AS client_revoked_at
+                    c.oauth_revoked_at AS client_revoked_at,
+                    g.revoked_at AS grant_revoked_at,
+                    g.agent_scope_keys AS delegated_agent_scope_keys,
+                    g.workspace_scope_keys AS delegated_workspace_scope_keys
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
+                LEFT JOIN mcp_oauth_delegated_grants g ON g.id = t.delegated_grant_id AND g.tenant_id = t.tenant_id
                 WHERE t.token_hash = :token_hash
                 LIMIT 1
                 """
@@ -389,7 +403,7 @@ async def verify_memory_auth(
                 )
                 await db.commit()
                 raise _auth_exception(request, 403, "MCP bearer token expired", error="invalid_token")
-            if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
+            if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None or (result.get("delegated_grant_id") is not None and result.get("grant_revoked_at") is not None):
                 await _record_token_validation_audit_event(
                     db,
                     request=request,
@@ -458,6 +472,9 @@ async def verify_memory_auth(
             client_name=result.get("display_name") or result["client_key"],
             agent_scope_key=result.get("agent_scope_key"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
+            delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
+            delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
+            delegated_grant_id=result.get("delegated_grant_id"),
             scopes=token_scopes,
             resource=result.get("token_resource"),
             audit_metadata={"token_id": str(result["token_id"])},
@@ -492,13 +509,18 @@ async def _verify_scoped_bearer_token(
                     t.resource AS token_resource,
                     t.expires_at,
                     t.revoked_at AS token_revoked_at,
+                    t.delegated_grant_id,
                     c.id AS client_id,
                     c.client_key,
                     c.display_name,
                     c.allowed_scopes,
-                    c.oauth_revoked_at AS client_revoked_at
+                    c.oauth_revoked_at AS client_revoked_at,
+                    g.revoked_at AS grant_revoked_at,
+                    g.agent_scope_keys AS delegated_agent_scope_keys,
+                    g.workspace_scope_keys AS delegated_workspace_scope_keys
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
+                LEFT JOIN mcp_oauth_delegated_grants g ON g.id = t.delegated_grant_id AND g.tenant_id = t.tenant_id
                 WHERE t.token_hash = :token_hash
                 LIMIT 1
                 """
@@ -532,7 +554,7 @@ async def _verify_scoped_bearer_token(
                 )
                 await db.commit()
                 raise _auth_exception(request, 403, f"{detail_prefix} bearer token expired", error="invalid_token")
-            if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None:
+            if result["token_revoked_at"] is not None or result["client_revoked_at"] is not None or (result.get("delegated_grant_id") is not None and result.get("grant_revoked_at") is not None):
                 await _record_token_validation_audit_event(
                     db,
                     request=request,
@@ -595,6 +617,9 @@ async def _verify_scoped_bearer_token(
             client_id=result["client_id"],
             client_key=result["client_key"],
             client_name=result.get("display_name") or result["client_key"],
+            delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
+            delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
+            delegated_grant_id=result.get("delegated_grant_id"),
             scopes=token_scopes,
             resource=result.get("token_resource"),
             audit_metadata={"token_id": str(result["token_id"])},

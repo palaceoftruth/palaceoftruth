@@ -91,6 +91,11 @@ class McpOAuthAccessToken(Base):
         ForeignKey("mcp_oauth_delegated_grants.id", ondelete="SET NULL"),
         nullable=True,
     )
+    refresh_token_family_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_oauth_refresh_token_families.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     issued_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -157,5 +162,21 @@ class McpOAuthRefreshTokenFamily(Base):
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     grant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mcp_oauth_delegated_grants.id", ondelete="CASCADE"), nullable=False)
     current_token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class McpOAuthRefreshToken(Base):
+    """Opaque, one-use refresh-token record retained for replay detection."""
+    __tablename__ = "mcp_oauth_refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mcp_oauth_refresh_token_families.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    issued_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)

@@ -352,16 +352,42 @@ async def _issue_authorization_code_access_token(
     if consumed.mappings().one_or_none() is None:
         raise HTTPException(status_code=400, detail="invalid_grant")
 
+    # A family and immutable token record let us recognize a replay after the
+    # active token rotates; retaining only the current hash cannot do that.
+    refresh_token = secrets.token_urlsafe(48)
+    family = await db.execute(
+        text(
+            """
+            INSERT INTO mcp_oauth_refresh_token_families (tenant_id, grant_id, current_token_hash, expires_at)
+            VALUES (:tenant_id, :grant_id, :token_hash, :expires_at)
+            RETURNING id
+            """
+        ),
+        {"tenant_id": client_row["tenant_id"], "grant_id": row["grant_id"], "token_hash": hash_secret(refresh_token), "expires_at": now + timedelta(days=30)},
+    )
+    family_row = family.mappings().one_or_none()
+    if family_row is None:
+        raise HTTPException(status_code=500, detail="refresh_family_creation_failed")
+    family_id = family_row["id"]
+    await db.execute(
+        text(
+            """
+            INSERT INTO mcp_oauth_refresh_tokens (tenant_id, family_id, token_hash, expires_at)
+            VALUES (:tenant_id, :family_id, :token_hash, :expires_at)
+            """
+        ),
+        {"tenant_id": client_row["tenant_id"], "family_id": family_id, "token_hash": hash_secret(refresh_token), "expires_at": now + timedelta(days=30)},
+    )
     access_token = secrets.token_urlsafe(48)
     expires_at = now + timedelta(seconds=ttl_seconds)
     await db.execute(
         text(
             """
             INSERT INTO mcp_oauth_access_tokens
-                (tenant_id, client_id, token_hash, scopes, resource, delegated_grant_id, expires_at)
+                (tenant_id, client_id, token_hash, scopes, resource, delegated_grant_id, refresh_token_family_id, expires_at)
             VALUES
                 (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :resource,
-                 :delegated_grant_id, :expires_at)
+                 :delegated_grant_id, :refresh_token_family_id, :expires_at)
             """
         ),
         {
@@ -371,6 +397,7 @@ async def _issue_authorization_code_access_token(
             "scopes": json.dumps(token_scopes),
             "resource": row["resource"],
             "delegated_grant_id": row["grant_id"] if "grant_id" in row else None,
+            "refresh_token_family_id": family_id,
             "expires_at": expires_at,
         },
     )
@@ -387,7 +414,51 @@ async def _issue_authorization_code_access_token(
         expires_in=ttl_seconds,
         scope=" ".join(token_scopes),
         resource=row["resource"],
+        refresh_token=refresh_token,
     )
+
+
+async def _issue_refresh_access_token(*, db, client_row, refresh_token: str | None, scope: str | None) -> McpOAuthTokenResponse:
+    """Rotate one refresh token atomically and revoke its family on replay."""
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+    now = datetime.now(timezone.utc)
+    result = await db.execute(text("""
+        SELECT r.id AS refresh_id, r.used_at, r.revoked_at AS token_revoked_at, r.expires_at AS token_expires_at,
+               f.id AS family_id, f.revoked_at AS family_revoked_at, g.id AS grant_id, g.client_id, g.resource, g.scopes, g.revoked_at AS grant_revoked_at
+        FROM mcp_oauth_refresh_tokens r
+        JOIN mcp_oauth_refresh_token_families f ON f.id = r.family_id AND f.tenant_id = r.tenant_id
+        JOIN mcp_oauth_delegated_grants g ON g.id = f.grant_id AND g.tenant_id = f.tenant_id
+        WHERE r.token_hash = :token_hash AND r.tenant_id = :tenant_id
+        FOR UPDATE
+    """), {"token_hash": hash_secret(refresh_token), "tenant_id": client_row["tenant_id"]})
+    row = result.mappings().one_or_none()
+    if row is None or row["client_id"] != client_row["id"]:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+    invalid = row["used_at"] is not None or row["token_revoked_at"] is not None or row["family_revoked_at"] is not None or row["grant_revoked_at"] is not None or row["token_expires_at"] <= now
+    if invalid:
+        # Reuse is a compromise signal. Revoke the family and every access
+        # token derived from it, while preserving an oracle-safe response.
+        await db.execute(text("UPDATE mcp_oauth_refresh_token_families SET revoked_at = COALESCE(revoked_at, :now) WHERE id = :id"), {"now": now, "id": row["family_id"]})
+        await db.execute(text("UPDATE mcp_oauth_access_tokens SET revoked_at = COALESCE(revoked_at, :now) WHERE refresh_token_family_id = :id"), {"now": now, "id": row["family_id"]})
+        await db.execute(text("UPDATE mcp_oauth_refresh_tokens SET revoked_at = COALESCE(revoked_at, :now) WHERE family_id = :id"), {"now": now, "id": row["family_id"]})
+        await db.commit()
+        raise HTTPException(status_code=400, detail="invalid_grant")
+    grant_scopes = _parse_scopes(row["scopes"])
+    token_scopes = _requested_scopes(scope, grant_scopes)
+    next_refresh = secrets.token_urlsafe(48)
+    ttl_seconds = int(client_row["oauth_token_ttl_seconds"] or 3600)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+    consumed = await db.execute(text("UPDATE mcp_oauth_refresh_tokens SET used_at = :now WHERE id = :id AND used_at IS NULL RETURNING id"), {"now": now, "id": row["refresh_id"]})
+    if consumed.mappings().one_or_none() is None:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+    await db.execute(text("UPDATE mcp_oauth_refresh_token_families SET current_token_hash = :hash WHERE id = :id"), {"hash": hash_secret(next_refresh), "id": row["family_id"]})
+    await db.execute(text("INSERT INTO mcp_oauth_refresh_tokens (tenant_id, family_id, token_hash, expires_at) VALUES (:tenant_id, :family_id, :hash, :expires_at)"), {"tenant_id": client_row["tenant_id"], "family_id": row["family_id"], "hash": hash_secret(next_refresh), "expires_at": row["token_expires_at"]})
+    access_token = secrets.token_urlsafe(48)
+    await db.execute(text("""INSERT INTO mcp_oauth_access_tokens (tenant_id, client_id, token_hash, scopes, resource, delegated_grant_id, refresh_token_family_id, expires_at) VALUES (:tenant_id, :client_id, :hash, CAST(:scopes AS jsonb), :resource, :grant_id, :family_id, :expires_at)"""), {"tenant_id": client_row["tenant_id"], "client_id": client_row["id"], "hash": hash_secret(access_token), "scopes": json.dumps(token_scopes), "resource": row["resource"], "grant_id": row["grant_id"], "family_id": row["family_id"], "expires_at": expires_at})
+    await _record_oauth_endpoint_audit_event(db, client_row=client_row, operation="oauth.refresh_rotation", status="success", params_summary={"grant_type": "refresh_token", "scopes": token_scopes})
+    await db.commit()
+    return McpOAuthTokenResponse(access_token=access_token, refresh_token=next_refresh, expires_in=ttl_seconds, scope=" ".join(token_scopes), resource=row["resource"])
 
 
 @router.get("/authorize")
@@ -660,6 +731,7 @@ async def issue_mcp_access_token(
     code: Annotated[str | None, Form()] = None,
     code_verifier: Annotated[str | None, Form()] = None,
     redirect_uri: Annotated[str | None, Form()] = None,
+    refresh_token: Annotated[str | None, Form()] = None,
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> McpOAuthTokenResponse:
     row = await _authenticate_oauth_client(
@@ -675,6 +747,14 @@ async def issue_mcp_access_token(
                 code=code,
                 code_verifier=code_verifier,
                 redirect_uri=redirect_uri,
+            )
+    if grant_type == "refresh_token":
+        async with async_session() as db:
+            return await _issue_refresh_access_token(
+                db=db,
+                client_row=row,
+                refresh_token=refresh_token,
+                scope=scope,
             )
     if grant_type != "client_credentials":
         raise HTTPException(status_code=400, detail="unsupported_grant_type")
@@ -820,6 +900,25 @@ async def revoke_mcp_access_token(
         authorization=authorization,
     )
     async with async_session() as db:
+        # RFC 7009 requires success for unknown tokens. For a caller-owned
+        # refresh token, revoke the whole family and every derived access token.
+        family = await db.execute(
+            text(
+                """
+                SELECT f.id FROM mcp_oauth_refresh_tokens r
+                JOIN mcp_oauth_refresh_token_families f ON f.id = r.family_id AND f.tenant_id = r.tenant_id
+                JOIN mcp_oauth_delegated_grants g ON g.id = f.grant_id AND g.tenant_id = f.tenant_id
+                WHERE r.token_hash = :token_hash AND r.tenant_id = :tenant_id AND g.client_id = :client_id
+                FOR UPDATE
+                """
+            ),
+            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"], "client_id": caller["id"]},
+        )
+        family_row = family.mappings().one_or_none()
+        if family_row is not None:
+            await db.execute(text("UPDATE mcp_oauth_refresh_token_families SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) WHERE id = :id"), {"id": family_row["id"]})
+            await db.execute(text("UPDATE mcp_oauth_refresh_tokens SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) WHERE family_id = :id"), {"id": family_row["id"]})
+            await db.execute(text("UPDATE mcp_oauth_access_tokens SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) WHERE refresh_token_family_id = :id"), {"id": family_row["id"]})
         await db.execute(
             text(
                 "UPDATE mcp_oauth_access_tokens "

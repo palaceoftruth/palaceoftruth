@@ -39,6 +39,8 @@ class FakeSession:
         self.revoked = []
         self.audit_events = []
         self.authorization_interactions = []
+        self.refresh_families = []
+        self.refresh_tokens = []
         self.statements = []
         self.commits = 0
 
@@ -63,11 +65,20 @@ class FakeSession:
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
+        if "insert into mcp_oauth_refresh_token_families" in sql:
+            family = {**params, "id": uuid.uuid4()}
+            self.refresh_families.append(family)
+            return _Result([{"id": family["id"]}])
+        if "insert into mcp_oauth_refresh_tokens" in sql:
+            self.refresh_tokens.append(params)
+            return _Result([])
         if "insert into mcp_oauth_authorization_interactions" in sql:
             self.authorization_interactions.append(params)
             return _Result([])
         if "from mcp_oauth_authorization_codes" in sql:
             return _Result([] if self.authorization_code_row is None else [self.authorization_code_row])
+        if "from mcp_oauth_refresh_tokens" in sql:
+            return _Result([])
         if "update mcp_oauth_authorization_codes" in sql:
             if self.authorization_code_row is None or self.authorization_code_row.get("used_at") is not None:
                 return _Result([])
@@ -84,6 +95,9 @@ class FakeSession:
             ]
             return _Result(rows[:1])
         if "update mcp_oauth_access_tokens" in sql:
+            self.revoked.append(params)
+            return _Result([])
+        if "update mcp_oauth_refresh_token" in sql:
             self.revoked.append(params)
             return _Result([])
         raise AssertionError(f"Unexpected SQL: {sql}")

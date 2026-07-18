@@ -82,6 +82,18 @@ from app.services.search import RetrievalDependencyUnavailableError
 from app.workers.queues import enqueue_singleton_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
+
+
+def _enforce_delegated_grant_retrieval(request: Request, *, agent_scope_keys: list[str], workspace_scope_keys: list[str], tenant_shared: bool, broad: bool) -> None:
+    """Fail closed when a delegated OAuth grant narrows memory retrieval."""
+    context = getattr(request.state, "auth_context", None)
+    if context is None or getattr(context, "delegated_grant_id", None) is None:
+        return
+    allowed_agents = set(getattr(context, "delegated_agent_scope_keys", ()) or ())
+    allowed_workspaces = set(getattr(context, "delegated_workspace_scope_keys", ()) or ())
+    # Empty lists intentionally authorize no scopes; grants never imply tenant-wide access.
+    if tenant_shared or broad or any(key not in allowed_agents for key in agent_scope_keys) or any(key not in allowed_workspaces for key in workspace_scope_keys):
+        raise HTTPException(status_code=403, detail="Delegated OAuth grant does not permit the requested memory scopes")
 logger = logging.getLogger(__name__)
 
 
@@ -994,6 +1006,13 @@ async def retrieve_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryRetrieveResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.scope.key] if body.scope.type == "agent" else [],
+        workspace_scope_keys=[body.scope.key] if body.scope.type == "workspace" else [],
+        tenant_shared=body.scope.type == "tenant_shared",
+        broad=False,
+    )
     is_hermes_client = (
         getattr(request.state, "auth_mode", None) == "mcp_oauth"
         and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
@@ -1093,6 +1112,13 @@ async def retrieve_agent_memory_artifacts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> AgentMemoryRetrieveResponse:
+    _enforce_delegated_grant_retrieval(
+        request,
+        agent_scope_keys=[body.agent_scope_key, *body.include_agent_scope_keys],
+        workspace_scope_keys=body.workspace_scope_keys,
+        tenant_shared=body.include_tenant_shared,
+        broad=body.include_broad_corpus or body.include_all_permitted_agent_scopes or bool(body.include_agent_scope_patterns) or body.session_scope_key is not None,
+    )
     is_hermes_client = (
         getattr(request.state, "auth_mode", None) == "mcp_oauth"
         and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")

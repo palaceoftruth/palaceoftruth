@@ -26,6 +26,9 @@ from app.schemas.memory import (
     McpOAuthClientRegisterResponse,
     McpOAuthClientRevokeResponse,
     McpOAuthClientSummary,
+    McpOAuthGrantListResponse,
+    McpOAuthGrantRevokeResponse,
+    McpOAuthGrantSummary,
 )
 from app.schemas.palace import (
     PalaceAnswerAuditReport,
@@ -432,6 +435,42 @@ async def bind_palace_mcp_client_agent_scope(
         raise HTTPException(status_code=404, detail="MCP OAuth client not found")
     await db.commit()
     return _serialize_mcp_client(row)
+
+
+def _serialize_oauth_grant(row) -> McpOAuthGrantSummary:
+    return McpOAuthGrantSummary(
+        id=row["id"], client_id=row["client_id"], client_key=row["client_key"],
+        client_name=row["display_name"] or row["client_key"], resource=row["resource"],
+        scopes=row["scopes"], agent_scope_keys=row["agent_scope_keys"],
+        workspace_scope_keys=row["workspace_scope_keys"], authorized_by=row["authorized_by"], revoked_at=row["revoked_at"],
+    )
+
+
+@router.get("/mcp-grants", response_model=McpOAuthGrantListResponse, dependencies=[Depends(require_api_capability("admin"))])
+async def list_palace_mcp_grants(request: Request, db: AsyncSession = Depends(get_db)) -> McpOAuthGrantListResponse:
+    rows = (await db.execute(text("""
+        SELECT g.id, g.client_id, g.resource, g.scopes, g.agent_scope_keys, g.workspace_scope_keys, g.authorized_by, g.revoked_at,
+               c.client_key, c.display_name
+        FROM mcp_oauth_delegated_grants g JOIN mcp_clients c ON c.id = g.client_id AND c.tenant_id = g.tenant_id
+        WHERE g.tenant_id = :tenant_id ORDER BY g.revoked_at NULLS FIRST, g.id DESC
+    """), {"tenant_id": request.state.tenant_id})).mappings().all()
+    return McpOAuthGrantListResponse(tenant_id=request.state.tenant_id, grants=[_serialize_oauth_grant(row) for row in rows])
+
+
+@router.post("/mcp-grants/{grant_id}/revoke", response_model=McpOAuthGrantRevokeResponse, dependencies=[Depends(require_api_capability("admin"))])
+async def revoke_palace_mcp_grant(grant_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)) -> McpOAuthGrantRevokeResponse:
+    row = (await db.execute(text("""
+        UPDATE mcp_oauth_delegated_grants SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+        WHERE id = :grant_id AND tenant_id = :tenant_id
+        RETURNING id, client_id, resource, scopes, agent_scope_keys, workspace_scope_keys, authorized_by, revoked_at
+    """), {"grant_id": grant_id, "tenant_id": request.state.tenant_id})).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth grant not found")
+    await db.execute(text("UPDATE mcp_oauth_access_tokens SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) WHERE delegated_grant_id = :grant_id AND tenant_id = :tenant_id"), {"grant_id": grant_id, "tenant_id": request.state.tenant_id})
+    await db.execute(text("UPDATE mcp_oauth_refresh_token_families SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) WHERE grant_id = :grant_id AND tenant_id = :tenant_id"), {"grant_id": grant_id, "tenant_id": request.state.tenant_id})
+    client = (await db.execute(text("SELECT client_key, display_name FROM mcp_clients WHERE id = :id AND tenant_id = :tenant_id"), {"id": row["client_id"], "tenant_id": request.state.tenant_id})).mappings().one()
+    await db.commit()
+    return McpOAuthGrantRevokeResponse(tenant_id=request.state.tenant_id, grant=_serialize_oauth_grant({**row, **client}), revoked=True)
 
 
 @router.post("/mcp-clients/{client_id}/revoke", response_model=McpOAuthClientRevokeResponse, dependencies=[Depends(require_api_capability("admin"))])
