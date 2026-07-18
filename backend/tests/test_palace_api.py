@@ -767,6 +767,10 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
                     "display_name": "Codex remote MCP",
                     "allowed_scopes": ["read", "write"],
                     "metadata": {"owner": "codex"},
+                    "client_type": "confidential_web",
+                    "redirect_uris": ["https://nebulaios.example.com/oauth/callback"],
+                    "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+                    "authorization_code_enabled": True,
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": 3600,
                     "created_at": datetime.now(timezone.utc),
@@ -790,6 +794,10 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
     assert payload["clients"][0]["client_key"] == "codex-remote"
     assert payload["clients"][0]["request_count"] == 3
     assert payload["clients"][0]["denied_count"] == 1
+    assert payload["clients"][0]["client_type"] == "confidential_web"
+    assert payload["clients"][0]["redirect_uris"] == ["https://nebulaios.example.com/oauth/callback"]
+    assert payload["clients"][0]["allowed_resources"] == ["https://api.palace.sarvent.cloud/api/v1"]
+    assert payload["clients"][0]["authorization_code_enabled"] is True
     assert "client_secret" not in payload["config_snippets"]["http_oauth_toml"]
     assert "read -rsp" in payload["config_snippets"]["oauth_token_command"]
     assert [scope["value"] for scope in payload["scope_catalog"]] == list(ALL_MCP_OPERATION_SCOPES)

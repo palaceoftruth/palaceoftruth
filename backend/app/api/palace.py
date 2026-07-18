@@ -308,6 +308,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
                 """
                 SELECT c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata,
                        c.agent_scope_key, c.allow_all_agent_scope_reads,
+                       c.client_type, c.redirect_uris, c.allowed_resources, c.authorization_code_enabled,
                        c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at,
                        COUNT(e.id) AS request_count,
                        COUNT(e.id) FILTER (WHERE e.status = 'success') AS success_count,
@@ -318,6 +319,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
                 LEFT JOIN mcp_request_audit_events e ON e.client_id = c.id AND e.tenant_id = c.tenant_id
                 WHERE c.tenant_id = :tenant_id
                 GROUP BY c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata, c.agent_scope_key, c.allow_all_agent_scope_reads,
+                         c.client_type, c.redirect_uris, c.allowed_resources, c.authorization_code_enabled,
                          c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at
                 ORDER BY COALESCE(MAX(e.created_at), c.last_seen_at, c.created_at) DESC
                 """
