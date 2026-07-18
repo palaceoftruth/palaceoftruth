@@ -3,7 +3,7 @@ import base64
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api import mcp_oauth
@@ -248,6 +248,60 @@ def test_mcp_oauth_authorize_rejects_unregistered_redirect_uri(monkeypatch) -> N
 
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid_request"
+
+
+def test_mcp_oauth_consent_summary_requires_the_tenant_bound_browser_session(monkeypatch) -> None:
+    browser_session = "browser-session"
+    interaction = {
+        "tenant_id": "tenant-a",
+        "resource": "https://testserver/mcp",
+        "scopes": ["read"],
+        "agent_scope_keys": ["codex"],
+        "workspace_scope_keys": ["palaceoftruth"],
+        "browser_session_hash": hash_secret(browser_session),
+        "decision": None,
+        "consumed_at": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "client_key": "codex-remote",
+        "display_name": "Codex Remote",
+    }
+
+    class ConsentSession(FakeSession):
+        async def execute(self, statement, params=None):
+            if "from mcp_oauth_authorization_interactions" in str(statement).lower():
+                return _Result([interaction])
+            return await super().execute(statement, params)
+
+    session = ConsentSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    async def browser_api_key(request: Request):
+        request.state.tenant_id = "tenant-a"
+        return "browser-key"
+
+    client.app.dependency_overrides[mcp_oauth.verify_api_key] = browser_api_key
+    response = client.get(
+        "/api/v1/memory/mcp/oauth/authorize/interaction-id",
+        headers={"X-API-Key": "browser-key"},
+        cookies={"palace_oauth_consent_session": browser_session},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "client_name": "Codex Remote",
+        "tenant_id": "tenant-a",
+        "resource": "https://testserver/mcp",
+        "scopes": ["read"],
+        "agent_scope_keys": ["codex"],
+        "workspace_scope_keys": ["palaceoftruth"],
+        "expires_at": interaction["expires_at"].isoformat(),
+    }
+
+    missing_cookie = client.get(
+        "/api/v1/memory/mcp/oauth/authorize/interaction-id",
+        headers={"X-API-Key": "browser-key"},
+    )
+    assert missing_cookie.status_code == 400
+    assert missing_cookie.json()["detail"] == "invalid_request"
 
 
 def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None:
