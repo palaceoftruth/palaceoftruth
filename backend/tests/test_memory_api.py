@@ -249,7 +249,6 @@ def _build_app(
     app.include_router(router, prefix="/api/v1")
     app.state.arq_pool = FakeArqPool()
     app.state.embedder = object()
-
     async def override_get_db():
         yield session
 
@@ -1721,6 +1720,89 @@ def test_hermes_oauth_client_writes_only_its_bound_agent_scope(monkeypatch) -> N
     ):
         assert response.status_code == 403
         assert response.json()["detail"]["reason_code"] == reason
+
+
+def test_delegated_grant_write_allowlists_apply_to_single_and_batch_entries(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+    delegated_agents = ["codex"]
+    delegated_workspaces = ["palaceoftruth"]
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "delegated-writer"
+        request.state.mcp_allowed_scopes = ["read", "write", "write:agent", "write:workspace"]
+        request.state.auth_context = SimpleNamespace(
+            delegated_grant_id=uuid.uuid4(),
+            delegated_agent_scope_keys=tuple(delegated_agents),
+            delegated_workspace_scope_keys=tuple(delegated_workspaces),
+        )
+        return "token"
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    allowed = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "scope": {"type": "agent", "key": "codex"}},
+    )
+    denied = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "scope": {"type": "agent", "key": "sibling-agent"}},
+    )
+    delegated_agents.clear()
+    empty_allowlist = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "scope": {"type": "agent", "key": "codex"}},
+    )
+    batch = client.post(
+        "/api/v1/memory/entries:batch",
+        json={
+            "entries": [
+                {**_canonical_payload(), "scope": {"type": "workspace", "key": "palaceoftruth"}},
+                {**_canonical_payload(), "scope": {"type": "workspace", "key": "other-workspace"}},
+                {**_canonical_payload(), "scope": {"type": "tenant_shared", "key": None}},
+            ]
+        },
+    )
+
+    assert allowed.status_code == 202
+    assert denied.status_code == 403
+    assert "does not permit" in denied.json()["detail"]
+    assert batch.status_code == 202
+    assert empty_allowlist.status_code == 403
+    assert [entry["status"] for entry in batch.json()["results"]] == ["queued", "failed", "failed"]
+    assert all(
+        entry["error"]["reason_code"] == "delegated_grant_scope_denied"
+        for entry in batch.json()["results"][1:]
+    )
 
 
 def test_memory_artifacts_accepts_legacy_payloads(monkeypatch) -> None:

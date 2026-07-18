@@ -94,6 +94,20 @@ def _enforce_delegated_grant_retrieval(request: Request, *, agent_scope_keys: li
     # Empty lists intentionally authorize no scopes; grants never imply tenant-wide access.
     if tenant_shared or broad or any(key not in allowed_agents for key in agent_scope_keys) or any(key not in allowed_workspaces for key in workspace_scope_keys):
         raise HTTPException(status_code=403, detail="Delegated OAuth grant does not permit the requested memory scopes")
+
+
+def _delegated_grant_write_denial(request: Request, scope: MemoryScope) -> str | None:
+    """Return a fail-closed denial when a delegated grant narrows a write."""
+    context = getattr(request.state, "auth_context", None)
+    if context is None or getattr(context, "delegated_grant_id", None) is None:
+        return None
+    if scope.type == "agent" and scope.key in set(getattr(context, "delegated_agent_scope_keys", ()) or ()):
+        return None
+    if scope.type == "workspace" and scope.key in set(getattr(context, "delegated_workspace_scope_keys", ()) or ()):
+        return None
+    # Delegated grants are explicit agent/workspace allowlists. Empty lists and
+    # every other scope type intentionally authorize no durable write target.
+    return "Delegated OAuth grant does not permit the requested memory write scope"
 logger = logging.getLogger(__name__)
 
 
@@ -572,6 +586,10 @@ async def create_memory_entry(
     if body.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
 
+    delegated_denial = _delegated_grant_write_denial(request, body.scope)
+    if delegated_denial is not None:
+        raise HTTPException(status_code=403, detail=delegated_denial)
+
     admission = evaluate_memory_write_admission(
         body=body,
         auth_mode=getattr(request.state, "auth_mode", None),
@@ -630,6 +648,25 @@ async def create_memory_entries_batch(
                     contract_status="permanent_tenant_mismatch",
                     retryable=False,
                     error=_tenant_mismatch_detail(),
+                )
+            )
+            continue
+
+        delegated_denial = _delegated_grant_write_denial(request, entry.scope)
+        if delegated_denial is not None:
+            failed_count += 1
+            results.append(
+                MemoryEntryBatchResult(
+                    index=index,
+                    status="failed",
+                    contract_status="rejected",
+                    retryable=False,
+                    error={
+                        "status": "rejected",
+                        "reason_code": "delegated_grant_scope_denied",
+                        "message": delegated_denial,
+                        "retryable": False,
+                    },
                 )
             )
             continue
