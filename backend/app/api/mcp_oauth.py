@@ -4,15 +4,15 @@ import json
 import secrets
 import base64
 import hashlib
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.auth import compare_secret, hash_secret
+from app.auth import compare_secret, hash_secret, verify_api_key
 from app.database import async_session
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
@@ -56,6 +56,19 @@ def _browser_consent_url(request: Request, interaction_id: str) -> str:
         host = host.removeprefix("api.")
     netloc = host if parsed.port is None else f"{host}:{parsed.port}"
     return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", ""))
+
+
+def _authorization_response_uri(*, redirect_uri: str, state: str | None, code: str | None, error: str | None) -> str:
+    """Build a response only after the callback URI was read from durable state."""
+    parsed = urlsplit(redirect_uri)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if code is not None:
+        query.append(("code", code))
+    if error is not None:
+        query.append(("error", error))
+    if state is not None:
+        query.append(("state", state))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
 
 def _supported_resources(request: Request) -> set[str]:
@@ -462,6 +475,109 @@ async def begin_mcp_authorization(
     redirect.set_cookie("palace_oauth_consent_csrf", csrf_token, max_age=600, secure=True, httponly=False, samesite="lax", path="/")
     redirect.headers["Referrer-Policy"] = "no-referrer"
     return redirect
+
+
+@router.post("/authorize/{interaction_id}/decision")
+async def decide_mcp_authorization(
+    request: Request,
+    interaction_id: str,
+    decision: Annotated[str, Form()],
+    csrf_token: Annotated[str, Form()],
+    browser_session: Annotated[str | None, Cookie(alias="palace_oauth_consent_session")] = None,
+    _: str = Depends(verify_api_key),
+) -> dict[str, str]:
+    """Approve or deny a single interaction using the tenant's browser API key.
+
+    The API key authenticates the tenant but is never inserted into the grant,
+    code, interaction, audit payload, or redirect. Cookie possession and a
+    double-submit CSRF token bind the browser decision to its GET request.
+    """
+    if decision not in {"approved", "denied"} or not browser_session or not csrf_token:
+        raise HTTPException(status_code=400, detail="invalid_request")
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(status_code=403, detail="invalid_request")
+
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT i.id, i.tenant_id, i.client_id, i.resource, i.scopes, i.agent_scope_keys,
+                       i.workspace_scope_keys, i.redirect_uri, i.state, i.pkce_challenge,
+                       i.browser_session_hash, i.csrf_token_hash, i.decision, i.consumed_at, i.expires_at,
+                       c.client_key, c.display_name
+                FROM mcp_oauth_authorization_interactions i
+                JOIN mcp_clients c ON c.id = i.client_id AND c.tenant_id = i.tenant_id
+                WHERE i.id = CAST(:id AS uuid)
+                FOR UPDATE
+                """
+            ),
+            {"id": interaction_id},
+        )
+        interaction = result.mappings().one_or_none()
+        now = datetime.now(timezone.utc)
+        if (
+            interaction is None
+            or interaction["tenant_id"] != tenant_id
+            or interaction["decision"] is not None
+            or interaction["consumed_at"] is not None
+            or not isinstance(interaction["expires_at"], datetime)
+            or interaction["expires_at"] <= now
+            or not compare_secret(browser_session, interaction["browser_session_hash"])
+            or not compare_secret(csrf_token, interaction["csrf_token_hash"])
+        ):
+            raise HTTPException(status_code=400, detail="invalid_request")
+
+        code: str | None = None
+        if decision == "approved":
+            grant = await db.execute(
+                text(
+                    """
+                    INSERT INTO mcp_oauth_delegated_grants
+                        (tenant_id, client_id, resource, scopes, agent_scope_keys, workspace_scope_keys, authorized_by)
+                    VALUES
+                        (:tenant_id, :client_id, :resource, CAST(:scopes AS jsonb), CAST(:agent_scope_keys AS jsonb),
+                         CAST(:workspace_scope_keys AS jsonb), :authorized_by)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id, "client_id": interaction["client_id"], "resource": interaction["resource"],
+                    "scopes": json.dumps(interaction["scopes"]), "agent_scope_keys": json.dumps(interaction["agent_scope_keys"]),
+                    "workspace_scope_keys": json.dumps(interaction["workspace_scope_keys"]), "authorized_by": "tenant-admin-browser",
+                },
+            )
+            grant_id = grant.mappings().one_or_none()["id"]
+            code = secrets.token_urlsafe(48)
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO mcp_oauth_authorization_codes
+                        (tenant_id, grant_id, code_hash, redirect_uri, pkce_challenge, expires_at)
+                    VALUES (:tenant_id, :grant_id, :code_hash, :redirect_uri, :pkce_challenge, :expires_at)
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id, "grant_id": grant_id, "code_hash": hash_secret(code),
+                    "redirect_uri": interaction["redirect_uri"], "pkce_challenge": interaction["pkce_challenge"],
+                    "expires_at": now + timedelta(minutes=5),
+                },
+            )
+        await db.execute(
+            text(
+                """
+                UPDATE mcp_oauth_authorization_interactions
+                SET decision = :decision, authorized_by = :authorized_by, decided_at = :decided_at, consumed_at = :consumed_at
+                WHERE id = :id AND decision IS NULL AND consumed_at IS NULL
+                """
+            ),
+            {"id": interaction["id"], "decision": decision, "authorized_by": "tenant-admin-browser", "decided_at": now, "consumed_at": now},
+        )
+        await db.commit()
+    return {"redirect_uri": _authorization_response_uri(
+        redirect_uri=interaction["redirect_uri"], state=interaction["state"], code=code,
+        error="access_denied" if decision == "denied" else None,
+    )}
 
 
 @router.post("/token", response_model=McpOAuthTokenResponse)
