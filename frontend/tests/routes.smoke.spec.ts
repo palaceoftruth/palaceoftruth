@@ -95,6 +95,56 @@ async function mockGraph(
 }
 
 test.describe("Route smoke", () => {
+  test("tenant admin can review a consent request on desktop and mobile", async ({ page }, testInfo) => {
+    const interactionId = "11111111-1111-1111-1111-111111111111";
+    const decisions: Array<{ headers: Record<string, string>; body: string }> = [];
+    await page.addInitScript(() => {
+      localStorage.setItem("sb:browser_api_key", "tenant-browser-key");
+    });
+    await page.context().addCookies([{
+      name: "palace_oauth_consent_csrf",
+      value: "csrf-test-token",
+      url: testInfo.project.use.baseURL,
+    }]);
+    await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}`, async (route) => {
+      await route.fulfill({
+        json: {
+          client_name: "NebulaiOS",
+          tenant_id: "tenant-demo",
+          resource: "https://api.palace.sarvent.cloud/api/v1",
+          scopes: ["read", "write:workspace"],
+          agent_scope_keys: ["codex"],
+          workspace_scope_keys: ["palaceoftruth"],
+        },
+      });
+    });
+    await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}/decision`, async (route) => {
+      decisions.push({ headers: route.request().headers(), body: route.request().postData() ?? "" });
+      await route.fulfill({ json: { redirect_uri: "/oauth/complete" } });
+    });
+
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}`);
+    await expect(page.getByRole("heading", { name: "Review access request" })).toBeVisible();
+    await expect(page.getByText("NebulaiOS", { exact: true })).toBeVisible();
+    await expect(page.getByText("tenant-demo", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve access" })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("oauth-consent-desktop.png"), fullPage: true });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole("heading", { name: "Review access request" })).toBeVisible();
+    await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+    await page.screenshot({ path: testInfo.outputPath("oauth-consent-mobile.png"), fullPage: true });
+
+    await page.getByRole("button", { name: "Approve access" }).click();
+    await expect.poll(() => decisions).toHaveLength(1);
+    expect(decisions[0]?.headers["x-api-key"]).toBe("tenant-browser-key");
+    expect(decisions[0]?.body).toContain('name="decision"');
+    expect(decisions[0]?.body).toContain("approved");
+    expect(decisions[0]?.body).toContain('name="csrf_token"');
+    expect(decisions[0]?.body).toContain("csrf-test-token");
+  });
+
   test("home route shows stats shell and recent captures", async ({ page }) => {
     await mockDashboard(page);
 
