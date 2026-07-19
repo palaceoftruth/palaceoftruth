@@ -100,6 +100,10 @@ write-back is explicitly delegated.
   call can still mean accepted or queued rather than durable; inspect the
   returned `durability`, `job_id`, `poll_url`, `poll_after_seconds`, and retry
   hints before claiming the memory is fully persisted.
+- `palace_memory_job_status` polls one returned memory job without retrying it,
+  while `palace_exact_scope_recall` queries only the active configured scope.
+  Together they support write -> terminal job -> exact-scope recall canaries
+  without widening recall or using raw REST.
 - `palace_remember_bulk` writes up to 100 explicit memories through
   `/api/v1/memory/entries:batch` and returns ordered per-item results. Use it
   for intentional bulk saves, not as a local offline spool or replay queue.

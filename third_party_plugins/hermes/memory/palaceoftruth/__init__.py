@@ -25,6 +25,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
 
@@ -62,6 +63,8 @@ SEARCH_TOOL_NAME = "palace_search"
 SEMANTIC_RECALL_TOOL_NAME = "palace_semantic_recall"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
+MEMORY_JOB_STATUS_TOOL_NAME = "palace_memory_job_status"
+EXACT_SCOPE_RECALL_TOOL_NAME = "palace_exact_scope_recall"
 SKILL_TAG_PREFIX = "skill-"
 SCOPE_TYPES = {"session", "agent", "workspace", "tenant_shared"}
 FACT_KINDS = {"world", "experience", "observation"}
@@ -73,6 +76,7 @@ PALACE_MEMORY_ROUTE_SCOPES = {
     ("POST", "/api/v1/memory/retrieve-agent"): "read",
     ("POST", "/api/v1/memory/retrieve"): "read",
     ("POST", "/api/v1/memory/semantic-recall"): "read",
+    ("GET", "/api/v1/memory/jobs"): "read",
     ("POST", "/api/v1/memory/entries"): "write",
     ("POST", "/api/v1/memory/entries:batch"): "write",
 }
@@ -328,6 +332,8 @@ def _safe_scope_labels(scopes: list[dict[str, Any]], *, limit: int = 12) -> list
 
 
 def _mcp_scope_for_memory_route(method: str, path: str) -> str | None:
+    if method.upper() == "GET" and path.startswith("/api/v1/memory/jobs/"):
+        return "read"
     scope = PALACE_MEMORY_ROUTE_SCOPES.get((method.upper(), path))
     if scope or not path.startswith("/api/v1/memory/"):
         return scope
@@ -1690,6 +1696,48 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": MEMORY_JOB_STATUS_TOOL_NAME,
+                "description": (
+                    "Read the terminal or queued status of one previously accepted Palace "
+                    "memory job. This is read-only and does not retry jobs."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "The UUID job_id returned by palace_remember.",
+                        }
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": EXACT_SCOPE_RECALL_TOOL_NAME,
+                "description": (
+                    "Search only the active configured Palace scope for canary verification. "
+                    "This never broadens to workspace, tenant-shared, or sibling-agent scopes."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The exact canary identifier or memory lookup query.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "default": 5,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
@@ -1934,6 +1982,62 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "poll_after_seconds": response.get("poll_after_seconds"),
                     "results": response.get("results", []),
                     "response": response,
+                }
+            )
+
+        if tool_name == MEMORY_JOB_STATUS_TOOL_NAME:
+            raw_job_id = str(args.get("job_id") or "").strip()
+            try:
+                job_id = str(UUID(raw_job_id))
+            except (TypeError, ValueError, AttributeError):
+                return json.dumps({"ok": False, "error": "job_id must be a UUID"})
+            try:
+                response = self._request_json("GET", f"/api/v1/memory/jobs/{job_id}")
+            except Exception as exc:
+                return json.dumps(
+                    {"ok": False, "job_id": job_id, "error": _safe_exception_summary(exc)}
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "job_id": job_id,
+                    "status": response.get("status"),
+                    "contract_status": response.get("contract_status"),
+                    "retryable": bool(response.get("retryable", False)),
+                    "poll_after_seconds": response.get("poll_after_seconds"),
+                    "job": response,
+                }
+            )
+
+        if tool_name == EXACT_SCOPE_RECALL_TOOL_NAME:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return json.dumps({"ok": False, "error": "query is required"})
+            try:
+                raw_limit = args.get("limit", self._retrieve_limit)
+                limit = int(raw_limit)
+                if not 1 <= limit <= 20:
+                    raise ValueError("limit must be between 1 and 20")
+                scope = self._build_scope(self._session_id)
+                if scope is None:
+                    raise RuntimeError("active Palace scope is not configured")
+                response = self._request_json(
+                    "POST",
+                    "/api/v1/memory/retrieve",
+                    {"query": _trim(query, 2000), "limit": limit, "scope": scope},
+                )
+                annotated = _annotate_retrieval_results([(scope, response)])
+                text = self._format_exact_scope_recall(scope, annotated)
+            except Exception as exc:
+                return json.dumps(
+                    {"ok": False, "query": query, "error": _safe_exception_summary(exc)}
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "query": query,
+                    "scope": scope,
+                    "result": text or "No Palace of Truth memory matched this query in the active scope.",
                 }
             )
 
@@ -2725,6 +2829,29 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if chunk:
                 lines.append(f"  Snippet: {chunk}")
             used_chars += added_chars
+        return "\n".join(lines)
+
+    def _format_exact_scope_recall(
+        self,
+        scope: dict[str, str],
+        results: list[dict[str, Any]],
+    ) -> str:
+        if not results:
+            return ""
+        lines = [f"Exact-scope recall from Palace of Truth: {_scope_label(scope)}."]
+        for result in _presentation_sorted_results(results):
+            title = _trim(str(result.get("title") or "Untitled memory"), 120)
+            score = result.get("score")
+            lines.append(f"- [{score:.2f}] {title}" if isinstance(score, (int, float)) else f"- {title}")
+            evidence_line = _format_result_evidence(result, base_url=self._base_url)
+            if evidence_line:
+                lines.append(evidence_line)
+            snippet = _trim(
+                str(result.get("chunk_text") or result.get("summary") or result.get("body") or "").replace("\n", " "),
+                500,
+            )
+            if snippet:
+                lines.append(f"  Snippet: {snippet}")
         return "\n".join(lines)
 
     def _build_semantic_recall_payload(
