@@ -20,6 +20,26 @@ PLUGIN_PATH = (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_oauth_environment(monkeypatch) -> None:
+    """Keep API-key fixtures independent from the host's OAuth configuration."""
+    for name in (
+        "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET",
+        "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL",
+        "PALACEOFTRUTH_MCP_OAUTH_RESOURCE",
+        "PALACEOFTRUTH_MCP_OAUTH_AUDIENCE",
+        "PALACEOFTRUTH_MCP_CLIENT_KEY",
+        "PALACEOFTRUTH_MCP_CLIENT_SCOPES",
+        "SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET",
+        "SECONDBRAIN_MCP_OAUTH_TOKEN_URL",
+        "SECONDBRAIN_MCP_OAUTH_RESOURCE",
+        "SECONDBRAIN_MCP_OAUTH_AUDIENCE",
+        "SECONDBRAIN_MCP_CLIENT_KEY",
+        "SECONDBRAIN_MCP_CLIENT_SCOPES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def load_palaceoftruth_plugin():
     agent_pkg = types.ModuleType("agent")
     agent_memory_provider = types.ModuleType("agent.memory_provider")
