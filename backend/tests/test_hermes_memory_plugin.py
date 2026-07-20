@@ -20,6 +20,26 @@ PLUGIN_PATH = (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_oauth_environment(monkeypatch) -> None:
+    """Keep API-key fixtures independent from the host's OAuth configuration."""
+    for name in (
+        "PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET",
+        "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL",
+        "PALACEOFTRUTH_MCP_OAUTH_RESOURCE",
+        "PALACEOFTRUTH_MCP_OAUTH_AUDIENCE",
+        "PALACEOFTRUTH_MCP_CLIENT_KEY",
+        "PALACEOFTRUTH_MCP_CLIENT_SCOPES",
+        "SECONDBRAIN_MCP_OAUTH_CLIENT_SECRET",
+        "SECONDBRAIN_MCP_OAUTH_TOKEN_URL",
+        "SECONDBRAIN_MCP_OAUTH_RESOURCE",
+        "SECONDBRAIN_MCP_OAUTH_AUDIENCE",
+        "SECONDBRAIN_MCP_CLIENT_KEY",
+        "SECONDBRAIN_MCP_CLIENT_SCOPES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def load_palaceoftruth_plugin():
     agent_pkg = types.ModuleType("agent")
     agent_memory_provider = types.ModuleType("agent.memory_provider")
@@ -567,6 +587,8 @@ def test_palaceoftruth_provider_exposes_explicit_search_and_remember_tools(
         "palace_semantic_recall",
         "palace_remember",
         "palace_remember_bulk",
+        "palace_memory_job_status",
+        "palace_exact_scope_recall",
     }
     assert "palace_search" in provider.system_prompt_block()
 
@@ -1627,6 +1649,80 @@ def test_palaceoftruth_fallback_retrieval_sends_read_scope_for_post(
         ("POST", "/api/v1/memory/retrieve-agent", "read"),
         ("POST", "/api/v1/memory/retrieve", "read"),
     ]
+
+
+def test_palaceoftruth_memory_job_status_tool_polls_read_only_job(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+    job_id = "631ecf94-5521-4eb3-92a4-938c1a4d4b49"
+
+    def fake_urlopen(request, timeout: int):
+        assert request.get_method() == "GET"
+        assert request_path(request) == f"/api/v1/memory/jobs/{job_id}"
+        assert request.get_header("X-mcp-scope") == "read"
+        return FakeJsonResponse(
+            {"job_id": job_id, "status": "complete", "contract_status": "completed"}
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    result = json.loads(provider.handle_tool_call("palace_memory_job_status", {"job_id": job_id}))
+
+    assert result == {
+        "ok": True,
+        "job_id": job_id,
+        "status": "complete",
+        "contract_status": "completed",
+        "retryable": False,
+        "poll_after_seconds": None,
+        "job": {"job_id": job_id, "status": "complete", "contract_status": "completed"},
+    }
+
+
+def test_palaceoftruth_exact_scope_recall_stays_in_active_agent_scope(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "barbara")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+    seen_payload: dict = {}
+
+    def fake_urlopen(request, timeout: int):
+        assert request.get_method() == "POST"
+        assert request_path(request) == "/api/v1/memory/retrieve"
+        assert request.get_header("X-mcp-scope") == "read"
+        seen_payload.update(json.loads(request.data.decode("utf-8")))
+        return FakeJsonResponse(
+            {
+                "results": [
+                    {
+                        "item_id": "2fa8de6f-c754-4de7-b13f-8ca8ef31ff47",
+                        "title": "Barbara OAuth canary",
+                        "chunk_text": "terminal job verified",
+                        "scope": {"type": "agent", "key": "barbara"},
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    result = json.loads(
+        provider.handle_tool_call("palace_exact_scope_recall", {"query": "barbara canary"})
+    )
+
+    assert seen_payload == {
+        "query": "barbara canary",
+        "limit": 5,
+        "scope": {"type": "agent", "key": "barbara"},
+    }
+    assert result["ok"] is True
+    assert result["scope"] == {"type": "agent", "key": "barbara"}
+    assert "Exact-scope recall" in result["result"]
+    assert "agent/barbara" in result["result"]
 
 
 def test_palaceoftruth_request_json_honors_retry_after_http_date(monkeypatch) -> None:
