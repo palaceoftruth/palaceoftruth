@@ -20,6 +20,9 @@ The dashboard covers:
 - memory and webhook job health.
 - item source/status mix.
 - Kubernetes deployment availability and container restarts.
+- retrieval p95 latency, outcomes, fallback use, and stale-result rate.
+- embedding failures, durable job age, and watched-source refresh health.
+- k3s-lab remote-write failures and pending-sample backlog.
 
 Import through Grafana UI or API using the dashboard JSON as the canonical
 source. Keep queries on low-cardinality labels exported by
@@ -68,6 +71,70 @@ use tenant, query, URL, item, job, correlation, or fingerprint values as labels.
 Durable database gauges expose oldest job age and source refresh age/due state.
 They intentionally report aggregate bounded classes rather than individual job
 or source identifiers.
+
+## Dashboard ownership and reconciliation
+
+This repository owns the canonical dashboard JSON. Environment repositories own
+Prometheus discovery and alert-rule resources. Central Grafana receives this
+dashboard through a controlled UI or API import; it is not provisioned from the
+`k3s-lab` Flux application path. After importing an updated JSON file, verify the
+dashboard UID is `palace-operations`, select the Mimir datasource, and set the
+cluster, namespace, and backend-job variables for the target environment.
+
+The central endpoint is `https://grafana.lgtm.sarvent.cloud`. The SarvEnt
+platform operator owns the import and supplies a short-lived Grafana service
+account token through the approved secret manager; never store or print that
+token. From this directory, create the Grafana API envelope and import it:
+
+```bash
+jq -n --slurpfile dashboard palace-operations.json \
+  '{dashboard: $dashboard[0], overwrite: true, message: "Update Palace operations dashboard"}' \
+  > /tmp/palace-dashboard-import.json
+
+curl -fsS -X POST "${GRAFANA_URL:-https://grafana.lgtm.sarvent.cloud}/api/dashboards/db" \
+  -H "Authorization: Bearer ${GRAFANA_SERVICE_ACCOUNT_TOKEN:?required}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @/tmp/palace-dashboard-import.json
+```
+
+Verify the UID and export the reviewed dashboard without logging the token:
+
+```bash
+curl -fsS "${GRAFANA_URL:-https://grafana.lgtm.sarvent.cloud}/api/dashboards/uid/palace-operations" \
+  -H "Authorization: Bearer ${GRAFANA_SERVICE_ACCOUNT_TOKEN:?required}" \
+  | jq '.dashboard | del(.id, .version, .iteration)' \
+  > /tmp/palace-dashboard-export.json
+
+jq 'del(.id, .version, .iteration)' palace-operations.json \
+  > /tmp/palace-dashboard-canonical.json
+diff -u /tmp/palace-dashboard-canonical.json /tmp/palace-dashboard-export.json
+```
+
+Treat the checked-in JSON as authoritative. Before accepting a central Grafana
+edit, export it and compare it with this file so UI-only drift does not silently
+replace the reviewed queries.
+
+## Retrieval and freshness alert runbook
+
+Start with read-only checks:
+
+1. Confirm the Palace ServiceMonitor target is up and metric scrape errors are
+   zero.
+2. Compare retrieval error, latency, stale-result, and fallback panels across
+   both backend replicas before changing routing or thresholds.
+3. For job or source-refresh alerts, inspect aggregate queue age, worker
+   heartbeat, oldest durable job age, and refresh outcomes. Do not retry or
+   delete production jobs from an alert response.
+4. For remote-write alerts, inspect
+   `prometheus_remote_storage_samples_failed_total`,
+   `prometheus_remote_storage_samples_pending`, Prometheus logs, and Mimir
+   ingestion errors. Fix the rejected sample source before tuning queue
+   capacity or relabeling.
+
+Alert rules are selected only when their `release` label matches the live
+Prometheus `ruleSelector`, and the namespace is permitted by
+`ruleNamespaceSelector`. Verify both selectors after every monitoring-stack
+change.
 
 ## Worker alerting
 
