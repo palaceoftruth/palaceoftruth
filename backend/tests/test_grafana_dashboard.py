@@ -54,3 +54,16 @@ def test_operations_dashboard_has_expected_environment_variables() -> None:
     variable_names = {variable["name"] for variable in dashboard["templating"]["list"]}
 
     assert {"datasource", "cluster", "namespace", "job"} <= variable_names
+
+
+def test_operations_dashboard_exposes_all_metric_scrape_errors() -> None:
+    dashboard = json.loads(DASHBOARD_PATH.read_text())
+    scrape_error_panel = next(
+        panel for panel in dashboard["panels"] if panel["title"] == "Metric scrape errors"
+    )
+    targets_by_legend = {
+        target["legendFormat"]: target for target in scrape_error_panel["targets"]
+    }
+
+    assert targets_by_legend["database"].get("hide", False) is False
+    assert targets_by_legend["queue"].get("hide", False) is False
