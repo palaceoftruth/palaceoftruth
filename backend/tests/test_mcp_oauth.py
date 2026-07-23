@@ -297,6 +297,7 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
     assert response.headers["location"].startswith("https://palace.sarvent.cloud/oauth/consent?interaction_id=")
     assert "palace_oauth_consent_session" in response.headers["set-cookie"]
     assert "Domain=.palace.sarvent.cloud" in response.headers["set-cookie"]
+    assert str(uuid.UUID(session.authorization_interactions[0]["id"])) == session.authorization_interactions[0]["id"]
     assert session.authorization_interactions[0]["tenant_id"] == "tenant-a"
     assert session.authorization_interactions[0]["state"] == "opaque-client-state"
     assert session.authorization_interactions[0]["browser_session_hash"]
