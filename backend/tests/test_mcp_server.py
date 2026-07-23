@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.mcp_server import (
     McpHttpAuthVerifier,
     PalaceApiError,
     SecondBrainApiClient,
+    OAuthClientCredentialsTokenClient,
     SecondBrainMcpRuntime,
     SecondBrainMcpSettings,
     _build_scope,
@@ -340,6 +342,104 @@ async def test_api_client_mints_oauth_token_with_client_credentials() -> None:
 
     assert seen_requests[0][1].endswith("/api/v1/memory/mcp/oauth/token")
     assert seen_requests[1][2] == "Bearer minted-token"
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_client_reuses_token_before_expiry_margin() -> None:
+    requests = 0
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 60})
+
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.test",
+        api_key=None,
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.test/oauth/token",
+        client_key="codex-remote",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        tokens = OAuthClientCredentialsTokenClient(settings, http_client, now=lambda: now)
+        assert await tokens.get_token(resource="https://api.test/api/v1") == "minted-token"
+        assert await tokens.get_token(resource="https://api.test/api/v1") == "minted-token"
+
+    assert requests == 1
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_client_refreshes_inside_expiry_margin() -> None:
+    requests = 0
+    current_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json={"access_token": f"minted-{requests}", "expires_in": 60})
+
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.test",
+        api_key=None,
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.test/oauth/token",
+        client_key="codex-remote",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        tokens = OAuthClientCredentialsTokenClient(settings, http_client, now=lambda: current_time)
+        assert await tokens.get_token(resource="https://api.test/api/v1") == "minted-1"
+        current_time += timedelta(seconds=31)
+        assert await tokens.get_token(resource="https://api.test/api/v1") == "minted-2"
+
+    assert requests == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (httpx.Response(200, content=b"not-json"), "non-JSON"),
+        (httpx.Response(401, json={"detail": "invalid"}), "HTTP 401"),
+    ],
+)
+async def test_oauth_token_client_reports_safe_endpoint_failures(
+    response: httpx.Response,
+    message: str,
+) -> None:
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.test",
+        api_key=None,
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.test/oauth/token",
+        client_key="codex-remote",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as http_client:
+        tokens = OAuthClientCredentialsTokenClient(settings, http_client)
+        with pytest.raises(RuntimeError, match=message) as exc_info:
+            await tokens.get_token(resource="https://api.test/api/v1")
+
+    assert "client-secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_client_reports_safe_network_failures() -> None:
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.test",
+        api_key=None,
+        oauth_client_secret="client-secret",
+        oauth_token_url="https://api.test/oauth/token",
+        client_key="codex-remote",
+    )
+    async def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network unavailable", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as http_client:
+        tokens = OAuthClientCredentialsTokenClient(settings, http_client)
+        with pytest.raises(RuntimeError, match="Failed to reach Palace OAuth token endpoint") as exc_info:
+            await tokens.get_token(resource="https://api.test/api/v1")
+
+    assert "client-secret" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
