@@ -3,12 +3,15 @@ import base64
 import hashlib
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.api import mcp_oauth
 from app.auth import hash_secret
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
+from app.schemas.memory import McpOAuthAuthorizationServerMetadata
 
 
 class _MappingRows:
@@ -298,6 +301,33 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
     assert session.authorization_interactions[0]["state"] == "opaque-client-state"
     assert session.authorization_interactions[0]["browser_session_hash"]
     assert session.authorization_interactions[0]["csrf_token_hash"]
+
+
+def test_mcp_host_authorization_uses_the_frontend_consent_host_and_shared_cookie_domain(monkeypatch) -> None:
+    client_row = _client_row(
+        client_type="confidential_web",
+        authorization_code_enabled=True,
+        redirect_uris=["https://nebulaios.example/callback"],
+        allowed_resources=["https://mcp.palace.sarvent.cloud/mcp"],
+    )
+    client = _client(FakeSession(client_row), monkeypatch, base_url="https://mcp.palace.sarvent.cloud")
+
+    response = client.get(
+        "/api/v1/memory/mcp/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "tenant-a:codex-remote",
+            "redirect_uri": "https://nebulaios.example/callback",
+            "resource": "https://mcp.palace.sarvent.cloud/mcp",
+            "code_challenge": "A" * 43,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("https://palace.sarvent.cloud/oauth/consent?interaction_id=")
+    assert "Domain=.palace.sarvent.cloud" in response.headers["set-cookie"]
 
 
 def test_mcp_oauth_authorize_rejects_unregistered_redirect_uri(monkeypatch) -> None:
@@ -770,9 +800,11 @@ def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["issuer"] == "https://testserver/api/v1/memory/mcp/oauth"
+    assert body["authorization_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/authorize"
     assert body["token_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/token"
     assert body["revocation_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/revoke"
     assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
+    assert body["response_types_supported"] == ["code"]
     assert body["grant_types_supported"] == ["client_credentials", "authorization_code", "refresh_token"]
     assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
     assert body["code_challenge_methods_supported"] == ["S256"]
@@ -785,7 +817,30 @@ def test_mcp_oauth_authorization_server_metadata_supports_issuer_well_known_path
     response = client.get("/.well-known/oauth-authorization-server/api/v1/memory/mcp/oauth")
 
     assert response.status_code == 200
-    assert response.json()["issuer"] == "https://testserver/api/v1/memory/mcp/oauth"
+    body = response.json()
+    assert body["issuer"] == "https://testserver/api/v1/memory/mcp/oauth"
+    assert body["authorization_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/authorize"
+    assert body["response_types_supported"] == ["code"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("authorization_endpoint", ""),
+        ("response_types_supported", []),
+    ],
+)
+def test_mcp_oauth_authorization_server_metadata_rejects_empty_authorization_contract(
+    monkeypatch,
+    field: str,
+    value: str | list[str],
+) -> None:
+    client = _client(FakeSession(_client_row()), monkeypatch)
+    payload = client.get("/.well-known/oauth-authorization-server").json()
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        McpOAuthAuthorizationServerMetadata.model_validate(payload)
 
 
 def test_mcp_oauth_metadata_forces_https_resource_for_proxied_http(monkeypatch) -> None:

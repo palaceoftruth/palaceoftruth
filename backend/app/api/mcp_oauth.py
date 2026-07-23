@@ -52,8 +52,10 @@ def _browser_consent_url(request: Request, interaction_id: str) -> str:
     """Return the same-site SPA route without trusting a caller-supplied URI."""
     parsed = urlsplit(str(request.base_url))
     host = parsed.hostname or ""
-    if host.startswith("api."):
-        host = host.removeprefix("api.")
+    for service_prefix in ("api.", "mcp."):
+        if host.startswith(service_prefix):
+            host = host.removeprefix(service_prefix)
+            break
     netloc = host if parsed.port is None else f"{host}:{parsed.port}"
     return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", ""))
 
@@ -67,9 +69,10 @@ def _browser_consent_cookie_domain(request: Request) -> str | None:
     shared parent domain. Ambiguous/local hostnames remain host-only.
     """
     host = (urlsplit(str(request.base_url)).hostname or "").lower()
-    if not host.startswith("api."):
+    service_prefix = next((prefix for prefix in ("api.", "mcp.") if host.startswith(prefix)), None)
+    if service_prefix is None:
         return None
-    parent_domain = host.removeprefix("api.")
+    parent_domain = host.removeprefix(service_prefix)
     return f".{parent_domain}" if "." in parent_domain else None
 
 
@@ -1092,9 +1095,11 @@ def _mcp_oauth_authorization_server_metadata_response(request: Request) -> McpOA
     token_url = _metadata_url(request, "issue_mcp_access_token")
     return McpOAuthAuthorizationServerMetadata(
         issuer=_authorization_server_issuer(request),
+        authorization_endpoint=_metadata_url(request, "begin_mcp_authorization"),
         token_endpoint=token_url,
         revocation_endpoint=_metadata_url(request, "revoke_mcp_access_token"),
         introspection_endpoint=_metadata_url(request, "introspect_mcp_access_token"),
+        response_types_supported=["code"],
         grant_types_supported=["client_credentials", "authorization_code", "refresh_token"],
         scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
         code_challenge_methods_supported=["S256"],

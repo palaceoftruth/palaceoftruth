@@ -286,10 +286,11 @@ class McpOAuthIntrospectionResponse(BaseModel):
 
 class McpOAuthAuthorizationServerMetadata(BaseModel):
     issuer: str
+    authorization_endpoint: str = Field(min_length=1)
     token_endpoint: str
     revocation_endpoint: str
     introspection_endpoint: str
-    response_types_supported: list[str] = Field(default_factory=list)
+    response_types_supported: list[str] = Field(min_length=1)
     grant_types_supported: list[str]
     scopes_supported: list[McpOperationScope]
     token_endpoint_auth_methods_supported: list[str]
