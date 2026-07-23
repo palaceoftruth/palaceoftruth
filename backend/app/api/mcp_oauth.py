@@ -4,6 +4,7 @@ import json
 import secrets
 import base64
 import hashlib
+import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -533,7 +534,9 @@ async def begin_mcp_authorization(
         except HTTPException as exc:
             raise HTTPException(status_code=400, detail="invalid_scope") from exc
 
-        interaction_id = secrets.token_hex(32)
+        # The persistence column is PostgreSQL UUID; keep the browser-facing
+        # interaction identifier opaque while generating the exact stored type.
+        interaction_id = str(uuid.uuid4())
         browser_session = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
