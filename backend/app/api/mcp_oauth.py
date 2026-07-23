@@ -190,11 +190,18 @@ async def _authenticate_oauth_client(
     form_client_secret: str | None,
     authorization: str | None,
 ):
-    resolved_client_id, resolved_client_secret = _client_credentials_from_request(
-        form_client_id=form_client_id,
-        form_client_secret=form_client_secret,
-        authorization=authorization,
-    )
+    # ``none`` is a real authentication method, never a fallback for a
+    # confidential client with a missing credential.
+    if authorization or form_client_secret:
+        resolved_client_id, resolved_client_secret = _client_credentials_from_request(
+            form_client_id=form_client_id,
+            form_client_secret=form_client_secret,
+            authorization=authorization,
+        )
+    elif form_client_id:
+        resolved_client_id, resolved_client_secret = form_client_id, None
+    else:
+        raise HTTPException(status_code=401, detail="invalid_client")
     tenant_id, client_key = _split_tenant_qualified_client_id(resolved_client_id)
     async with async_session() as db:
         result = await db.execute(
@@ -202,9 +209,10 @@ async def _authenticate_oauth_client(
                 """
                 SELECT id, tenant_id, client_key, allowed_scopes, oauth_client_secret_hash,
                        oauth_revoked_at, oauth_token_ttl_seconds, display_name,
-                       client_type, authorization_code_enabled
+                       client_type, authorization_code_enabled, oauth_client_id,
+                       token_endpoint_auth_method
                 FROM mcp_clients
-                WHERE client_key = :client_key
+                WHERE (client_key = :client_key OR oauth_client_id = :client_key)
                   AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
                 ORDER BY created_at ASC
                 LIMIT 2
@@ -217,6 +225,12 @@ async def _authenticate_oauth_client(
         raise HTTPException(status_code=401, detail="invalid_client")
     row = rows[0] if rows else None
     if row is None or row["oauth_revoked_at"] is not None:
+        raise HTTPException(status_code=401, detail="invalid_client")
+    if row.get("client_type") == "public":
+        if tenant_id is None or resolved_client_secret is not None or row.get("token_endpoint_auth_method") != "none":
+            raise HTTPException(status_code=401, detail="invalid_client")
+        return row
+    if resolved_client_secret is None:
         raise HTTPException(status_code=401, detail="invalid_client")
     if not compare_secret(resolved_client_secret, row["oauth_client_secret_hash"]):
         raise HTTPException(status_code=401, detail="invalid_client")
@@ -301,7 +315,7 @@ async def _issue_authorization_code_access_token(
     """
     if (
         not client_row.get("authorization_code_enabled")
-        or client_row.get("client_type") != "confidential_web"
+        or client_row.get("client_type") not in {"confidential_web", "public"}
         or not code
         or not code_verifier
         or not redirect_uri
@@ -513,7 +527,8 @@ async def begin_mcp_authorization(
                 SELECT id, tenant_id, client_key, display_name, allowed_scopes, redirect_uris,
                        allowed_resources, client_type, authorization_code_enabled, oauth_revoked_at
                 FROM mcp_clients
-                WHERE tenant_id = :tenant_id AND client_key = :client_key
+                WHERE tenant_id = :tenant_id
+                  AND (client_key = :client_key OR oauth_client_id = :client_key)
                 LIMIT 1
                 """
             ),
@@ -523,7 +538,7 @@ async def begin_mcp_authorization(
         if (
             client_row is None
             or client_row["oauth_revoked_at"] is not None
-            or client_row["client_type"] != "confidential_web"
+            or client_row["client_type"] not in {"confidential_web", "public"}
             or not client_row["authorization_code_enabled"]
             or redirect_uri not in _list_of_strings(client_row["redirect_uris"])
             or requested_resource not in _list_of_strings(client_row["allowed_resources"])
@@ -770,6 +785,8 @@ async def issue_mcp_access_token(
                 refresh_token=refresh_token,
                 scope=scope,
             )
+    if row.get("client_type") == "public":
+        raise HTTPException(status_code=400, detail="unauthorized_client")
     if grant_type != "client_credentials":
         raise HTTPException(status_code=400, detail="unsupported_grant_type")
     try:
@@ -987,10 +1004,11 @@ async def introspect_mcp_access_token(
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
                 WHERE t.token_hash = :token_hash
                   AND t.tenant_id = :tenant_id
+                  AND t.client_id = :client_id
                 LIMIT 1
                 """
             ),
-            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"]},
+            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"], "client_id": caller["id"]},
         )
         row = result.mappings().one_or_none()
         if row is None:
@@ -1106,9 +1124,9 @@ def _mcp_oauth_authorization_server_metadata_response(request: Request) -> McpOA
         grant_types_supported=["client_credentials", "authorization_code", "refresh_token"],
         scopes_supported=list(ALL_MCP_OPERATION_SCOPES),
         code_challenge_methods_supported=["S256"],
-        token_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
-        revocation_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
-        introspection_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post"],
+        token_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post", "none"],
+        revocation_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post", "none"],
+        introspection_endpoint_auth_methods_supported=["client_secret_basic", "client_secret_post", "none"],
     )
 
 

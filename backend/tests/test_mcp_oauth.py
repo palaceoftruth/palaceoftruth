@@ -61,7 +61,7 @@ class FakeSession:
             rows = [
                 row
                 for row in self.rows
-                if row["client_key"] == params["client_key"]
+                if (row["client_key"] == params["client_key"] or row.get("oauth_client_id") == params["client_key"])
                 and (params.get("tenant_id") is None or row["tenant_id"] == params["tenant_id"])
             ]
             return _Result(rows[:2])
@@ -142,6 +142,76 @@ def test_s256_pkce_verifier_validation_is_exact_and_fail_closed() -> None:
     assert mcp_oauth._matches_s256_pkce_verifier(verifier=verifier, challenge=challenge[:-1] + "A") is False
 
 
+def test_public_client_uses_only_tenant_qualified_none_auth(monkeypatch) -> None:
+    row = _client_row(
+        client_type="public",
+        oauth_client_id="opaque-public-id",
+        oauth_client_secret_hash=None,
+        token_endpoint_auth_method="none",
+    )
+    session = FakeSession(row)
+    client = _client(session, monkeypatch)
+
+    rejected_secret = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={"grant_type": "client_credentials", "client_id": "tenant-a:opaque-public-id", "client_secret": "not-a-proof"},
+    )
+    rejected_credential_grant = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={"grant_type": "client_credentials", "client_id": "tenant-a:opaque-public-id"},
+    )
+
+    assert rejected_secret.status_code == 401
+    assert rejected_credential_grant.status_code == 400
+    assert rejected_credential_grant.json()["detail"] == "unauthorized_client"
+
+
+def test_public_client_redeems_pkce_code_without_a_secret(monkeypatch) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    client_row = _client_row(
+        client_type="public",
+        oauth_client_id="opaque-public-id",
+        oauth_client_secret_hash=None,
+        token_endpoint_auth_method="none",
+        authorization_code_enabled=True,
+    )
+    code_row = {
+        "id": uuid.uuid4(), "grant_id": uuid.uuid4(), "pkce_challenge": challenge,
+        "redirect_uri": "https://nebulaios.example/callback", "client_id": client_row["id"],
+        "resource": "https://testserver/mcp", "scopes": ["read"], "revoked_at": None,
+        "used_at": None, "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+    }
+    client = _client(FakeSession(client_row, authorization_code_row=code_row), monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "authorization_code", "client_id": "tenant-a:opaque-public-id",
+            "code": "one-use-code", "code_verifier": verifier,
+            "redirect_uri": "https://nebulaios.example/callback",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_public_client_can_revoke_and_introspect_without_a_secret(monkeypatch) -> None:
+    row = _client_row(
+        client_type="public", oauth_client_id="opaque-public-id", oauth_client_secret_hash=None,
+        token_endpoint_auth_method="none",
+    )
+    client = _client(FakeSession(row), monkeypatch)
+    caller = {"client_id": "tenant-a:opaque-public-id"}
+
+    revoked = client.post("/api/v1/memory/mcp/oauth/revoke", data={**caller, "token": "unknown-token"})
+    introspected = client.post("/api/v1/memory/mcp/oauth/introspect", data={**caller, "token": "unknown-token"})
+
+    assert revoked.status_code == 200
+    assert introspected.status_code == 200
+    assert introspected.json()["active"] is False
+
+
 def test_mcp_oauth_authorization_code_exchange_is_pkce_bound_and_one_use(monkeypatch) -> None:
     verifier = "A" * 43
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
@@ -211,8 +281,14 @@ def test_mcp_oauth_authorization_code_exchange_rejects_wrong_redirect_or_verifie
     assert code_row["used_at"] is None
 
 
-def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(monkeypatch) -> None:
-    client_row = _client_row()
+@pytest.mark.parametrize("public_client", [False, True])
+def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(monkeypatch, public_client: bool) -> None:
+    client_row = _client_row(
+        client_type="public" if public_client else "confidential_web",
+        oauth_client_id="opaque-public-id" if public_client else None,
+        oauth_client_secret_hash=None if public_client else hash_secret("client-secret"),
+        token_endpoint_auth_method="none" if public_client else "client_secret_basic",
+    )
     refresh_row = {
         "refresh_id": uuid.uuid4(),
         "used_at": None,
@@ -243,11 +319,12 @@ def test_mcp_oauth_refresh_rotation_reuses_are_rejected_and_revoke_the_family(mo
     client = _client(session, monkeypatch)
     payload = {
         "grant_type": "refresh_token",
-        "client_id": "codex-remote",
-        "client_secret": "client-secret",
+        "client_id": "tenant-a:opaque-public-id" if public_client else "codex-remote",
         "refresh_token": "opaque-refresh-token",
         "scope": "read",
     }
+    if not public_client:
+        payload["client_secret"] = "client-secret"
 
     rotated = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
     replay = client.post("/api/v1/memory/mcp/oauth/token", data=payload)
@@ -807,7 +884,7 @@ def test_mcp_oauth_authorization_server_metadata(monkeypatch) -> None:
     assert body["introspection_endpoint"] == "https://testserver/api/v1/memory/mcp/oauth/introspect"
     assert body["response_types_supported"] == ["code"]
     assert body["grant_types_supported"] == ["client_credentials", "authorization_code", "refresh_token"]
-    assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post"]
+    assert body["token_endpoint_auth_methods_supported"] == ["client_secret_basic", "client_secret_post", "none"]
     assert body["code_challenge_methods_supported"] == ["S256"]
 
 
