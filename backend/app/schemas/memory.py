@@ -128,7 +128,7 @@ class McpOAuthClientRegisterRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
-    client_type: Literal["service", "confidential_web"] = "service"
+    client_type: Literal["service", "confidential_web", "public"] = "service"
     redirect_uris: list[str] = Field(default_factory=list)
     allowed_resources: list[str] = Field(default_factory=list)
     authorization_code_enabled: bool = False
@@ -145,8 +145,10 @@ class McpOAuthClientRegisterRequest(BaseModel):
             raise ValueError("allow_all_agent_scope_reads requires agent_scope_key")
         if self.client_type == "service" and (self.redirect_uris or self.authorization_code_enabled):
             raise ValueError("service clients cannot register redirect URIs or authorization-code capability")
-        if self.client_type == "confidential_web" and (not self.redirect_uris or not self.allowed_resources):
-            raise ValueError("confidential web clients require redirect URIs and allowed resources")
+        if self.client_type in {"confidential_web", "public"} and (not self.redirect_uris or not self.allowed_resources):
+            raise ValueError("authorization-code clients require redirect URIs and allowed resources")
+        if self.client_type == "public" and not self.authorization_code_enabled:
+            raise ValueError("public clients require authorization-code capability")
         return self
 
     @field_validator("redirect_uris", "allowed_resources")
@@ -185,7 +187,9 @@ class McpOAuthClientSummary(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
-    client_type: Literal["service", "confidential_web"] = "service"
+    client_type: Literal["service", "confidential_web", "public"] = "service"
+    client_id: str | None = None
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post", "none"] = "client_secret_basic"
     redirect_uris: list[str] = Field(default_factory=list)
     allowed_resources: list[str] = Field(default_factory=list)
     authorization_code_enabled: bool = False
@@ -212,7 +216,8 @@ class McpClientConfigSnippets(BaseModel):
 class McpOAuthClientRegisterResponse(BaseModel):
     tenant_id: str
     client: McpOAuthClientSummary
-    client_secret: str
+    # Public-client registration deliberately omits this field from responses.
+    client_secret: str | None = None
     config_snippets: McpClientConfigSnippets | None = None
 
 

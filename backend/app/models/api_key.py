@@ -46,6 +46,8 @@ class McpClient(Base):
     redirect_uris: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     allowed_resources: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     authorization_code_enabled: Mapped[bool] = mapped_column(server_default="false", nullable=False)
+    oauth_client_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
+    token_endpoint_auth_method: Mapped[str] = mapped_column(Text, server_default="client_secret_basic", nullable=False)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}", nullable=False)
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     last_seen_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

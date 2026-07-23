@@ -132,6 +132,8 @@ class FakeSession:
                     "redirect_uris": json.loads(params["redirect_uris"]),
                     "allowed_resources": json.loads(params["allowed_resources"]),
                     "authorization_code_enabled": params["authorization_code_enabled"],
+                    "oauth_client_id": params.get("oauth_client_id"),
+                    "token_endpoint_auth_method": params.get("token_endpoint_auth_method", "client_secret_basic"),
                     "oauth_client_secret_hash": params["secret_hash"],
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": params["token_ttl_seconds"],
@@ -151,6 +153,8 @@ class FakeSession:
                         "redirect_uris": json.loads(params["redirect_uris"]),
                         "allowed_resources": json.loads(params["allowed_resources"]),
                         "authorization_code_enabled": params["authorization_code_enabled"],
+                        "oauth_client_id": params.get("oauth_client_id"),
+                        "token_endpoint_auth_method": params.get("token_endpoint_auth_method", "client_secret_basic"),
                         "oauth_client_secret_hash": params["secret_hash"],
                         "oauth_revoked_at": None,
                         "oauth_token_ttl_seconds": params["token_ttl_seconds"],
@@ -604,6 +608,32 @@ def test_register_confidential_web_client_requires_exact_registered_https_uris()
     assert accepted.status_code == 201
     assert accepted.json()["client"]["client_type"] == "confidential_web"
     assert accepted.json()["client"]["redirect_uris"] == ["https://nebulaios.test/callback"]
+
+
+def test_register_public_client_never_returns_or_persists_a_secret() -> None:
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/register",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={
+            "client_key": "nebulaios-public-registration-key",
+            "display_name": "NebulaiOS public client",
+            "client_type": "public",
+            "redirect_uris": ["https://nebulaios.test/callback"],
+            "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+            "authorization_code_enabled": True,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert "client_secret" not in body
+    assert body["client"]["token_endpoint_auth_method"] == "none"
+    assert body["client"]["client_id"].startswith("tenant-a:")
+    stored = session.mcp_clients[0]
+    assert stored["oauth_client_secret_hash"] is None
 
 
 def test_register_mcp_oauth_client_rejects_duplicate_without_rotating_secret() -> None:

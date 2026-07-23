@@ -974,6 +974,36 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
     assert "resource='https://testserver/api/v1'" in payload["config_snippets"]["oauth_api_token_command"]
 
 
+def test_register_palace_public_client_omits_secret_and_config_snippets() -> None:
+    client_id = uuid.uuid4()
+    session = FakeSession(execute_results=[[
+        {
+            "id": client_id, "tenant_id": "tenant-a", "client_key": "nebulaios-registration",
+            "display_name": "NebulaiOS", "allowed_scopes": ["read"], "metadata": {},
+            "client_type": "public", "oauth_client_id": "opaque-public-id",
+            "token_endpoint_auth_method": "none", "redirect_uris": ["https://nebulaios.test/callback"],
+            "allowed_resources": ["https://testserver/api/v1"], "authorization_code_enabled": True,
+            "oauth_revoked_at": None, "oauth_token_ttl_seconds": 1800,
+            "created_at": datetime.now(timezone.utc), "last_seen_at": None,
+        }
+    ]])
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "nebulaios-registration", "display_name": "NebulaiOS", "client_type": "public",
+            "redirect_uris": ["https://nebulaios.test/callback"],
+            "allowed_resources": ["https://testserver/api/v1"], "authorization_code_enabled": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert "client_secret" not in response.json()
+    assert "config_snippets" not in response.json()
+    assert response.json()["client"]["client_id"] == "tenant-a:opaque-public-id"
+
+
 def test_register_palace_mcp_client_rejects_duplicate_without_rotating_secret() -> None:
     session = FakeSession(execute_results=[[]])
     client = _build_app(session)

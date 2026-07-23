@@ -206,6 +206,8 @@ def _serialize_mcp_client(row) -> McpOAuthClientSummary:
         agent_scope_key=row.get("agent_scope_key"),
         allow_all_agent_scope_reads=bool(row.get("allow_all_agent_scope_reads")),
         client_type=row.get("client_type") or "service",
+        client_id=(f"{row['tenant_id']}:{row['oauth_client_id']}" if row.get("oauth_client_id") else None),
+        token_endpoint_auth_method=row.get("token_endpoint_auth_method") or "client_secret_basic",
         redirect_uris=row.get("redirect_uris") or [],
         allowed_resources=row.get("allowed_resources") or [],
         authorization_code_enabled=bool(row.get("authorization_code_enabled")),
@@ -349,30 +351,31 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
     )
 
 
-@router.post("/mcp-clients/register", response_model=McpOAuthClientRegisterResponse, status_code=201, dependencies=[Depends(require_api_capability("admin"))])
+@router.post("/mcp-clients/register", response_model=McpOAuthClientRegisterResponse, response_model_exclude_none=True, status_code=201, dependencies=[Depends(require_api_capability("admin"))])
 async def register_palace_mcp_client(
     body: McpOAuthClientRegisterRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> McpOAuthClientRegisterResponse:
     tenant_id = request.state.tenant_id
-    raw_secret = secrets.token_urlsafe(48)
+    raw_secret = None if body.client_type == "public" else secrets.token_urlsafe(48)
+    oauth_client_id = secrets.token_urlsafe(24) if body.client_type == "public" else None
     result = await db.execute(
         text(
             """
             INSERT INTO mcp_clients
                 (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
-                 client_type, redirect_uris, allowed_resources, authorization_code_enabled,
-                 oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
+                 client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
+                 token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
                  CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads,
-                 :client_type, CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), :authorization_code_enabled,
-                 :secret_hash, NULL, :token_ttl_seconds)
+                 :client_type, CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), :authorization_code_enabled, :oauth_client_id,
+                 :token_endpoint_auth_method, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
             RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
-                      client_type, redirect_uris, allowed_resources, authorization_code_enabled,
-                      oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
+                      client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
+                      token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
             """
         ),
         {
@@ -387,7 +390,9 @@ async def register_palace_mcp_client(
             "redirect_uris": json.dumps(body.redirect_uris),
             "allowed_resources": json.dumps(body.allowed_resources),
             "authorization_code_enabled": body.authorization_code_enabled,
-            "secret_hash": hash_secret(raw_secret),
+            "oauth_client_id": oauth_client_id,
+            "token_endpoint_auth_method": "none" if body.client_type == "public" else "client_secret_basic",
+            "secret_hash": hash_secret(raw_secret) if raw_secret else None,
             "token_ttl_seconds": body.token_ttl_seconds,
         },
     )
@@ -406,7 +411,7 @@ async def register_palace_mcp_client(
         tenant_id=tenant_id,
         client=client,
         client_secret=raw_secret,
-        config_snippets=_config_snippets(request, client_key=client.client_key, scopes=client.allowed_scopes),
+        config_snippets=(None if body.client_type == "public" else _config_snippets(request, client_key=client.client_key, scopes=client.allowed_scopes)),
     )
 
 
