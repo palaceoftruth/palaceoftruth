@@ -88,7 +88,7 @@ export default function OAuthConsent() {
             <ScopeList label="Requested scopes" values={interaction.scopes} empty="No scopes were requested." />
             <ScopeList label="Agent restrictions" values={interaction.agent_scope_keys} empty="No agent-specific restriction was requested." />
             <ScopeList label="Workspace restrictions" values={interaction.workspace_scope_keys} empty="No workspace-specific restriction was requested." />
-            <div className="sb-panel-muted p-4"><p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Access lifetime</p><p className="mt-3 text-sm leading-6 text-zinc-300">Short-lived access only. This request does not grant refresh access.</p></div>
+            <div className="sb-panel-muted p-4"><p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Access lifetime</p><p className="mt-3 text-sm leading-6 text-zinc-300">Access can continue through rotating refresh tokens for up to 30 days, or until you disconnect or a tenant administrator revokes the grant.</p></div>
           </div>
           <div className="flex gap-3 rounded-2xl border border-emerald-800/30 bg-emerald-950/20 p-4 text-sm leading-6 text-emerald-100"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />Your browser API key authenticates this decision but is never added to the authorization code or callback.</div>
           <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
