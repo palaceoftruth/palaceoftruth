@@ -764,6 +764,64 @@ class SecondBrainMcpSettings:
         )
 
 
+class OAuthClientCredentialsTokenClient:
+    """Mint and cache MCP OAuth client-credentials tokens without exposing secrets."""
+
+    _EXPIRY_MARGIN = timedelta(seconds=30)
+
+    def __init__(
+        self,
+        settings: SecondBrainMcpSettings,
+        client: httpx.AsyncClient,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._client = client
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._token: str | None = None
+        self._expires_at: datetime | None = None
+
+    async def get_token(self, *, resource: str) -> str:
+        if self._token and (
+            self._expires_at is None or self._expires_at > self._now() + self._EXPIRY_MARGIN
+        ):
+            return self._token
+        if not self._settings.oauth_client_secret or not self._settings.oauth_token_url:
+            raise RuntimeError("MCP bearer token or OAuth client secret is required")
+        try:
+            response = await self._client.post(
+                self._settings.oauth_token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self._settings.client_key,
+                    "client_secret": self._settings.oauth_client_secret,
+                    "scope": " ".join(self._settings.client_scopes),
+                    "resource": resource,
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"Palace OAuth token endpoint rejected client credentials (HTTP {exc.response.status_code})"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError("Failed to reach Palace OAuth token endpoint") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Palace OAuth token endpoint returned a non-JSON response") from exc
+        access_token = payload.get("access_token")
+        expires_in = payload.get("expires_in")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise RuntimeError("Palace OAuth token endpoint did not return access_token")
+        if not isinstance(expires_in, int) or expires_in <= 0:
+            raise RuntimeError("Palace OAuth token endpoint did not return a valid expires_in")
+        self._token = access_token
+        self._expires_at = self._now() + timedelta(seconds=expires_in)
+        return access_token
+
+
 class SecondBrainApiClient:
     def __init__(
         self,
@@ -779,8 +837,7 @@ class SecondBrainApiClient:
         )
         self._owns_client = client is None
         self._tenant_id: str | None = None
-        self._bearer_token = settings.bearer_token
-        self._bearer_expires_at: datetime | None = None
+        self._oauth_tokens = OAuthClientCredentialsTokenClient(settings, self._client)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -859,33 +916,9 @@ class SecondBrainApiClient:
         return urlunsplit((parsed.scheme, parsed.netloc, "/api/v1", "", ""))
 
     async def _active_bearer_token(self) -> str:
-        if self._bearer_token and (
-            self._bearer_expires_at is None or self._bearer_expires_at > datetime.now(timezone.utc) + timedelta(seconds=30)
-        ):
-            return self._bearer_token
-        if not self.settings.oauth_client_secret or not self.settings.oauth_token_url:
-            raise RuntimeError("MCP bearer token or OAuth client secret is required")
-        response = await self._client.post(
-            self.settings.oauth_token_url,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.settings.client_key,
-                "client_secret": self.settings.oauth_client_secret,
-                "scope": " ".join(self.settings.client_scopes),
-                "resource": self._oauth_resource(),
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        access_token = payload.get("access_token")
-        expires_in = payload.get("expires_in")
-        if not isinstance(access_token, str) or not access_token.strip():
-            raise RuntimeError("Palace OAuth token endpoint did not return access_token")
-        if not isinstance(expires_in, int) or expires_in <= 0:
-            raise RuntimeError("Palace OAuth token endpoint did not return a valid expires_in")
-        self._bearer_token = access_token
-        self._bearer_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        return access_token
+        if self.settings.bearer_token:
+            return self.settings.bearer_token
+        return await self._oauth_tokens.get_token(resource=self._oauth_resource())
 
     async def record_mcp_request_audit(
         self,
