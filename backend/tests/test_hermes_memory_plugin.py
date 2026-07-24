@@ -382,6 +382,93 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
     assert "tenant-key" not in caplog.text
 
 
+def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv(
+        "PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL",
+        "http://palaceoftruth-backend:8000/api/v1/memory/mcp/oauth/token",
+    )
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+    # A stale workspace default must not leak into a bound Hermes OAuth read.
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "workspace")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            assert params == {"limit": 100, "sample_limit": 5}
+            return {
+                "scopes": [
+                    {"scope": {"type": "agent", "key": "clara"}, "entry_count": 2},
+                    {"scope": {"type": "workspace", "key": "hermes"}, "entry_count": 1},
+                    {"scope": {"type": "tenant_shared"}, "entry_count": 1},
+                ],
+                "total": 3,
+                "limit": 100,
+            }
+        if method == "POST" and path == "/api/v1/memory/retrieve-agent":
+            assert payload is not None
+            assert payload["agent_scope_key"] == "clara"
+            assert payload["workspace_scope_keys"] == []
+            assert payload["include_tenant_shared"] is False
+            assert payload["tenant_shared_policy"] == "never"
+            assert payload["include_broad_corpus"] is False
+            assert payload["broad_corpus_policy"] == "disabled"
+            assert payload["workspace_strict"] is False
+            raise RuntimeError("route-aware failure")
+        if method == "POST" and path == "/api/v1/memory/retrieve":
+            assert payload is not None
+            assert payload["scope"] == {"type": "agent", "key": "clara"}
+            return {
+                "trace": {"fallback_used": False},
+                "results": [
+                    {
+                        "item_id": "clara-memory",
+                        "title": "Clara memory",
+                        "source_type": "note",
+                        "chunk_text": "Canonical agent recall remains available.",
+                        "score": 0.9,
+                    }
+                ],
+                "total": 1,
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    text = provider.prefetch("agent recall", session_id="session-1")
+
+    assert [
+        payload["scope"]
+        for method, path, payload in requests_seen
+        if method == "POST" and path == "/api/v1/memory/retrieve" and payload
+    ] == [{"type": "agent", "key": "clara"}]
+    assert "Clara memory" in text
+
+
 def test_palaceoftruth_provider_sends_agent_scope_patterns(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")

@@ -2645,6 +2645,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             seen_labels.add(label)
             scopes.append(scope)
 
+        if self._is_bound_hermes_oauth_client():
+            # Palace binds hermes-* OAuth clients to a canonical agent scope.
+            # Even if a deployment carries a stale workspace retrieval default,
+            # fallback must use the runtime's bound agent identity.
+            agent_scope_key = self._agent_identity
+            if not agent_scope_key and primary_scope["type"] == "agent":
+                agent_scope_key = _scope_key(primary_scope)
+            if agent_scope_key:
+                _append_scope({"type": "agent", "key": agent_scope_key})
+            return scopes
+
         _append_scope(primary_scope)
         for workspace_key in self._workspace_scope_keys_for_agent_retrieve(
             primary_scope,
@@ -2654,6 +2665,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if self._include_tenant_shared and primary_scope["type"] != "tenant_shared":
             _append_scope({"type": "tenant_shared"})
         return scopes
+
+    def _is_bound_hermes_oauth_client(self) -> bool:
+        return bool(
+            self._oauth_client_secret
+            and self._oauth_client_key.startswith("hermes-")
+        )
 
     def _discover_memory_scopes(self) -> list[dict[str, Any]]:
         response = self._request_json(
@@ -3042,9 +3059,24 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         try:
             route_started_at = perf_counter()
-            workspace_scope_keys = self._workspace_scope_keys_for_agent_retrieve(
-                primary_scope,
-                discovered_scopes,
+            is_bound_hermes_oauth_client = self._is_bound_hermes_oauth_client()
+            workspace_scope_keys = (
+                []
+                if is_bound_hermes_oauth_client
+                else self._workspace_scope_keys_for_agent_retrieve(
+                    primary_scope,
+                    discovered_scopes,
+                )
+            )
+            include_tenant_shared = (
+                False
+                if is_bound_hermes_oauth_client
+                else self._include_tenant_shared
+            )
+            include_broad_corpus = (
+                False
+                if is_bound_hermes_oauth_client
+                else self._include_broad_corpus
             )
             response = self._request_json(
                 "POST",
@@ -3059,13 +3091,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "include_agent_scope_patterns": self._include_agent_scope_patterns,
                     "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
                     "workspace_scope_keys": workspace_scope_keys,
-                    "include_tenant_shared": self._include_tenant_shared,
+                    "include_tenant_shared": include_tenant_shared,
                     "tenant_shared_policy": "fallback_only"
-                    if self._include_tenant_shared
+                    if include_tenant_shared
                     else "never",
-                    "include_broad_corpus": self._include_broad_corpus,
+                    "include_broad_corpus": include_broad_corpus,
                     "broad_corpus_policy": "enabled"
-                    if self._include_broad_corpus
+                    if include_broad_corpus
                     else "disabled",
                     "workspace_strict": bool(workspace_scope_keys)
                     and not self._include_agent_scope_patterns,
