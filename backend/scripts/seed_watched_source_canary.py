@@ -24,9 +24,11 @@ DEFAULT_URL = f"http://{DEFAULT_HOST}/canary.html"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tenant-id", default=DEFAULT_TENANT_ID)
-    parser.add_argument("--url", default=DEFAULT_URL)
-    parser.add_argument("--allowed-host", default=DEFAULT_HOST)
+    parser.set_defaults(
+        tenant_id=DEFAULT_TENANT_ID,
+        url=DEFAULT_URL,
+        allowed_host=DEFAULT_HOST,
+    )
     parser.add_argument(
         "--refresh-slo-seconds",
         type=int,
@@ -44,12 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
     args = parser.parse_args(argv)
-    host = (urlsplit(args.url).hostname or "").lower().rstrip(".")
-    allowed_host = args.allowed_host.lower().rstrip(".")
-    if host != allowed_host:
-        parser.error("--url hostname must exactly match --allowed-host")
-    if args.tenant_id != DEFAULT_TENANT_ID:
-        parser.error(f"--tenant-id must remain {DEFAULT_TENANT_ID!r}")
+    if (urlsplit(args.url).hostname or "").lower().rstrip(".") != DEFAULT_HOST:
+        parser.error("compiled canary URL must use the internal fixture host")
     if not 300 <= args.refresh_slo_seconds <= 3600:
         parser.error("--refresh-slo-seconds must be 300-3600")
     return args
@@ -67,6 +65,7 @@ async def seed(args: argparse.Namespace) -> dict[str, object]:
         return report
 
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
 
     from app.database import async_session
     from app.models.source_resource import SourceResource
@@ -75,41 +74,57 @@ async def seed(args: argparse.Namespace) -> dict[str, object]:
     canonical_url = normalize_http_url(args.url)
     canonical_identity = canonical_http_identity(canonical_url)
     async with async_session() as db:
-        existing = await db.scalar(
-            select(SourceResource).where(
-                SourceResource.tenant_id == args.tenant_id,
-                SourceResource.kind == "http",
-                SourceResource.canonical_identity == canonical_identity,
+        try:
+            async with db.begin_nested():
+                existing = await db.scalar(
+                    select(SourceResource).where(
+                        SourceResource.tenant_id == args.tenant_id,
+                        SourceResource.kind == "http",
+                        SourceResource.canonical_identity == canonical_identity,
+                    )
+                )
+                if existing is not None:
+                    report["already_present"] = True
+                    report["resource_id"] = str(existing.id)
+                    return report
+
+                resource = SourceResource(
+                    tenant_id=args.tenant_id,
+                    kind="http",
+                    source_class="webpage",
+                    canonical_url=canonical_url,
+                    canonical_identity=canonical_identity,
+                    refresh_policy="interval",
+                    refresh_slo_seconds=args.refresh_slo_seconds,
+                    status="active",
+                    next_due_at=datetime.now(timezone.utc),
+                    consecutive_failures=0,
+                )
+                db.add(resource)
+                await db.flush()
+                db.add(
+                    build_alias(
+                        resource=resource,
+                        tenant_id=args.tenant_id,
+                        observed_url=args.url,
+                        signal="submitted",
+                        provenance={"canary": "SAR-1207", "fixture": "internal-only"},
+                    )
+                )
+                await db.flush()
+        except IntegrityError:
+            existing = await db.scalar(
+                select(SourceResource).where(
+                    SourceResource.tenant_id == args.tenant_id,
+                    SourceResource.kind == "http",
+                    SourceResource.canonical_identity == canonical_identity,
+                )
             )
-        )
-        if existing is not None:
+            if existing is None:
+                raise
             report["already_present"] = True
             report["resource_id"] = str(existing.id)
             return report
-
-        resource = SourceResource(
-            tenant_id=args.tenant_id,
-            kind="http",
-            source_class="webpage",
-            canonical_url=canonical_url,
-            canonical_identity=canonical_identity,
-            refresh_policy="interval",
-            refresh_slo_seconds=args.refresh_slo_seconds,
-            status="active",
-            next_due_at=datetime.now(timezone.utc),
-            consecutive_failures=0,
-        )
-        db.add(resource)
-        await db.flush()
-        db.add(
-            build_alias(
-                resource=resource,
-                tenant_id=args.tenant_id,
-                observed_url=args.url,
-                signal="submitted",
-                provenance={"canary": "SAR-1207", "fixture": "internal-only"},
-            )
-        )
         await db.commit()
         report["created"] = True
         report["resource_id"] = str(resource.id)
