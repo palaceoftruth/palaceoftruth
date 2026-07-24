@@ -2645,6 +2645,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             seen_labels.add(label)
             scopes.append(scope)
 
+        if self._is_bound_hermes_oauth_client():
+            # Palace binds hermes-* OAuth clients to a canonical agent scope.
+            # Even if a deployment carries a stale workspace retrieval default,
+            # fallback must use the runtime's bound agent identity.
+            agent_scope_key = self._agent_identity
+            if not agent_scope_key and primary_scope["type"] == "agent":
+                agent_scope_key = _scope_key(primary_scope)
+            if agent_scope_key:
+                _append_scope({"type": "agent", "key": agent_scope_key})
+            return scopes
+
         _append_scope(primary_scope)
         for workspace_key in self._workspace_scope_keys_for_agent_retrieve(
             primary_scope,
@@ -2654,6 +2665,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if self._include_tenant_shared and primary_scope["type"] != "tenant_shared":
             _append_scope({"type": "tenant_shared"})
         return scopes
+
+    def _is_bound_hermes_oauth_client(self) -> bool:
+        return bool(
+            self._oauth_client_secret
+            and self._oauth_client_key.startswith("hermes-")
+        )
 
     def _discover_memory_scopes(self) -> list[dict[str, Any]]:
         response = self._request_json(
@@ -3040,74 +3057,78 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         elif self._agent_identity:
             agent_scope_key = self._agent_identity
 
-        try:
-            route_started_at = perf_counter()
-            workspace_scope_keys = self._workspace_scope_keys_for_agent_retrieve(
-                primary_scope,
-                discovered_scopes,
-            )
-            response = self._request_json(
-                "POST",
-                "/api/v1/memory/retrieve-agent",
-                {
-                    **request_payload,
-                    "candidate_limit": self._agent_candidate_limit,
-                    "broad_candidate_limit": self._agent_broad_candidate_limit,
-                    "display_limit": self._agent_display_limit,
-                    "context_budget_chars": self._context_budget_chars,
-                    "agent_scope_key": agent_scope_key,
-                    "include_agent_scope_patterns": self._include_agent_scope_patterns,
-                    "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
-                    "workspace_scope_keys": workspace_scope_keys,
-                    "include_tenant_shared": self._include_tenant_shared,
-                    "tenant_shared_policy": "fallback_only"
-                    if self._include_tenant_shared
-                    else "never",
-                    "include_broad_corpus": self._include_broad_corpus,
-                    "broad_corpus_policy": "enabled"
-                    if self._include_broad_corpus
-                    else "disabled",
-                    "workspace_strict": bool(workspace_scope_keys)
-                    and not self._include_agent_scope_patterns,
-                },
-            )
-            trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
-            searched_scopes = trace.get("searched_scopes") if isinstance(trace, dict) else []
-            searched_scope_labels = _safe_scope_labels(searched_scopes if isinstance(searched_scopes, list) else [])
-            _log_retrieval_diagnostic(
-                logging.INFO,
-                "route_aware_success",
-                endpoint="/api/v1/memory/retrieve-agent",
-                elapsed_ms=round((perf_counter() - route_started_at) * 1000),
-                timeout_seconds=self._timeout_seconds,
-                discovered_scope_count=len(discovered_scopes),
-                discovered_scope_type_counts=_scope_type_counts(discovered_scopes),
-                searched_scope_count=len(searched_scope_labels),
-                searched_scopes=searched_scope_labels,
-                result_count=len(response.get("results") or []),
-                fallback_used=trace.get("fallback_used"),
-                budget_truncated=trace.get("budget_truncated") or trace.get("context_budget_truncated"),
-            )
-            text = self._format_agent_retrieve_response(
-                response,
-                discovered_scopes=discovered_scopes,
-            )
-            if text:
-                return text
-        except Exception as exc:
-            fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
-            _log_retrieval_diagnostic(
-                logging.WARNING,
-                "route_aware_failed",
-                endpoint="/api/v1/memory/retrieve-agent",
-                elapsed_ms=round((perf_counter() - started_at) * 1000),
-                timeout_seconds=self._timeout_seconds,
-                error_class=exc.__class__.__name__,
-                discovered_scope_count=len(discovered_scopes),
-                discovered_scope_type_counts=_scope_type_counts(discovered_scopes),
-                fallback_scope_count=len(fallback_scopes),
-                fallback_scopes=_safe_scope_labels(fallback_scopes),
-            )
+        if not self._is_bound_hermes_oauth_client():
+            try:
+                route_started_at = perf_counter()
+                workspace_scope_keys = self._workspace_scope_keys_for_agent_retrieve(
+                    primary_scope,
+                    discovered_scopes,
+                )
+                response = self._request_json(
+                    "POST",
+                    "/api/v1/memory/retrieve-agent",
+                    {
+                        **request_payload,
+                        "candidate_limit": self._agent_candidate_limit,
+                        "broad_candidate_limit": self._agent_broad_candidate_limit,
+                        "display_limit": self._agent_display_limit,
+                        "context_budget_chars": self._context_budget_chars,
+                        "agent_scope_key": agent_scope_key,
+                        "include_agent_scope_patterns": self._include_agent_scope_patterns,
+                        "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
+                        "workspace_scope_keys": workspace_scope_keys,
+                        "include_tenant_shared": self._include_tenant_shared,
+                        "tenant_shared_policy": "fallback_only"
+                        if self._include_tenant_shared
+                        else "never",
+                        "include_broad_corpus": self._include_broad_corpus,
+                        "broad_corpus_policy": "enabled"
+                        if self._include_broad_corpus
+                        else "disabled",
+                        "workspace_strict": bool(workspace_scope_keys)
+                        and not self._include_agent_scope_patterns,
+                    },
+                )
+                trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
+                searched_scopes = trace.get("searched_scopes") if isinstance(trace, dict) else []
+                searched_scope_labels = _safe_scope_labels(
+                    searched_scopes if isinstance(searched_scopes, list) else []
+                )
+                _log_retrieval_diagnostic(
+                    logging.INFO,
+                    "route_aware_success",
+                    endpoint="/api/v1/memory/retrieve-agent",
+                    elapsed_ms=round((perf_counter() - route_started_at) * 1000),
+                    timeout_seconds=self._timeout_seconds,
+                    discovered_scope_count=len(discovered_scopes),
+                    discovered_scope_type_counts=_scope_type_counts(discovered_scopes),
+                    searched_scope_count=len(searched_scope_labels),
+                    searched_scopes=searched_scope_labels,
+                    result_count=len(response.get("results") or []),
+                    fallback_used=trace.get("fallback_used"),
+                    budget_truncated=trace.get("budget_truncated")
+                    or trace.get("context_budget_truncated"),
+                )
+                text = self._format_agent_retrieve_response(
+                    response,
+                    discovered_scopes=discovered_scopes,
+                )
+                if text:
+                    return text
+            except Exception as exc:
+                fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
+                _log_retrieval_diagnostic(
+                    logging.WARNING,
+                    "route_aware_failed",
+                    endpoint="/api/v1/memory/retrieve-agent",
+                    elapsed_ms=round((perf_counter() - started_at) * 1000),
+                    timeout_seconds=self._timeout_seconds,
+                    error_class=exc.__class__.__name__,
+                    discovered_scope_count=len(discovered_scopes),
+                    discovered_scope_type_counts=_scope_type_counts(discovered_scopes),
+                    fallback_scope_count=len(fallback_scopes),
+                    fallback_scopes=_safe_scope_labels(fallback_scopes),
+                )
 
         scope_responses: list[tuple[dict[str, str], dict[str, Any]]] = []
         fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
