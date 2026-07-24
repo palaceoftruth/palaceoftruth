@@ -24,7 +24,6 @@ def upgrade() -> None:
         "source_resources",
         "source_class IN ('webpage', 'feed', 'sitemap')",
     )
-    op.alter_column("source_resources", "source_class", server_default=None)
 
 
 def downgrade() -> None:

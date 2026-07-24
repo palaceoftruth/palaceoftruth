@@ -14,6 +14,9 @@ webpages 24 hours, and sitemaps 12 hours. Any later dispatcher integration
 must persist provenance and policy before setting a resource active. The canary
 remains disabled until the Helm configuration and a compliance report can prove
 that at least 95% of enrolled resources were checked within their policy window.
+The schema keeps `webpage` as its database default so existing direct writers
+and migration probes remain compatible while new discovery paths record a more
+specific class explicitly.
 
 Rollback: keep dispatch disabled (the default), stop invoking discovery, and no
 network or persisted source-resource action is required to undo this parser-only
