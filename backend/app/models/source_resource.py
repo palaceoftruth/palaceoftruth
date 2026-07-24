@@ -40,6 +40,7 @@ class SourceResource(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint("kind IN ('http')", name="ck_source_resources_kind"),
+        CheckConstraint("source_class IN ('webpage', 'feed', 'sitemap')", name="ck_source_resources_source_class"),
         CheckConstraint(
             "status IN ('active', 'unreachable', 'gone', 'paused')",
             name="ck_source_resources_status",
@@ -60,6 +61,8 @@ class SourceResource(Base):
     )
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="http")
+    # Class is provenance, not an implicit permission to dispatch network work.
+    source_class: Mapped[str] = mapped_column(String(20), nullable=False, server_default="webpage")
     canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_identity: Mapped[str] = mapped_column(Text, nullable=False)
     refresh_policy: Mapped[str] = mapped_column(String(20), nullable=False, server_default="interval")

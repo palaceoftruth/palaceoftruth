@@ -63,6 +63,7 @@ def _source_resource(*, tenant_id: str = "tenant-a") -> SourceResource:
         id=uuid.uuid4(),
         tenant_id=tenant_id,
         kind="http",
+        source_class="webpage",
         canonical_url="https://example.com/docs",
         canonical_identity="identity",
         refresh_policy="interval",

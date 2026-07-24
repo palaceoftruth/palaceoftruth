@@ -1,0 +1,20 @@
+# Watched-source discovery canary
+
+The `watched_source_discovery` service parses an already-fetched RSS/Atom feed
+or sitemap into explicit, bounded enrollment candidates. It never fetches a
+URL, enrolls a candidate, changes a refresh policy, or subscribes to WebSub.
+
+For the k3s-lab canary, an operator must supply a per-run allowlist and a small
+candidate cap. Candidates outside that host allowlist (and duplicates) are
+recorded as rejected. Advertised WebSub hubs are evidence only; callbacks stay
+disabled until a separate, reviewed subscription design exists.
+
+Source-class defaults are deliberately conservative: feeds target 30 minutes,
+webpages 24 hours, and sitemaps 12 hours. Any later dispatcher integration
+must persist provenance and policy before setting a resource active. The canary
+remains disabled until the Helm configuration and a compliance report can prove
+that at least 95% of enrolled resources were checked within their policy window.
+
+Rollback: keep dispatch disabled (the default), stop invoking discovery, and no
+network or persisted source-resource action is required to undo this parser-only
+foundation.

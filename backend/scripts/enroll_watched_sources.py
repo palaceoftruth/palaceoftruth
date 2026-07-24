@@ -154,6 +154,7 @@ async def enroll(args: argparse.Namespace, rows: list[tuple[WebSave, Item]], nex
                     resource = SourceResource(
                         tenant_id=candidate.tenant_id,
                         kind="http",
+                        source_class="webpage",
                         canonical_url=candidate.canonical_url,
                         canonical_identity=candidate.canonical_identity,
                         # Policy selection is intentionally deferred to the later operator task.

@@ -77,6 +77,10 @@ config:
   agentMemoryDelegatedReadPoliciesJson: ""
   feedPollMinInterval: "300"
   feedMaxFailures: "5"
+  # Kept false until a reviewed per-environment canary explicitly enables it.
+  sourceResourceRefreshDispatchEnabled: "false"
+  sourceResourceRefreshDispatchBatchSize: "20"
+  sourceResourceRefreshLeaseSeconds: "900"
   # X oEmbed capture needs no credentials. Facebook public post capture can use
   # a Meta app token from the app secret plus this Graph API version.
   facebookGraphApiVersion: "v25.0"
