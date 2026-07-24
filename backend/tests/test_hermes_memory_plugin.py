@@ -429,16 +429,6 @@ def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
                 "total": 3,
                 "limit": 100,
             }
-        if method == "POST" and path == "/api/v1/memory/retrieve-agent":
-            assert payload is not None
-            assert payload["agent_scope_key"] == "clara"
-            assert payload["workspace_scope_keys"] == []
-            assert payload["include_tenant_shared"] is False
-            assert payload["tenant_shared_policy"] == "never"
-            assert payload["include_broad_corpus"] is False
-            assert payload["broad_corpus_policy"] == "disabled"
-            assert payload["workspace_strict"] is False
-            raise RuntimeError("route-aware failure")
         if method == "POST" and path == "/api/v1/memory/retrieve":
             assert payload is not None
             assert payload["scope"] == {"type": "agent", "key": "clara"}
@@ -461,6 +451,10 @@ def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
 
     text = provider.prefetch("agent recall", session_id="session-1")
 
+    assert not any(
+        method == "POST" and path == "/api/v1/memory/retrieve-agent"
+        for method, path, _ in requests_seen
+    )
     assert [
         payload["scope"]
         for method, path, payload in requests_seen
