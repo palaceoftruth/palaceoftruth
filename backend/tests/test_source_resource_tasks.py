@@ -49,13 +49,19 @@ class _ClaimSession:
         self.flushed = True
 
 
-def _resource(*, status: str = "active", due_at=None, backoff_until=None) -> SourceResource:
+def _resource(
+    *,
+    status: str = "active",
+    due_at=None,
+    backoff_until=None,
+    canonical_url: str = "https://example.com/source",
+) -> SourceResource:
     return SourceResource(
         id=uuid.uuid4(),
         tenant_id="tenant-a",
         kind="http",
-        canonical_url="https://example.com/source",
-        canonical_identity=canonical_http_identity("https://example.com/source"),
+        canonical_url=canonical_url,
+        canonical_identity=canonical_http_identity(canonical_url),
         refresh_policy="interval",
         refresh_slo_seconds=3600,
         status=status,
@@ -108,6 +114,26 @@ async def test_dispatch_enqueues_nothing_until_explicitly_enabled(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_dispatch_enqueues_nothing_with_empty_host_allowlist(monkeypatch) -> None:
+    redis = _FakeRedis()
+    monkeypatch.setattr(source_resource_tasks.settings, "source_resource_refresh_dispatch_enabled", True)
+    monkeypatch.setattr(source_resource_tasks.settings, "source_resource_refresh_allowed_hosts", "")
+
+    assert await source_resource_tasks.dispatch_due_source_resources({"redis": redis}) == 0
+    assert redis.enqueued == []
+
+
+def test_refresh_host_allowlist_rejects_wildcards_urls_and_ports() -> None:
+    assert source_resource_tasks.parse_refresh_allowed_hosts(
+        "CANARY.INTERNAL., docs.internal"
+    ) == ("canary.internal", "docs.internal")
+
+    for value in ("*.internal", "https://canary.internal", "canary.internal:8080"):
+        with pytest.raises(ValueError):
+            source_resource_tasks.parse_refresh_allowed_hosts(value)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_enqueues_auditable_bounded_claims(monkeypatch) -> None:
     resource_id = uuid.uuid4()
     token = uuid.UUID("00000000-0000-0000-0000-000000000010")
@@ -134,6 +160,11 @@ async def test_dispatch_enqueues_auditable_bounded_claims(monkeypatch) -> None:
             return False
 
     monkeypatch.setattr(source_resource_tasks.settings, "source_resource_refresh_dispatch_enabled", True)
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_allowed_hosts",
+        "palace-source-canary.palace-sarvent.svc.cluster.local",
+    )
     monkeypatch.setattr(source_resource_tasks, "claim_due_source_resources", fake_claim)
     monkeypatch.setattr(source_resource_tasks, "async_session", lambda: _Manager())
 
@@ -155,15 +186,20 @@ async def test_dispatch_enqueues_auditable_bounded_claims(monkeypatch) -> None:
 async def test_claim_due_resources_uses_skip_locked_predicates_and_defensive_lease_checks() -> None:
     now = datetime.now(timezone.utc)
     due = _resource(due_at=now)
+    disallowed = _resource(
+        due_at=now,
+        canonical_url="https://outside.example/source",
+    )
     paused = _resource(status="paused", due_at=now)
     backed_off = _resource(due_at=now, backoff_until=now.replace(year=now.year + 1))
-    session = _ClaimSession([due, paused, backed_off])
+    session = _ClaimSession([due, disallowed, paused, backed_off])
 
     leases = await source_resource_tasks.claim_due_source_resources(
         session,
         now=now,
         limit=2,
         lease_seconds=300,
+        allowed_hosts=("example.com",),
     )
 
     assert [lease.resource_id for lease in leases] == [due.id]
@@ -178,6 +214,7 @@ async def test_claim_due_resources_uses_skip_locked_predicates_and_defensive_lea
     assert "LIMIT 2" in sql
     assert "source_resources.refresh_policy != 'manual'" in sql
     assert "source_resources.refresh_lease_expires_at" in sql
+    assert "https://example.com/" in sql
 
 
 @pytest.mark.asyncio

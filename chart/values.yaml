@@ -81,6 +81,8 @@ config:
   sourceResourceRefreshDispatchEnabled: "false"
   sourceResourceRefreshDispatchBatchSize: "20"
   sourceResourceRefreshLeaseSeconds: "900"
+  # Exact comma-separated hosts only. Empty keeps dispatch fail-closed.
+  sourceResourceRefreshAllowedHosts: ""
   # X oEmbed capture needs no credentials. Facebook public post capture can use
   # a Meta app token from the app secret plus this Graph API version.
   facebookGraphApiVersion: "v25.0"

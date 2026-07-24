@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
+from urllib.parse import urlsplit
 
 import trafilatura
 from sqlalchemy import delete, or_, select
@@ -57,12 +58,54 @@ class ResourceActivation:
     material_change: bool
 
 
+def parse_refresh_allowed_hosts(raw_hosts: str) -> tuple[str, ...]:
+    """Return exact normalized DNS hosts or fail closed on malformed input."""
+
+    hosts: set[str] = set()
+    for raw_host in raw_hosts.split(","):
+        host = raw_host.strip().lower().rstrip(".")
+        if not host:
+            continue
+        parsed = urlsplit(f"//{host}")
+        if (
+            parsed.hostname != host
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or "*" in host
+        ):
+            raise ValueError(f"invalid source refresh allowed host: {raw_host!r}")
+        hosts.add(host)
+    return tuple(sorted(hosts))
+
+
+def _resource_host_is_allowed(resource: SourceResource, allowed_hosts: tuple[str, ...]) -> bool:
+    return (urlsplit(resource.canonical_url).hostname or "").lower().rstrip(".") in allowed_hosts
+
+
+def _allowed_host_predicate(allowed_hosts: tuple[str, ...]):
+    predicates = []
+    for host in allowed_hosts:
+        for scheme in ("http", "https"):
+            base_url = f"{scheme}://{host}"
+            predicates.extend(
+                (
+                    SourceResource.canonical_url == base_url,
+                    SourceResource.canonical_url.startswith(f"{base_url}/"),
+                    SourceResource.canonical_url.startswith(f"{base_url}?"),
+                )
+            )
+    return or_(*predicates)
+
+
 async def claim_due_source_resources(
     db: AsyncSession,
     *,
     now: datetime,
     limit: int,
     lease_seconds: int,
+    allowed_hosts: tuple[str, ...],
 ) -> list[RefreshLease]:
     """Claim a capped batch with row locks; callers commit before enqueueing."""
 
@@ -72,10 +115,13 @@ async def claim_due_source_resources(
         raise ValueError("lease_seconds must be positive")
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
+    if not allowed_hosts:
+        return []
 
     result = await db.execute(
         select(SourceResource)
         .where(SourceResource.kind == "http")
+        .where(_allowed_host_predicate(allowed_hosts))
         .where(SourceResource.refresh_policy != "manual")
         .where(SourceResource.status.in_(("active", "unreachable")))
         .where(SourceResource.next_due_at.is_not(None))
@@ -93,6 +139,10 @@ async def claim_due_source_resources(
     )
     leases: list[RefreshLease] = []
     for resource in result.scalars().all():
+        # Keep a second application-level check so a future query refactor
+        # cannot broaden dispatch beyond the configured exact-host allowlist.
+        if not _resource_host_is_allowed(resource, allowed_hosts):
+            continue
         lease = claim_refresh_lease(resource, now=now, lease_seconds=lease_seconds)
         if lease is not None:
             db.add(resource)
@@ -107,6 +157,10 @@ async def dispatch_due_source_resources(ctx: dict) -> int:
     if not settings.source_resource_refresh_dispatch_enabled:
         logger.debug("source resource refresh dispatch disabled")
         return 0
+    allowed_hosts = parse_refresh_allowed_hosts(settings.source_resource_refresh_allowed_hosts)
+    if not allowed_hosts:
+        logger.warning("source resource refresh dispatch enabled with an empty host allowlist")
+        return 0
 
     now = datetime.now(timezone.utc)
     async with async_session() as db:
@@ -115,6 +169,7 @@ async def dispatch_due_source_resources(ctx: dict) -> int:
             now=now,
             limit=settings.source_resource_refresh_dispatch_batch_size,
             lease_seconds=settings.source_resource_refresh_lease_seconds,
+            allowed_hosts=allowed_hosts,
         )
         # Persist ownership before enqueueing.  If Redis is temporarily down,
         # the bounded lease expires and a later dispatch can recover safely.
