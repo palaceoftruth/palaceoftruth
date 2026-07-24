@@ -67,6 +67,10 @@ data:
   PALACEOFTRUTH_DELEGATED_AGENT_MEMORY_READ_POLICIES: {{ default .Values.config.agentMemoryDelegatedReadPoliciesJson .Values.config.palaceoftruthDelegatedAgentMemoryReadPolicies | quote }}
   FEED_POLL_MIN_INTERVAL: {{ .Values.config.feedPollMinInterval | quote }}
   FEED_MAX_FAILURES: {{ .Values.config.feedMaxFailures | quote }}
+  SOURCE_RESOURCE_REFRESH_DISPATCH_ENABLED: {{ .Values.config.sourceResourceRefreshDispatchEnabled | quote }}
+  SOURCE_RESOURCE_REFRESH_DISPATCH_BATCH_SIZE: {{ .Values.config.sourceResourceRefreshDispatchBatchSize | quote }}
+  SOURCE_RESOURCE_REFRESH_LEASE_SECONDS: {{ .Values.config.sourceResourceRefreshLeaseSeconds | quote }}
+  SOURCE_RESOURCE_REFRESH_ALLOWED_HOSTS: {{ .Values.config.sourceResourceRefreshAllowedHosts | quote }}
   FACEBOOK_GRAPH_API_VERSION: {{ .Values.config.facebookGraphApiVersion | quote }}
   WEBPAGE_SCRAPER_PROVIDER: {{ .Values.config.webpageScraperProvider | quote }}
   FIRECRAWL_BASE_URL: {{ .Values.config.firecrawlBaseUrl | quote }}

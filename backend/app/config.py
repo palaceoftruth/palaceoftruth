@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     source_resource_refresh_dispatch_enabled: bool = False
     source_resource_refresh_dispatch_batch_size: int = 20
     source_resource_refresh_lease_seconds: int = 900
+    # Comma-separated exact DNS hosts. An empty value keeps dispatch fail-closed
+    # even when the enable flag is accidentally set.
+    source_resource_refresh_allowed_hosts: str = ""
 
     # Social post capture
     facebook_oembed_access_token: str = ""

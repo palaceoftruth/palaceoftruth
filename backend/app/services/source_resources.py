@@ -259,6 +259,7 @@ def resource_snapshot(resource: SourceResource) -> dict:
     return {
         "canonical_identity": resource.canonical_identity,
         "canonical_url": resource.canonical_url,
+        "source_class": resource.source_class,
         "status": resource.status,
         "refresh_policy": resource.refresh_policy,
         "refresh_slo_seconds": resource.refresh_slo_seconds,

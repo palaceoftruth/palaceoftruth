@@ -179,6 +179,7 @@ class PalaceSourceResourceSummary(BaseModel):
     id: uuid.UUID
     kind: Literal["http"]
     canonical_url: str
+    source_class: str
     freshness: Literal["current", "due", "stale", "unreachable", "gone", "unknown"]
     status: Literal["active", "unreachable", "gone", "paused"]
     refresh_policy: Literal["manual", "interval", "adaptive"]

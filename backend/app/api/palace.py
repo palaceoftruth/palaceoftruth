@@ -108,6 +108,7 @@ def _source_resource_summary(resource: SourceResource) -> PalaceSourceResourceSu
         id=resource.id,
         kind=resource.kind,
         canonical_url=resource.canonical_url,
+        source_class=resource.source_class,
         freshness=compute_freshness(resource),
         status=resource.status,
         refresh_policy=resource.refresh_policy,
