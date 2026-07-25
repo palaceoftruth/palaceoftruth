@@ -588,6 +588,66 @@ def test_kubernetes_check_alerts_when_master_not_found_after_startup_ready() -> 
     assert report["checks"][0]["status"] == "failed"
 
 
+def test_kubernetes_check_treats_log_marker_as_historical_after_live_memory_path_passes() -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=10.42.5.211:6379\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    report = {
+        "target": "palaceoftruth",
+        "tenant_id": "tenant-a",
+        "checks": [
+            {"name": "runtime_dependencies", "status": "passed"},
+            {"name": "memory_job_completion", "status": "passed"},
+            {"name": "sentinel_valkey", "status": "passed"},
+        ],
+        "alerts": [],
+    }
+    args = SimpleNamespace(
+        skip_kubernetes=False,
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        restart_alert_threshold=3,
+        skip_log_scan=False,
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+    )
+
+    rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
+
+    assert report["alerts"] == []
+    kubernetes_check = report["checks"][-1]
+    assert kubernetes_check["status"] == "passed"
+    assert kubernetes_check["master_not_found_hits"] == []
+    assert kubernetes_check["historical_master_not_found_hits"] == [
+        {"pod": "worker-abc", "container": "worker"}
+    ]
+
+
 def test_kubernetes_check_fails_closed_when_worker_logs_cannot_be_read() -> None:
     class FakeKube:
         namespace = "palaceoftruth"

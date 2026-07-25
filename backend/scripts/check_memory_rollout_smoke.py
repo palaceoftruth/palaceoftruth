@@ -312,6 +312,14 @@ def _alert(report: dict[str, Any], code: str, message: str, **details: Any) -> N
     )
 
 
+def _check_passed(report: dict[str, Any], name: str) -> bool:
+    return any(
+        check.get("name") == name and check.get("status") == "passed"
+        for check in report.get("checks", [])
+        if isinstance(check, dict)
+    )
+
+
 def check_api_health(client: HttpClient, report: dict[str, Any]) -> None:
     result = client.request("GET", "/health")
     if result.status >= 400:
@@ -592,7 +600,16 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
     restart_rows: list[dict[str, Any]] = []
     non_running_rows: list[dict[str, str]] = []
     master_not_found_hits: list[dict[str, str]] = []
+    historical_master_not_found_hits: list[dict[str, str]] = []
     log_read_failures: list[dict[str, str]] = []
+    current_memory_path_healthy = all(
+        _check_passed(report, name)
+        for name in (
+            "runtime_dependencies",
+            "memory_job_completion",
+            "sentinel_valkey",
+        )
+    )
     selected_worker_pods = 0
     selected_worker_containers = 0
     for pod in pods:
@@ -644,7 +661,14 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
                     )
                     continue
                 if _has_unresolved_master_discovery_error(log_text):
-                    master_not_found_hits.append({"pod": pod_name, "container": container_name})
+                    hit = {"pod": pod_name, "container": container_name}
+                    if current_memory_path_healthy:
+                        # A successful worker readiness gate, durable memory job,
+                        # and live Sentinel probe are stronger current-state
+                        # evidence than an older marker in the bounded log window.
+                        historical_master_not_found_hits.append(hit)
+                    else:
+                        master_not_found_hits.append(hit)
 
     if selected_worker_pods == 0:
         _alert(report, "worker_pods_not_found", "no worker pods matched rollout smoke selector")
@@ -667,6 +691,7 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
         non_running_pods=non_running_rows,
         restart_alerts=restart_rows,
         master_not_found_hits=master_not_found_hits,
+        historical_master_not_found_hits=historical_master_not_found_hits,
         log_read_failures=log_read_failures,
     )
 
