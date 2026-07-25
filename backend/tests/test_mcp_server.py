@@ -23,6 +23,7 @@ from app.mcp_server import (
     SecondBrainMcpRuntime,
     SecondBrainMcpSettings,
     _build_scope,
+    _compact_startup_decision_claims,
     _normalize_created_at,
     _port_from_env,
     _streamable_http_transport_security,
@@ -3587,6 +3588,51 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
                     ]
                 },
             )
+        if request.url.path == "/api/v1/palace/answers/audit":
+            return httpx.Response(
+                200,
+                json={
+                    "tenant_id": "tenant-a",
+                    "audit_scope": "decision_claims",
+                    "items": [
+                        {
+                            "object_type": "decision_claim",
+                            "object_id": "550e8400-e29b-41d4-a716-446655440013",
+                            "object_key": "decision:startup-safety",
+                            "object_text": "Use reviewed source-backed decisions first.",
+                            "claim_type": "decision",
+                            "claim_status": "active",
+                            "support_state": "source_backed",
+                            "audit_state": "curated",
+                            "promotion_status": "promoted",
+                            "source_count": 1,
+                            "metadata": {"task_id": "SAR-1233", "body": "must not leak"},
+                            "sources": [
+                                {
+                                    "source_record_id": "550e8400-e29b-41d4-a716-446655440014",
+                                    "source_chunk_id": "550e8400-e29b-41d4-a716-446655440015",
+                                    "source_item_id": entry_item_id,
+                                    "support_role": "supports",
+                                    "source_span": {"text": "must not leak"},
+                                }
+                            ],
+                        },
+                        {
+                            "object_type": "decision_claim",
+                            "object_id": "550e8400-e29b-41d4-a716-446655440016",
+                            "object_key": "decision:stale",
+                            "claim_type": "decision",
+                            "claim_status": "stale",
+                            "support_state": "stale_source",
+                            "audit_state": "stale",
+                            "warning": "claim_status_stale",
+                            "promotion_status": "stale",
+                            "source_count": 1,
+                            "sources": [],
+                        },
+                    ],
+                },
+            )
         if request.url.path == "/api/v1/memory/jobs":
             return httpx.Response(200, json={"jobs": [{"job_id": "job-1", "status": "complete"}], "total": 1})
         if request.url.path == "/api/v1/memory/mcp/audit":
@@ -3648,10 +3694,71 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
         "attached_count": 1,
     }
     assert result["checkpoint_pointers"][0]["tags"] == ["checkpoint"]
+    assert result["decision_claims"]["authoritative"] == [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440013",
+            "key": "decision:startup-safety",
+            "decision": "Use reviewed source-backed decisions first.",
+            "support_state": "source_backed",
+            "source_count": 1,
+            "source_pointers": [
+                {
+                    "source_record_id": "550e8400-e29b-41d4-a716-446655440014",
+                    "source_chunk_id": "550e8400-e29b-41d4-a716-446655440015",
+                    "source_item_id": entry_item_id,
+                    "support_role": "supports",
+                }
+            ],
+            "metadata": {"task_id": "SAR-1233"},
+        }
+    ]
+    assert result["decision_claims"]["warnings"] == [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440016",
+            "key": "decision:stale",
+            "claim_status": "stale",
+            "support_state": "stale_source",
+            "warning": "claim_status_stale",
+        }
+    ]
     assert result["follow_up_probes"][0]["tool"] == "palace_search"
     assert audit_payload["operation"] == "get_wakeup_context"
     assert audit_payload["required_scope"] == "read"
     assert seen[-1] == ("POST", "/api/v1/memory/mcp/audit", {})
+
+
+def test_compact_startup_decision_claims_keeps_non_authoritative_states_warning_only() -> None:
+    states = [
+        ("draft", "generated_unpromoted", "generated_unpromoted", "unpromoted"),
+        ("rejected", "not_authoritative", "not_authoritative", "rejected"),
+        ("stale", "stale_source", "stale", "stale"),
+        ("conflicted", "conflicted", "conflicted", "unreviewed"),
+        ("active", "source_missing", "missing", "promoted"),
+        ("active", "source_backed", "policy_limited", "promoted"),
+    ]
+    payload = {
+        "items": [
+            {
+                "object_id": f"claim-{index}",
+                "object_key": f"decision:{index}",
+                "object_text": "A compact decision",
+                "claim_status": claim_status,
+                "support_state": support_state,
+                "audit_state": audit_state,
+                "promotion_status": promotion_status,
+                "metadata": {"body": "raw body must not leak", "policy_limited": audit_state == "policy_limited"},
+                "sources": [{"source_span": {"text": "raw span must not leak"}}],
+            }
+            for index, (claim_status, support_state, audit_state, promotion_status) in enumerate(states)
+        ]
+    }
+
+    result = _compact_startup_decision_claims(payload)
+
+    assert result["authoritative"] == []
+    assert [entry["key"] for entry in result["warnings"]] == [f"decision:{index}" for index in range(len(states))]
+    assert "raw body must not leak" not in json.dumps(result)
+    assert "raw span must not leak" not in json.dumps(result)
 
 
 def test_get_wakeup_context_returns_partial_warning_when_source_trust_unavailable() -> None:
@@ -3738,6 +3845,7 @@ def test_get_wakeup_context_returns_partial_warning_when_source_trust_unavailabl
     assert "body" not in response_json
     assert "preview" not in response_json
     assert "chunk_text" not in response_json
+    assert "must not leak" not in response_json
 
 
 def test_get_wakeup_context_marks_empty_stale_context_partial() -> None:
@@ -3748,6 +3856,8 @@ def test_get_wakeup_context_marks_empty_stale_context_partial() -> None:
             return httpx.Response(200, json={"freshness": "stale", "stale": True})
         if request.url.path == "/api/v1/memory/entries":
             return httpx.Response(200, json={"entries": [], "total": 0, "limit": 5, "next_cursor": None})
+        if request.url.path == "/api/v1/palace/answers/audit":
+            return httpx.Response(200, json={"tenant_id": "tenant-a", "audit_scope": "decision_claims", "items": []})
         if request.url.path == "/api/v1/memory/mcp/audit":
             return httpx.Response(
                 201,

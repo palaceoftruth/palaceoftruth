@@ -181,7 +181,11 @@ diagnostic labels, not ranking approvals.
 
 For session startup, use `get_wakeup_context` when an agent needs one compact
 package with wake-up status, selected agent/workspace/session memory summaries,
-checkpoint pointers, readiness warnings, and safe follow-up probes. Use
+checkpoint pointers, promoted source-backed decision claims, readiness warnings,
+and safe follow-up probes. Only active, operator-promoted claims with current
+exact source support appear as startup guidance; stale, conflicted, missing,
+policy-limited, draft, and rejected claims remain warning-only. The payload uses
+claim text and source pointers, never source bodies, chunks, previews, or spans. Use
 `palace_search` or `retrieve_agent_memory` after that for a specific question,
 and use `capture_checkpoint` only when writing a reviewed handoff or compaction
 checkpoint.
