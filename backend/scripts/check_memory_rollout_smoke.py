@@ -312,6 +312,14 @@ def _alert(report: dict[str, Any], code: str, message: str, **details: Any) -> N
     )
 
 
+def _check_passed(report: dict[str, Any], name: str) -> bool:
+    return any(
+        check.get("name") == name and check.get("status") == "passed"
+        for check in report.get("checks", [])
+        if isinstance(check, dict)
+    )
+
+
 def check_api_health(client: HttpClient, report: dict[str, Any]) -> None:
     result = client.request("GET", "/health")
     if result.status >= 400:
@@ -405,19 +413,24 @@ def check_runtime_dependencies(
     """Wait until API, database/queue, and every ARQ worker are ready to consume."""
     deadline = time.monotonic() + args.dependency_timeout_seconds
     last_state: dict[str, Any] = {}
-    try:
-        kube = kube or KubernetesClient(namespace=args.namespace, timeout=args.request_timeout)
-    except Exception as exc:
-        _alert(report, "runtime_dependencies_unqueryable", str(exc), error_class=exc.__class__.__name__)
-        _record_check(report, "runtime_dependencies", "failed", error_class=exc.__class__.__name__)
-        return
+    skip_kubernetes = bool(getattr(args, "skip_kubernetes", False))
+    if not skip_kubernetes:
+        try:
+            kube = kube or KubernetesClient(namespace=args.namespace, timeout=args.request_timeout)
+        except Exception as exc:
+            _alert(report, "runtime_dependencies_unqueryable", str(exc), error_class=exc.__class__.__name__)
+            _record_check(report, "runtime_dependencies", "failed", error_class=exc.__class__.__name__)
+            return
 
     while time.monotonic() <= deadline:
         api_state = _api_readiness_state(client)
-        try:
-            worker_state = _worker_startup_state(kube, args)
-        except Exception as exc:
-            worker_state = {"ready": False, "error_class": exc.__class__.__name__, "error": str(exc)}
+        if skip_kubernetes:
+            worker_state = {"ready": True, "skipped": True, "reason": "--skip-kubernetes"}
+        else:
+            try:
+                worker_state = _worker_startup_state(kube, args)
+            except Exception as exc:
+                worker_state = {"ready": False, "error_class": exc.__class__.__name__, "error": str(exc)}
         last_state = {"api": api_state, "workers": worker_state}
         if api_state["ready"] and worker_state["ready"]:
             _record_check(report, "runtime_dependencies", "passed", **last_state)
@@ -592,7 +605,16 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
     restart_rows: list[dict[str, Any]] = []
     non_running_rows: list[dict[str, str]] = []
     master_not_found_hits: list[dict[str, str]] = []
+    historical_master_not_found_hits: list[dict[str, str]] = []
     log_read_failures: list[dict[str, str]] = []
+    prior_memory_path_healthy = all(
+        _check_passed(report, name)
+        for name in (
+            "runtime_dependencies",
+            "memory_job_completion",
+            "sentinel_valkey",
+        )
+    )
     selected_worker_pods = 0
     selected_worker_containers = 0
     for pod in pods:
@@ -644,7 +666,17 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
                     )
                     continue
                 if _has_unresolved_master_discovery_error(log_text):
-                    master_not_found_hits.append({"pod": pod_name, "container": container_name})
+                    hit = {"pod": pod_name, "container": container_name}
+                    master_not_found_hits.append(hit)
+
+    post_scan_sentinel: dict[str, Any] | None = None
+    if master_not_found_hits and prior_memory_path_healthy:
+        post_scan_sentinel = _post_scan_sentinel_state()
+        if post_scan_sentinel["healthy"]:
+            # The second live probe is ordered after the observed marker, so it
+            # can prove the bounded log hit no longer reflects Sentinel state.
+            historical_master_not_found_hits.extend(master_not_found_hits)
+            master_not_found_hits = []
 
     if selected_worker_pods == 0:
         _alert(report, "worker_pods_not_found", "no worker pods matched rollout smoke selector")
@@ -667,8 +699,26 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
         non_running_pods=non_running_rows,
         restart_alerts=restart_rows,
         master_not_found_hits=master_not_found_hits,
+        historical_master_not_found_hits=historical_master_not_found_hits,
+        post_scan_sentinel=post_scan_sentinel,
         log_read_failures=log_read_failures,
     )
+
+
+def _post_scan_sentinel_state() -> dict[str, Any]:
+    try:
+        result = asyncio.run(check_rollout_gate())
+    except Exception as exc:
+        return {
+            "healthy": False,
+            "error_class": exc.__class__.__name__,
+            "error": str(exc),
+        }
+    return {
+        "healthy": True,
+        "master": f"{result.master_host}:{result.master_port}",
+        "connected_replicas": result.connected_replicas,
+    }
 
 
 def _has_unresolved_master_discovery_error(log_text: str) -> bool:
