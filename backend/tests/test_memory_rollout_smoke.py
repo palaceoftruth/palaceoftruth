@@ -588,7 +588,9 @@ def test_kubernetes_check_alerts_when_master_not_found_after_startup_ready() -> 
     assert report["checks"][0]["status"] == "failed"
 
 
-def test_kubernetes_check_treats_log_marker_as_historical_after_live_memory_path_passes() -> None:
+def test_kubernetes_check_treats_log_marker_as_historical_after_post_scan_sentinel_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeKube:
         namespace = "palaceoftruth"
 
@@ -636,6 +638,14 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_live_memory_path
         log_tail_lines=500,
         request_timeout=5,
     )
+    async def healthy_sentinel():
+        return SimpleNamespace(
+            master_host="10.42.5.211",
+            master_port=6379,
+            connected_replicas=1,
+        )
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", healthy_sentinel)
 
     rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
 
@@ -646,6 +656,74 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_live_memory_path
     assert kubernetes_check["historical_master_not_found_hits"] == [
         {"pod": "worker-abc", "container": "worker"}
     ]
+    assert kubernetes_check["post_scan_sentinel"]["healthy"] is True
+
+
+def test_kubernetes_check_fails_closed_when_post_scan_sentinel_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                        },
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=10.42.5.211:6379\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    async def failed_sentinel():
+        raise RuntimeError("No master found for 'mymaster'")
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", failed_sentinel)
+    report = {
+        "target": "palaceoftruth",
+        "tenant_id": "tenant-a",
+        "checks": [
+            {"name": "runtime_dependencies", "status": "passed"},
+            {"name": "memory_job_completion", "status": "passed"},
+            {"name": "sentinel_valkey", "status": "passed"},
+        ],
+        "alerts": [],
+    }
+    args = SimpleNamespace(
+        skip_kubernetes=False,
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        restart_alert_threshold=3,
+        skip_log_scan=False,
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+    )
+
+    rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
+
+    assert [alert["code"] for alert in report["alerts"]] == ["master_not_found"]
+    kubernetes_check = report["checks"][-1]
+    assert kubernetes_check["status"] == "failed"
+    assert kubernetes_check["post_scan_sentinel"] == {
+        "healthy": False,
+        "error_class": "RuntimeError",
+        "error": "No master found for 'mymaster'",
+    }
 
 
 def test_kubernetes_check_fails_closed_when_worker_logs_cannot_be_read() -> None:
@@ -742,6 +820,49 @@ def test_runtime_dependencies_require_api_readiness_and_started_workers() -> Non
             "status": "passed",
             "api": {"ready": True, "http_status": 200, "status": "ok", "dependencies": {"database": "ok", "queue": "ok"}},
             "workers": {"ready": True, "selected_pods": ["worker-abc"], "non_running": [], "missing_markers": []},
+        }
+    ]
+
+
+def test_runtime_dependencies_skip_kubernetes_requires_only_api_readiness() -> None:
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    report = {"target": "local", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace=None,
+        request_timeout=5,
+        dependency_timeout_seconds=1,
+        dependency_interval_seconds=0.01,
+        skip_kubernetes=True,
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args)
+
+    assert report["alerts"] == []
+    assert report["checks"] == [
+        {
+            "name": "runtime_dependencies",
+            "status": "passed",
+            "api": {
+                "ready": True,
+                "http_status": 200,
+                "status": "ok",
+                "dependencies": {"database": "ok", "queue": "ok"},
+            },
+            "workers": {
+                "ready": True,
+                "skipped": True,
+                "reason": "--skip-kubernetes",
+            },
         }
     ]
 
