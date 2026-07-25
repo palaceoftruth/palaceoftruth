@@ -210,6 +210,24 @@ compatibility fixtures, and opt-in command previews for task-pool and live
 deploy checks. Add `--include-task-pool` or `--include-live-deploy` only when
 read-only network checks are explicitly desired.
 
+After source-backed decision claims are enabled, the report also verifies the
+local `get_wakeup_context` decision-claim projection contract. To inspect the
+live aggregate claim-support and answer-audit state without writing memory,
+opt in explicitly with a read-capable API key:
+
+```bash
+uv run python scripts/smoke_agent_memory_compatibility.py \
+  --api-base-url https://api.palaceoftruth.test \
+  --api-key "$PALACEOFTRUTH_API_KEY" \
+  startup-context-report --include-live-claim-audit
+```
+
+The live report exposes only counts and state categories. A
+`claim_audit_id_drift` warning means the support and audit endpoints disagree;
+`non_authoritative_decision_claims` means one or more active claims are not
+safe startup guidance. It never includes claim text, source bodies, chunks, or
+credentials.
+
 The repo-packaged Codex/Claude plugin lives in [third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
 
 ### Agent MCP authentication and writes

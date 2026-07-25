@@ -1621,6 +1621,94 @@ def test_startup_context_report_composes_offline_evidence_without_live_calls(
     assert checks["agent_memory_scorecard"]["signals"]["transport_count"] == 3
     assert checks["offline_compatibility_fixture"]["signals"]["offline_report_only"] is True
     assert checks["live_deploy_health"]["status"] == "skipped"
+    assert checks["wakeup_decision_claim_contract"]["status"] == "ok"
+    assert checks["source_backed_decision_claim_evidence"]["status"] == "skipped"
+    assert checks["source_backed_decision_claim_evidence"]["evidence_type"] == "explicit_opt_in_required"
+
+
+def test_startup_context_report_live_claim_audit_summarizes_states_without_claim_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, api_key: str) -> None:
+            assert base_url == "https://api.palaceoftruth.test"
+            assert api_key == "secret"
+
+        def request(self, method: str, path: str, *, body=None, query=None, timeout: float = 30.0) -> Any:
+            requests.append((method, path, query))
+            assert method == "GET"
+            assert body is None
+            assert query == {"status": "active", "limit": 200}
+            if path == "/api/v1/palace/claims/support":
+                return {
+                    "claims": [
+                        {"id": "claim-1", "claim_type": "decision", "support_state": "source_backed", "claim_text": "never report this"},
+                        {"id": "claim-2", "claim_type": "decision", "support_state": "stale_source", "claim_text": "never report this"},
+                    ]
+                }
+            if path == "/api/v1/palace/answers/audit":
+                return {
+                    "items": [
+                        {"object_id": "claim-1", "claim_status": "active", "promotion_status": "promoted", "support_state": "source_backed", "audit_state": "curated", "object_text": "never report this"},
+                        {"object_id": "claim-2", "claim_status": "active", "promotion_status": "draft", "support_state": "stale_source", "audit_state": "stale", "object_text": "never report this"},
+                    ]
+                }
+            raise AssertionError(f"Unexpected request: {path}")
+
+    monkeypatch.setattr(smoke_module, "Client", FakeClient)
+    args = smoke_module.build_parser().parse_args(
+        [
+            "--api-base-url", "https://api.palaceoftruth.test", "--api-key", "secret",
+            "startup-context-report", "--run-id", "20260725-claims", "--include-live-claim-audit",
+        ]
+    )
+
+    evidence = smoke_module._live_decision_claim_evidence(args)
+
+    assert evidence == {
+        "status": "warning",
+        "read_only": True,
+        "claim_support": {"decision_claim_count": 2, "support_states": {"source_backed": 1, "stale_source": 1}},
+        "answer_audit": {"item_count": 2, "audit_states": {"curated": 1, "stale": 1}, "authoritative_count": 1, "warning_count": 1},
+        "wakeup_projection": {"status": "ok", "support_only_count": 0, "audit_only_count": 0},
+        "warnings": ["non_authoritative_decision_claims"],
+    }
+    assert "never report this" not in str(evidence)
+    assert requests == [
+        ("GET", "/api/v1/palace/claims/support", {"status": "active", "limit": 200}),
+        ("GET", "/api/v1/palace/answers/audit", {"status": "active", "limit": 200}),
+    ]
+
+
+def test_startup_context_report_live_claim_audit_redacts_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self, base_url: str, api_key: str) -> None:
+            pass
+
+        def request(self, method: str, path: str, *, body=None, query=None, timeout: float = 30.0) -> Any:
+            raise smoke_module.ApiError(method, path, 502, "raw claim body and secret-value")
+
+    monkeypatch.setattr(smoke_module, "Client", FakeClient)
+    args = smoke_module.build_parser().parse_args(
+        [
+            "--api-key", "secret", "startup-context-report", "--run-id", "20260725-error",
+            "--include-live-claim-audit",
+        ]
+    )
+
+    evidence = smoke_module._live_decision_claim_evidence(args)
+
+    assert evidence == {
+        "status": "failed",
+        "reason": "live claim audit endpoint failed: GET /api/v1/palace/claims/support HTTP 502",
+        "read_only": True,
+    }
+    assert "raw claim body" not in str(evidence)
+    assert "secret-value" not in str(evidence)
 
 
 def test_startup_context_report_redacts_secret_and_memory_body(

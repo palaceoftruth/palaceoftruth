@@ -2645,6 +2645,129 @@ def _redact_sensitive_values(value: Any) -> Any:
     return value
 
 
+def _state_counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    """Return only aggregate state counts so reports never expose claim content."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(field)
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _startup_decision_claim_contract() -> dict[str, Any]:
+    """Check the local wakeup projection contract without importing app runtime state."""
+    source_path = DEFAULT_BACKEND_ROOT / "app" / "mcp_server.py"
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"status": "warning", "reason": f"unable to inspect local MCP contract: {exc.__class__.__name__}"}
+
+    required_markers = (
+        "def _compact_startup_decision_claims",
+        '"decision_claims": decision_claims',
+        "get_answer_audit(",
+        '"authoritative_count"',
+        '"warning_count"',
+        'item.get("claim_status") == "active"',
+        'item.get("promotion_status") == "promoted"',
+        'item.get("support_state") == "source_backed"',
+        'item.get("audit_state") == "curated"',
+    )
+    missing = [marker for marker in required_markers if marker not in source]
+    return {
+        "status": "ok" if not missing else "warning",
+        "wakeup_decision_claim_section": not missing,
+        "authoritative_requires": ["active", "promoted", "source_backed", "curated"],
+        "missing_contract_markers": len(missing),
+    }
+
+
+def _live_decision_claim_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    """Run opt-in, read-only aggregate checks for claim/audit drift and warning states."""
+    if not args.include_live_claim_audit:
+        return {
+            "status": "skipped",
+            "reason": "pass --include-live-claim-audit with --api-key for read-only claim and audit checks",
+            "read_only": True,
+        }
+    if not args.api_key:
+        return {
+            "status": "failed",
+            "reason": "--include-live-claim-audit requires --api-key",
+            "read_only": True,
+        }
+
+    try:
+        client = Client(args.api_base_url, args.api_key)
+        support_payload = client.request(
+            "GET", "/api/v1/palace/claims/support", query={"status": "active", "limit": 200}, timeout=args.live_timeout
+        )
+        audit_payload = client.request(
+            "GET", "/api/v1/palace/answers/audit", query={"status": "active", "limit": 200}, timeout=args.live_timeout
+        )
+    except ApiError as exc:
+        # ApiError retains a response body for callers that need diagnosis. This
+        # report is intentionally safe to retain, so expose only route/status.
+        return {
+            "status": "failed",
+            "reason": f"live claim audit endpoint failed: {exc.method} {exc.path} HTTP {exc.status}",
+            "read_only": True,
+        }
+    except RuntimeError as exc:
+        return {
+            "status": "failed",
+            "reason": f"live claim audit transport failed: {exc.__class__.__name__}",
+            "read_only": True,
+        }
+
+    claims = support_payload.get("claims") if isinstance(support_payload, dict) else None
+    items = audit_payload.get("items") if isinstance(audit_payload, dict) else None
+    if not isinstance(claims, list) or not all(isinstance(claim, dict) for claim in claims):
+        return {"status": "failed", "reason": "claim-support response lacked a claims list", "read_only": True}
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        return {"status": "failed", "reason": "answer-audit response lacked an items list", "read_only": True}
+
+    decision_claims = [claim for claim in claims if claim.get("claim_type") == "decision"]
+    support_ids = {claim.get("id") for claim in decision_claims if isinstance(claim.get("id"), str)}
+    audit_ids = {item.get("object_id") for item in items if isinstance(item.get("object_id"), str)}
+    support_only = support_ids - audit_ids
+    audit_only = audit_ids - support_ids
+    support_states = _state_counts(decision_claims, "support_state")
+    audit_states = _state_counts(items, "audit_state")
+    authoritative_count = sum(
+        1
+        for item in items
+        if item.get("claim_status") == "active"
+        and item.get("promotion_status") == "promoted"
+        and item.get("support_state") == "source_backed"
+        and item.get("audit_state") == "curated"
+    )
+    warning_count = len(items) - authoritative_count
+    warnings: list[str] = []
+    if support_only or audit_only:
+        warnings.append("claim_audit_id_drift")
+    if warning_count:
+        warnings.append("non_authoritative_decision_claims")
+    return {
+        "status": "warning" if warnings else "ok",
+        "read_only": True,
+        "claim_support": {"decision_claim_count": len(decision_claims), "support_states": support_states},
+        "answer_audit": {
+            "item_count": len(items),
+            "audit_states": audit_states,
+            "authoritative_count": authoritative_count,
+            "warning_count": warning_count,
+        },
+        "wakeup_projection": {
+            "status": "warning" if support_only or audit_only else "ok",
+            "support_only_count": len(support_only),
+            "audit_only_count": len(audit_only),
+        },
+        "warnings": warnings,
+    }
+
+
 def build_startup_context_report(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_run_id(args.run_id or default_run_id())
     bridge_args = argparse.Namespace(
@@ -2690,6 +2813,8 @@ def build_startup_context_report(args: argparse.Namespace) -> dict[str, Any]:
     compatibility = _summarize_compatibility_fixture(args)
     task_pool = _task_pool_state(args)
     deploy = _live_deploy_state(args)
+    decision_claim_contract = _startup_decision_claim_contract()
+    decision_claim_evidence = _live_decision_claim_evidence(args)
 
     wakeup_tool_ready = any(
         check.get("name") == "mcp_tool_surface" and check.get("status") == "ok"
@@ -2712,6 +2837,19 @@ def build_startup_context_report(args: argparse.Namespace) -> dict[str, Any]:
                 "tool_surface_ready": wakeup_tool_ready,
                 "generated_synthesis_authoritative": False,
             },
+        ),
+        _startup_check(
+            name="wakeup_decision_claim_contract",
+            status=decision_claim_contract["status"],
+            source="backend/app/mcp_server.py",
+            signals=decision_claim_contract,
+        ),
+        _startup_check(
+            name="source_backed_decision_claim_evidence",
+            status=decision_claim_evidence["status"],
+            source="claim-support and answer-audit read-only endpoints",
+            evidence_type="explicit_opt_in_required" if not args.include_live_claim_audit else "direct_live_read_only",
+            signals=decision_claim_evidence,
         ),
         _startup_check(
             name="codex_bridge",
@@ -3423,6 +3561,11 @@ def build_parser() -> argparse.ArgumentParser:
     startup.add_argument("--frontend-url", default="https://palace.example.com/")
     startup.add_argument("--api-health-url", default="https://api.palace.example.com/api/v1/health")
     startup.add_argument("--live-timeout", type=float, default=10.0)
+    startup.add_argument(
+        "--include-live-claim-audit",
+        action="store_true",
+        help="Run explicit read-only claim-support and answer-audit checks; requires --api-key.",
+    )
     startup.add_argument("--output", default=None)
     startup.set_defaults(func=cmd_startup_context_report)
 
