@@ -122,6 +122,9 @@ agent can treat them as authority.
    above.
 3. Call `get_wakeup_context` at session startup for the intended agent and
    workspace scope.
+   Its `decision_claims.authoritative` list contains only active,
+   operator-promoted decisions with current exact source support; inspect its
+   warning-only list with `get_claim_support` before relying on any other claim.
 4. Treat `source_backed` context as the starting point, verify
    `generated_unpromoted` context, ignore or replace `stale_source` context, and
    request authorized summaries for `policy_limited` context.

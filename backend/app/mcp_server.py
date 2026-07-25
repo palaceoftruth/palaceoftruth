@@ -116,6 +116,27 @@ SESSION_CONTEXT_WAKEUP_BRIEF_FIELDS = (
     "updated_at",
     "source_trust",
 )
+SESSION_CONTEXT_DECISION_CLAIM_FIELDS = (
+    "id",
+    "key",
+    "decision",
+    "support_state",
+    "source_count",
+    "source_pointers",
+    "metadata",
+)
+SESSION_CONTEXT_DECISION_CLAIM_METADATA_FIELDS = (
+    "review_action",
+    "reviewed_at",
+    "reviewed_by",
+    "review_role",
+    "source_item_id",
+    "task_id",
+    "pr_url",
+    "run_id",
+    "policy_limited",
+    "policy_scope",
+)
 SECRET_PARAM_KEYS = {
     "api_key",
     "key_hash",
@@ -1707,6 +1728,77 @@ def _compact_wakeup_brief(payload: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _compact_startup_decision_claims(payload: dict[str, Any]) -> dict[str, Any]:
+    """Separate authoritative promoted decisions from warning-only audit results.
+
+    The answer-audit endpoint is already tenant-bounded and redacts source bodies.
+    Keep this projection narrower still: startup context needs decision text and
+    stable source pointers, never source spans, previews, or raw source content.
+    """
+    items = payload.get("items")
+    if not isinstance(items, list):
+        items = []
+    authoritative: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source_pointers = []
+        for source in item.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+            pointer = {
+                key: source[key]
+                for key in ("source_record_id", "source_chunk_id", "source_item_id", "support_role")
+                if source.get(key) not in (None, [], {})
+            }
+            if pointer:
+                source_pointers.append(pointer)
+        raw_metadata = item.get("metadata")
+        safe_metadata = (
+            {key: raw_metadata[key] for key in SESSION_CONTEXT_DECISION_CLAIM_METADATA_FIELDS if key in raw_metadata}
+            if isinstance(raw_metadata, dict)
+            else {}
+        )
+        compact = {
+            "id": item.get("object_id"),
+            "key": item.get("object_key"),
+            "decision": item.get("object_text"),
+            "support_state": item.get("support_state"),
+            "source_count": item.get("source_count", len(source_pointers)),
+            "source_pointers": source_pointers,
+            "metadata": safe_metadata,
+        }
+        compact = {key: value for key, value in compact.items() if value not in (None, [], {})}
+        is_authoritative = (
+            item.get("claim_status") == "active"
+            and item.get("promotion_status") == "promoted"
+            and item.get("support_state") == "source_backed"
+            and item.get("audit_state") == "curated"
+        )
+        if is_authoritative:
+            authoritative.append(compact)
+        else:
+            warning = item.get("warning") or item.get("audit_state") or "decision_claim_not_authoritative"
+            warnings.append(
+                {
+                    "id": item.get("object_id"),
+                    "key": item.get("object_key"),
+                    "claim_status": item.get("claim_status"),
+                    "support_state": item.get("support_state"),
+                    "warning": warning,
+                }
+            )
+    return {
+        "status": "ok",
+        "authoritative": authoritative,
+        "warnings": warnings,
+        "authoritative_count": len(authoritative),
+        "warning_count": len(warnings),
+        "entry_fields": list(SESSION_CONTEXT_DECISION_CLAIM_FIELDS),
+    }
+
+
 def _entry_item_id(entry: dict[str, Any]) -> str | None:
     raw_item_id = entry.get("source_item_id") or entry.get("item_id")
     if not isinstance(raw_item_id, str) or not raw_item_id.strip():
@@ -1886,6 +1978,14 @@ def _session_context_follow_up_probes(
                 "scope_type": "agent",
                 "scope_key": agent_scope_key,
                 "limit": 10,
+            },
+        },
+        {
+            "purpose": "Inspect safe source support for startup decision claims before relying on a warning-only claim.",
+            "tool": "get_claim_support",
+            "arguments": {
+                "status": "active",
+                "limit": 25,
             },
         },
         {
@@ -3062,6 +3162,17 @@ async def get_wakeup_context(
         for scope_payload in [*scope_summaries, *checkpoint_pointers]:
             if scope_payload.get("status") == "ok":
                 await _attach_source_trust_to_scope(runtime, scope_payload)
+        try:
+            decision_claims = _compact_startup_decision_claims(
+                await runtime.api.get_answer_audit(claim_id=None, status=None, limit=25)
+            )
+        except Exception as exc:
+            decision_claims = {
+                "status": "error",
+                "error": {"class": type(exc).__name__, "message": str(exc)},
+                "authoritative": [],
+                "warnings": [],
+            }
         recent_jobs = None
         if include_recent_jobs:
             try:
@@ -3073,6 +3184,9 @@ async def get_wakeup_context(
         if recent_jobs is not None and isinstance(recent_jobs, dict) and recent_jobs.get("status") == "error":
             readiness["status"] = "partial"
             readiness["warnings"] = list(dict.fromkeys([*readiness["warnings"], "recent_jobs_unavailable"]))
+        if decision_claims.get("status") == "error":
+            readiness["status"] = "partial"
+            readiness["warnings"] = list(dict.fromkeys([*readiness["warnings"], "decision_claims_unavailable"]))
 
         return {
             "schema_version": 1,
@@ -3088,6 +3202,7 @@ async def get_wakeup_context(
             ],
             "scope_summaries": scope_summaries,
             "checkpoint_pointers": checkpoint_pointers,
+            "decision_claims": decision_claims,
             "recent_jobs": recent_jobs,
             "follow_up_probes": _session_context_follow_up_probes(
                 agent_scope_key=agent_scope_key,
@@ -3098,6 +3213,7 @@ async def get_wakeup_context(
             "privacy": {
                 "raw_memory_bodies_included": False,
                 "entry_fields": list(SESSION_CONTEXT_ENTRY_FIELDS),
+                "decision_claim_fields": list(SESSION_CONTEXT_DECISION_CLAIM_FIELDS),
             },
         }
 
