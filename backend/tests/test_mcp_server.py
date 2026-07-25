@@ -3606,7 +3606,13 @@ def test_get_wakeup_context_returns_compact_session_start_package() -> None:
                             "audit_state": "curated",
                             "promotion_status": "promoted",
                             "source_count": 1,
-                            "metadata": {"task_id": "SAR-1233", "body": "must not leak"},
+                            "metadata": {
+                                "task_id": "SAR-1233",
+                                "body": "must not leak",
+                                "operator_reviews": [{"rationale": "nested authoritative rationale must not leak"}],
+                                "policy_reason": "authoritative policy reason must not leak",
+                                "source_url": "https://private.example.test/source",
+                            },
                             "sources": [
                                 {
                                     "source_record_id": "550e8400-e29b-41d4-a716-446655440014",
@@ -3853,6 +3859,9 @@ def test_get_wakeup_context_returns_partial_warning_when_source_trust_unavailabl
     assert "preview" not in response_json
     assert "chunk_text" not in response_json
     assert "must not leak" not in response_json
+    assert "nested authoritative rationale must not leak" not in response_json
+    assert "authoritative policy reason must not leak" not in response_json
+    assert "private.example.test" not in response_json
 
 
 def test_get_wakeup_context_marks_empty_stale_context_partial() -> None:
