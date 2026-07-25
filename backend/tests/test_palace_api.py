@@ -101,6 +101,7 @@ class FakeSession:
         self.added = []
         self.scalar_results = list(scalar_results or [])
         self.execute_results = list(execute_results or [])
+        self.executed_statements = []
 
     async def get(self, model, key):
         return self.objects.get((model, key))
@@ -111,6 +112,7 @@ class FakeSession:
         return None
 
     async def execute(self, _statement, _params=None):
+        self.executed_statements.append(_statement)
         rows = self.execute_results.pop(0) if self.execute_results else []
         return _FakeScalarResult(rows)
 
@@ -896,7 +898,9 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
                     "display_name": "Codex remote MCP",
                     "allowed_scopes": ["read", "write"],
                     "metadata": {"owner": "codex"},
-                    "client_type": "confidential_web",
+                    "client_type": "public",
+                    "oauth_client_id": "opaque-public-id",
+                    "token_endpoint_auth_method": "none",
                     "redirect_uris": ["https://nebulaios.example.com/oauth/callback"],
                     "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
                     "authorization_code_enabled": True,
@@ -923,7 +927,9 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
     assert payload["clients"][0]["client_key"] == "codex-remote"
     assert payload["clients"][0]["request_count"] == 3
     assert payload["clients"][0]["denied_count"] == 1
-    assert payload["clients"][0]["client_type"] == "confidential_web"
+    assert payload["clients"][0]["client_type"] == "public"
+    assert payload["clients"][0]["client_id"] == "tenant-a:opaque-public-id"
+    assert payload["clients"][0]["token_endpoint_auth_method"] == "none"
     assert payload["clients"][0]["redirect_uris"] == ["https://nebulaios.example.com/oauth/callback"]
     assert payload["clients"][0]["allowed_resources"] == ["https://api.palace.sarvent.cloud/api/v1"]
     assert payload["clients"][0]["authorization_code_enabled"] is True
@@ -931,6 +937,9 @@ def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None
     assert "read -rsp" in payload["config_snippets"]["oauth_token_command"]
     assert [scope["value"] for scope in payload["scope_catalog"]] == list(ALL_MCP_OPERATION_SCOPES)
     assert any(scope["description"] for scope in payload["scope_catalog"] if scope["value"] == "write:workspace")
+    list_query = str(session.executed_statements[0])
+    assert "c.oauth_client_id" in list_query
+    assert "c.token_endpoint_auth_method" in list_query
 
 
 def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
