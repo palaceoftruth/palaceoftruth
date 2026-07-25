@@ -126,7 +126,6 @@ SESSION_CONTEXT_DECISION_CLAIM_FIELDS = (
     "metadata",
 )
 SESSION_CONTEXT_DECISION_CLAIM_METADATA_FIELDS = (
-    "operator_reviews",
     "review_action",
     "reviewed_at",
     "reviewed_by",
@@ -135,11 +134,8 @@ SESSION_CONTEXT_DECISION_CLAIM_METADATA_FIELDS = (
     "task_id",
     "pr_url",
     "run_id",
-    "source_url",
     "policy_limited",
-    "policy_reason",
     "policy_scope",
-    "policy_source",
 )
 SECRET_PARAM_KEYS = {
     "api_key",

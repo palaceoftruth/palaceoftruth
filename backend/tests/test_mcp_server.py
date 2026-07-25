@@ -3746,7 +3746,12 @@ def test_compact_startup_decision_claims_keeps_non_authoritative_states_warning_
                 "support_state": support_state,
                 "audit_state": audit_state,
                 "promotion_status": promotion_status,
-                "metadata": {"body": "raw body must not leak", "policy_limited": audit_state == "policy_limited"},
+                "metadata": {
+                    "body": "raw body must not leak",
+                    "operator_reviews": [{"rationale": "nested raw rationale must not leak"}],
+                    "policy_reason": "free-text policy reason must not leak",
+                    "policy_limited": audit_state == "policy_limited",
+                },
                 "sources": [{"source_span": {"text": "raw span must not leak"}}],
             }
             for index, (claim_status, support_state, audit_state, promotion_status) in enumerate(states)
@@ -3759,6 +3764,8 @@ def test_compact_startup_decision_claims_keeps_non_authoritative_states_warning_
     assert [entry["key"] for entry in result["warnings"]] == [f"decision:{index}" for index in range(len(states))]
     assert "raw body must not leak" not in json.dumps(result)
     assert "raw span must not leak" not in json.dumps(result)
+    assert "nested raw rationale must not leak" not in json.dumps(result)
+    assert "free-text policy reason must not leak" not in json.dumps(result)
 
 
 def test_get_wakeup_context_returns_partial_warning_when_source_trust_unavailable() -> None:
