@@ -2,6 +2,8 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.relationships import RelationshipService
 from app.services.relationship_telemetry import (
     relationship_telemetry_snapshot,
@@ -238,3 +240,56 @@ def test_exact_candidate_observation_never_persists_an_edge() -> None:
     assert result.edge_persisted is False
     assert db.execute_calls == []
     assert db.committed is True
+
+
+@pytest.mark.parametrize(
+    ("confidence", "expected_persisted"),
+    [(0.69, False), (0.7, True)],
+)
+def test_extraction_threshold_is_configurable_at_boundary(
+    monkeypatch,
+    confidence: float,
+    expected_persisted: bool,
+) -> None:
+    source = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Source",
+        summary="Source summary",
+        tenant_id="tenant-a",
+        status="ready",
+        deleted_at=None,
+    )
+    target = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Target",
+        summary="Target summary",
+        tenant_id="tenant-a",
+        status="ready",
+        deleted_at=None,
+    )
+    db = _ExactPairDB(source, target)
+    service = RelationshipService(
+        db,
+        embedder=object(),
+        llm=_DetailedFakeLLM(relationship="related_to", confidence=confidence),
+    )
+    monkeypatch.setattr(
+        "app.services.relationships.settings.relationship_extraction_min_confidence",
+        0.7,
+    )
+
+    result = asyncio.run(
+        service.classify_candidate(
+            source.id,
+            target.id,
+            tenant_id="tenant-a",
+        )
+    )
+
+    assert result.relationship == "related_to"
+    assert result.confidence == confidence
+    assert result.validation_outcome == "valid"
+    assert result.persistence_min_confidence == 0.7
+    assert result.persistence_threshold_rejected is (not expected_persisted)
+    assert result.edge_persisted is expected_persisted
+    assert len(db.execute_calls) == int(expected_persisted)

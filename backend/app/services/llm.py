@@ -8,9 +8,13 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
 from openai import AsyncOpenAI, RateLimitError, APIStatusError, BadRequestError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.config import settings
+from app.services.relationship_classification_contract import (
+    RELATIONSHIP_PROMPT_VERSION,
+    build_relationship_classification_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,45 @@ class TagExtraction(BaseModel):
 
 
 class RelationshipClassification(BaseModel):
-    relationship: Literal["related_to", "expands_on", "contradicts", "prerequisite_of", "example_of", "none"] = "none"
-    confidence: float = 0.0
+    relationship_exists: bool = Field(
+        description="True only when Item A has a direct, material semantic relationship to Item B."
+    )
+    relationship: Literal[
+        "related_to",
+        "expands_on",
+        "contradicts",
+        "prerequisite_of",
+        "example_of",
+        "none",
+    ] = Field(description="The directional relationship of Item A to Item B, or none.")
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the selected relationship label, from 0 to 1.",
+    )
+
+    @model_validator(mode="after")
+    def validate_relationship_exists(self) -> "RelationshipClassification":
+        if self.relationship_exists != (self.relationship != "none"):
+            raise ValueError("relationship_exists must agree with relationship")
+        return self
+
+
+@dataclass(frozen=True)
+class LLMGenerationSettings:
+    """Explicit sampling identity for reproducible bounded evaluations."""
+
+    max_tokens: int = 1024
+    temperature: float | None = None
+    seed: int | None = None
+
+    def request_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"max_tokens": self.max_tokens}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.seed is not None:
+            kwargs["seed"] = self.seed
+        return kwargs
 
 
 @dataclass
@@ -52,6 +93,11 @@ class LLMCompletionDiagnostics:
     """Bounded, non-sensitive completion metadata for operational callers."""
 
     provider: Literal["openrouter", "openai", "unknown"] = "unknown"
+    upstream_provider: str = "unknown"
+    requested_model: str = "unknown"
+    actual_model: str = "unknown"
+    temperature: float | None = None
+    seed: int | None = None
     fallback_used: bool = False
     retry_count: int = 0
 
@@ -62,9 +108,15 @@ class RelationshipClassificationResult:
     confidence: float
     validation_outcome: Literal["valid", "empty", "malformed", "timeout", "provider_error"]
     provider: Literal["openrouter", "openai", "unknown"]
+    upstream_provider: str
+    requested_model: str
+    model: str
     retry_provider: Literal["openrouter", "openai", "unknown"]
     fallback_used: bool
     retry_count: int
+    prompt_version: str
+    temperature: float | None
+    seed: int | None
 
 
 class BrowserAction(BaseModel):
@@ -223,6 +275,18 @@ class LLMService:
         }
 
     @staticmethod
+    def _record_completion_identity(
+        diagnostics: LLMCompletionDiagnostics | None,
+        response: Any,
+        *,
+        fallback_model: str,
+    ) -> None:
+        if diagnostics is None:
+            return
+        diagnostics.actual_model = str(getattr(response, "model", None) or "unknown")
+        diagnostics.upstream_provider = str(getattr(response, "provider", None) or "unknown")
+
+    @staticmethod
     def _completion_content(response: Any) -> str:
         choices = getattr(response, "choices", None)
         if not choices:
@@ -248,8 +312,13 @@ class LLMService:
         self,
         messages: list[dict],
         response_format: dict[str, Any] | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
     ) -> Any:
-        response = await self._create_openai_completion(messages, response_format=response_format)
+        response = await self._create_openai_completion(
+            messages,
+            response_format=response_format,
+            generation_settings=generation_settings,
+        )
         try:
             self._completion_content(response)
         except _MalformedCompletionResponse as exc:
@@ -261,11 +330,13 @@ class LLMService:
         current_model: str,
         messages: list[dict],
         response_format: dict[str, Any] | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
     ) -> Any:
+        generation_settings = generation_settings or LLMGenerationSettings()
         kwargs: dict[str, Any] = {
             "model": current_model,
             "messages": messages,
-            "max_tokens": 1024,
+            **generation_settings.request_kwargs(),
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
@@ -277,11 +348,13 @@ class LLMService:
         self,
         messages: list[dict],
         response_format: dict[str, Any] | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
     ) -> Any:
+        generation_settings = generation_settings or LLMGenerationSettings()
         kwargs: dict[str, Any] = {
             "model": _OPENAI_FALLBACK_MODEL,
             "messages": messages,
-            "max_tokens": 1024,
+            **generation_settings.request_kwargs(),
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
@@ -294,8 +367,15 @@ class LLMService:
         model: str | None = None,
         response_format: dict[str, Any] | None = None,
         diagnostics: LLMCompletionDiagnostics | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
+        allow_model_fallbacks: bool = True,
     ) -> Any:
-        chain = self._build_model_chain(model)
+        generation_settings = generation_settings or LLMGenerationSettings()
+        chain = self._build_model_chain(model) if allow_model_fallbacks else [model or self.default_model]
+        if diagnostics is not None:
+            diagnostics.requested_model = chain[0]
+            diagnostics.temperature = generation_settings.temperature
+            diagnostics.seed = generation_settings.seed
         for attempt, current_model in enumerate(chain):
             transient_retry = 0
             while True:
@@ -306,8 +386,14 @@ class LLMService:
                         current_model,
                         messages,
                         response_format=response_format,
+                        generation_settings=generation_settings,
                     )
                     self._completion_content(response)
+                    self._record_completion_identity(
+                        diagnostics,
+                        response,
+                        fallback_model=current_model,
+                    )
                     return response
                 except _MalformedCompletionResponse as exc:
                     if transient_retry < _OPENROUTER_TRANSIENT_RETRIES:
@@ -335,6 +421,15 @@ class LLMService:
                         if diagnostics is not None:
                             diagnostics.fallback_used = True
                         break
+                    if not allow_model_fallbacks:
+                        logger.warning(
+                            "Calibrated model %s returned malformed completion after %d retries; failing closed",
+                            current_model,
+                            transient_retry,
+                        )
+                        raise RuntimeError(
+                            f"calibrated model {current_model} returned malformed completions"
+                        ) from exc
                     logger.warning(
                         "OpenRouter chain returned malformed completion from %s after %d retries, falling back to %s",
                         current_model,
@@ -344,10 +439,17 @@ class LLMService:
                     if diagnostics is not None:
                         diagnostics.provider = "openai"
                         diagnostics.fallback_used = True
-                    return await self._create_validated_openai_completion(
+                    response = await self._create_validated_openai_completion(
                         messages,
                         response_format=response_format,
+                        generation_settings=generation_settings,
                     )
+                    self._record_completion_identity(
+                        diagnostics,
+                        response,
+                        fallback_model=_OPENAI_FALLBACK_MODEL,
+                    )
+                    return response
                 except (RateLimitError, APIStatusError) as e:
                     status = getattr(e, "status_code", 429)
                     if (
@@ -382,6 +484,15 @@ class LLMService:
                         if diagnostics is not None:
                             diagnostics.fallback_used = True
                         break
+                    if not allow_model_fallbacks:
+                        logger.warning(
+                            "Calibrated model %s failed with status %d; failing closed",
+                            current_model,
+                            status,
+                        )
+                        raise RuntimeError(
+                            f"calibrated model {current_model} failed with status {status}"
+                        ) from e
                     logger.warning(
                         "OpenRouter chain exhausted (%s %d), falling back to %s",
                         current_model,
@@ -391,10 +502,17 @@ class LLMService:
                     if diagnostics is not None:
                         diagnostics.provider = "openai"
                         diagnostics.fallback_used = True
-                    return await self._create_validated_openai_completion(
+                    response = await self._create_validated_openai_completion(
                         messages,
                         response_format=response_format,
+                        generation_settings=generation_settings,
                     )
+                    self._record_completion_identity(
+                        diagnostics,
+                        response,
+                        fallback_model=_OPENAI_FALLBACK_MODEL,
+                    )
+                    return response
         raise RuntimeError("LLM completion failed after all retries and fallbacks")
 
     async def complete(
@@ -403,12 +521,20 @@ class LLMService:
         model: str | None = None,
         *,
         diagnostics: LLMCompletionDiagnostics | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
+        allow_model_fallbacks: bool = True,
     ) -> str:
         """Send chat completion with automatic fallback through the model chain.
 
         Order: OpenRouter primary → OpenRouter fallbacks → OpenAI gpt-4o-mini (direct).
         """
-        response = await self._complete_with_fallback(messages, model=model, diagnostics=diagnostics)
+        response = await self._complete_with_fallback(
+            messages,
+            model=model,
+            diagnostics=diagnostics,
+            generation_settings=generation_settings,
+            allow_model_fallbacks=allow_model_fallbacks,
+        )
         return self._completion_content(response)
 
     async def complete_structured(
@@ -419,6 +545,8 @@ class LLMService:
         schema_name: str,
         model: str | None = None,
         diagnostics: LLMCompletionDiagnostics | None = None,
+        generation_settings: LLMGenerationSettings | None = None,
+        allow_model_fallbacks: bool = True,
     ) -> BaseModel:
         """Request schema-shaped JSON, with one legacy-parser retry for older providers."""
         response_format = {
@@ -435,13 +563,21 @@ class LLMService:
                 model=model,
                 response_format=response_format,
                 diagnostics=diagnostics,
+                generation_settings=generation_settings,
+                allow_model_fallbacks=allow_model_fallbacks,
             )
             return schema.model_validate(_json_loads_from_response(self._completion_content(response)))
         except Exception as exc:
             logger.warning("Structured LLM response failed for %s; retrying legacy JSON parse: %s", schema_name, exc)
             if diagnostics is not None:
                 diagnostics.retry_count += 1
-            raw = await self.complete(messages, model=model, diagnostics=diagnostics)
+            raw = await self.complete(
+                messages,
+                model=model,
+                diagnostics=diagnostics,
+                generation_settings=generation_settings,
+                allow_model_fallbacks=allow_model_fallbacks,
+            )
             return schema.model_validate(_json_loads_from_response(raw))
 
     async def complete_with_usage(
@@ -582,33 +718,27 @@ class LLMService:
         Diagnostics intentionally exclude prompts, item identifiers, and provider messages
         so metrics and logs remain safe for tenant content.
         """
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You classify relationships between knowledge base items. "
-                    "Respond ONLY with valid JSON: "
-                    '{"relationship": "related_to", "confidence": 0.85}\n'
-                    "Valid relationship types: related_to, expands_on, contradicts, "
-                    "prerequisite_of, example_of, none"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f'ITEM A: "{title_a}"\nSummary: {summary_a}\n\n'
-                    f'ITEM B: "{title_b}"\nSummary: {summary_b}\n\n'
-                    "What is the relationship of Item A to Item B?"
-                ),
-            },
-        ]
+        messages = build_relationship_classification_messages(
+            title_a,
+            summary_a,
+            title_b,
+            summary_b,
+        )
+        generation_settings = LLMGenerationSettings(
+            max_tokens=256,
+            temperature=settings.relationship_classification_temperature,
+            seed=settings.relationship_classification_seed,
+        )
         diagnostics = LLMCompletionDiagnostics()
         try:
             data = await self.complete_structured(
                 messages,
                 RelationshipClassification,
-                schema_name="relationship_classification",
+                schema_name="relationship_classification_v3",
+                model=settings.relationship_classification_model,
                 diagnostics=diagnostics,
+                generation_settings=generation_settings,
+                allow_model_fallbacks=False,
             )
             assert isinstance(data, RelationshipClassification)
             outcome: Literal["valid", "empty", "malformed", "timeout", "provider_error"] = (
@@ -616,14 +746,20 @@ class LLMService:
             )
             return RelationshipClassificationResult(
                 relationship=data.relationship,
-                confidence=max(0.0, min(data.confidence, 1.0)),
+                confidence=data.confidence,
                 validation_outcome=outcome,
                 provider=diagnostics.provider,
+                upstream_provider=diagnostics.upstream_provider,
+                requested_model=diagnostics.requested_model,
+                model=diagnostics.actual_model,
                 # Current bounded retry loops execute against OpenRouter models;
                 # direct OpenAI is a terminal fallback, never a retry target.
                 retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
                 fallback_used=diagnostics.fallback_used,
                 retry_count=diagnostics.retry_count,
+                prompt_version=RELATIONSHIP_PROMPT_VERSION,
+                temperature=diagnostics.temperature,
+                seed=diagnostics.seed,
             )
         except (asyncio.TimeoutError, TimeoutError) as exc:
             logger.warning("Relationship classification timed out: %s", exc)
@@ -639,9 +775,15 @@ class LLMService:
             confidence=0.0,
             validation_outcome=outcome,
             provider=diagnostics.provider,
+            upstream_provider=diagnostics.upstream_provider,
+            requested_model=diagnostics.requested_model,
+            model=diagnostics.actual_model,
             retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
             fallback_used=diagnostics.fallback_used,
             retry_count=diagnostics.retry_count,
+            prompt_version=RELATIONSHIP_PROMPT_VERSION,
+            temperature=diagnostics.temperature,
+            seed=diagnostics.seed,
         )
 
     async def get_browser_actions(self, page_text: str, url: str) -> list[dict]:

@@ -61,6 +61,14 @@ jobs:
             tests/test_detect_hermes_plugin_release.py \
             tests/test_agent_plugin_release.py \
             tests/test_agent_plugin_manifests.py \
+            tests/test_llm_service.py \
+            tests/test_relationship_classification_contract.py \
+            tests/test_relationship_precision_eval.py \
+            tests/test_relationship_service.py \
+            tests/test_relationship_canary_fixture.py \
+            tests/test_relationship_canary_contract.py \
+            tests/test_relationship_canary_api.py \
+            tests/test_relationship_canary_v2_candidate.py \
             tests/test_retrieval_replay.py \
             tests/test_search.py \
             tests/test_memory_service.py \
