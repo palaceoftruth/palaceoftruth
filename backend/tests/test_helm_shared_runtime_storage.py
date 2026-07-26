@@ -80,6 +80,20 @@ def _container_env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {entry["name"]: entry for entry in container.get("env", [])}
 
 
+def _workload_commands(value: Any) -> list[str]:
+    commands: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"command", "args"} and isinstance(child, list):
+                commands.append(" ".join(str(part) for part in child))
+            else:
+                commands.extend(_workload_commands(child))
+    elif isinstance(value, list):
+        for child in value:
+            commands.extend(_workload_commands(child))
+    return commands
+
+
 def _arg_value(args: list[str], name: str) -> str:
     try:
         index = args.index(name)
@@ -391,9 +405,20 @@ def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods()
     for name in ("palaceoftruth-valkey-primary", "palaceoftruth-valkey-replica"):
         stateful_set = _manifest_by_kind_name(manifests, "StatefulSet", name)
         assert "updateStrategy" not in stateful_set["spec"]
-        rendered = yaml.safe_dump(stateful_set)
-        assert "SENTINEL RESET" not in rendered
-        assert "sentinel failover" not in rendered.lower()
+
+    # Fail closed across every rendered workload command, including probes,
+    # lifecycle hooks, init containers, and Helm hook Jobs.
+    workload_commands = "\n".join(_workload_commands(manifests)).lower()
+    for forbidden in (
+        "sentinel reset",
+        "sentinel remove",
+        "sentinel failover",
+        "flushall",
+        "flushdb",
+        "kubectl delete",
+        "kubectl patch",
+    ):
+        assert forbidden not in workload_commands
 
 
 def test_sentinel_checksum_ignores_release_metadata_but_tracks_runtime_config(tmp_path: Path) -> None:
