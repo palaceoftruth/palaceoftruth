@@ -7,16 +7,23 @@ metadata:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
 spec:
   replicas: {{ include "palaceoftruth.valkeySentinelCount" . }}
+  # Sentinel persists learned peers by rewriting sentinel.conf. Never overlap
+  # old and new generations: a new pod can otherwise relearn terminated peer
+  # IPs from the old generation and retain a split topology indefinitely.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: {{ include "palaceoftruth.valkeySentinelName" . }}
   template:
     metadata:
       annotations:
-        checksum/valkey-sentinel-config: {{ include (print $.Template.BasePath "/valkey-sentinel-configmap.yaml") . | sha256sum }}
+        checksum/valkey-sentinel-config: {{ include "palaceoftruth.valkeySentinelConfig" . | sha256sum }}
       labels:
         app: {{ include "palaceoftruth.valkeySentinelName" . }}
-        {{- include "palaceoftruth.labels" . | nindent 8 }}
+        # Pod labels intentionally exclude chart/app versions so unrelated
+        # Palace releases do not recycle the Sentinel ensemble.
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
       # Spread sentinel pods across nodes to prevent a single node failure
       # from taking out quorum.
@@ -55,9 +62,19 @@ spec:
               mountPath: /data
           readinessProbe:
             exec:
-              command: ["valkey-cli", "-p", "26379", "ping"]
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  test "$(valkey-cli -p 26379 --raw ping)" = "PONG"
+                  valkey-cli -p 26379 --raw sentinel ckquorum {{ .Values.valkey.sentinel.masterName | quote }} | grep -q '^OK'
+                  set -- $(valkey-cli -p 26379 --raw sentinel get-master-addr-by-name {{ .Values.valkey.sentinel.masterName | quote }})
+                  test "$#" -eq 2
+                  test "$(valkey-cli -h "$1" -p "$2" --raw role | head -n 1)" = "master"
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             exec:
               command: ["valkey-cli", "-p", "26379", "ping"]
