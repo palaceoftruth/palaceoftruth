@@ -393,6 +393,10 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
         'palace_relationship_extraction_duration_seconds_count{provider="openrouter",validation_outcome="malformed"} 1'
         in body
     )
+    assert (
+        'palace_relationship_extraction_duration_seconds_bucket{le="0.25",provider="openrouter",validation_outcome="malformed"} 1'
+        in body
+    )
     assert 'palace_relationship_edges_extracted_total{provider="openrouter"} 0' in body
     assert (
         'palace_retrieval_requests_total{endpoint="retrieve_agent",outcome="success"} 1'

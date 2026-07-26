@@ -45,6 +45,10 @@ data:
   CHUNK_OVERLAP: {{ .Values.config.chunkOverlap | quote }}
   SEARCH_LIMIT: {{ .Values.config.searchLimit | quote }}
   APP_VERSION: {{ .Chart.AppVersion | quote }}
+  DEPLOYMENT_CLUSTER: {{ .Values.config.deploymentCluster | quote }}
+  DEPLOYMENT_NAMESPACE: {{ .Values.config.deploymentNamespace | quote }}
+  SAR1083_RELATIONSHIP_CANARY_ENABLED: {{ .Values.config.sar1083RelationshipCanaryEnabled | quote }}
+  SAR1083_RELATIONSHIP_CANARY_AUTHORIZATION_ID: {{ .Values.config.sar1083RelationshipCanaryAuthorizationId | quote }}
   RETRIEVAL_CAPTURE_ENABLED: {{ .Values.config.retrievalCaptureEnabled | quote }}
   RETRIEVAL_CAPTURE_PATH: {{ .Values.config.retrievalCapturePath | quote }}
   RETRIEVAL_CAPTURE_QUERY_MODE: {{ .Values.config.retrievalCaptureQueryMode | quote }}

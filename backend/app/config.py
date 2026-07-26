@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     search_limit: int = 10
     upload_artifact_dir: str = "/tmp/palaceoftruth/upload-artifacts"
     app_version: str = ""
+    deployment_cluster: str = ""
+    deployment_namespace: str = ""
+    sar1083_relationship_canary_enabled: bool = False
+    sar1083_relationship_canary_authorization_id: str = ""
 
     # Retrieval capture is an opt-in local artifact for ranking replay. The
     # default stores only query fingerprints, never raw query text.

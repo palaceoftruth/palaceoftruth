@@ -33,6 +33,12 @@ from app.services.bundle import (
     serialize_admin_job,
     tenant_has_state,
 )
+from app.services.relationship_canary import (
+    FIXTURE_SHA256,
+    RelationshipCanaryContractError,
+    live_canary_lock,
+    run_live_canary,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -130,6 +136,27 @@ class RevokeTenantApiKeyResponse(BaseModel):
     tenant_id: str
     revoked: bool
     key: TenantApiKeySummary
+
+
+class Sar1083RelationshipCanaryRequest(BaseModel):
+    authorization_id: str
+    expected_app_version: str
+    fixture_sha256: str
+
+    @field_validator("authorization_id", "expected_app_version", "fixture_sha256")
+    @classmethod
+    def required_canary_fields_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("canary request fields must not be blank")
+        return value
+
+    @field_validator("fixture_sha256")
+    @classmethod
+    def fixture_digest_must_match(cls, value: str) -> str:
+        if value != FIXTURE_SHA256:
+            raise ValueError("fixture_sha256 does not match the compiled canary")
+        return value
 
 
 class TenantApiKeyAuditEventSummary(BaseModel):
@@ -934,3 +961,37 @@ async def cancel_admin_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     await db.commit()
     await db.refresh(job)
     return serialize_admin_job(job)
+
+
+@router.post(
+    "/canaries/sar-1083",
+    dependencies=[Depends(_verify_admin)],
+)
+async def run_sar1083_relationship_canary(
+    request: Request,
+    body: Sar1083RelationshipCanaryRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Run only the compiled, operator-authorized SAR-1083 fixture."""
+
+    try:
+        async with live_canary_lock():
+            return await run_live_canary(
+                db,
+                embedder=request.app.state.embedder,
+                llm=request.app.state.llm,
+                authorization_id=body.authorization_id,
+                expected_app_version=body.expected_app_version,
+            )
+    except RelationshipCanaryContractError as exc:
+        # Contract failures are intentionally sanitized: never echo provider
+        # messages, fixture bodies, credentials, or unrelated tenant content.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "rejected",
+                "task_id": "SAR-1083",
+                "error_class": exc.__class__.__name__,
+                "message": str(exc),
+            },
+        ) from exc

@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir .
 RUN playwright install --with-deps chromium
 COPY app/ app/
 COPY scripts/ scripts/
+COPY tests/fixtures/sar_1083_relationship_canary_fixture.json tests/fixtures/sar_1083_relationship_canary_fixture.json
 COPY alembic/ alembic/
 COPY alembic.ini .
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

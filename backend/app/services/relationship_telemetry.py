@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from collections import defaultdict
 
@@ -10,7 +11,41 @@ _extraction_counts: dict[tuple[str, str, str], int] = defaultdict(int)
 _retry_counts: dict[str, int] = defaultdict(int)
 _duration_sums: dict[tuple[str, str], float] = defaultdict(float)
 _duration_counts: dict[tuple[str, str], int] = defaultdict(int)
+_duration_histograms: dict[tuple[str, str], dict[str, object]] = {}
 _edge_counts: dict[str, int] = defaultdict(int)
+RELATIONSHIP_DURATION_BUCKETS = (
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    30.0,
+    60.0,
+)
+
+
+def _observe_duration(labels: tuple[str, str], value: float) -> None:
+    if not math.isfinite(value) or value < 0:
+        return
+    state = _duration_histograms.setdefault(
+        labels,
+        {
+            "buckets": RELATIONSHIP_DURATION_BUCKETS,
+            "counts": [0] * len(RELATIONSHIP_DURATION_BUCKETS),
+            "count": 0,
+            "sum": 0.0,
+        },
+    )
+    counts = state["counts"]
+    assert isinstance(counts, list)
+    for index, boundary in enumerate(RELATIONSHIP_DURATION_BUCKETS):
+        if value <= boundary:
+            counts[index] += 1
+    state["count"] = int(state["count"]) + 1
+    state["sum"] = float(state["sum"]) + value
 
 
 def record_relationship_extraction(
@@ -35,18 +70,32 @@ def record_relationship_extraction(
     with _lock:
         _extraction_counts[(safe_provider, safe_outcome, fallback)] += 1
         _retry_counts[safe_retry_provider] += max(0, int(retry_count))
-        _duration_sums[labels] += max(0.0, duration_seconds)
+        bounded_duration = max(0.0, duration_seconds)
+        _duration_sums[labels] += bounded_duration
         _duration_counts[labels] += 1
+        _observe_duration(labels, bounded_duration)
         _edge_counts[safe_provider] += max(0, int(edges_extracted))
 
 
-def relationship_telemetry_snapshot() -> dict[str, list[tuple[tuple[str, ...], int | float]]]:
+def relationship_telemetry_snapshot() -> dict[str, list]:
     with _lock:
         return {
             "extractions": [(labels, count) for labels, count in sorted(_extraction_counts.items())],
             "retries": [((provider,), count) for provider, count in sorted(_retry_counts.items())],
             "duration_sums": [(labels, total) for labels, total in sorted(_duration_sums.items())],
             "duration_counts": [(labels, count) for labels, count in sorted(_duration_counts.items())],
+            "duration_histograms": [
+                (
+                    labels,
+                    {
+                        "buckets": tuple(state["buckets"]),
+                        "counts": list(state["counts"]),
+                        "count": state["count"],
+                        "sum": state["sum"],
+                    },
+                )
+                for labels, state in sorted(_duration_histograms.items())
+            ],
             "edges": [((provider,), count) for provider, count in sorted(_edge_counts.items())],
         }
 
@@ -57,4 +106,5 @@ def reset_relationship_telemetry_for_tests() -> None:
         _retry_counts.clear()
         _duration_sums.clear()
         _duration_counts.clear()
+        _duration_histograms.clear()
         _edge_counts.clear()

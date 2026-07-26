@@ -60,6 +60,41 @@ class _FakeLLM:
         return ("related_to", 0.9)
 
 
+class _DetailedFakeLLM:
+    def __init__(self, *, relationship="related_to", confidence=0.9, outcome="valid") -> None:
+        self.relationship = relationship
+        self.confidence = confidence
+        self.outcome = outcome
+
+    async def classify_relationship_detailed(self, *_args):
+        return SimpleNamespace(
+            relationship=self.relationship,
+            confidence=self.confidence,
+            provider="openrouter",
+            retry_provider="openrouter",
+            validation_outcome=self.outcome,
+            fallback_used=False,
+            retry_count=0,
+        )
+
+
+class _ExactPairDB:
+    def __init__(self, source, target) -> None:
+        self.items = {source.id: source, target.id: target}
+        self.execute_calls: list[tuple[str, dict | None]] = []
+        self.committed = False
+
+    async def get(self, _model, key):
+        return self.items.get(key)
+
+    async def execute(self, statement, params=None):
+        self.execute_calls.append((str(statement), params))
+        return _FakeResult(scalar_value=1)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
 def test_relationship_extraction_scopes_queries_to_item_tenant() -> None:
     item_id = uuid.uuid4()
     item = SimpleNamespace(
@@ -125,3 +160,81 @@ def test_relationship_extraction_records_bounded_telemetry() -> None:
     assert snapshot["extractions"] == [(("unknown", "valid", "false"), 1)]
     assert snapshot["edges"] == [(("unknown",), 1)]
     assert snapshot["retries"] == [(("unknown",), 0)]
+
+
+def test_exact_candidate_classification_persists_only_an_allowed_ready_pair() -> None:
+    reset_relationship_telemetry_for_tests()
+    source = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Source",
+        summary="Source summary",
+        tenant_id="sar-1083-canary",
+        status="ready",
+        deleted_at=None,
+    )
+    target = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Target",
+        summary="Target summary",
+        tenant_id="sar-1083-canary",
+        status="ready",
+        deleted_at=None,
+    )
+    db = _ExactPairDB(source, target)
+    service = RelationshipService(db, embedder=object(), llm=_DetailedFakeLLM())
+
+    result = asyncio.run(
+        service.classify_candidate(
+            source.id,
+            target.id,
+            tenant_id="sar-1083-canary",
+            allowed_relationships={"related_to", "expands_on", "example_of"},
+        )
+    )
+
+    assert result.relationship == "related_to"
+    assert result.edge_persisted is True
+    assert len(db.execute_calls) == 1
+    assert db.execute_calls[0][1]["source"] == str(source.id)
+    assert db.execute_calls[0][1]["target"] == str(target.id)
+    assert db.committed is True
+
+
+def test_exact_candidate_observation_never_persists_an_edge() -> None:
+    reset_relationship_telemetry_for_tests()
+    source = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Source",
+        summary="Source summary",
+        tenant_id="sar-1083-canary",
+        status="ready",
+        deleted_at=None,
+    )
+    target = SimpleNamespace(
+        id=uuid.uuid4(),
+        title="Target",
+        summary="Target summary",
+        tenant_id="sar-1083-canary",
+        status="ready",
+        deleted_at=None,
+    )
+    db = _ExactPairDB(source, target)
+    service = RelationshipService(
+        db,
+        embedder=object(),
+        llm=_DetailedFakeLLM(relationship="none", confidence=0.0, outcome="empty"),
+    )
+
+    result = asyncio.run(
+        service.classify_candidate(
+            source.id,
+            target.id,
+            tenant_id="sar-1083-canary",
+            persist=False,
+        )
+    )
+
+    assert result.validation_outcome == "empty"
+    assert result.edge_persisted is False
+    assert db.execute_calls == []
+    assert db.committed is True
