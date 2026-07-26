@@ -50,6 +50,11 @@ config:
   chunkSize: "500"
   chunkOverlap: "50"
   searchLimit: "10"
+  # Fail-closed deployment identity for explicitly authorized bounded canaries.
+  deploymentCluster: ""
+  deploymentNamespace: ""
+  sar1083RelationshipCanaryEnabled: "false"
+  sar1083RelationshipCanaryAuthorizationId: ""
   retrievalCaptureEnabled: "false"
   retrievalCapturePath: "/tmp/palaceoftruth/retrieval-capture.ndjson"
   retrievalCaptureQueryMode: "fingerprint"

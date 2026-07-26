@@ -293,23 +293,16 @@ def _add_memory_runtime_metrics(builder: PrometheusTextBuilder) -> None:
             count,
             {"provider": provider},
         )
-    duration_counts = dict(relationship_snapshot["duration_counts"])
-    for labels, duration_sum in relationship_snapshot["duration_sums"]:
+    for labels, state in relationship_snapshot["duration_histograms"]:
         provider, validation_outcome = labels
-        metric_labels = {"provider": provider, "validation_outcome": validation_outcome}
-        builder.metric(
-            "palace_relationship_extraction_duration_seconds_sum",
-            "Total relationship classification duration by provider and validation outcome.",
-            "counter",
-            duration_sum,
-            metric_labels,
-        )
-        builder.metric(
-            "palace_relationship_extraction_duration_seconds_count",
-            "Relationship classification duration sample count by provider and validation outcome.",
-            "counter",
-            duration_counts.get(labels, 0),
-            metric_labels,
+        builder.histogram(
+            "palace_relationship_extraction_duration_seconds",
+            "Relationship classification duration by provider and validation outcome.",
+            buckets=state["buckets"],
+            counts=state["counts"],
+            count=state["count"],
+            value_sum=state["sum"],
+            labels={"provider": provider, "validation_outcome": validation_outcome},
         )
     for (provider,), count in relationship_snapshot["edges"]:
         builder.metric(

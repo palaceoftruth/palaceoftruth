@@ -1,7 +1,9 @@
 """Relationship extraction service — centroid similarity + LLM classification."""
 import logging
 import uuid
+from dataclasses import dataclass
 from time import monotonic
+from typing import Collection
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 _MIN_CONFIDENCE = 0.5
 _CANDIDATE_LIMIT = 5
+
+
+@dataclass(frozen=True)
+class RelationshipOperationResult:
+    """Bounded relationship outcome suitable for canary evidence."""
+
+    relationship: str
+    confidence: float
+    validation_outcome: str
+    provider: str
+    retry_provider: str
+    fallback_used: bool
+    retry_count: int
+    duration_seconds: float
+    edge_persisted: bool
 
 
 class RelationshipService:
@@ -98,48 +115,101 @@ class RelationshipService:
         ).fetchall()
 
         for row in rows:
-            if not row.summary:
-                continue
-
-            started_at = monotonic()
-            detailed_classifier = getattr(self.llm, "classify_relationship_detailed", None)
-            if callable(detailed_classifier):
-                classification = await detailed_classifier(item.title, item.summary, row.title, row.summary)
-                rel_type = classification.relationship
-                confidence = classification.confidence
-                provider = classification.provider
-                retry_provider = classification.retry_provider
-                validation_outcome = classification.validation_outcome
-                fallback_used = classification.fallback_used
-                retry_count = classification.retry_count
-            else:
-                # Compatibility for test doubles and custom LLM implementations.
-                rel_type, confidence = await self.llm.classify_relationship(item.title, item.summary, row.title, row.summary)
-                provider = "unknown"
-                retry_provider = "unknown"
-                validation_outcome = "empty" if rel_type == "none" else "valid"
-                fallback_used = False
-                retry_count = 0
-
-            if confidence < _MIN_CONFIDENCE or rel_type == "none":
-                record_relationship_extraction(
-                    provider=provider,
-                    retry_provider=retry_provider,
-                    validation_outcome=validation_outcome,
-                    fallback_used=fallback_used,
-                    retry_count=retry_count,
-                    duration_seconds=monotonic() - started_at,
-                    edges_extracted=0,
+            if row.summary:
+                await self._classify_candidate_records(
+                    source=item,
+                    target=row,
+                    tenant_id=tenant_id,
                 )
-                logger.debug(
-                    "Skipping relationship %s→%s: type=%s confidence=%.2f",
-                    item_id, row.id, rel_type, confidence,
-                )
-                continue
 
-            # Candidate rows can disappear while the LLM call is running, especially
-            # during benchmark cleanup. Lock surviving endpoints and no-op if either
-            # side is gone before inserting the FK-backed relationship row.
+        await self.db.commit()
+
+    async def classify_candidate(
+        self,
+        source_item_id: uuid.UUID,
+        target_item_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        persist: bool = True,
+        allowed_relationships: Collection[str] | None = None,
+    ) -> RelationshipOperationResult:
+        """Classify one exact tenant-scoped pair without candidate discovery."""
+
+        source = await self.db.get(Item, source_item_id)
+        target = await self.db.get(Item, target_item_id)
+        for label, item in (("source", source), ("target", target)):
+            if (
+                item is None
+                or str(item.tenant_id) != tenant_id
+                or item.status != "ready"
+                or item.deleted_at is not None
+                or not item.summary
+            ):
+                raise ValueError(f"{label} item is not a ready canary endpoint")
+        if source_item_id == target_item_id:
+            raise ValueError("relationship endpoints must be different")
+
+        result = await self._classify_candidate_records(
+            source=source,
+            target=target,
+            tenant_id=tenant_id,
+            persist=persist,
+            allowed_relationships=allowed_relationships,
+        )
+        await self.db.commit()
+        return result
+
+    async def _classify_candidate_records(
+        self,
+        *,
+        source,
+        target,
+        tenant_id: str,
+        persist: bool = True,
+        allowed_relationships: Collection[str] | None = None,
+    ) -> RelationshipOperationResult:
+        started_at = monotonic()
+        detailed_classifier = getattr(self.llm, "classify_relationship_detailed", None)
+        if callable(detailed_classifier):
+            classification = await detailed_classifier(
+                source.title,
+                source.summary,
+                target.title,
+                target.summary,
+            )
+            rel_type = classification.relationship
+            confidence = classification.confidence
+            provider = classification.provider
+            retry_provider = classification.retry_provider
+            validation_outcome = classification.validation_outcome
+            fallback_used = classification.fallback_used
+            retry_count = classification.retry_count
+        else:
+            # Compatibility for test doubles and custom LLM implementations.
+            rel_type, confidence = await self.llm.classify_relationship(
+                source.title,
+                source.summary,
+                target.title,
+                target.summary,
+            )
+            provider = "unknown"
+            retry_provider = "unknown"
+            validation_outcome = "empty" if rel_type == "none" else "valid"
+            fallback_used = False
+            retry_count = 0
+
+        duration_seconds = monotonic() - started_at
+        relationship_allowed = allowed_relationships is None or rel_type in allowed_relationships
+        should_persist = (
+            persist
+            and relationship_allowed
+            and confidence >= _MIN_CONFIDENCE
+            and rel_type != "none"
+        )
+        edge_persisted = False
+        if should_persist:
+            # Candidate rows can disappear while the LLM call is running. Lock
+            # surviving endpoints and no-op if either side is no longer ready.
             result = await self.db.execute(sa_text("""
                 WITH endpoints AS (
                     SELECT src.id AS source_item_id, dst.id AS target_item_id
@@ -161,40 +231,49 @@ class RelationshipService:
                 DO UPDATE SET confidence = EXCLUDED.confidence
                 RETURNING 1
             """), {
-                "source": str(item_id),
-                "target": str(row.id),
+                "source": str(source.id),
+                "target": str(target.id),
                 "tenant_id": tenant_id,
                 "rel": rel_type,
                 "conf": confidence,
             })
-            if result.scalar_one_or_none() is None:
-                record_relationship_extraction(
-                    provider=provider,
-                    retry_provider=retry_provider,
-                    validation_outcome=validation_outcome,
-                    fallback_used=fallback_used,
-                    retry_count=retry_count,
-                    duration_seconds=monotonic() - started_at,
-                    edges_extracted=0,
-                )
-                logger.info(
-                    "Skipped relationship %s→%s: endpoint missing or no longer ready",
-                    item_id,
-                    row.id,
-                )
-                continue
-            record_relationship_extraction(
-                provider=provider,
-                retry_provider=retry_provider,
-                validation_outcome=validation_outcome,
-                fallback_used=fallback_used,
-                retry_count=retry_count,
-                duration_seconds=monotonic() - started_at,
-                edges_extracted=1,
-            )
+            edge_persisted = result.scalar_one_or_none() is not None
+
+        record_relationship_extraction(
+            provider=provider,
+            retry_provider=retry_provider,
+            validation_outcome=validation_outcome,
+            fallback_used=fallback_used,
+            retry_count=retry_count,
+            duration_seconds=duration_seconds,
+            edges_extracted=1 if edge_persisted else 0,
+        )
+        if edge_persisted:
             logger.info(
                 "Stored relationship %s→%s: %s (confidence=%.2f)",
-                item_id, row.id, rel_type, confidence,
+                source.id,
+                target.id,
+                rel_type,
+                confidence,
             )
-
-        await self.db.commit()
+        else:
+            logger.debug(
+                "Skipped relationship %s→%s: type=%s confidence=%.2f persist=%s allowed=%s",
+                source.id,
+                target.id,
+                rel_type,
+                confidence,
+                persist,
+                relationship_allowed,
+            )
+        return RelationshipOperationResult(
+            relationship=rel_type,
+            confidence=confidence,
+            validation_outcome=validation_outcome,
+            provider=provider,
+            retry_provider=retry_provider,
+            fallback_used=fallback_used,
+            retry_count=retry_count,
+            duration_seconds=duration_seconds,
+            edge_persisted=edge_persisted,
+        )
