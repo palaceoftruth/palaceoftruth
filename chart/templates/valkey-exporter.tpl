@@ -26,16 +26,20 @@ process arguments or rendered environment values.
     {{- toYaml $root.Values.valkey.metrics.securityContext | nindent 4 }}
   readinessProbe:
     httpGet:
-      path: /metrics
+      path: {{ $root.Values.valkey.metrics.readinessProbe.path | quote }}
       port: metrics
-    initialDelaySeconds: 5
-    periodSeconds: 10
+    initialDelaySeconds: {{ $root.Values.valkey.metrics.readinessProbe.initialDelaySeconds }}
+    periodSeconds: {{ $root.Values.valkey.metrics.readinessProbe.periodSeconds }}
+    timeoutSeconds: {{ $root.Values.valkey.metrics.readinessProbe.timeoutSeconds }}
+    failureThreshold: {{ $root.Values.valkey.metrics.readinessProbe.failureThreshold }}
   livenessProbe:
     httpGet:
-      path: /metrics
+      path: {{ $root.Values.valkey.metrics.livenessProbe.path | quote }}
       port: metrics
-    initialDelaySeconds: 10
-    periodSeconds: 20
+    initialDelaySeconds: {{ $root.Values.valkey.metrics.livenessProbe.initialDelaySeconds }}
+    periodSeconds: {{ $root.Values.valkey.metrics.livenessProbe.periodSeconds }}
+    timeoutSeconds: {{ $root.Values.valkey.metrics.livenessProbe.timeoutSeconds }}
+    failureThreshold: {{ $root.Values.valkey.metrics.livenessProbe.failureThreshold }}
   {{- if $secretConfigured }}
   volumeMounts:
     - name: valkey-exporter-password

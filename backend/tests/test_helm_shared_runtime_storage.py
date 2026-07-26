@@ -554,6 +554,20 @@ def test_standalone_valkey_exporter_renders_hardened_sidecar_and_metrics_service
     }
     assert exporter["resources"]["requests"] == {"memory": "16Mi", "cpu": "10m"}
     assert exporter["resources"]["limits"] == {"memory": "64Mi", "cpu": "100m"}
+    assert exporter["readinessProbe"] == {
+        "httpGet": {"path": "/health", "port": "metrics"},
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10,
+        "timeoutSeconds": 3,
+        "failureThreshold": 3,
+    }
+    assert exporter["livenessProbe"] == {
+        "httpGet": {"path": "/health", "port": "metrics"},
+        "initialDelaySeconds": 10,
+        "periodSeconds": 20,
+        "timeoutSeconds": 3,
+        "failureThreshold": 3,
+    }
     assert "volumeMounts" not in exporter
     assert service["metadata"]["labels"]["palaceoftruth.io/valkey-metrics"] == "true"
     assert service["spec"]["ports"][-1] == {
@@ -587,6 +601,10 @@ def test_sentinel_valkey_exporters_and_bounded_servicemonitor_render_when_enable
         )
         assert _container_env(exporter)["REDIS_ADDR"]["value"] == expected_target
         assert "args" not in exporter
+        assert exporter["readinessProbe"]["httpGet"] == {"path": "/health", "port": "metrics"}
+        assert exporter["livenessProbe"]["httpGet"] == {"path": "/health", "port": "metrics"}
+        assert exporter["readinessProbe"]["timeoutSeconds"] == 3
+        assert exporter["livenessProbe"]["timeoutSeconds"] == 3
 
     for service_name in (
         "palaceoftruth-valkey-primary",
