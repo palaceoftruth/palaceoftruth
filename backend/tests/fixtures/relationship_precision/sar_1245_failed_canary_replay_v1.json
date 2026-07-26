@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "output_set_id": "sar-1083-live-unrelated-replay-v1",
+  "fixture_id": "sar-1245-relationship-precision-locked-v1",
+  "fixture_sha256": "fefd35466fdecaf1ace9b3e8b2c874f4d1a92a7dce909903c73e1e7a80ab5b10",
+  "capture_completeness": {
+    "known_relationship_order": false,
+    "known_none_confidences": false,
+    "known_actual_model": false,
+    "source_comment": "abba29de-e85d-40ca-a77c-0b12b858e1f0"
+  },
+  "outputs": [
+    {"case_id":"known-01","relationship":"related_to","confidence":0.65,"schema_valid":true,"identity":null},
+    {"case_id":"known-02","relationship":"related_to","confidence":0.65,"schema_valid":true,"identity":null},
+    {"case_id":"known-03","relationship":"related_to","confidence":0.45,"schema_valid":true,"identity":null},
+    {"case_id":"known-04","relationship":"none","confidence":0.0,"schema_valid":true,"identity":null},
+    {"case_id":"known-05","relationship":"none","confidence":0.0,"schema_valid":true,"identity":null},
+    {"case_id":"known-06","relationship":"none","confidence":0.0,"schema_valid":true,"identity":null},
+    {"case_id":"known-07","relationship":"none","confidence":0.0,"schema_valid":true,"identity":null}
+  ]
+}

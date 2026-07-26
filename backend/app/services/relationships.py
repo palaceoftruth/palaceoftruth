@@ -9,6 +9,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embedding_profile import resolve_embedding_profile
+from app.config import settings
 from app.models.item import Item
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
@@ -17,7 +18,6 @@ from app.services.search import _embedding_search_plan
 
 logger = logging.getLogger(__name__)
 
-_MIN_CONFIDENCE = 0.5
 _CANDIDATE_LIMIT = 5
 
 
@@ -29,9 +29,17 @@ class RelationshipOperationResult:
     confidence: float
     validation_outcome: str
     provider: str
+    upstream_provider: str
+    requested_model: str
+    model: str
     retry_provider: str
     fallback_used: bool
     retry_count: int
+    prompt_version: str
+    temperature: float | None
+    seed: int | None
+    persistence_min_confidence: float
+    persistence_threshold_rejected: bool
     duration_seconds: float
     edge_persisted: bool
 
@@ -180,10 +188,16 @@ class RelationshipService:
             rel_type = classification.relationship
             confidence = classification.confidence
             provider = classification.provider
+            upstream_provider = getattr(classification, "upstream_provider", "unknown")
+            requested_model = getattr(classification, "requested_model", "unknown")
+            model = getattr(classification, "model", "unknown")
             retry_provider = classification.retry_provider
             validation_outcome = classification.validation_outcome
             fallback_used = classification.fallback_used
             retry_count = classification.retry_count
+            prompt_version = getattr(classification, "prompt_version", "unknown")
+            temperature = getattr(classification, "temperature", None)
+            seed = getattr(classification, "seed", None)
         else:
             # Compatibility for test doubles and custom LLM implementations.
             rel_type, confidence = await self.llm.classify_relationship(
@@ -193,17 +207,27 @@ class RelationshipService:
                 target.summary,
             )
             provider = "unknown"
+            upstream_provider = "unknown"
+            requested_model = "unknown"
+            model = "unknown"
             retry_provider = "unknown"
             validation_outcome = "empty" if rel_type == "none" else "valid"
             fallback_used = False
             retry_count = 0
+            prompt_version = "unknown"
+            temperature = None
+            seed = None
 
         duration_seconds = monotonic() - started_at
         relationship_allowed = allowed_relationships is None or rel_type in allowed_relationships
+        persistence_min_confidence = settings.relationship_extraction_min_confidence
+        persistence_threshold_rejected = (
+            rel_type != "none" and confidence < persistence_min_confidence
+        )
         should_persist = (
             persist
             and relationship_allowed
-            and confidence >= _MIN_CONFIDENCE
+            and not persistence_threshold_rejected
             and rel_type != "none"
         )
         edge_persisted = False
@@ -271,9 +295,17 @@ class RelationshipService:
             confidence=confidence,
             validation_outcome=validation_outcome,
             provider=provider,
+            upstream_provider=upstream_provider,
+            requested_model=requested_model,
+            model=model,
             retry_provider=retry_provider,
             fallback_used=fallback_used,
             retry_count=retry_count,
+            prompt_version=prompt_version,
+            temperature=temperature,
+            seed=seed,
+            persistence_min_confidence=persistence_min_confidence,
+            persistence_threshold_rejected=persistence_threshold_rejected,
             duration_seconds=duration_seconds,
             edge_persisted=edge_persisted,
         )

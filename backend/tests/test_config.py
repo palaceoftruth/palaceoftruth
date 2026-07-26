@@ -62,6 +62,32 @@ def test_settings_keep_openai_embedding_profile_defaults() -> None:
     assert settings.embedding_profile_name == "openai-text-embedding-3-small-1536"
 
 
+def test_settings_expose_frozen_relationship_classifier_profile() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.relationship_classification_model == "openai/gpt-4.1"
+    assert settings.relationship_classification_temperature == 0.0
+    assert settings.relationship_classification_seed == 1083
+    assert settings.relationship_extraction_min_confidence == 0.7
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("relationship_classification_temperature", 2.1, "RELATIONSHIP_CLASSIFICATION_TEMPERATURE"),
+        ("relationship_classification_seed", -1, "RELATIONSHIP_CLASSIFICATION_SEED"),
+        ("relationship_extraction_min_confidence", 1.1, "RELATIONSHIP_EXTRACTION_MIN_CONFIDENCE"),
+    ],
+)
+def test_settings_reject_invalid_relationship_classifier_profile(
+    field: str,
+    value,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        config.Settings(**_settings_kwargs(**{field: value}))
+
+
 def test_settings_reject_unknown_embedding_provider() -> None:
     with pytest.raises(ValidationError, match="EMBEDDING_PROVIDER"):
         config.Settings(**_settings_kwargs(embedding_provider="unknown"))

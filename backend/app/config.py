@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_default_model: str = "minimax/minimax-m2.7"
     openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
+    relationship_classification_model: str = "openai/gpt-4.1"
+    relationship_classification_temperature: float = 0.0
+    relationship_classification_seed: int = 1083
+    relationship_extraction_min_confidence: float = 0.7
 
     # API auth
     api_key: str
@@ -194,6 +198,12 @@ class Settings(BaseSettings):
             raise ValueError("ASSEMBLYAI_POLL_INTERVAL_SECONDS must be greater than 0")
         if self.transcription_max_parallel_chunks < 1:
             raise ValueError("TRANSCRIPTION_MAX_PARALLEL_CHUNKS must be at least 1")
+        if not 0 <= self.relationship_classification_temperature <= 2:
+            raise ValueError("RELATIONSHIP_CLASSIFICATION_TEMPERATURE must be between 0 and 2")
+        if self.relationship_classification_seed < 0:
+            raise ValueError("RELATIONSHIP_CLASSIFICATION_SEED must be non-negative")
+        if not 0 <= self.relationship_extraction_min_confidence <= 1:
+            raise ValueError("RELATIONSHIP_EXTRACTION_MIN_CONFIDENCE must be between 0 and 1")
         webpage_scraper_provider = self.webpage_scraper_provider.strip().lower().replace("_", "-")
         if webpage_scraper_provider not in {"local", "firecrawl-cloud", "firecrawl-self-hosted"}:
             raise ValueError(

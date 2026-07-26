@@ -16,6 +16,10 @@ data:
   {{- end }}
   OPENROUTER_DEFAULT_MODEL: {{ .Values.config.openrouterDefaultModel | quote }}
   OPENROUTER_FALLBACK_MODELS: {{ .Values.config.openrouterFallbackModels | quote }}
+  RELATIONSHIP_CLASSIFICATION_MODEL: {{ .Values.config.relationshipClassificationModel | quote }}
+  RELATIONSHIP_CLASSIFICATION_TEMPERATURE: {{ .Values.config.relationshipClassificationTemperature | quote }}
+  RELATIONSHIP_CLASSIFICATION_SEED: {{ .Values.config.relationshipClassificationSeed | quote }}
+  RELATIONSHIP_EXTRACTION_MIN_CONFIDENCE: {{ .Values.config.relationshipExtractionMinConfidence | quote }}
   CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
   EMBEDDING_PROVIDER: {{ include "palaceoftruth.embeddingProvider" . | quote }}
   EMBEDDING_MODEL: {{ include "palaceoftruth.embeddingModel" . | quote }}

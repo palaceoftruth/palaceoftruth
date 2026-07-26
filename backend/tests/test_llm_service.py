@@ -6,7 +6,13 @@ import httpx
 import pytest
 from openai import APIStatusError
 
-from app.services.llm import BrowserActions, LLMService, TagExtraction, _strict_json_schema
+from app.services.llm import (
+    BrowserActions,
+    LLMCompletionDiagnostics,
+    LLMService,
+    TagExtraction,
+    _strict_json_schema,
+)
 
 
 class _FakeCompletionsAPI:
@@ -34,6 +40,8 @@ def _completion_response(
     *,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    model: str = "resolved/test-model",
+    provider: str = "test-upstream",
 ):
     usage = None
     if prompt_tokens is not None and completion_tokens is not None:
@@ -45,7 +53,24 @@ def _completion_response(
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
         usage=usage,
+        model=model,
+        provider=provider,
     )
+
+
+def test_completion_identity_fails_closed_when_provider_omits_actual_model() -> None:
+    diagnostics = LLMCompletionDiagnostics()
+    response = _completion_response("ok")
+    del response.model
+
+    LLMService._record_completion_identity(
+        diagnostics,
+        response,
+        fallback_model="requested/model",
+    )
+
+    assert diagnostics.actual_model == "unknown"
+    assert diagnostics.upstream_provider == "test-upstream"
 
 
 def _malformed_completion_response():
@@ -373,40 +398,71 @@ async def test_generate_tags_retries_legacy_parse_for_fenced_prose_json(llm_serv
 
 
 @pytest.mark.asyncio
-async def test_classify_relationship_clamps_invalid_confidence(llm_service) -> None:
+async def test_classify_relationship_rejects_out_of_range_confidence(llm_service) -> None:
     service, openrouter_completions, _openai_completions = llm_service
     openrouter_completions.outcomes = [
-        _completion_response('{"relationship": "expands_on", "confidence": 4.2}')
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "expands_on", "confidence": 4.2}'
+        ),
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "expands_on", "confidence": 4.2}'
+        ),
     ]
 
     result = await service.classify_relationship("A", "summary", "B", "summary")
 
-    assert result == ("expands_on", 1.0)
+    assert result == ("none", 0.0)
 
 
 @pytest.mark.asyncio
 async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm_service) -> None:
     service, openrouter_completions, _openai_completions = llm_service
     openrouter_completions.outcomes = [
-        _completion_response('<think>compare sources</think>\n{"relationship": "related_to", "confidence": 0.85}')
+        _completion_response(
+            '<think>compare sources</think>\n'
+            '{"relationship_exists": true, "relationship": "related_to", "confidence": 0.85}',
+            model="openai/gpt-4.1",
+            provider="OpenAI",
+        )
     ]
 
-    result = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+    result = await service.classify_relationship_detailed(
+        "Northwind incident",
+        "Errors affected Northwind release.",
+        "Northwind rollback",
+        "The Northwind release was reverted.",
+    )
 
     assert result.relationship == "related_to"
     assert result.confidence == 0.85
     assert result.validation_outcome == "valid"
     assert result.provider == "openrouter"
+    assert result.upstream_provider == "OpenAI"
+    assert result.requested_model == "openai/gpt-4.1"
+    assert result.model == "openai/gpt-4.1"
+    assert result.prompt_version == "relationship-classification-v3"
+    assert result.temperature == 0.0
+    assert result.seed == 1083
     assert result.fallback_used is False
     assert result.retry_count == 0
+    call = openrouter_completions.calls[0]
+    assert call["max_tokens"] == 256
+    assert call["temperature"] == 0.0
+    assert call["seed"] == 1083
+    assert call["response_format"]["json_schema"]["name"] == "relationship_classification_v3"
+    assert call["extra_body"] == {"provider": {"require_parameters": True}}
 
 
 @pytest.mark.asyncio
 async def test_classify_relationship_detailed_reports_malformed_and_timeout(llm_service, monkeypatch) -> None:
     service, openrouter_completions, _openai_completions = llm_service
     openrouter_completions.outcomes = [
-        _completion_response('{"relationship": "unsupported", "confidence": 0.7}'),
-        _completion_response('{"relationship": "unsupported", "confidence": 0.7}'),
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "unsupported", "confidence": 0.7}'
+        ),
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "unsupported", "confidence": 0.7}'
+        ),
     ]
 
     malformed = await service.classify_relationship_detailed("A", "summary", "B", "summary")
@@ -425,17 +481,64 @@ async def test_classify_relationship_detailed_reports_malformed_and_timeout(llm_
 
 
 @pytest.mark.asyncio
-async def test_classify_relationship_detailed_attributes_openrouter_retries_after_direct_fallback(llm_service) -> None:
+async def test_classify_relationship_detailed_fails_closed_without_uncalibrated_fallback(
+    llm_service,
+) -> None:
     service, openrouter_completions, openai_completions = llm_service
     openrouter_completions.outcomes = [_malformed_completion_response() for _ in range(9)]
-    openai_completions.outcomes = [_completion_response('{"relationship": "related_to", "confidence": 0.9}')]
+    openai_completions.outcomes = [
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "related_to", "confidence": 0.9}',
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+        )
+    ]
 
-    result = await service.classify_relationship_detailed("A", "summary", "B", "summary")
+    result = await service.classify_relationship_detailed(
+        "Northwind incident",
+        "Errors affected Northwind release.",
+        "Northwind rollback",
+        "The Northwind release was reverted.",
+    )
 
-    assert result.provider == "openai"
+    assert result.relationship == "none"
+    assert result.confidence == 0.0
+    assert result.validation_outcome == "provider_error"
+    assert result.provider == "openrouter"
+    assert result.requested_model == "openai/gpt-4.1"
+    assert result.model == "unknown"
+    assert result.upstream_provider == "unknown"
     assert result.retry_provider == "openrouter"
-    assert result.fallback_used is True
-    assert result.retry_count == 6
+    assert result.fallback_used is False
+    assert result.retry_count == 5
+    assert len(openrouter_completions.calls) == 6
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status_code", "request_count"), [(401, 2), (403, 2), (429, 6)])
+async def test_relationship_classifier_provider_errors_never_use_generic_fallbacks(
+    llm_service,
+    status_code: int,
+    request_count: int,
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _api_status_error(status_code) for _ in range(request_count)
+    ]
+
+    result = await service.classify_relationship_detailed(
+        "Northwind incident",
+        "Errors affected Northwind release.",
+        "Northwind rollback",
+        "The Northwind release was reverted.",
+    )
+
+    assert result.relationship == "none"
+    assert result.validation_outcome == "provider_error"
+    assert result.fallback_used is False
+    assert len(openrouter_completions.calls) == request_count
+    assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
