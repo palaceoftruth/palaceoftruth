@@ -24,10 +24,11 @@ def _render_chart(
     *set_args: str,
     release_name: str = "palaceoftruth",
     namespace: str | None = None,
+    chart_dir: Path = CHART_DIR,
 ) -> list[dict[str, Any]]:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
-    command = ["helm", "template", release_name, str(CHART_DIR)]
+    command = ["helm", "template", release_name, str(chart_dir)]
     if namespace is not None:
         command.extend(["--namespace", namespace])
     for arg in set_args:
@@ -77,6 +78,20 @@ def _temp_mount(deployment: dict[str, Any]) -> dict[str, Any]:
 
 def _container_env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {entry["name"]: entry for entry in container.get("env", [])}
+
+
+def _workload_commands(value: Any) -> list[str]:
+    commands: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"command", "args"} and isinstance(child, list):
+                commands.append(" ".join(str(part) for part in child))
+            else:
+                commands.extend(_workload_commands(child))
+    elif isinstance(value, list):
+        for child in value:
+            commands.extend(_workload_commands(child))
+    return commands
 
 
 def _arg_value(args: list[str], name: str) -> str:
@@ -362,6 +377,77 @@ def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
     assert _arg_value(args, "--dependency-timeout-seconds") == "300"
     assert _arg_value(args, "--dependency-interval-seconds") == "5"
     assert _arg_value(args, "--log-tail-lines") == "3000"
+
+
+def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods() -> None:
+    manifests = _render_chart("valkey.sentinel.enabled=true")
+    sentinel = _deployment_by_name(manifests, "palaceoftruth-valkey-sentinel")
+    sentinel_template = sentinel["spec"]["template"]
+
+    assert sentinel["spec"]["strategy"] == {"type": "Recreate"}
+    assert sentinel_template["metadata"]["labels"] == {
+        "app": "palaceoftruth-valkey-sentinel",
+        "app.kubernetes.io/name": "palaceoftruth",
+        "app.kubernetes.io/instance": "palaceoftruth",
+    }
+    assert set(sentinel_template["metadata"]["annotations"]) == {"checksum/valkey-sentinel-config"}
+
+    readiness = sentinel_template["spec"]["containers"][0]["readinessProbe"]
+    readiness_script = readiness["exec"]["command"][-1]
+    assert 'sentinel ckquorum "mymaster"' in readiness_script
+    assert 'sentinel get-master-addr-by-name "mymaster"' in readiness_script
+    assert '--raw role' in readiness_script
+    assert readiness["timeoutSeconds"] == 3
+    assert readiness["failureThreshold"] == 3
+
+    # The repair is Sentinel-only. The Valkey primary and replica retain their
+    # normal StatefulSet update strategies and receive no reset/failover command.
+    for name in ("palaceoftruth-valkey-primary", "palaceoftruth-valkey-replica"):
+        stateful_set = _manifest_by_kind_name(manifests, "StatefulSet", name)
+        assert "updateStrategy" not in stateful_set["spec"]
+
+    # Fail closed across every rendered workload command, including probes,
+    # lifecycle hooks, init containers, and Helm hook Jobs.
+    workload_commands = "\n".join(_workload_commands(manifests)).lower()
+    for forbidden in (
+        "sentinel reset",
+        "sentinel remove",
+        "sentinel failover",
+        "flushall",
+        "flushdb",
+        "kubectl delete",
+        "kubectl patch",
+    ):
+        assert forbidden not in workload_commands
+
+
+def test_sentinel_checksum_ignores_release_metadata_but_tracks_runtime_config(tmp_path: Path) -> None:
+    baseline = _render_chart("valkey.sentinel.enabled=true")
+    updated_chart = tmp_path / "chart"
+    shutil.copytree(CHART_DIR, updated_chart)
+    chart_yaml_path = updated_chart / "Chart.yaml"
+    chart_yaml = yaml.safe_load(chart_yaml_path.read_text())
+    chart_yaml["version"] = "9.9.9"
+    chart_yaml["appVersion"] = "unrelated-app-release"
+    chart_yaml_path.write_text(yaml.safe_dump(chart_yaml, sort_keys=False))
+    chart_metadata_change = _render_chart("valkey.sentinel.enabled=true", chart_dir=updated_chart)
+    config_change = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "valkey.sentinel.downAfterMilliseconds=7000",
+    )
+
+    def checksum(manifests: list[dict[str, Any]]) -> str:
+        deployment = _deployment_by_name(manifests, "palaceoftruth-valkey-sentinel")
+        return deployment["spec"]["template"]["metadata"]["annotations"]["checksum/valkey-sentinel-config"]
+
+    baseline_template = _deployment_by_name(baseline, "palaceoftruth-valkey-sentinel")["spec"]["template"]
+    metadata_change_template = _deployment_by_name(
+        chart_metadata_change,
+        "palaceoftruth-valkey-sentinel",
+    )["spec"]["template"]
+    assert metadata_change_template == baseline_template
+    assert checksum(chart_metadata_change) == checksum(baseline)
+    assert checksum(config_change) != checksum(baseline)
 
 
 def test_palace_sarvent_oauth_staging_values_keep_fallback_and_verify_oauth_identity() -> None:

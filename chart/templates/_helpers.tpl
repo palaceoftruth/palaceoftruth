@@ -76,6 +76,33 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Writable Sentinel configuration content. Keep this in one helper so the pod
+template checksum changes only when the Sentinel runtime configuration changes,
+not when chart metadata changes.
+*/}}
+{{- define "palaceoftruth.valkeySentinelConfig" -}}
+# Valkey Sentinel requires this when the monitored primary is configured
+# with Kubernetes service DNS instead of a literal IP address.
+sentinel resolve-hostnames yes
+
+# Monitor the primary. Quorum = minimum sentinels that must agree the
+# primary is down before triggering a failover.
+sentinel monitor {{ .Values.valkey.sentinel.masterName }} {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379 {{ .Values.valkey.sentinel.quorum }}
+
+# How long (ms) a primary can be unreachable before it's considered down.
+sentinel down-after-milliseconds {{ .Values.valkey.sentinel.masterName }} {{ .Values.valkey.sentinel.downAfterMilliseconds }}
+
+# Max time (ms) allowed for a failover to complete.
+sentinel failover-timeout {{ .Values.valkey.sentinel.masterName }} {{ .Values.valkey.sentinel.failoverTimeout }}
+
+# How many replicas to reconfigure in parallel after a failover.
+sentinel parallel-syncs {{ .Values.valkey.sentinel.masterName }} 1
+
+# Sentinel listens on this port.
+port 26379
+{{- end }}
+
+{{/*
 CNPG postgres cluster name.
 Defaults to <fullname>-postgres when postgres.clusterName is empty.
 */}}
