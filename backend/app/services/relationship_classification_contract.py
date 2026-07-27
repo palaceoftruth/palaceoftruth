@@ -6,7 +6,7 @@ import hashlib
 import json
 
 
-RELATIONSHIP_PROMPT_VERSION = "relationship-classification-v3"
+RELATIONSHIP_PROMPT_VERSION = "relationship-classification-v4"
 RELATIONSHIP_SCHEMA_VERSION = 2
 RELATIONSHIP_SYSTEM_PROMPT = (
     f"Relationship classification contract: {RELATIONSHIP_PROMPT_VERSION}.\n"
@@ -28,9 +28,10 @@ RELATIONSHIP_SYSTEM_PROMPT = (
     "- none: no direct material relationship exists.\n"
     "Direction matters: the label always describes Item A relative to Item B. "
     "Do not reverse expands_on, prerequisite_of, or example_of.\n"
-    "Before returning a non-none label, state internally the concrete subject or dependency "
-    "that links the items. If the only link is wrapper language such as 'note', 'record', "
-    "'canary', 'weekly', or 'test', return none.\n"
+    "Before returning a non-none label, identify the primary subject of each item independently, "
+    "then name the concrete shared subject or dependency. If the primary subjects are different, "
+    "return none even when both items use the same synthetic, canary, test, note, record, weekly, "
+    "or metadata wrapper language. Do not infer a relationship from their shared wrapper.\n"
     "Return only the structured response required by the schema.\n"
     "Hard-negative examples: an alpine snowpack measurement and baroque flute fingering "
     "have no relationship; two weekly test records about chimney mortar and aquarium salinity "
@@ -44,7 +45,7 @@ RELATIONSHIP_SYSTEM_PROMPT = (
     '"relationship": "example_of", "confidence": 0.95}.'
 )
 # Pinned below after any reviewed prompt-version change.
-RELATIONSHIP_PROMPT_SHA256 = "29a94d7ea504d82fea8af88509ce911555ba4ff1b134a01231eb785b91b5902d"
+RELATIONSHIP_PROMPT_SHA256 = "a97fb6f25d0e14934bb29019d2e1ccee0641df9b78968ea32ce8dfebc6cf6394"
 
 def relationship_prompt_sha256() -> str:
     return hashlib.sha256(RELATIONSHIP_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
