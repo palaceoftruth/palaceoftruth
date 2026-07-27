@@ -10,6 +10,8 @@ from app.services.relationship_canary_contract import (
 from app.services.relationship_canary_v2_candidate import (
     CANDIDATE_FIXTURE_ID,
     CANDIDATE_FIXTURE_SHA256,
+    CANDIDATE_PROMPT_SHA256,
+    CANDIDATE_PROMPT_VERSION,
     CANDIDATE_TENANT_ID,
     RelationshipCanaryV2CandidateError,
     build_v2_candidate_plan,
@@ -39,8 +41,8 @@ def test_v2_candidate_retains_failed_hard_negative_and_prompt_identity() -> None
     assert unrelated["records"][0]["title"] == "Canary seasonal palette"
     assert unrelated["records"][1]["title"] == "Canary archival index"
     assert "unrelated to colors" in unrelated["records"][1]["summary"]
-    assert fixture["artifact_metadata"]["prompt_version"] == "relationship-classification-v3"
-    assert len(fixture["artifact_metadata"]["prompt_sha256"]) == 64
+    assert fixture["artifact_metadata"]["prompt_version"] == CANDIDATE_PROMPT_VERSION
+    assert fixture["artifact_metadata"]["prompt_sha256"] == CANDIDATE_PROMPT_SHA256
     assert fixture["quality_gate"]["independent_negative_pairs"] == 59
     assert fixture["quality_gate"]["maximum_false_positives"] == 0
 

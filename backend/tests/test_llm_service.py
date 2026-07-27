@@ -440,7 +440,7 @@ async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm
     assert result.upstream_provider == "OpenAI"
     assert result.requested_model == "openai/gpt-4.1"
     assert result.model == "openai/gpt-4.1"
-    assert result.prompt_version == "relationship-classification-v3"
+    assert result.prompt_version == "relationship-classification-v4"
     assert result.temperature == 0.0
     assert result.seed == 1083
     assert result.fallback_used is False

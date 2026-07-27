@@ -7,16 +7,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.services.relationship_classification_contract import (
-    RELATIONSHIP_PROMPT_SHA256,
-    RELATIONSHIP_PROMPT_VERSION,
-)
 from app.services.relationship_canary_contract import FIXTURE_ID as V1_FIXTURE_ID
 
 
 CANDIDATE_FIXTURE_ID = "sar-1083-relationship-telemetry-canary-v2-candidate"
 CANDIDATE_FIXTURE_SHA256 = "e5d9e0a29a6d20066c6e5131b03a10b652c431bdba819cf00fe701fbf4a890f0"
 CANDIDATE_TENANT_ID = "sar-1083-canary-v2"
+# This candidate is immutable evidence for the v3 precision-gate review. It must
+# not silently inherit the live classifier contract after a later prompt revision.
+CANDIDATE_PROMPT_VERSION = "relationship-classification-v3"
+CANDIDATE_PROMPT_SHA256 = "29a94d7ea504d82fea8af88509ce911555ba4ff1b134a01231eb785b91b5902d"
 CANDIDATE_FIXTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "tests"
@@ -51,8 +51,8 @@ def load_v2_candidate(path: Path = CANDIDATE_FIXTURE_PATH) -> dict[str, Any]:
         "network_calls": False,
         "raw_content_reported": False,
         "cleanup": "retain",
-        "prompt_version": RELATIONSHIP_PROMPT_VERSION,
-        "prompt_sha256": RELATIONSHIP_PROMPT_SHA256,
+        "prompt_version": CANDIDATE_PROMPT_VERSION,
+        "prompt_sha256": CANDIDATE_PROMPT_SHA256,
     }:
         raise RelationshipCanaryV2CandidateError("candidate safety metadata mismatch")
     if [case.get("id") for case in payload.get("cases", [])] != [
@@ -78,8 +78,8 @@ def build_v2_candidate_plan() -> dict[str, Any]:
         "fixture_id": CANDIDATE_FIXTURE_ID,
         "fixture_sha256": CANDIDATE_FIXTURE_SHA256,
         "tenant_id": CANDIDATE_TENANT_ID,
-        "prompt_version": RELATIONSHIP_PROMPT_VERSION,
-        "prompt_sha256": RELATIONSHIP_PROMPT_SHA256,
+        "prompt_version": CANDIDATE_PROMPT_VERSION,
+        "prompt_sha256": CANDIDATE_PROMPT_SHA256,
         "quality_gate": fixture["quality_gate"],
         "record_count": 6,
         "mutations_performed": 0,
