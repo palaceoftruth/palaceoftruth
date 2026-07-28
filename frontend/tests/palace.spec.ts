@@ -866,6 +866,132 @@ test.describe("Palace smoke", () => {
     await expect(page.getByText("Evidence only. This panel cannot change rooms, memberships, or redirects.")).toBeVisible();
   });
 
+  test("control tower compares a selected room pair without mutation controls", async ({ page }, testInfo) => {
+    const firstRoomId = "2a4edc17-9ed2-48e6-bb39-9d11695f6b1e";
+    const secondRoomId = "f68e9854-9981-4691-b883-3d9e502c6fd2";
+    const clusterRequests: Array<{ method: string; url: string }> = [];
+    const candidate = {
+      room_id: firstRoomId,
+      room_name: "Pricing Narrative",
+      room_stable_key: "product-growth:pricing-narrative",
+      candidate_room_id: secondRoomId,
+      candidate_room_name: "Pricing Objections",
+      candidate_stable_key: "product-growth:pricing-objections",
+      wing_id: "wing-product-growth",
+      wing_name: "Product / Growth",
+      score: 0.81,
+      reasons: ["shared tags", "shared drawer references"],
+      shared_tags: ["pricing", "sales"],
+      shared_drawer_item_ids: ["item-pricing-brief"],
+    };
+    const tower = {
+      tenant_id: "default", dirty_generation: 0, indexed_generation: 0, backlog_generation: 0,
+      active_palace_run: null,
+      memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+      webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+      fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+      diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+      wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+      sync_sources: [], sync_runs: [], palace_runs: [],
+    };
+    await mockPalaceControlTower(page, tower);
+    await page.unroute("**/api/v1/palace/room-clusters");
+    await page.route("**/api/v1/palace/room-clusters**", async (route) => {
+      const request = route.request();
+      clusterRequests.push({ method: request.method(), url: request.url() });
+      await route.fulfill({ json: {
+        response_version: "room-cluster-review/v1",
+        evidence_signature: "sha256:selected-pair-evidence",
+        generated_at: new Date().toISOString(),
+        candidate_count: 1,
+        candidates: [candidate],
+        evaluated_rooms: 2,
+        total_rooms: 2,
+        truncated: false,
+        warnings: [],
+        selected_comparison: {
+          rooms: [
+            { id: firstRoomId, name: "Pricing Narrative", stable_key: "product-growth:pricing-narrative", slug: "pricing-narrative", wing_id: "wing-product-growth", wing_name: "Product / Growth", state: "active", redirect_room_id: null, lineage_parent_room_id: null },
+            { id: secondRoomId, name: "Pricing Objections", stable_key: "product-growth:pricing-objections", slug: "pricing-objections", wing_id: "wing-product-growth", wing_name: "Product / Growth", state: "active", redirect_room_id: null, lineage_parent_room_id: null },
+          ],
+          evidence: [
+            { logical_item_ids: ["item-pricing-brief", "item-pricing-plan"], membership_item_ids: ["item-pricing-brief"], membership_row_count: 2, automatic_membership_count: 1, pinned_membership_count: 1, tags: ["pricing", "sales"], tunnel_count: 1, freshness: { membership_generation: 4, closet_generation: 4, snapshot_generation: 4, tunnel_generation: 4, membership_status: "fresh", closet_status: "fresh", snapshot_status: "fresh", tunnel_status: "fresh" } },
+            { logical_item_ids: ["item-pricing-brief"], membership_item_ids: ["item-pricing-brief"], membership_row_count: 1, automatic_membership_count: 1, pinned_membership_count: 0, tags: ["pricing", "sales"], tunnel_count: 1, freshness: { membership_generation: 4, closet_generation: 3, snapshot_generation: 4, tunnel_generation: 4, membership_status: "fresh", closet_status: "stale", snapshot_status: "fresh", tunnel_status: "fresh" } },
+          ],
+          exact_name_match: false,
+          normalized_name_match: false,
+          shared_logical_item_ids: ["item-pricing-brief"],
+          shared_membership_item_ids: ["item-pricing-brief"],
+          shared_tags: ["pricing", "sales"],
+          tunnels: [{ source_room_id: firstRoomId, target_room_id: secondRoomId, tunnel_type: "related", strength: 0.8, activation_count: 3, stability: 0.9 }],
+          score: 0.81,
+          reasons: ["shared logical items", "shared tags"],
+          cross_wing: false,
+          classification: "likely_duplicate",
+          warnings: ["Closet freshness is stale for Pricing Objections."],
+          scan_bounds: { candidate_count: 1, candidates: [candidate], evaluated_rooms: 2, total_rooms: 2, truncated: false },
+          evidence_signature: "sha256:selected-comparison-evidence",
+        },
+      } });
+    });
+
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+    await page.getByRole("button", { name: "Inspect pair evidence" }).click();
+
+    await expect(page.getByRole("heading", { name: "Selected pair comparison" })).toBeVisible();
+    await expect(page.getByText("Likely duplicate")).toBeVisible();
+    await expect(page.getByText("Pricing Narrative", { exact: true })).toBeVisible();
+    await expect(page.getByText("Pricing Objections", { exact: true })).toBeVisible();
+    await expect(page.getByText("1 logical items · 1 membership items · 2 tags")).toBeVisible();
+    await expect(page.getByText("related · 80% strength · 3 activations · 90% stability")).toBeVisible();
+    await expect(page.getByText("Closet freshness is stale for Pricing Objections.")).toBeVisible();
+    await expect(page.getByText("Read-only", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /merge|redirect|delete|apply/i })).toHaveCount(0);
+    await expect.poll(() => clusterRequests.length).toBeGreaterThanOrEqual(2);
+    expect(clusterRequests.every(({ method }) => method === "GET")).toBe(true);
+    expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${firstRoomId}`);
+    expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${secondRoomId}`);
+
+    const comparison = page.locator("section[aria-labelledby='selected-pair-heading']");
+    await comparison.screenshot({ path: testInfo.outputPath("sar-1255-selected-pair-desktop.png") });
+    await page.setViewportSize({ width: 390, height: 820 });
+    await comparison.scrollIntoViewIfNeeded();
+    await expectNoHorizontalOverflow(page);
+    await comparison.screenshot({ path: testInfo.outputPath("sar-1255-selected-pair-mobile.png") });
+  });
+
+  test("control tower labels bounded stale room-cluster evidence and an empty result", async ({ page }) => {
+    await mockPalaceControlTower(page, {
+      tenant_id: "default", dirty_generation: 0, indexed_generation: 0, backlog_generation: 0,
+      active_palace_run: null,
+      memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+      webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+      fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+      diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+      wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+      sync_sources: [], sync_runs: [], palace_runs: [],
+    });
+    await page.unroute("**/api/v1/palace/room-clusters");
+    await page.route("**/api/v1/palace/room-clusters", async (route) => {
+      await route.fulfill({ json: {
+        response_version: "room-cluster-review/v1",
+        evidence_signature: "sha256:bounded-stale-evidence",
+        generated_at: "2026-01-01T00:00:00Z",
+        candidate_count: 0,
+        candidates: [],
+        evaluated_rooms: 20,
+        total_rooms: 84,
+        truncated: true,
+        warnings: ["Inventory is bounded; additional active rooms were not evaluated."],
+      } });
+    });
+
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+    await expect(page.getByText("Evidence may be stale")).toBeVisible();
+    await expect(page.getByText("Inventory is truncated; this review is not a complete room inventory.")).toBeVisible();
+    await expect(page.getByText("No likely duplicate rooms are being surfaced for human review.")).toBeVisible();
+  });
+
   test("control tower shows loading and source trust error states", async ({ page }) => {
     await page.route("**/api/v1/palace/control-tower", async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 150));

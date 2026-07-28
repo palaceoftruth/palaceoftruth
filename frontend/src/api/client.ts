@@ -361,7 +361,12 @@ export const api = {
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
 
-  getPalaceRoomClusterReview: () => req<PalaceRoomClusterReview>("/palace/room-clusters"),
+  getPalaceRoomClusterReview: (selectedRoomIds?: readonly [string, string]) => {
+    const query = new URLSearchParams();
+    selectedRoomIds?.forEach((roomId) => query.append("selected_room_ids", roomId));
+    const suffix = query.size ? `?${query}` : "";
+    return req<PalaceRoomClusterReview>(`/palace/room-clusters${suffix}`);
+  },
 
   listPalaceSourceResources: () => req<PalaceSourceResourceListResponse>("/palace/source-resources"),
 

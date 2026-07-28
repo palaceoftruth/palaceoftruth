@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Clipboard, Loader2, Pause, Pencil, RadioTower, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowLeft, Clipboard, Eye, Loader2, Pause, Pencil, RadioTower, RefreshCw, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
@@ -112,6 +112,11 @@ function formatCandidateScore(score: number): string {
   return `${Math.round(score * 100)}%`;
 }
 
+function evidenceIsStale(generatedAt: string): boolean {
+  const generatedAtMs = new Date(generatedAt).getTime();
+  return Number.isNaN(generatedAtMs) || Date.now() - generatedAtMs > 10 * 60 * 1000;
+}
+
 function sourceFreshnessClass(freshness: PalaceSourceResourceSummary["freshness"]): string {
   if (freshness === "current") return "border-emerald-700/50 bg-emerald-950/30 text-emerald-100";
   if (freshness === "due" || freshness === "unknown") return "border-amber-700/50 bg-amber-950/30 text-amber-100";
@@ -215,6 +220,70 @@ function SecretSafeSnippet({
   );
 }
 
+function SelectedPairEvidence({
+  review,
+}: {
+  review: PalaceRoomClusterReview;
+}) {
+  const comparison = review.selected_comparison;
+  if (!comparison) {
+    return <p className="mt-3 text-xs text-rose-200" role="status">Selected pair evidence was not returned by the review service.</p>;
+  }
+  const classification = comparison.classification.split("_").join(" ");
+
+  return (
+    <div className="mt-4 space-y-4 text-sm">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {comparison.rooms.map((room, index) => (
+          <div key={room.id} className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+            <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">Room {index + 1}</p>
+            <p className="mt-1 break-words font-medium text-zinc-100">{room.name}</p>
+            <p className="mt-1 break-all text-xs text-zinc-500">{room.stable_key}</p>
+            <p className="mt-1 text-xs text-zinc-400">{room.wing_name} · {room.state}</p>
+          </div>
+        ))}
+      </div>
+      <dl className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        <div><dt className="text-zinc-500">Classification</dt><dd className="mt-1 font-medium capitalize text-amber-100">{classification}</dd></div>
+        <div><dt className="text-zinc-500">Confidence</dt><dd className="mt-1 text-zinc-200">{formatCandidateScore(comparison.score)}</dd></div>
+        <div><dt className="text-zinc-500">Coverage</dt><dd className="mt-1 text-zinc-200">{comparison.scan_bounds.evaluated_rooms} / {comparison.scan_bounds.total_rooms} rooms</dd></div>
+        <div><dt className="text-zinc-500">Name comparison</dt><dd className="mt-1 text-zinc-200">{comparison.exact_name_match ? "Exact" : comparison.normalized_name_match ? "Normalized" : "Distinct"}</dd></div>
+      </dl>
+      <div className="grid gap-3 lg:grid-cols-2">
+        {comparison.evidence.map((evidence, index) => {
+          const room = comparison.rooms[index];
+          return (
+            <div key={room?.id ?? index} className="rounded-xl border border-zinc-800 p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">{room?.name ?? `Room ${index + 1}`} evidence</p>
+              <p className="mt-2 text-xs text-zinc-300">{evidence.logical_item_ids.length} logical items · {evidence.membership_row_count} memberships ({evidence.automatic_membership_count} automatic, {evidence.pinned_membership_count} pinned)</p>
+              <p className="mt-1 text-xs text-zinc-300">{evidence.tags.length} tags · {evidence.tunnel_count} tunnels</p>
+              <p className="mt-2 text-xs text-zinc-500">Freshness: membership {evidence.freshness.membership_status}, closet {evidence.freshness.closet_status}, snapshot {evidence.freshness.snapshot_status}, tunnels {evidence.freshness.tunnel_status}</p>
+            </div>
+          );
+        })}
+      </div>
+      <div className="rounded-xl border border-zinc-800 p-3">
+        <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">Shared evidence</p>
+        <p className="mt-2 text-xs text-zinc-300">{comparison.shared_logical_item_ids.length} logical items · {comparison.shared_membership_item_ids.length} membership items · {comparison.shared_tags.length} tags</p>
+        <ul className="mt-2 space-y-1 text-xs text-zinc-300">
+          {comparison.reasons.map((reason) => <li key={reason}>Signal: {reason}</li>)}
+          {comparison.shared_tags.map((tag) => <li key={tag}>Shared tag: {tag}</li>)}
+        </ul>
+      </div>
+      <div className="rounded-xl border border-zinc-800 p-3">
+        <p className="text-xs uppercase tracking-[0.16em] text-zinc-500">Direct tunnels</p>
+        {comparison.tunnels.length ? <ul className="mt-2 space-y-1 text-xs text-zinc-300">{comparison.tunnels.map((tunnel) => <li key={`${tunnel.source_room_id}-${tunnel.target_room_id}-${tunnel.tunnel_type}`}>{tunnel.tunnel_type} · {formatCandidateScore(tunnel.strength)} strength · {tunnel.activation_count} activations · {formatCandidateScore(tunnel.stability)} stability</li>)}</ul> : <p className="mt-2 text-xs text-zinc-400">No direct tunnels were returned for this pair.</p>}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+        <span className="break-all">Evidence {comparison.evidence_signature}</span>
+        <span>{comparison.scan_bounds.truncated ? "Selected evidence is truncated" : "Selected evidence is complete"}</span>
+        <span>{evidenceIsStale(review.generated_at) ? "Evidence may be stale" : `Captured ${relative(review.generated_at)}`}</span>
+      </div>
+      {[...review.warnings, ...comparison.warnings].map((warning) => <p key={warning} className="text-xs text-amber-200">{warning}</p>)}
+    </div>
+  );
+}
+
 export default function PalaceControlTowerPage() {
   const [tower, setTower] = useState<PalaceControlTower | null>(null);
   const [loading, setLoading] = useState(true);
@@ -237,6 +306,10 @@ export default function PalaceControlTowerPage() {
   const [clusterReview, setClusterReview] = useState<PalaceRoomClusterReview | null>(null);
   const [clusterReviewLoading, setClusterReviewLoading] = useState(true);
   const [clusterReviewError, setClusterReviewError] = useState<string | null>(null);
+  const [selectedClusterPair, setSelectedClusterPair] = useState<readonly [string, string] | null>(null);
+  const [selectedClusterReview, setSelectedClusterReview] = useState<PalaceRoomClusterReview | null>(null);
+  const [selectedClusterLoading, setSelectedClusterLoading] = useState(false);
+  const [selectedClusterError, setSelectedClusterError] = useState<string | null>(null);
   const [resourceDetails, setResourceDetails] = useState<Record<string, PalaceSourceResourceDetail>>({});
   const [resourceActionId, setResourceActionId] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -275,6 +348,23 @@ export default function PalaceControlTowerPage() {
     } finally {
       setLoading(false);
       setClusterReviewLoading(false);
+    }
+  };
+
+  const inspectClusterPair = async (candidate: PalaceRoomClusterReview["candidates"][number]) => {
+    const selectedPair: readonly [string, string] = [candidate.room_id, candidate.candidate_room_id];
+    setSelectedClusterPair(selectedPair);
+    setSelectedClusterReview(null);
+    setSelectedClusterError(null);
+    setSelectedClusterLoading(true);
+    try {
+      // This request only narrows the existing review evidence to an explicit
+      // pair. It has no room, membership, or redirect mutation semantics.
+      setSelectedClusterReview(await api.getPalaceRoomClusterReview(selectedPair));
+    } catch (err) {
+      setSelectedClusterError(errorMessage(err));
+    } finally {
+      setSelectedClusterLoading(false);
     }
   };
 
@@ -915,7 +1005,11 @@ export default function PalaceControlTowerPage() {
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
                 <span>{clusterReview.evaluated_rooms} of {clusterReview.total_rooms} active rooms scanned</span>
                 <span className="max-w-full break-all">Evidence {clusterReview.evidence_signature.slice(0, 16)}</span>
+                <span>{evidenceIsStale(clusterReview.generated_at) ? "Evidence may be stale" : `Captured ${relative(clusterReview.generated_at)}`}</span>
               </div>
+            ) : null}
+            {clusterReview?.truncated ? (
+              <p className="mt-2 text-xs text-amber-200" role="status">Inventory is truncated; this review is not a complete room inventory.</p>
             ) : null}
             {clusterReview?.warnings.map((warning) => (
               <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>
@@ -948,6 +1042,14 @@ export default function PalaceControlTowerPage() {
                         ))}
                       </div>
                     ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void inspectClusterPair(candidate)}
+                      className="mt-3 inline-flex items-center gap-2 rounded-full border border-amber-700/60 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:border-amber-500 hover:text-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      Inspect pair evidence
+                    </button>
                   </div>
                 ))}
               </div>
@@ -956,6 +1058,24 @@ export default function PalaceControlTowerPage() {
                 No likely duplicate rooms are being surfaced for human review.
               </p>
             )}
+            {selectedClusterPair ? (
+              <section className="mt-4 rounded-2xl border border-zinc-700 bg-zinc-950/50 p-4" aria-labelledby="selected-pair-heading">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 id="selected-pair-heading" className="text-sm font-medium text-zinc-100">Selected pair comparison</h3>
+                    <p className="mt-1 text-xs text-zinc-500">Read-only evidence for the exact pair selected above. This does not authorize a merge or redirect.</p>
+                  </div>
+                  <span className="rounded-full border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300">Read-only</span>
+                </div>
+                {selectedClusterLoading ? (
+                  <p className="mt-3 text-xs text-zinc-500" role="status">Loading selected pair evidence…</p>
+                ) : selectedClusterError ? (
+                  <p className="mt-3 text-xs text-rose-200" role="status">Selected pair evidence could not be loaded: {selectedClusterError}</p>
+                ) : selectedClusterReview ? (
+                  <SelectedPairEvidence review={selectedClusterReview} />
+                ) : null}
+              </section>
+            ) : null}
           </div>
 
           <form ref={sourceFormRef} onSubmit={handleSourceSubmit} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
