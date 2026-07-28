@@ -369,7 +369,9 @@ uv run python ../scripts/check_database_health.py
 cd ../frontend
 npx playwright install --with-deps chromium
 npm run build
-# Standard stack mode uses https://palaceoftruth.test.
+# Default browser specs start a local Vite server automatically; no manual server is required.
+npm run test:e2e
+# Full-stack mode uses the devinfra stack after `docker compose up --build -d` and `di up palaceoftruth`.
 PLAYWRIGHT_BASE_URL=https://palaceoftruth.test PALACE_FRONTEND_BASE_URL=https://palaceoftruth.test npm run test:e2e
 
 cd ../extension
