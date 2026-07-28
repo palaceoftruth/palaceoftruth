@@ -235,6 +235,8 @@ export default function PalaceControlTowerPage() {
   const [mcpRegistration, setMcpRegistration] = useState<McpOAuthClientRegisterResponse | null>(null);
   const [sourceResources, setSourceResources] = useState<PalaceSourceResourceSummary[]>([]);
   const [clusterReview, setClusterReview] = useState<PalaceRoomClusterReview | null>(null);
+  const [clusterReviewLoading, setClusterReviewLoading] = useState(true);
+  const [clusterReviewError, setClusterReviewError] = useState<string | null>(null);
   const [resourceDetails, setResourceDetails] = useState<Record<string, PalaceSourceResourceDetail>>({});
   const [resourceActionId, setResourceActionId] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -244,13 +246,21 @@ export default function PalaceControlTowerPage() {
   const load = async () => {
     setLoading(true);
     setLoadError(null);
+    setClusterReviewLoading(true);
+    setClusterReviewError(null);
     try {
-      const [controlTower, clients, grants, watchedResources, review] = await Promise.all([
+      // The evidence panel is additive: a transient read failure must not hide
+      // the rest of the operator control surface or suggest a state change.
+      const reviewRequest = api.getPalaceRoomClusterReview().then(
+        (review) => ({ review, error: null }),
+        (error: unknown) => ({ review: null, error: errorMessage(error) }),
+      );
+      const [controlTower, clients, grants, watchedResources, reviewResult] = await Promise.all([
         api.getPalaceControlTower(),
         api.listPalaceMcpClients(),
         api.listPalaceMcpGrants(),
         api.listPalaceSourceResources(),
-        api.getPalaceRoomClusterReview(),
+        reviewRequest,
       ]);
       setTower(controlTower);
       setMcpClients(clients.clients);
@@ -258,11 +268,13 @@ export default function PalaceControlTowerPage() {
       setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
       setMcpGrants(grants.grants);
       setSourceResources(watchedResources.resources);
-      setClusterReview(review);
+      setClusterReview(reviewResult.review);
+      setClusterReviewError(reviewResult.error);
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
+      setClusterReviewLoading(false);
     }
   };
 
@@ -893,7 +905,13 @@ export default function PalaceControlTowerPage() {
               </div>
               <p className="text-xs text-zinc-500">{consolidation?.candidate_count ?? 0} detected</p>
             </div>
-            {clusterReview ? (
+            {clusterReviewLoading ? (
+              <p className="mt-3 text-xs text-zinc-500" role="status">Loading room-cluster evidence…</p>
+            ) : clusterReviewError ? (
+              <p className="mt-3 text-xs text-amber-200" role="status">
+                Room-cluster evidence is temporarily unavailable: {clusterReviewError}
+              </p>
+            ) : clusterReview ? (
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
                 <span>{clusterReview.evaluated_rooms} of {clusterReview.total_rooms} active rooms scanned</span>
                 <span className="max-w-full break-all">Evidence {clusterReview.evidence_signature.slice(0, 16)}</span>

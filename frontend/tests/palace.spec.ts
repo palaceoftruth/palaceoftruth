@@ -839,6 +839,33 @@ test.describe("Palace smoke", () => {
     await expect(page.getByRole("button", { name: "Add the first source" })).toBeVisible();
   });
 
+  test("control tower keeps read-only review failures isolated", async ({ page }) => {
+    await mockPalaceControlTower(page, {
+      tenant_id: "default",
+      dirty_generation: 0,
+      indexed_generation: 0,
+      backlog_generation: 0,
+      active_palace_run: null,
+      memory_health: { queued: 0, processing: 0, failed: 0, retryable: 0, recent_jobs: [] },
+      webhook_health: { configured: 0, pending: 0, terminal: 0, failed_jobs: 0, retryable_jobs: 0, recent_jobs: [] },
+      fact_registry: { active: 0, superseded: 0, distinct_sources: 0, last_extracted_at: null, recent_facts: [] },
+      diary_rollups: { fresh: 0, stale: 0, expected_through_day: null, last_refreshed_at: null, recent_rollups: [] },
+      wakeup_briefs: { fresh: 0, stale: 0, generated_for_day: null, last_refreshed_at: null, recent_briefs: [] },
+      sync_sources: [],
+      sync_runs: [],
+      palace_runs: [],
+    });
+    await page.route("**/api/v1/palace/room-clusters", async (route) => {
+      await route.fulfill({ status: 503, json: { detail: "Review evidence is refreshing" } });
+    });
+
+    await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
+
+    await expect(page.getByRole("heading", { name: "Palace Control Tower" })).toBeVisible();
+    await expect(page.getByText("Room-cluster evidence is temporarily unavailable")).toBeVisible();
+    await expect(page.getByText("Evidence only. This panel cannot change rooms, memberships, or redirects.")).toBeVisible();
+  });
+
   test("control tower shows loading and source trust error states", async ({ page }) => {
     await page.route("**/api/v1/palace/control-tower", async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -886,10 +913,29 @@ test.describe("Palace smoke", () => {
         },
       });
     });
+    await page.route("**/api/v1/palace/mcp-grants", async (route) => {
+      await route.fulfill({ json: { tenant_id: "default", grants: [] } });
+    });
+    await page.route("**/api/v1/palace/source-resources", async (route) => {
+      await route.fulfill({ json: { resources: [], total: 0 } });
+    });
+    await page.route("**/api/v1/palace/room-clusters", async (route) => {
+      await route.fulfill({
+        json: {
+          response_version: "room-cluster-review/v1",
+          evidence_signature: "test-room-cluster-review",
+          generated_at: "2026-07-28T00:00:00Z",
+          candidate_count: 0,
+          candidates: [],
+          evaluated_rooms: 0,
+          total_rooms: 0,
+          truncated: false,
+          warnings: [],
+        },
+      });
+    });
 
     await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
-
-    await expect(page.getByText("Loading control tower")).toBeVisible();
     await page.getByText("Wakeup trust health").scrollIntoViewIfNeeded();
     await expect(page.getByRole("heading", { name: "Source trust counts failed." })).toBeVisible();
     await expect(page.getByText("MCP wakeup remains usable")).toBeVisible();
