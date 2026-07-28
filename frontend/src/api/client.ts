@@ -26,6 +26,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   PalaceControlTower,
+  PalaceRoomClusterReview,
   PalaceOverview,
   PalaceRetrieveResponse,
   PalaceRoomDetail,
@@ -359,6 +360,13 @@ export const api = {
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
+
+  getPalaceRoomClusterReview: (selectedRoomIds?: readonly [string, string]) => {
+    const query = new URLSearchParams();
+    selectedRoomIds?.forEach((roomId) => query.append("selected_room_ids", roomId));
+    const suffix = query.size ? `?${query}` : "";
+    return req<PalaceRoomClusterReview>(`/palace/room-clusters${suffix}`);
+  },
 
   listPalaceSourceResources: () => req<PalaceSourceResourceListResponse>("/palace/source-resources"),
 

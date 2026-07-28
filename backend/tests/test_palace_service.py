@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import uuid
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.item import Item
 from app.models.palace import (
@@ -55,6 +56,7 @@ from app.services.palace import (
     _updated_tunnel_stability,
     _sync_source_locator,
     build_overview,
+    build_room_cluster_review,
     create_sync_source,
     create_or_get_palace_run,
     build_room_artifact_health,
@@ -1196,6 +1198,189 @@ async def test_find_consolidation_candidates_reports_bounded_control_tower_scan(
     assert summary.truncated is True
     assert summary.candidate_count == 1
     assert summary.candidates[0].room_id == room_a.id
+
+
+@pytest.mark.asyncio
+async def test_build_room_cluster_review_is_deterministic_and_performs_no_writes() -> None:
+    wing_id = uuid.uuid4()
+    shared_item_id = uuid.uuid4()
+    room_a = Room(
+        id=uuid.uuid4(), tenant_id="default", wing_id=wing_id, slug="options-trading",
+        stable_key="markets:options-trading", name="Options Trading", state="active",
+    )
+    room_b = Room(
+        id=uuid.uuid4(), tenant_id="default", wing_id=wing_id, slug="options-tradings",
+        stable_key="markets:options-tradings", name="Options Tradings", state="active",
+    )
+    db = _ConsolidationCandidateDb(
+        rooms=[(room_a, "Markets"), (room_b, "Markets")],
+        closets=[
+            RoomClosetArtifact(room_id=room_a.id, tenant_id="default", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+            RoomClosetArtifact(room_id=room_b.id, tenant_id="default", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+        ],
+    )
+
+    review = await build_room_cluster_review(db, tenant_id="default", max_profile_rooms=2)
+
+    assert review.response_version == "room-cluster-review/v1"
+    assert review.evidence_signature
+    assert review.candidate_count == 1
+    assert review.generated_at.tzinfo is not None
+    assert db.added == []
+    assert db.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_build_room_cluster_review_compares_selected_tenant_rooms_deterministically() -> None:
+    wing_id = uuid.uuid4()
+    first_room_id, second_room_id = sorted((uuid.uuid4(), uuid.uuid4()), key=str)
+    shared_item_id = uuid.uuid4()
+    room_a = Room(
+        id=first_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="options-trading",
+        stable_key="markets:options-trading", name="Options Trading", state="active",
+    )
+    room_b = Room(
+        id=second_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="options-tradings",
+        stable_key="markets:options-tradings", name="Options Tradings", state="active",
+    )
+
+    async def review_for(selected_room_ids):
+        db = _ConsolidationCandidateDb(
+            rooms=[(room_a, "Markets"), (room_b, "Markets")],
+            closets=[
+                RoomClosetArtifact(room_id=room_a.id, tenant_id="tenant-a", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+                RoomClosetArtifact(room_id=room_b.id, tenant_id="tenant-a", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+            ],
+        )
+        review = await build_room_cluster_review(db, tenant_id="tenant-a", selected_room_ids=selected_room_ids)
+        assert db.added == []
+        assert db.commits == 0
+        return review
+
+    forward = await review_for((first_room_id, second_room_id))
+    reverse = await review_for((second_room_id, first_room_id))
+
+    assert forward.candidate_count == 1
+    assert forward.candidates[0].room_id == first_room_id
+    assert forward.evidence_signature == reverse.evidence_signature
+    assert forward.candidates == reverse.candidates
+
+
+@pytest.mark.asyncio
+async def test_selected_room_comparison_exposes_typed_evidence_and_signature_drift() -> None:
+    wing_id = uuid.uuid4()
+    first_room_id, second_room_id = sorted((uuid.uuid4(), uuid.uuid4()), key=str)
+    shared_item_id = uuid.uuid4()
+    room_a = Room(
+        id=first_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="pricing-notes",
+        stable_key="markets:pricing-notes", name="Pricing Notes", state="active",
+        membership_generation=4, closet_generation=4, snapshot_generation=4, tunnel_generation=3,
+    )
+    room_b = Room(
+        id=second_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="pricing-notes",
+        stable_key="markets:pricing-notes-archive", name="Pricing Notes", state="redirected",
+        redirect_room_id=room_a.id, lineage_parent_room_id=room_a.id,
+        membership_generation=4, closet_generation=4, snapshot_generation=3, tunnel_generation=4,
+    )
+    membership_a = RoomMembership(room_id=room_a.id, item_id=shared_item_id, tenant_id="tenant-a", source="pinned")
+    membership_b = RoomMembership(room_id=room_b.id, item_id=shared_item_id, tenant_id="tenant-a", source="auto")
+    tunnel = RoomTunnel(
+        tenant_id="tenant-a", source_room_id=room_a.id, target_room_id=room_b.id,
+        tunnel_type="shared-tag", strength=0.83, activation_count=2, stability=0.9,
+    )
+
+    class SelectedComparisonDb:
+        def __init__(self, *, right_tags: dict[str, int]) -> None:
+            self.added: list[object] = []
+            self.commits = 0
+            self.calls = 0
+            self.closets = [
+                RoomClosetArtifact(room_id=room_a.id, tenant_id="tenant-a", generation=4, drawer_refs=[{"item_id": str(shared_item_id)}], tag_profile={"pricing": 2}),
+                RoomClosetArtifact(room_id=room_b.id, tenant_id="tenant-a", generation=4, drawer_refs=[{"item_id": str(shared_item_id)}], tag_profile=right_tags),
+            ]
+
+        async def execute(self, _statement):
+            self.calls += 1
+            responses = (
+                _RowsResult([(room_a, "Markets"), (room_b, "Markets")]),
+                _ScalarsResult(self.closets),
+                _RowsResult([(room_a.id, shared_item_id), (room_b.id, shared_item_id)]),
+                _RowsResult([(room_a, "Markets"), (room_b, "Markets")]),
+                _ScalarsResult(self.closets),
+                _ScalarsResult([membership_a, membership_b]),
+                _ScalarsResult([tunnel]),
+            )
+            return responses[self.calls - 1]
+
+        def add(self, value) -> None:
+            self.added.append(value)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    async def review_for(right_tags: dict[str, int]):
+        db = SelectedComparisonDb(right_tags=right_tags)
+        review = await build_room_cluster_review(
+            db,
+            tenant_id="tenant-a",
+            selected_room_ids=(second_room_id, first_room_id),
+        )
+        assert db.added == []
+        assert db.commits == 0
+        return review
+
+    review = await review_for({"pricing": 2, **{f"tag-{index:02d}": 1 for index in range(10)}})
+    comparison = review.selected_comparison
+
+    assert comparison is not None
+    assert [room.id for room in comparison.rooms] == [first_room_id, second_room_id]
+    assert comparison.rooms[1].redirect_room_id == first_room_id
+    assert comparison.rooms[1].lineage_parent_room_id == first_room_id
+    assert comparison.rooms[1].redirect_lineage_room_ids == [first_room_id]
+    assert comparison.evidence[0].pinned_membership_count == 1
+    assert comparison.evidence[1].automatic_membership_count == 1
+    assert comparison.shared_logical_item_ids == [shared_item_id]
+    assert comparison.shared_membership_item_ids == [shared_item_id]
+    assert comparison.shared_tags == ["pricing"]
+    assert len(comparison.evidence[1].tags) == 8
+    assert comparison.tunnels[0].strength == 0.83
+    assert comparison.classification == "keep_separate"
+    assert comparison.evidence[1].freshness.snapshot_status == "stale"
+    assert comparison.evidence_signature
+
+    changed = await review_for({"pricing": 3, "archive": 1})
+    assert changed.selected_comparison is not None
+    assert changed.selected_comparison.evidence_signature != comparison.evidence_signature
+
+    room_b.state = "active"
+    room_b.redirect_room_id = None
+    room_b.lineage_parent_room_id = None
+    room_b.wing_id = uuid.uuid4()
+    cross_wing = await review_for({"pricing": 3, "archive": 1})
+    assert cross_wing.selected_comparison is not None
+    assert cross_wing.selected_comparison.cross_wing is True
+    assert cross_wing.selected_comparison.classification == "wing_placement_review"
+    assert any("different wings" in warning for warning in cross_wing.selected_comparison.warnings)
+
+
+@pytest.mark.asyncio
+async def test_selected_room_comparison_does_not_disclose_other_tenant_room() -> None:
+    tenant_room = Room(
+        id=uuid.uuid4(), tenant_id="tenant-a", wing_id=uuid.uuid4(), slug="tenant-room",
+        stable_key="tenant:room", name="Tenant Room", state="active",
+    )
+    other_tenant_room_id = uuid.uuid4()
+    db = _ConsolidationCandidateDb(rooms=[(tenant_room, "Tenant")], closets=[])
+
+    with pytest.raises(HTTPException, match="Selected room IDs were not found in this tenant"):
+        await build_room_cluster_review(
+            db,
+            tenant_id="tenant-a",
+            selected_room_ids=(tenant_room.id, other_tenant_room_id),
+        )
+
+    assert db.added == []
+    assert db.commits == 0
 
 
 @pytest.mark.asyncio

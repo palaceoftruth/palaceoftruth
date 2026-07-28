@@ -722,6 +722,90 @@ class PalaceConsolidationSummary(BaseModel):
     truncated: bool = False
 
 
+class PalaceRoomComparisonIdentity(BaseModel):
+    """Immutable room identifiers and lineage needed to review a pair safely."""
+
+    id: uuid.UUID
+    name: str
+    stable_key: str
+    slug: str
+    wing_id: uuid.UUID
+    wing_name: str
+    state: PalaceRoomState
+    redirect_room_id: uuid.UUID | None = None
+    lineage_parent_room_id: uuid.UUID | None = None
+    redirect_lineage_room_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class PalaceRoomComparisonFreshness(BaseModel):
+    membership_generation: int = 0
+    closet_generation: int = 0
+    snapshot_generation: int = 0
+    tunnel_generation: int = 0
+    membership_status: PalaceSectionStatus
+    closet_status: PalaceSectionStatus
+    snapshot_status: PalaceSectionStatus
+    tunnel_status: PalaceSectionStatus
+
+
+class PalaceRoomComparisonEvidence(BaseModel):
+    """Read-only evidence for one selected room; item IDs are distinct logical items."""
+
+    logical_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    membership_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    membership_row_count: int = 0
+    automatic_membership_count: int = 0
+    pinned_membership_count: int = 0
+    tags: list[str] = Field(default_factory=list)
+    tunnel_count: int = 0
+    freshness: PalaceRoomComparisonFreshness
+
+
+class PalaceRoomComparisonTunnel(BaseModel):
+    source_room_id: uuid.UUID
+    target_room_id: uuid.UUID
+    tunnel_type: str
+    strength: float
+    activation_count: int = 0
+    stability: float = 1.0
+
+
+class PalaceSelectedRoomComparison(BaseModel):
+    """A typed, tenant-scoped comparison for exactly two explicit room IDs."""
+
+    rooms: list[PalaceRoomComparisonIdentity]
+    evidence: list[PalaceRoomComparisonEvidence]
+    exact_name_match: bool
+    normalized_name_match: bool
+    shared_logical_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    shared_membership_item_ids: list[uuid.UUID] = Field(default_factory=list)
+    shared_tags: list[str] = Field(default_factory=list)
+    tunnels: list[PalaceRoomComparisonTunnel] = Field(default_factory=list)
+    score: float
+    reasons: list[str] = Field(default_factory=list)
+    cross_wing: bool
+    classification: Literal[
+        "likely_duplicate",
+        "related_but_separate",
+        "keep_separate",
+        "wing_placement_review",
+        "insufficient_evidence",
+    ]
+    warnings: list[str] = Field(default_factory=list)
+    scan_bounds: PalaceConsolidationSummary
+    evidence_signature: str
+
+
+class PalaceRoomClusterReview(PalaceConsolidationSummary):
+    """Bounded, read-only evidence used by the Control Tower review surface."""
+
+    response_version: str = "room-cluster-review/v1"
+    evidence_signature: str
+    generated_at: datetime
+    warnings: list[str] = Field(default_factory=list)
+    selected_comparison: PalaceSelectedRoomComparison | None = None
+
+
 class PalaceWorkerQueueMetrics(BaseModel):
     key: str
     label: str

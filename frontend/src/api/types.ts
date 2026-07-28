@@ -752,6 +752,83 @@ export interface PalaceConsolidationSummary {
   truncated: boolean;
 }
 
+export type PalaceRoomComparisonClassification =
+  | "likely_duplicate"
+  | "related_but_separate"
+  | "keep_separate"
+  | "wing_placement_review"
+  | "insufficient_evidence";
+export type PalaceRoomComparisonSectionStatus = "fresh" | "stale";
+
+export interface PalaceRoomComparisonIdentity {
+  id: string;
+  name: string;
+  stable_key: string;
+  slug: string;
+  wing_id: string;
+  wing_name: string;
+  state: string;
+  redirect_room_id: string | null;
+  lineage_parent_room_id: string | null;
+}
+
+export interface PalaceRoomComparisonFreshness {
+  membership_generation: number;
+  closet_generation: number;
+  snapshot_generation: number;
+  tunnel_generation: number;
+  membership_status: PalaceRoomComparisonSectionStatus;
+  closet_status: PalaceRoomComparisonSectionStatus;
+  snapshot_status: PalaceRoomComparisonSectionStatus;
+  tunnel_status: PalaceRoomComparisonSectionStatus;
+}
+
+export interface PalaceRoomComparisonEvidence {
+  logical_item_ids: string[];
+  membership_item_ids: string[];
+  membership_row_count: number;
+  automatic_membership_count: number;
+  pinned_membership_count: number;
+  tags: string[];
+  tunnel_count: number;
+  freshness: PalaceRoomComparisonFreshness;
+}
+
+export interface PalaceRoomComparisonTunnel {
+  source_room_id: string;
+  target_room_id: string;
+  tunnel_type: string;
+  strength: number;
+  activation_count: number;
+  stability: number;
+}
+
+export interface PalaceSelectedRoomComparison {
+  rooms: PalaceRoomComparisonIdentity[];
+  evidence: PalaceRoomComparisonEvidence[];
+  exact_name_match: boolean;
+  normalized_name_match: boolean;
+  shared_logical_item_ids: string[];
+  shared_membership_item_ids: string[];
+  shared_tags: string[];
+  tunnels: PalaceRoomComparisonTunnel[];
+  score: number;
+  reasons: string[];
+  cross_wing: boolean;
+  classification: PalaceRoomComparisonClassification;
+  warnings: string[];
+  scan_bounds: PalaceConsolidationSummary;
+  evidence_signature: string;
+}
+
+export interface PalaceRoomClusterReview extends PalaceConsolidationSummary {
+  response_version: "room-cluster-review/v1";
+  evidence_signature: string;
+  generated_at: string;
+  warnings: string[];
+  selected_comparison: PalaceSelectedRoomComparison | null;
+}
+
 export interface PalaceWorkerQueueMetrics {
   key: string;
   label: string;

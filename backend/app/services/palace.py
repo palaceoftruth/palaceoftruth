@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Sequence
 from urllib.parse import quote, urlparse
 
 import boto3
@@ -48,6 +49,12 @@ from app.models.palace import (
 from app.schemas.palace import (
     PalaceControlTower,
     PalaceConsolidationCandidate,
+    PalaceSelectedRoomComparison,
+    PalaceRoomComparisonEvidence,
+    PalaceRoomComparisonFreshness,
+    PalaceRoomComparisonIdentity,
+    PalaceRoomComparisonTunnel,
+    PalaceRoomClusterReview,
     PalaceConsolidationSummary,
     PalaceArtifactSectionHealth,
     PalaceDiaryRollupSummary,
@@ -121,6 +128,7 @@ _WEBHOOK_TERMINAL_STATUSES = {"completed", "duplicate", "failed", "cancelled"}
 CONSOLIDATION_CANDIDATE_EVENT = "consolidation-candidate"
 CONSOLIDATION_CANDIDATE_LIMIT = 8
 CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD = 0.62
+COMPARISON_TAG_LIMIT = 8
 CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS = 1.0
 CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT = 250
 
@@ -1926,6 +1934,270 @@ def _consolidation_candidate_signature(candidate: PalaceConsolidationCandidate) 
     return f"{candidate.wing_id}:{room_ids[0]}:{room_ids[1]}"
 
 
+def _room_cluster_review_signature(summary: PalaceConsolidationSummary) -> str:
+    """Versioned digest of displayed evidence, not an authorization token."""
+
+    payload = "|".join(
+        [
+            "room-cluster-review/v1",
+            str(summary.total_rooms),
+            str(summary.evaluated_rooms),
+            str(summary.truncated),
+            *[
+                f"{_consolidation_candidate_signature(candidate)}:{candidate.score}:{','.join(candidate.reasons)}"
+                for candidate in summary.candidates
+            ],
+        ]
+    )
+    return compute_content_hash(payload)
+
+
+def _comparison_section_status(*, generation: int, target_generation: int) -> str:
+    return "fresh" if generation >= target_generation else "stale"
+
+
+def _selected_comparison_signature(comparison: PalaceSelectedRoomComparison) -> str:
+    """Hash all material evidence while excluding the signature field itself."""
+
+    payload = comparison.model_dump(mode="json", exclude={"evidence_signature"})
+    return compute_content_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+async def _tenant_redirect_lineage_ids(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    room: Room,
+    known_rooms: dict[uuid.UUID, Room],
+) -> list[uuid.UUID]:
+    """Resolve a bounded redirect chain without disclosing another tenant's room."""
+
+    current_id = room.redirect_room_id or room.lineage_parent_room_id
+    seen = {room.id}
+    lineage: list[uuid.UUID] = []
+    while current_id is not None and current_id not in seen and len(lineage) < 32:
+        seen.add(current_id)
+        current = known_rooms.get(current_id)
+        if current is None:
+            rows = (
+                await db.execute(
+                    select(Room)
+                    .where(Room.tenant_id == tenant_id)
+                    .where(Room.id == current_id)
+                )
+            ).scalars().all()
+            if not rows:
+                break
+            current = rows[0]
+            known_rooms[current.id] = current
+        lineage.append(current.id)
+        current_id = current.redirect_room_id or current.lineage_parent_room_id
+    return lineage
+
+
+async def _build_selected_room_comparison(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    selected_room_ids: Sequence[uuid.UUID],
+    scan_bounds: PalaceConsolidationSummary,
+) -> PalaceSelectedRoomComparison | None:
+    """Load the fuller evidence contract for an explicit pair without mutating state."""
+
+    rows = (
+        await db.execute(
+            select(Room, Wing.name)
+            .join(Wing, Wing.id == Room.wing_id)
+            .where(Room.tenant_id == tenant_id)
+            .where(Room.id.in_(selected_room_ids))
+            .order_by(Room.id.asc())
+        )
+    ).all()
+    if len(rows) != 2:
+        # The inventory lookup already used the same tenant filter. Keeping this
+        # response opaque avoids turning a stale/deleted cross-tenant ID into an oracle.
+        return None
+
+    rooms = [row[0] for row in rows]
+    known_rooms = {room.id: room for room in rooms}
+    room_ids = tuple(room.id for room in rooms)
+    closets = await _latest_room_closets(db, tenant_id, room_ids=room_ids)
+    memberships = (
+        await db.execute(
+            select(RoomMembership)
+            .where(RoomMembership.tenant_id == tenant_id)
+            .where(RoomMembership.room_id.in_(room_ids))
+            .order_by(RoomMembership.room_id.asc(), RoomMembership.item_id.asc(), RoomMembership.id.asc())
+        )
+    ).scalars().all()
+    tunnels = (
+        await db.execute(
+            select(RoomTunnel)
+            .where(RoomTunnel.tenant_id == tenant_id)
+            .where(RoomTunnel.source_room_id.in_(room_ids))
+            .where(RoomTunnel.target_room_id.in_(room_ids))
+            .order_by(RoomTunnel.source_room_id.asc(), RoomTunnel.target_room_id.asc(), RoomTunnel.tunnel_type.asc())
+        )
+    ).scalars().all()
+
+    memberships_by_room: dict[uuid.UUID, list[RoomMembership]] = defaultdict(list)
+    for membership in memberships:
+        memberships_by_room[membership.room_id].append(membership)
+
+    identities: list[PalaceRoomComparisonIdentity] = []
+    evidence: list[PalaceRoomComparisonEvidence] = []
+    logical_item_sets: list[set[uuid.UUID]] = []
+    membership_item_sets: list[set[uuid.UUID]] = []
+    tag_sets: list[set[str]] = []
+    warnings: list[str] = []
+    for room, wing_name in rows:
+        room_memberships = memberships_by_room[room.id]
+        membership_item_ids = {membership.item_id for membership in room_memberships}
+        closet = closets.get(room.id)
+        logical_item_ids = set(_drawer_ref_item_ids(closet.drawer_refs if closet else None)) | membership_item_ids
+        tags = set(_normalized_tag_counts(closet.tag_profile if closet else None))
+        target_generation = int(room.membership_generation or 0)
+        identities.append(
+            PalaceRoomComparisonIdentity(
+                id=room.id, name=room.name, stable_key=room.stable_key, slug=room.slug,
+                wing_id=room.wing_id, wing_name=wing_name, state=room.state,
+                redirect_room_id=room.redirect_room_id, lineage_parent_room_id=room.lineage_parent_room_id,
+                redirect_lineage_room_ids=await _tenant_redirect_lineage_ids(
+                    db, tenant_id=tenant_id, room=room, known_rooms=known_rooms
+                ),
+            )
+        )
+        evidence.append(
+            PalaceRoomComparisonEvidence(
+                logical_item_ids=sorted(logical_item_ids, key=str),
+                membership_item_ids=sorted(membership_item_ids, key=str),
+                membership_row_count=len(room_memberships),
+                automatic_membership_count=sum(membership.source == "auto" for membership in room_memberships),
+                pinned_membership_count=sum(membership.source == "pinned" for membership in room_memberships),
+                tags=sorted(tags)[:COMPARISON_TAG_LIMIT],
+                tunnel_count=sum(tunnel.source_room_id == room.id or tunnel.target_room_id == room.id for tunnel in tunnels),
+                freshness=PalaceRoomComparisonFreshness(
+                    membership_generation=target_generation,
+                    closet_generation=int(room.closet_generation or 0),
+                    snapshot_generation=int(room.snapshot_generation or 0),
+                    tunnel_generation=int(room.tunnel_generation or 0),
+                    membership_status="fresh",
+                    closet_status=_comparison_section_status(generation=int(room.closet_generation or 0), target_generation=target_generation),
+                    snapshot_status=_comparison_section_status(generation=int(room.snapshot_generation or 0), target_generation=target_generation),
+                    tunnel_status=_comparison_section_status(generation=int(room.tunnel_generation or 0), target_generation=target_generation),
+                ),
+            )
+        )
+        logical_item_sets.append(logical_item_ids)
+        membership_item_sets.append(membership_item_ids)
+        tag_sets.append(tags)
+        if room.state == "redirected" or room.redirect_room_id is not None:
+            warnings.append(f"{room.name} is redirected and should not be consolidated without lineage review.")
+        if room.lineage_parent_room_id is not None:
+            warnings.append(f"{room.name} has a lineage parent and requires lineage review.")
+
+    left, right = rooms
+    exact_name_match = left.name.casefold() == right.name.casefold()
+    normalized_name_match = (left.slug or slugify(left.name)) == (right.slug or slugify(right.name))
+    cross_wing = left.wing_id != right.wing_id
+    if cross_wing:
+        warnings.append("Rooms are in different wings; this comparison is review evidence, not a merge recommendation.")
+    name_similarity = SequenceMatcher(None, left.slug or slugify(left.name), right.slug or slugify(right.name)).ratio()
+    tag_overlap = _weighted_tag_overlap(
+        _normalized_tag_counts(closets.get(left.id).tag_profile if closets.get(left.id) else None),
+        _normalized_tag_counts(closets.get(right.id).tag_profile if closets.get(right.id) else None),
+    )
+    logical_overlap = _jaccard(frozenset(logical_item_sets[0]), frozenset(logical_item_sets[1]))
+    score = round(max(name_similarity * 0.72 + tag_overlap * 0.18 + logical_overlap * 0.10, logical_overlap * 0.70 + tag_overlap * 0.20 + name_similarity * 0.10), 3)
+    reasons: list[str] = []
+    if exact_name_match:
+        reasons.append("exact room names")
+    elif normalized_name_match:
+        reasons.append("normalized room names")
+    if logical_item_sets[0] & logical_item_sets[1]:
+        reasons.append("shared logical items")
+    if membership_item_sets[0] & membership_item_sets[1]:
+        reasons.append("shared membership items")
+    if tag_sets[0] & tag_sets[1]:
+        reasons.append("shared tags")
+    if tunnels:
+        reasons.append("direct room tunnels")
+    evidence_count = sum(
+        bool(value)
+        for value in (
+            exact_name_match,
+            normalized_name_match,
+            logical_item_sets[0] & logical_item_sets[1],
+            membership_item_sets[0] & membership_item_sets[1],
+            tag_sets[0] & tag_sets[1],
+            tunnels,
+        )
+    )
+    has_redirect_lineage = any(
+        room.state == "redirected" or room.redirect_room_id or room.lineage_parent_room_id
+        for room in rooms
+    )
+    classification = (
+        "wing_placement_review" if cross_wing
+        else "keep_separate" if has_redirect_lineage
+        else "likely_duplicate" if score >= CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD and evidence_count >= 2
+        else "related_but_separate" if evidence_count >= 2
+        else "insufficient_evidence" if evidence_count == 0
+        else "keep_separate"
+    )
+    comparison = PalaceSelectedRoomComparison(
+        rooms=identities, evidence=evidence, exact_name_match=exact_name_match,
+        normalized_name_match=normalized_name_match,
+        shared_logical_item_ids=sorted(logical_item_sets[0] & logical_item_sets[1], key=str),
+        shared_membership_item_ids=sorted(membership_item_sets[0] & membership_item_sets[1], key=str),
+        shared_tags=sorted(tag_sets[0] & tag_sets[1])[:COMPARISON_TAG_LIMIT],
+        tunnels=[PalaceRoomComparisonTunnel(source_room_id=tunnel.source_room_id, target_room_id=tunnel.target_room_id, tunnel_type=tunnel.tunnel_type, strength=tunnel.strength, activation_count=tunnel.activation_count, stability=tunnel.stability) for tunnel in tunnels],
+        score=score, reasons=reasons, cross_wing=cross_wing, classification=classification,
+        warnings=warnings, scan_bounds=scan_bounds, evidence_signature="",
+    )
+    comparison.evidence_signature = _selected_comparison_signature(comparison)
+    return comparison
+
+
+async def build_room_cluster_review(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
+    max_profile_rooms: int = CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT,
+    selected_room_ids: Sequence[uuid.UUID] | None = None,
+) -> PalaceRoomClusterReview:
+    """Return deterministic tenant-scoped evidence without recording any event."""
+
+    summary = await find_consolidation_candidates(
+        db,
+        tenant_id=tenant_id,
+        limit=limit,
+        max_profile_rooms=max_profile_rooms,
+        selected_room_ids=selected_room_ids,
+    )
+    warnings: list[str] = []
+    if summary.truncated:
+        warnings.append("Inventory is bounded; additional active rooms were not evaluated.")
+    if not summary.candidates:
+        warnings.append("No candidate pairs met the review threshold in this bounded scan.")
+    selected_comparison = None
+    if selected_room_ids:
+        selected_comparison = await _build_selected_room_comparison(
+            db,
+            tenant_id=tenant_id,
+            selected_room_ids=selected_room_ids,
+            scan_bounds=summary,
+        )
+    return PalaceRoomClusterReview(
+        **summary.model_dump(),
+        evidence_signature=_room_cluster_review_signature(summary),
+        generated_at=datetime.now(timezone.utc),
+        warnings=warnings,
+        selected_comparison=selected_comparison,
+    )
+
+
 def _score_consolidation_pair(
     left: _RoomConsolidationProfile,
     right: _RoomConsolidationProfile,
@@ -1980,15 +2252,27 @@ async def find_consolidation_candidates(
     tenant_id: str,
     limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
     max_profile_rooms: int | None = None,
+    selected_room_ids: Sequence[uuid.UUID] | None = None,
 ) -> PalaceConsolidationSummary:
+    selected_ids = tuple(selected_room_ids or ())
+    if selected_ids and (len(selected_ids) != 2 or len(set(selected_ids)) != 2):
+        raise HTTPException(status_code=422, detail="selected_room_ids must contain exactly two distinct room IDs")
+
     room_query = (
         select(Room, Wing.name)
         .join(Wing, Wing.id == Room.wing_id)
         .where(Room.tenant_id == tenant_id)
-        .where(Room.state == "active")
     )
     total_rooms: int | None = None
-    if max_profile_rooms is not None:
+    if selected_ids:
+        # Keep explicit comparisons tenant-scoped and canonicalize their order so
+        # equivalent query-string orderings return identical candidate evidence.
+        room_query = room_query.where(Room.id.in_(selected_ids)).order_by(Room.id.asc())
+    else:
+        room_query = room_query.where(Room.state == "active")
+    if selected_ids:
+        total_rooms = len(selected_ids)
+    elif max_profile_rooms is not None:
         bounded_room_limit = max(int(max_profile_rooms), 1)
         total_rooms = int(
             await db.scalar(
@@ -2005,6 +2289,9 @@ async def find_consolidation_candidates(
     rooms = (await db.execute(room_query)).all()
     evaluated_rooms = len(rooms)
     total_room_count = total_rooms if total_rooms is not None else evaluated_rooms
+    if selected_ids and evaluated_rooms != len(selected_ids):
+        # Do not disclose whether an omitted ID exists in another tenant.
+        raise HTTPException(status_code=404, detail="Selected room IDs were not found in this tenant")
     truncated = total_room_count > evaluated_rooms
     if len(rooms) < 2:
         return PalaceConsolidationSummary(
@@ -2045,7 +2332,12 @@ async def find_consolidation_candidates(
         profiles_by_wing[room.wing_id].append(profile)
 
     candidates: list[PalaceConsolidationCandidate] = []
-    for profiles in profiles_by_wing.values():
+    profile_groups: Iterable[list[_RoomConsolidationProfile]]
+    if selected_ids:
+        profile_groups = [sorted((profile for profiles in profiles_by_wing.values() for profile in profiles), key=lambda profile: str(profile.room_id))]
+    else:
+        profile_groups = profiles_by_wing.values()
+    for profiles in profile_groups:
         for index, left in enumerate(profiles):
             for right in profiles[index + 1 :]:
                 candidate = _score_consolidation_pair(left, right)
