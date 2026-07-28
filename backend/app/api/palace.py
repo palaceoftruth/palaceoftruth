@@ -206,6 +206,7 @@ def _serialize_mcp_client(row) -> McpOAuthClientSummary:
         metadata=metadata,
         agent_scope_key=row.get("agent_scope_key"),
         allow_all_agent_scope_reads=bool(row.get("allow_all_agent_scope_reads")),
+        allow_tenant_shared_reads=bool(row.get("allow_tenant_shared_reads")),
         client_type=row.get("client_type") or "service",
         client_id=(f"{row['tenant_id']}:{row['oauth_client_id']}" if row.get("oauth_client_id") else None),
         token_endpoint_auth_method=row.get("token_endpoint_auth_method") or "client_secret_basic",
@@ -324,7 +325,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
             text(
                 """
                 SELECT c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata,
-                       c.agent_scope_key, c.allow_all_agent_scope_reads,
+                       c.agent_scope_key, c.allow_all_agent_scope_reads, c.allow_tenant_shared_reads,
                        c.client_type, c.redirect_uris, c.allowed_resources, c.authorization_code_enabled,
                        c.oauth_client_id, c.token_endpoint_auth_method,
                        c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at,
@@ -336,7 +337,7 @@ async def list_palace_mcp_clients(request: Request, db: AsyncSession = Depends(g
                 FROM mcp_clients c
                 LEFT JOIN mcp_request_audit_events e ON e.client_id = c.id AND e.tenant_id = c.tenant_id
                 WHERE c.tenant_id = :tenant_id
-                GROUP BY c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata, c.agent_scope_key, c.allow_all_agent_scope_reads,
+                GROUP BY c.id, c.tenant_id, c.client_key, c.display_name, c.allowed_scopes, c.metadata, c.agent_scope_key, c.allow_all_agent_scope_reads, c.allow_tenant_shared_reads,
                          c.client_type, c.redirect_uris, c.allowed_resources, c.authorization_code_enabled,
                          c.oauth_client_id, c.token_endpoint_auth_method,
                          c.oauth_revoked_at, c.oauth_token_ttl_seconds, c.created_at, c.last_seen_at
@@ -367,16 +368,16 @@ async def register_palace_mcp_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
                  client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                  token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads,
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :allow_tenant_shared_reads,
                  :client_type, CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), :authorization_code_enabled, :oauth_client_id,
                  :token_endpoint_auth_method, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
                       client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                       token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
             """
@@ -389,6 +390,7 @@ async def register_palace_mcp_client(
             "metadata": json.dumps(body.metadata),
             "agent_scope_key": body.agent_scope_key,
             "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
+            "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
             "client_type": body.client_type,
             "redirect_uris": json.dumps(body.redirect_uris),
             "allowed_resources": json.dumps(body.allowed_resources),
@@ -435,10 +437,11 @@ async def bind_palace_mcp_client_agent_scope(
             """
             UPDATE mcp_clients
             SET agent_scope_key = :agent_scope_key,
-                allow_all_agent_scope_reads = :allow_all_agent_scope_reads
+                allow_all_agent_scope_reads = :allow_all_agent_scope_reads,
+                allow_tenant_shared_reads = :allow_tenant_shared_reads
             WHERE tenant_id = :tenant_id AND id = :client_id
             RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
-                      agent_scope_key, allow_all_agent_scope_reads, oauth_revoked_at,
+                      agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, oauth_revoked_at,
                       oauth_token_ttl_seconds, created_at, last_seen_at
             """
         ),
@@ -447,6 +450,7 @@ async def bind_palace_mcp_client_agent_scope(
             "client_id": client_id,
             "agent_scope_key": body.agent_scope_key,
             "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
+            "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
         },
     )
     row = result.mappings().one_or_none()
@@ -506,6 +510,7 @@ async def revoke_palace_mcp_client(
             SET oauth_revoked_at = COALESCE(oauth_revoked_at, CURRENT_TIMESTAMP)
             WHERE tenant_id = :tenant_id AND id = :client_id
             RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                      agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
                       oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
             """
         ),

@@ -52,6 +52,9 @@ DEFAULT_MAX_WRITES_PER_SESSION = 100
 DEFAULT_MAX_BULK_CALLS_PER_TURN = 2
 DEFAULT_DEDUP_CACHE_TTL_SECONDS = 300
 DEFAULT_OAUTH_CLIENT_KEY = "default"
+DELEGATED_ACCESS_REASON_TEMPLATE = (
+    "Hermes agent {agent_scope_key} recall of operator-configured shared memory scopes."
+)
 DEFAULT_OAUTH_CLIENT_SCOPES = (
     "read",
     "write",
@@ -2648,10 +2651,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if self._is_bound_hermes_oauth_client():
             # Palace binds hermes-* OAuth clients to a canonical agent scope.
             # Even if a deployment carries a stale workspace retrieval default,
-            # fallback must use the runtime's bound agent identity.
-            agent_scope_key = self._agent_identity
-            if not agent_scope_key and primary_scope["type"] == "agent":
-                agent_scope_key = _scope_key(primary_scope)
+            # fallback must use the runtime's canonical bound agent identity.
+            agent_scope_key = self._canonical_bound_agent_scope_key(primary_scope)
             if agent_scope_key:
                 _append_scope({"type": "agent", "key": agent_scope_key})
             return scopes
@@ -2671,6 +2672,28 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._oauth_client_secret
             and self._oauth_client_key.startswith("hermes-")
         )
+
+    def _canonical_bound_agent_scope_key(
+        self,
+        primary_scope: dict[str, str] | None = None,
+    ) -> str | None:
+        """Return the agent scope canonically bound to a hermes-* OAuth client."""
+        if not self._is_bound_hermes_oauth_client():
+            return None
+        if self._agent_identity:
+            return self._agent_identity
+        # Client keys conventionally use hermes-<agent>. This is only a
+        # bootstrap fallback for runtimes that omit the explicit identity.
+        client_bound_key = self._oauth_client_key.removeprefix("hermes-").strip()
+        if client_bound_key:
+            return client_bound_key
+        if primary_scope and primary_scope.get("type") == "agent":
+            return _scope_key(primary_scope) or None
+        return None
+
+    def _delegated_access_reason(self, agent_scope_key: str) -> str:
+        """Build a stable, non-secret audit reason without including the query."""
+        return DELEGATED_ACCESS_REASON_TEMPLATE.format(agent_scope_key=agent_scope_key)
 
     def _discover_memory_scopes(self) -> list[dict[str, Any]]:
         response = self._request_json(
@@ -3051,18 +3074,35 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 timeout_seconds=self._timeout_seconds,
             )
 
-        agent_scope_key = None
-        if primary_scope and primary_scope["type"] == "agent":
-            agent_scope_key = _scope_key(primary_scope)
-        elif self._agent_identity:
-            agent_scope_key = self._agent_identity
+        agent_scope_key = self._canonical_bound_agent_scope_key(primary_scope)
+        if not agent_scope_key:
+            if primary_scope and primary_scope["type"] == "agent":
+                agent_scope_key = _scope_key(primary_scope)
+            elif self._agent_identity:
+                agent_scope_key = self._agent_identity
 
-        if not self._is_bound_hermes_oauth_client():
+        is_bound_hermes_client = self._is_bound_hermes_oauth_client()
+        delegated_recall_requested = bool(
+            self._include_tenant_shared or self._include_agent_scope_patterns
+        )
+        if not is_bound_hermes_client or delegated_recall_requested:
             try:
                 route_started_at = perf_counter()
-                workspace_scope_keys = self._workspace_scope_keys_for_agent_retrieve(
-                    primary_scope,
-                    discovered_scopes,
+                workspace_scope_keys = (
+                    []
+                    if is_bound_hermes_client
+                    else self._workspace_scope_keys_for_agent_retrieve(
+                        primary_scope,
+                        discovered_scopes,
+                    )
+                )
+                include_broad_corpus = (
+                    False if is_bound_hermes_client else self._include_broad_corpus
+                )
+                access_reason = (
+                    self._delegated_access_reason(agent_scope_key)
+                    if delegated_recall_requested and agent_scope_key
+                    else None
                 )
                 response = self._request_json(
                     "POST",
@@ -3081,12 +3121,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "tenant_shared_policy": "fallback_only"
                         if self._include_tenant_shared
                         else "never",
-                        "include_broad_corpus": self._include_broad_corpus,
+                        "include_broad_corpus": include_broad_corpus,
                         "broad_corpus_policy": "enabled"
-                        if self._include_broad_corpus
+                        if include_broad_corpus
                         else "disabled",
                         "workspace_strict": bool(workspace_scope_keys)
                         and not self._include_agent_scope_patterns,
+                        **({"access_reason": access_reason} if access_reason else {}),
                     },
                 )
                 trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}

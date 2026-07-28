@@ -128,6 +128,7 @@ class McpOAuthClientRegisterRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    allow_tenant_shared_reads: bool = False
     client_type: Literal["service", "confidential_web", "public"] = "service"
     redirect_uris: list[str] = Field(default_factory=list)
     allowed_resources: list[str] = Field(default_factory=list)
@@ -141,8 +142,8 @@ class McpOAuthClientRegisterRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_agent_scope_read_binding(self) -> "McpOAuthClientRegisterRequest":
-        if self.allow_all_agent_scope_reads and not self.agent_scope_key:
-            raise ValueError("allow_all_agent_scope_reads requires agent_scope_key")
+        if (self.allow_all_agent_scope_reads or self.allow_tenant_shared_reads) and not self.agent_scope_key:
+            raise ValueError("agent read permissions require agent_scope_key")
         if self.client_type == "service" and (self.redirect_uris or self.authorization_code_enabled):
             raise ValueError("service clients cannot register redirect URIs or authorization-code capability")
         if self.client_type in {"confidential_web", "public"} and (not self.redirect_uris or not self.allowed_resources):
@@ -171,6 +172,7 @@ class McpOAuthClientRegisterRequest(BaseModel):
 class McpOAuthClientAgentScopeBindingRequest(BaseModel):
     agent_scope_key: str
     allow_all_agent_scope_reads: bool = False
+    allow_tenant_shared_reads: bool = False
 
     @field_validator("agent_scope_key")
     @classmethod
@@ -187,6 +189,7 @@ class McpOAuthClientSummary(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    allow_tenant_shared_reads: bool = False
     client_type: Literal["service", "confidential_web", "public"] = "service"
     client_id: str | None = None
     token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post", "none"] = "client_secret_basic"

@@ -36,11 +36,18 @@ write-back is explicitly delegated.
   `PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` is present, OAuth is preferred and API calls use a bearer token minted from
   `/api/v1/memory/mcp/oauth/token`; `PALACEOFTRUTH_API_KEY` remains a legacy fallback for hosts that have not cut over.
 - The plugin validates its tenant identity with `/api/v1/memory/whoami` and mirrors the returned `tenant_id` into durable write payloads.
-- Recall is route-aware: the plugin first asks `/api/v1/memory/scopes` for
-  content-free scope metadata, then uses `/api/v1/memory/retrieve-agent` to
-  search its own agent scope, discovered workspace scopes, `tenant_shared`, and
-  the broad non-private corpus. If the new route is unavailable, it falls back
-  to the older per-scope `/api/v1/memory/retrieve` loop.
+- Recall is route-aware for legacy API-key clients: the plugin first asks
+  `/api/v1/memory/scopes` for content-free scope metadata, then uses
+  `/api/v1/memory/retrieve-agent` for configured scopes. If the new route is
+  unavailable, it falls back to the older per-scope
+  `/api/v1/memory/retrieve` loop.
+- A bound `hermes-*` OAuth client recalls only its canonical agent scope by
+  default. `PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true` or configured
+  `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS` explicitly activates
+  `/api/v1/memory/retrieve-agent` with the canonical agent key, a non-secret
+  audit reason, and bounded pattern selection. Bound clients never request
+  workspace, session, or broad-corpus recall through that route. If delegated
+  retrieval fails, the compatibility fallback remains canonical self-only.
 - Route-aware recall uses separate budgets for selected-scope candidates,
   broad-corpus candidates, final display count, and rendered context characters:
   `PALACEOFTRUTH_AGENT_CANDIDATE_LIMIT`,
@@ -77,7 +84,8 @@ write-back is explicitly delegated.
   `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS=agent/*` with
   `PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT` to ask Palace to discover matching
   agent scopes, select a bounded subset, and authorize those selected scopes
-  server-side before searching them.
+  server-side before searching them. Bound Hermes clients attach a stable
+  non-secret access reason for Palace's delegated-read audit policy.
 - Palace API calls use bounded retries for transient failures only: network
   errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
   validation failures, tenant mismatch, and privacy/admission rejections are not

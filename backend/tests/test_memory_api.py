@@ -522,6 +522,170 @@ def test_hermes_oauth_direct_retrieval_rejects_noncanonical_scope(monkeypatch) -
     assert "canonical agent scope" in response.json()["detail"]
 
 
+def _hermes_retrieve_agent_client(
+    *,
+    allow_all_agent_scope_reads: bool = False,
+    allow_tenant_shared_reads: bool = False,
+) -> TestClient:
+    client = _build_app(
+        FakeSession(),
+        auth_mode="mcp_oauth",
+        mcp_client_key="hermes-mara",
+        mcp_allowed_scopes=["read"],
+    )
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "hermes-mara"
+        request.state.mcp_agent_scope_key = "mara"
+        request.state.mcp_allow_all_agent_scope_reads = allow_all_agent_scope_reads
+        request.state.mcp_allow_tenant_shared_reads = allow_tenant_shared_reads
+        request.state.mcp_allowed_scopes = ["read"]
+        return "token"
+
+    client.app.dependency_overrides[verify_memory_auth] = override_verify
+    return client
+
+
+def test_hermes_oauth_retrieve_agent_allows_bound_tenant_shared_without_delegation(
+    monkeypatch,
+) -> None:
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=True)
+
+    async def fake_retrieve_agent_memory(
+        db, *, embedder, tenant_id: str, body, delegated_policy=None
+    ):
+        assert tenant_id == "tenant-a"
+        assert body.agent_scope_key == "mara"
+        assert body.include_tenant_shared is True
+        assert delegated_policy is None
+        return AgentMemoryRetrieveResponse(
+            scopes=[{"type": "agent", "key": "mara"}, {"type": "tenant_shared"}],
+            trace=AgentMemoryRetrieveTrace(
+                searched_scopes=[
+                    {"type": "agent", "key": "mara"},
+                    {"type": "tenant_shared"},
+                ],
+                tenant_shared_policy="always",
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", fake_retrieve_agent_memory)
+    response = client.post(
+        "/api/v1/memory/retrieve-agent",
+        json={
+            "query": "shared marketing context",
+            "agent_scope_key": "mara",
+            "include_tenant_shared": True,
+            "include_broad_corpus": False,
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_hermes_oauth_retrieve_agent_denies_unbound_tenant_shared(monkeypatch) -> None:
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=False)
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("unauthorized tenant-shared retrieval must not reach search")
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", reject_if_retrieved)
+    response = client.post(
+        "/api/v1/memory/retrieve-agent",
+        json={
+            "query": "shared marketing context",
+            "agent_scope_key": "mara",
+            "include_tenant_shared": True,
+            "include_broad_corpus": False,
+        },
+    )
+
+    assert response.status_code == 403
+    assert "tenant-shared" in response.json()["detail"]
+
+
+def test_hermes_oauth_retrieve_agent_cross_agent_access_uses_delegated_policy(
+    monkeypatch,
+) -> None:
+    client = _hermes_retrieve_agent_client(
+        allow_all_agent_scope_reads=True,
+        allow_tenant_shared_reads=True,
+    )
+
+    async def fake_retrieve_agent_memory(
+        db, *, embedder, tenant_id: str, body, delegated_policy=None
+    ):
+        assert body.include_agent_scope_keys == ["karen", "clara"]
+        assert body.access_reason == "coordinate fleet marketing"
+        assert delegated_policy is not None
+        assert delegated_policy.subject_agent_scope_key == "mara"
+        assert delegated_policy.allow_all_agent_scopes is True
+        assert delegated_policy.require_access_reason is True
+        return AgentMemoryRetrieveResponse(
+            scopes=[{"type": "agent", "key": "mara"}],
+            trace=AgentMemoryRetrieveTrace(
+                searched_scopes=[{"type": "agent", "key": "mara"}],
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", fake_retrieve_agent_memory)
+    response = client.post(
+        "/api/v1/memory/retrieve-agent",
+        json={
+            "query": "agent campaign context",
+            "agent_scope_key": "mara",
+            "include_agent_scope_keys": ["karen", "clara"],
+            "access_reason": "coordinate fleet marketing",
+            "include_tenant_shared": True,
+            "include_broad_corpus": False,
+        },
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace_scope_keys", ["marketing"]),
+        ("session_scope_key", "session-a"),
+        ("include_broad_corpus", True),
+    ],
+)
+def test_hermes_oauth_retrieve_agent_still_denies_non_agent_broad_scopes(
+    monkeypatch,
+    field,
+    value,
+) -> None:
+    client = _hermes_retrieve_agent_client(
+        allow_all_agent_scope_reads=True,
+        allow_tenant_shared_reads=True,
+    )
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("forbidden Hermes scope must not reach search")
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", reject_if_retrieved)
+    body = {
+        "query": "forbidden scope",
+        "agent_scope_key": "mara",
+        "include_tenant_shared": False,
+        "include_broad_corpus": False,
+        field: value,
+    }
+    response = client.post("/api/v1/memory/retrieve-agent", json=body)
+
+    assert response.status_code == 403
+    assert "same-tenant agent scopes" in response.json()["detail"]
+
+
 def test_memory_whoami_returns_authenticated_tenant() -> None:
     client = _build_app(FakeSession())
 
