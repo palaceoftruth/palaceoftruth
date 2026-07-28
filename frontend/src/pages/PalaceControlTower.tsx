@@ -5,6 +5,7 @@ import { ArrowLeft, Clipboard, Loader2, Pause, Pencil, RadioTower, RefreshCw, Ro
 import { api, ApiError } from "../api/client";
 import type {
   PalaceControlTower,
+  PalaceRoomClusterReview,
   PalaceMemoryJobScope,
   McpClientConfigSnippets,
   McpOAuthClientRegisterResponse,
@@ -233,6 +234,7 @@ export default function PalaceControlTowerPage() {
   const [mcpGrantRevokingId, setMcpGrantRevokingId] = useState<string | null>(null);
   const [mcpRegistration, setMcpRegistration] = useState<McpOAuthClientRegisterResponse | null>(null);
   const [sourceResources, setSourceResources] = useState<PalaceSourceResourceSummary[]>([]);
+  const [clusterReview, setClusterReview] = useState<PalaceRoomClusterReview | null>(null);
   const [resourceDetails, setResourceDetails] = useState<Record<string, PalaceSourceResourceDetail>>({});
   const [resourceActionId, setResourceActionId] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -243,11 +245,12 @@ export default function PalaceControlTowerPage() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [controlTower, clients, grants, watchedResources] = await Promise.all([
+      const [controlTower, clients, grants, watchedResources, review] = await Promise.all([
         api.getPalaceControlTower(),
         api.listPalaceMcpClients(),
         api.listPalaceMcpGrants(),
         api.listPalaceSourceResources(),
+        api.getPalaceRoomClusterReview(),
       ]);
       setTower(controlTower);
       setMcpClients(clients.clients);
@@ -255,6 +258,7 @@ export default function PalaceControlTowerPage() {
       setMcpScopeCatalog(clients.scope_catalog.length ? clients.scope_catalog : FALLBACK_MCP_SCOPE_OPTIONS);
       setMcpGrants(grants.grants);
       setSourceResources(watchedResources.resources);
+      setClusterReview(review);
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
@@ -594,7 +598,7 @@ export default function PalaceControlTowerPage() {
   const totalWakeupDiaryRollups = recentWakeupBriefs.reduce((sum, brief) => sum + brief.diary_count, 0);
   const sourceTrustHealth = tower?.source_trust_health;
   const artifactHealth = tower?.room_artifacts;
-  const consolidation = tower?.consolidation;
+  const consolidation = clusterReview ?? tower?.consolidation;
   const consolidationCandidates = consolidation?.candidates ?? [];
   const workerBackpressure = tower?.worker_backpressure;
 
@@ -883,9 +887,21 @@ export default function PalaceControlTowerPage() {
 
           <div className="border-t border-zinc-800 pt-4">
             <div className="flex flex-wrap items-baseline justify-between gap-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Consolidation candidates</p>
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">Room Cluster Review · Read-only preview</p>
+                <p className="mt-1 text-xs text-zinc-500">Evidence only. This panel cannot change rooms, memberships, or redirects.</p>
+              </div>
               <p className="text-xs text-zinc-500">{consolidation?.candidate_count ?? 0} detected</p>
             </div>
+            {clusterReview ? (
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+                <span>{clusterReview.evaluated_rooms} of {clusterReview.total_rooms} active rooms scanned</span>
+                <span className="max-w-full break-all">Evidence {clusterReview.evidence_signature.slice(0, 16)}</span>
+              </div>
+            ) : null}
+            {clusterReview?.warnings.map((warning) => (
+              <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>
+            ))}
             {consolidationCandidates.length ? (
               <div className="mt-3 space-y-3">
                 {consolidationCandidates.slice(0, 3).map((candidate) => (

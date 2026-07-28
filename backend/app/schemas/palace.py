@@ -722,6 +722,15 @@ class PalaceConsolidationSummary(BaseModel):
     truncated: bool = False
 
 
+class PalaceRoomClusterReview(PalaceConsolidationSummary):
+    """Bounded, read-only evidence used by the Control Tower review surface."""
+
+    response_version: str = "room-cluster-review/v1"
+    evidence_signature: str
+    generated_at: datetime
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PalaceWorkerQueueMetrics(BaseModel):
     key: str
     label: str

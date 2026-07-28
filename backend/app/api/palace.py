@@ -36,6 +36,7 @@ from app.schemas.palace import (
     PalaceClaimSupportSummary,
     PalaceClaimSupportReport,
     PalaceControlTower,
+    PalaceRoomClusterReview,
     PalaceItemSourceSummary,
     PalaceSourceResourceAliasSummary,
     PalaceSourceResourceActionResponse,
@@ -61,6 +62,7 @@ from app.schemas.palace import (
 from app.services.fact_registry import list_temporal_facts
 from app.services.palace import (
     build_control_tower,
+    build_room_cluster_review,
     build_overview,
     create_or_get_palace_run,
     create_or_get_sync_run,
@@ -315,6 +317,17 @@ async def palace_overview(request: Request, db: AsyncSession = Depends(get_db)) 
 @router.get("/control-tower", response_model=PalaceControlTower, dependencies=[Depends(require_api_capability("read"))])
 async def palace_control_tower(request: Request, db: AsyncSession = Depends(get_db)) -> PalaceControlTower:
     return await build_control_tower(db, request.state.tenant_id, arq_pool=request.app.state.arq_pool)
+
+
+@router.get("/room-clusters", response_model=PalaceRoomClusterReview, dependencies=[Depends(require_api_capability("read"))])
+async def get_room_cluster_review(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> PalaceRoomClusterReview:
+    """Expose bounded consolidation evidence; this route intentionally performs no write."""
+
+    return await build_room_cluster_review(db, tenant_id=request.state.tenant_id, limit=limit)
 
 
 @router.get("/mcp-clients", response_model=McpOAuthClientListResponse, dependencies=[Depends(require_api_capability("admin"))])

@@ -48,6 +48,7 @@ from app.models.palace import (
 from app.schemas.palace import (
     PalaceControlTower,
     PalaceConsolidationCandidate,
+    PalaceRoomClusterReview,
     PalaceConsolidationSummary,
     PalaceArtifactSectionHealth,
     PalaceDiaryRollupSummary,
@@ -1924,6 +1925,52 @@ def _weighted_tag_overlap(left: dict[str, int], right: dict[str, int]) -> float:
 def _consolidation_candidate_signature(candidate: PalaceConsolidationCandidate) -> str:
     room_ids = sorted([str(candidate.room_id), str(candidate.candidate_room_id)])
     return f"{candidate.wing_id}:{room_ids[0]}:{room_ids[1]}"
+
+
+def _room_cluster_review_signature(summary: PalaceConsolidationSummary) -> str:
+    """Versioned digest of displayed evidence, not an authorization token."""
+
+    payload = "|".join(
+        [
+            "room-cluster-review/v1",
+            str(summary.total_rooms),
+            str(summary.evaluated_rooms),
+            str(summary.truncated),
+            *[
+                f"{_consolidation_candidate_signature(candidate)}:{candidate.score}:{','.join(candidate.reasons)}"
+                for candidate in summary.candidates
+            ],
+        ]
+    )
+    return compute_content_hash(payload)
+
+
+async def build_room_cluster_review(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
+    max_profile_rooms: int = CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT,
+) -> PalaceRoomClusterReview:
+    """Return deterministic tenant-scoped evidence without recording any event."""
+
+    summary = await find_consolidation_candidates(
+        db,
+        tenant_id=tenant_id,
+        limit=limit,
+        max_profile_rooms=max_profile_rooms,
+    )
+    warnings: list[str] = []
+    if summary.truncated:
+        warnings.append("Inventory is bounded; additional active rooms were not evaluated.")
+    if not summary.candidates:
+        warnings.append("No candidate pairs met the review threshold in this bounded scan.")
+    return PalaceRoomClusterReview(
+        **summary.model_dump(),
+        evidence_signature=_room_cluster_review_signature(summary),
+        generated_at=datetime.now(timezone.utc),
+        warnings=warnings,
+    )
 
 
 def _score_consolidation_pair(

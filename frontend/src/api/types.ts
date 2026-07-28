@@ -752,6 +752,13 @@ export interface PalaceConsolidationSummary {
   truncated: boolean;
 }
 
+export interface PalaceRoomClusterReview extends PalaceConsolidationSummary {
+  response_version: "room-cluster-review/v1";
+  evidence_signature: string;
+  generated_at: string;
+  warnings: string[];
+}
+
 export interface PalaceWorkerQueueMetrics {
   key: string;
   label: string;

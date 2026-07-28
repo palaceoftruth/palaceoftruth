@@ -26,6 +26,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   PalaceControlTower,
+  PalaceRoomClusterReview,
   PalaceOverview,
   PalaceRetrieveResponse,
   PalaceRoomDetail,
@@ -359,6 +360,8 @@ export const api = {
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
+
+  getPalaceRoomClusterReview: () => req<PalaceRoomClusterReview>("/palace/room-clusters"),
 
   listPalaceSourceResources: () => req<PalaceSourceResourceListResponse>("/palace/source-resources"),
 
