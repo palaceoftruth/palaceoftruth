@@ -128,6 +128,7 @@ _WEBHOOK_TERMINAL_STATUSES = {"completed", "duplicate", "failed", "cancelled"}
 CONSOLIDATION_CANDIDATE_EVENT = "consolidation-candidate"
 CONSOLIDATION_CANDIDATE_LIMIT = 8
 CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD = 0.62
+COMPARISON_TAG_LIMIT = 8
 CONTROL_TOWER_SLOW_LOG_THRESHOLD_SECONDS = 1.0
 CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT = 250
 
@@ -1962,6 +1963,38 @@ def _selected_comparison_signature(comparison: PalaceSelectedRoomComparison) -> 
     return compute_content_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
+async def _tenant_redirect_lineage_ids(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    room: Room,
+    known_rooms: dict[uuid.UUID, Room],
+) -> list[uuid.UUID]:
+    """Resolve a bounded redirect chain without disclosing another tenant's room."""
+
+    current_id = room.redirect_room_id or room.lineage_parent_room_id
+    seen = {room.id}
+    lineage: list[uuid.UUID] = []
+    while current_id is not None and current_id not in seen and len(lineage) < 32:
+        seen.add(current_id)
+        current = known_rooms.get(current_id)
+        if current is None:
+            rows = (
+                await db.execute(
+                    select(Room)
+                    .where(Room.tenant_id == tenant_id)
+                    .where(Room.id == current_id)
+                )
+            ).scalars().all()
+            if not rows:
+                break
+            current = rows[0]
+            known_rooms[current.id] = current
+        lineage.append(current.id)
+        current_id = current.redirect_room_id or current.lineage_parent_room_id
+    return lineage
+
+
 async def _build_selected_room_comparison(
     db: AsyncSession,
     *,
@@ -1986,6 +2019,7 @@ async def _build_selected_room_comparison(
         return None
 
     rooms = [row[0] for row in rows]
+    known_rooms = {room.id: room for room in rooms}
     room_ids = tuple(room.id for room in rooms)
     closets = await _latest_room_closets(db, tenant_id, room_ids=room_ids)
     memberships = (
@@ -2028,6 +2062,9 @@ async def _build_selected_room_comparison(
                 id=room.id, name=room.name, stable_key=room.stable_key, slug=room.slug,
                 wing_id=room.wing_id, wing_name=wing_name, state=room.state,
                 redirect_room_id=room.redirect_room_id, lineage_parent_room_id=room.lineage_parent_room_id,
+                redirect_lineage_room_ids=await _tenant_redirect_lineage_ids(
+                    db, tenant_id=tenant_id, room=room, known_rooms=known_rooms
+                ),
             )
         )
         evidence.append(
@@ -2037,7 +2074,7 @@ async def _build_selected_room_comparison(
                 membership_row_count=len(room_memberships),
                 automatic_membership_count=sum(membership.source == "auto" for membership in room_memberships),
                 pinned_membership_count=sum(membership.source == "pinned" for membership in room_memberships),
-                tags=sorted(tags),
+                tags=sorted(tags)[:COMPARISON_TAG_LIMIT],
                 tunnel_count=sum(tunnel.source_room_id == room.id or tunnel.target_room_id == room.id for tunnel in tunnels),
                 freshness=PalaceRoomComparisonFreshness(
                     membership_generation=target_generation,
@@ -2085,18 +2122,35 @@ async def _build_selected_room_comparison(
         reasons.append("shared tags")
     if tunnels:
         reasons.append("direct room tunnels")
-    redirect_review = any(room.state == "redirected" or room.redirect_room_id or room.lineage_parent_room_id for room in rooms)
+    evidence_count = sum(
+        bool(value)
+        for value in (
+            exact_name_match,
+            normalized_name_match,
+            logical_item_sets[0] & logical_item_sets[1],
+            membership_item_sets[0] & membership_item_sets[1],
+            tag_sets[0] & tag_sets[1],
+            tunnels,
+        )
+    )
+    has_redirect_lineage = any(
+        room.state == "redirected" or room.redirect_room_id or room.lineage_parent_room_id
+        for room in rooms
+    )
     classification = (
-        "redirect_review" if redirect_review else "cross_wing_review" if cross_wing
-        else "likely_duplicate" if score >= CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD and reasons
-        else "related" if reasons else "distinct"
+        "wing_placement_review" if cross_wing
+        else "keep_separate" if has_redirect_lineage
+        else "likely_duplicate" if score >= CONSOLIDATION_CANDIDATE_SCORE_THRESHOLD and evidence_count >= 2
+        else "related_but_separate" if evidence_count >= 2
+        else "insufficient_evidence" if evidence_count == 0
+        else "keep_separate"
     )
     comparison = PalaceSelectedRoomComparison(
         rooms=identities, evidence=evidence, exact_name_match=exact_name_match,
         normalized_name_match=normalized_name_match,
         shared_logical_item_ids=sorted(logical_item_sets[0] & logical_item_sets[1], key=str),
         shared_membership_item_ids=sorted(membership_item_sets[0] & membership_item_sets[1], key=str),
-        shared_tags=sorted(tag_sets[0] & tag_sets[1]),
+        shared_tags=sorted(tag_sets[0] & tag_sets[1])[:COMPARISON_TAG_LIMIT],
         tunnels=[PalaceRoomComparisonTunnel(source_room_id=tunnel.source_room_id, target_room_id=tunnel.target_room_id, tunnel_type=tunnel.tunnel_type, strength=tunnel.strength, activation_count=tunnel.activation_count, stability=tunnel.stability) for tunnel in tunnels],
         score=score, reasons=reasons, cross_wing=cross_wing, classification=classification,
         warnings=warnings, scan_bounds=scan_bounds, evidence_signature="",

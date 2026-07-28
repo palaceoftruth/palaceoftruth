@@ -752,7 +752,12 @@ export interface PalaceConsolidationSummary {
   truncated: boolean;
 }
 
-export type PalaceRoomComparisonClassification = "likely_duplicate" | "related" | "distinct" | "cross_wing_review" | "redirect_review";
+export type PalaceRoomComparisonClassification =
+  | "likely_duplicate"
+  | "related_but_separate"
+  | "keep_separate"
+  | "wing_placement_review"
+  | "insufficient_evidence";
 export type PalaceRoomComparisonSectionStatus = "fresh" | "stale";
 
 export interface PalaceRoomComparisonIdentity {

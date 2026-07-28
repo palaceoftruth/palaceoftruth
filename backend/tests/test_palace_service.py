@@ -1329,20 +1329,22 @@ async def test_selected_room_comparison_exposes_typed_evidence_and_signature_dri
         assert db.commits == 0
         return review
 
-    review = await review_for({"pricing": 2})
+    review = await review_for({"pricing": 2, **{f"tag-{index:02d}": 1 for index in range(10)}})
     comparison = review.selected_comparison
 
     assert comparison is not None
     assert [room.id for room in comparison.rooms] == [first_room_id, second_room_id]
     assert comparison.rooms[1].redirect_room_id == first_room_id
     assert comparison.rooms[1].lineage_parent_room_id == first_room_id
+    assert comparison.rooms[1].redirect_lineage_room_ids == [first_room_id]
     assert comparison.evidence[0].pinned_membership_count == 1
     assert comparison.evidence[1].automatic_membership_count == 1
     assert comparison.shared_logical_item_ids == [shared_item_id]
     assert comparison.shared_membership_item_ids == [shared_item_id]
     assert comparison.shared_tags == ["pricing"]
+    assert len(comparison.evidence[1].tags) == 8
     assert comparison.tunnels[0].strength == 0.83
-    assert comparison.classification == "redirect_review"
+    assert comparison.classification == "keep_separate"
     assert comparison.evidence[1].freshness.snapshot_status == "stale"
     assert comparison.evidence_signature
 
@@ -1357,7 +1359,7 @@ async def test_selected_room_comparison_exposes_typed_evidence_and_signature_dri
     cross_wing = await review_for({"pricing": 3, "archive": 1})
     assert cross_wing.selected_comparison is not None
     assert cross_wing.selected_comparison.cross_wing is True
-    assert cross_wing.selected_comparison.classification == "cross_wing_review"
+    assert cross_wing.selected_comparison.classification == "wing_placement_review"
     assert any("different wings" in warning for warning in cross_wing.selected_comparison.warnings)
 
 

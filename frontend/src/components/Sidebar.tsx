@@ -82,7 +82,7 @@ export default function Sidebar({ open, onClose, collapsed, onToggleCollapse }: 
           fixed top-0 left-0 h-full border-r border-zinc-800/80 bg-zinc-950/88 z-30 backdrop-blur-xl
           flex flex-col
           transition-all duration-200 will-change-transform
-          ${open ? "translate-x-0 shadow-2xl shadow-black/40" : "-translate-x-[106%]"}
+          ${open ? "translate-x-0 visible shadow-2xl shadow-black/40" : "-translate-x-[106%] invisible pointer-events-none md:visible md:pointer-events-auto"}
           md:relative md:translate-x-0 md:flex md:shrink-0
           ${collapsed ? "md:w-14 w-56" : "w-56"}
         `}

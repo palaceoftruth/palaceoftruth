@@ -869,7 +869,7 @@ test.describe("Palace smoke", () => {
   test("control tower compares a selected room pair without mutation controls", async ({ page }, testInfo) => {
     const firstRoomId = "2a4edc17-9ed2-48e6-bb39-9d11695f6b1e";
     const secondRoomId = "f68e9854-9981-4691-b883-3d9e502c6fd2";
-    const clusterRequests: Array<{ method: string; url: string }> = [];
+    const clusterRequests: Array<{ method: string; url: string; apiKey?: string }> = [];
     const candidate = {
       room_id: firstRoomId,
       room_name: "Pricing Narrative",
@@ -895,10 +895,13 @@ test.describe("Palace smoke", () => {
       sync_sources: [], sync_runs: [], palace_runs: [],
     };
     await mockPalaceControlTower(page, tower);
+    // This mirrors the real browser's authenticated read path without relying
+    // on a developer's local API key or a production-reachable environment.
+    await page.addInitScript(() => localStorage.setItem("sb:browser_api_key", "sar-1255-read-only-test-key"));
     await page.unroute("**/api/v1/palace/room-clusters");
     await page.route("**/api/v1/palace/room-clusters**", async (route) => {
       const request = route.request();
-      clusterRequests.push({ method: request.method(), url: request.url() });
+      clusterRequests.push({ method: request.method(), url: request.url(), apiKey: request.headers()["x-api-key"] });
       await route.fulfill({ json: {
         response_version: "room-cluster-review/v1",
         evidence_signature: "sha256:selected-pair-evidence",
@@ -927,7 +930,7 @@ test.describe("Palace smoke", () => {
           score: 0.81,
           reasons: ["shared logical items", "shared tags"],
           cross_wing: false,
-          classification: "likely_duplicate",
+          classification: "related_but_separate",
           warnings: ["Closet freshness is stale for Pricing Objections."],
           scan_bounds: { candidate_count: 1, candidates: [candidate], evaluated_rooms: 2, total_rooms: 2, truncated: false },
           evidence_signature: "sha256:selected-comparison-evidence",
@@ -939,7 +942,7 @@ test.describe("Palace smoke", () => {
     await page.getByRole("button", { name: "Inspect pair evidence" }).click();
 
     await expect(page.getByRole("heading", { name: "Selected pair comparison" })).toBeVisible();
-    await expect(page.getByText("Likely duplicate")).toBeVisible();
+    await expect(page.getByText("Related, but separate")).toBeVisible();
     await expect(page.getByText("Pricing Narrative", { exact: true })).toBeVisible();
     await expect(page.getByText("Pricing Objections", { exact: true })).toBeVisible();
     await expect(page.getByText("1 logical items · 1 membership items · 2 tags")).toBeVisible();
@@ -949,15 +952,32 @@ test.describe("Palace smoke", () => {
     await expect(page.getByRole("button", { name: /merge|redirect|delete|apply/i })).toHaveCount(0);
     await expect.poll(() => clusterRequests.length).toBeGreaterThanOrEqual(2);
     expect(clusterRequests.every(({ method }) => method === "GET")).toBe(true);
+    expect(clusterRequests.every(({ apiKey }) => apiKey === "sar-1255-read-only-test-key")).toBe(true);
     expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${firstRoomId}`);
     expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${secondRoomId}`);
 
     const comparison = page.locator("section[aria-labelledby='selected-pair-heading']");
-    await comparison.screenshot({ path: testInfo.outputPath("sar-1255-selected-pair-desktop.png") });
-    await page.setViewportSize({ width: 390, height: 820 });
-    await comparison.scrollIntoViewIfNeeded();
-    await expectNoHorizontalOverflow(page);
-    await comparison.screenshot({ path: testInfo.outputPath("sar-1255-selected-pair-mobile.png") });
+    for (const viewport of [
+      { width: 375, height: 812, label: "375" },
+      { width: 768, height: 1024, label: "768" },
+      { width: 1024, height: 900, label: "1024" },
+      { width: 1440, height: 1000, label: "1440" },
+    ]) {
+      await page.setViewportSize(viewport);
+      await comparison.scrollIntoViewIfNeeded();
+      await comparison.evaluate((element) => element.scrollIntoView({ block: "start", inline: "nearest" }));
+      await expectNoHorizontalOverflow(page);
+      if (viewport.width < 768) {
+        await expect(page.locator("aside")).toBeHidden();
+      }
+      // Keep an inspectable viewport record of the selected comparison in
+      // addition to the complete scroll-surface capture below.
+      await page.screenshot({ path: testInfo.outputPath(`sar-1255-selected-pair-${viewport.label}.png`) });
+      // The app shell scrolls inside <main>, so page.fullPage would capture
+      // only the viewport. Capture the whole route surface instead of a panel
+      // crop, preserving its real authenticated layout and scroll context.
+      await page.locator("main .sb-page").screenshot({ path: testInfo.outputPath(`sar-1255-control-tower-${viewport.label}.png`) });
+    }
   });
 
   test("control tower labels bounded stale room-cluster evidence and an empty result", async ({ page }) => {

@@ -112,6 +112,17 @@ function formatCandidateScore(score: number): string {
   return `${Math.round(score * 100)}%`;
 }
 
+function formatComparisonClassification(classification: NonNullable<PalaceRoomClusterReview["selected_comparison"]>["classification"]): string {
+  const labels: Record<string, string> = {
+    likely_duplicate: "Likely duplicate",
+    related_but_separate: "Related, but separate",
+    keep_separate: "Keep separate",
+    wing_placement_review: "Wing placement review",
+    insufficient_evidence: "Insufficient evidence",
+  };
+  return labels[classification] ?? classification.split("_").join(" ");
+}
+
 function evidenceIsStale(generatedAt: string): boolean {
   const generatedAtMs = new Date(generatedAt).getTime();
   return Number.isNaN(generatedAtMs) || Date.now() - generatedAtMs > 10 * 60 * 1000;
@@ -229,7 +240,7 @@ function SelectedPairEvidence({
   if (!comparison) {
     return <p className="mt-3 text-xs text-rose-200" role="status">Selected pair evidence was not returned by the review service.</p>;
   }
-  const classification = comparison.classification.split("_").join(" ");
+  const classification = formatComparisonClassification(comparison.classification);
 
   return (
     <div className="mt-4 space-y-4 text-sm">
@@ -244,7 +255,7 @@ function SelectedPairEvidence({
         ))}
       </div>
       <dl className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
-        <div><dt className="text-zinc-500">Classification</dt><dd className="mt-1 font-medium capitalize text-amber-100">{classification}</dd></div>
+        <div><dt className="text-zinc-500">Classification</dt><dd className="mt-1 font-medium text-amber-100">{classification}</dd></div>
         <div><dt className="text-zinc-500">Confidence</dt><dd className="mt-1 text-zinc-200">{formatCandidateScore(comparison.score)}</dd></div>
         <div><dt className="text-zinc-500">Coverage</dt><dd className="mt-1 text-zinc-200">{comparison.scan_bounds.evaluated_rooms} / {comparison.scan_bounds.total_rooms} rooms</dd></div>
         <div><dt className="text-zinc-500">Name comparison</dt><dd className="mt-1 text-zinc-200">{comparison.exact_name_match ? "Exact" : comparison.normalized_name_match ? "Normalized" : "Distinct"}</dd></div>

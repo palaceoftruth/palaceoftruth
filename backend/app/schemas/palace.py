@@ -734,6 +734,7 @@ class PalaceRoomComparisonIdentity(BaseModel):
     state: PalaceRoomState
     redirect_room_id: uuid.UUID | None = None
     lineage_parent_room_id: uuid.UUID | None = None
+    redirect_lineage_room_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 class PalaceRoomComparisonFreshness(BaseModel):
@@ -783,7 +784,13 @@ class PalaceSelectedRoomComparison(BaseModel):
     score: float
     reasons: list[str] = Field(default_factory=list)
     cross_wing: bool
-    classification: Literal["likely_duplicate", "related", "distinct", "cross_wing_review", "redirect_review"]
+    classification: Literal[
+        "likely_duplicate",
+        "related_but_separate",
+        "keep_separate",
+        "wing_placement_review",
+        "insufficient_evidence",
+    ]
     warnings: list[str] = Field(default_factory=list)
     scan_bounds: PalaceConsolidationSummary
     evidence_signature: str
