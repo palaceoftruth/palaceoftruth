@@ -891,9 +891,11 @@ def test_room_cluster_review_is_tenant_scoped_and_read_only(monkeypatch) -> None
     session = FakeSession()
     client = _build_app(session, tenant_id="tenant-a")
     observed: dict[str, object] = {}
+    first_room_id = uuid.uuid4()
+    second_room_id = uuid.uuid4()
 
-    async def fake_build_room_cluster_review(db, *, tenant_id: str, limit: int):
-        observed.update({"db": db, "tenant_id": tenant_id, "limit": limit})
+    async def fake_build_room_cluster_review(db, *, tenant_id: str, limit: int, selected_room_ids=None):
+        observed.update({"db": db, "tenant_id": tenant_id, "limit": limit, "selected_room_ids": selected_room_ids})
         return PalaceRoomClusterReview(
             evidence_signature="sha256:test",
             generated_at=datetime(2026, 7, 28, tzinfo=timezone.utc),
@@ -905,11 +907,35 @@ def test_room_cluster_review_is_tenant_scoped_and_read_only(monkeypatch) -> None
 
     monkeypatch.setattr("app.api.palace.build_room_cluster_review", fake_build_room_cluster_review)
 
-    response = client.get("/api/v1/palace/room-clusters?limit=3")
+    response = client.get(
+        f"/api/v1/palace/room-clusters?limit=3&selected_room_ids={second_room_id}&selected_room_ids={first_room_id}"
+    )
 
     assert response.status_code == 200
     assert response.json()["response_version"] == "room-cluster-review/v1"
-    assert observed == {"db": session, "tenant_id": "tenant-a", "limit": 3}
+    assert observed == {
+        "db": session,
+        "tenant_id": "tenant-a",
+        "limit": 3,
+        "selected_room_ids": (second_room_id, first_room_id),
+    }
+    assert session.added == []
+    assert session.executed_statements == []
+
+
+def test_room_cluster_review_rejects_invalid_selected_room_ids(monkeypatch) -> None:
+    session = FakeSession()
+    client = _build_app(session)
+
+    async def unexpected_builder(*_args, **_kwargs):
+        raise AssertionError("invalid selected IDs must not reach the service")
+
+    monkeypatch.setattr("app.api.palace.build_room_cluster_review", unexpected_builder)
+
+    response = client.get(f"/api/v1/palace/room-clusters?selected_room_ids={uuid.uuid4()}")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "selected_room_ids must contain exactly two room IDs"
     assert session.added == []
     assert session.executed_statements == []
 

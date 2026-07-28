@@ -324,10 +324,22 @@ async def get_room_cluster_review(
     request: Request,
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=100),
+    selected_room_ids: list[uuid.UUID] | None = Query(default=None),
 ) -> PalaceRoomClusterReview:
     """Expose bounded consolidation evidence; this route intentionally performs no write."""
 
-    return await build_room_cluster_review(db, tenant_id=request.state.tenant_id, limit=limit)
+    selected_ids = tuple(selected_room_ids or ())
+    if selected_ids and len(selected_ids) != 2:
+        raise HTTPException(status_code=422, detail="selected_room_ids must contain exactly two room IDs")
+    if len(set(selected_ids)) != len(selected_ids):
+        raise HTTPException(status_code=422, detail="selected_room_ids must contain distinct room IDs")
+
+    return await build_room_cluster_review(
+        db,
+        tenant_id=request.state.tenant_id,
+        limit=limit,
+        selected_room_ids=selected_ids or None,
+    )
 
 
 @router.get("/mcp-clients", response_model=McpOAuthClientListResponse, dependencies=[Depends(require_api_capability("admin"))])

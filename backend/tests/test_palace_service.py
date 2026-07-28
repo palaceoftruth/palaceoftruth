@@ -1230,6 +1230,42 @@ async def test_build_room_cluster_review_is_deterministic_and_performs_no_writes
 
 
 @pytest.mark.asyncio
+async def test_build_room_cluster_review_compares_selected_tenant_rooms_deterministically() -> None:
+    wing_id = uuid.uuid4()
+    first_room_id, second_room_id = sorted((uuid.uuid4(), uuid.uuid4()), key=str)
+    shared_item_id = uuid.uuid4()
+    room_a = Room(
+        id=first_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="options-trading",
+        stable_key="markets:options-trading", name="Options Trading", state="active",
+    )
+    room_b = Room(
+        id=second_room_id, tenant_id="tenant-a", wing_id=wing_id, slug="options-tradings",
+        stable_key="markets:options-tradings", name="Options Tradings", state="active",
+    )
+
+    async def review_for(selected_room_ids):
+        db = _ConsolidationCandidateDb(
+            rooms=[(room_a, "Markets"), (room_b, "Markets")],
+            closets=[
+                RoomClosetArtifact(room_id=room_a.id, tenant_id="tenant-a", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+                RoomClosetArtifact(room_id=room_b.id, tenant_id="tenant-a", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+            ],
+        )
+        review = await build_room_cluster_review(db, tenant_id="tenant-a", selected_room_ids=selected_room_ids)
+        assert db.added == []
+        assert db.commits == 0
+        return review
+
+    forward = await review_for((first_room_id, second_room_id))
+    reverse = await review_for((second_room_id, first_room_id))
+
+    assert forward.candidate_count == 1
+    assert forward.candidates[0].room_id == first_room_id
+    assert forward.evidence_signature == reverse.evidence_signature
+    assert forward.candidates == reverse.candidates
+
+
+@pytest.mark.asyncio
 async def test_record_consolidation_candidate_events_is_non_destructive_and_deduped() -> None:
     wing_id = uuid.uuid4()
     item_id = uuid.uuid4()

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Sequence
 from urllib.parse import quote, urlparse
 
 import boto3
@@ -1951,6 +1951,7 @@ async def build_room_cluster_review(
     tenant_id: str,
     limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
     max_profile_rooms: int = CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT,
+    selected_room_ids: Sequence[uuid.UUID] | None = None,
 ) -> PalaceRoomClusterReview:
     """Return deterministic tenant-scoped evidence without recording any event."""
 
@@ -1959,6 +1960,7 @@ async def build_room_cluster_review(
         tenant_id=tenant_id,
         limit=limit,
         max_profile_rooms=max_profile_rooms,
+        selected_room_ids=selected_room_ids,
     )
     warnings: list[str] = []
     if summary.truncated:
@@ -2027,15 +2029,27 @@ async def find_consolidation_candidates(
     tenant_id: str,
     limit: int = CONSOLIDATION_CANDIDATE_LIMIT,
     max_profile_rooms: int | None = None,
+    selected_room_ids: Sequence[uuid.UUID] | None = None,
 ) -> PalaceConsolidationSummary:
+    selected_ids = tuple(selected_room_ids or ())
+    if selected_ids and (len(selected_ids) != 2 or len(set(selected_ids)) != 2):
+        raise HTTPException(status_code=422, detail="selected_room_ids must contain exactly two distinct room IDs")
+
     room_query = (
         select(Room, Wing.name)
         .join(Wing, Wing.id == Room.wing_id)
         .where(Room.tenant_id == tenant_id)
-        .where(Room.state == "active")
     )
     total_rooms: int | None = None
-    if max_profile_rooms is not None:
+    if selected_ids:
+        # Keep explicit comparisons tenant-scoped and canonicalize their order so
+        # equivalent query-string orderings return identical candidate evidence.
+        room_query = room_query.where(Room.id.in_(selected_ids)).order_by(Room.id.asc())
+    else:
+        room_query = room_query.where(Room.state == "active")
+    if selected_ids:
+        total_rooms = len(selected_ids)
+    elif max_profile_rooms is not None:
         bounded_room_limit = max(int(max_profile_rooms), 1)
         total_rooms = int(
             await db.scalar(
@@ -2052,6 +2066,9 @@ async def find_consolidation_candidates(
     rooms = (await db.execute(room_query)).all()
     evaluated_rooms = len(rooms)
     total_room_count = total_rooms if total_rooms is not None else evaluated_rooms
+    if selected_ids and evaluated_rooms != len(selected_ids):
+        # Do not disclose whether an omitted ID exists in another tenant.
+        raise HTTPException(status_code=404, detail="Selected room IDs were not found in this tenant")
     truncated = total_room_count > evaluated_rooms
     if len(rooms) < 2:
         return PalaceConsolidationSummary(
@@ -2092,7 +2109,12 @@ async def find_consolidation_candidates(
         profiles_by_wing[room.wing_id].append(profile)
 
     candidates: list[PalaceConsolidationCandidate] = []
-    for profiles in profiles_by_wing.values():
+    profile_groups: Iterable[list[_RoomConsolidationProfile]]
+    if selected_ids:
+        profile_groups = [sorted((profile for profiles in profiles_by_wing.values() for profile in profiles), key=lambda profile: str(profile.room_id))]
+    else:
+        profile_groups = profiles_by_wing.values()
+    for profiles in profile_groups:
         for index, left in enumerate(profiles):
             for right in profiles[index + 1 :]:
                 candidate = _score_consolidation_pair(left, right)
