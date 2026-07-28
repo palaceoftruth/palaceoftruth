@@ -55,6 +55,7 @@ from app.services.palace import (
     _updated_tunnel_stability,
     _sync_source_locator,
     build_overview,
+    build_room_cluster_review,
     create_sync_source,
     create_or_get_palace_run,
     build_room_artifact_health,
@@ -1196,6 +1197,36 @@ async def test_find_consolidation_candidates_reports_bounded_control_tower_scan(
     assert summary.truncated is True
     assert summary.candidate_count == 1
     assert summary.candidates[0].room_id == room_a.id
+
+
+@pytest.mark.asyncio
+async def test_build_room_cluster_review_is_deterministic_and_performs_no_writes() -> None:
+    wing_id = uuid.uuid4()
+    shared_item_id = uuid.uuid4()
+    room_a = Room(
+        id=uuid.uuid4(), tenant_id="default", wing_id=wing_id, slug="options-trading",
+        stable_key="markets:options-trading", name="Options Trading", state="active",
+    )
+    room_b = Room(
+        id=uuid.uuid4(), tenant_id="default", wing_id=wing_id, slug="options-tradings",
+        stable_key="markets:options-tradings", name="Options Tradings", state="active",
+    )
+    db = _ConsolidationCandidateDb(
+        rooms=[(room_a, "Markets"), (room_b, "Markets")],
+        closets=[
+            RoomClosetArtifact(room_id=room_a.id, tenant_id="default", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+            RoomClosetArtifact(room_id=room_b.id, tenant_id="default", generation=1, drawer_refs=[{"item_id": str(shared_item_id)}]),
+        ],
+    )
+
+    review = await build_room_cluster_review(db, tenant_id="default", max_profile_rooms=2)
+
+    assert review.response_version == "room-cluster-review/v1"
+    assert review.evidence_signature
+    assert review.candidate_count == 1
+    assert review.generated_at.tzinfo is not None
+    assert db.added == []
+    assert db.commits == 0
 
 
 @pytest.mark.asyncio

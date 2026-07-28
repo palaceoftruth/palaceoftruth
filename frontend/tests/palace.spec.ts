@@ -34,6 +34,21 @@ async function mockPalaceControlTower(page: Parameters<typeof test>[0]["page"], 
   await page.route("**/api/v1/palace/control-tower", async (route) => {
     await route.fulfill({ json: tower });
   });
+  await page.route("**/api/v1/palace/room-clusters", async (route) => {
+    await route.fulfill({
+      json: {
+        response_version: "room-cluster-review/v1",
+        evidence_signature: "test-room-cluster-review",
+        generated_at: "2026-07-28T00:00:00Z",
+        candidate_count: 0,
+        candidates: [],
+        evaluated_rooms: 0,
+        total_rooms: 0,
+        truncated: false,
+        warnings: ["No candidate pairs met the review threshold in this bounded scan."],
+      },
+    });
+  });
   await page.route("**/api/v1/palace/mcp-clients", async (route) => {
     await route.fulfill({
       json: {

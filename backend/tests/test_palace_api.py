@@ -18,6 +18,7 @@ from app.models.palace import PalaceRoomEvent, PalaceRun, Room, SyncSource
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.schemas.palace import (
     PalaceControlTower,
+    PalaceRoomClusterReview,
     PalaceDiaryRollupStatus,
     PalaceDiaryRollupSummary,
     PalaceFactRegistrySummary,
@@ -884,6 +885,33 @@ def test_palace_control_tower_includes_memory_health(monkeypatch) -> None:
     assert payload["memory_health"]["recent_jobs"][0]["scope"] == {"type": "workspace", "key": "launch-pad"}
     assert payload["build_elapsed_ms"] == 42.5
     assert payload["section_timings_ms"] == {"consolidation": 12.4, "source_trust_health": 3.1}
+
+
+def test_room_cluster_review_is_tenant_scoped_and_read_only(monkeypatch) -> None:
+    session = FakeSession()
+    client = _build_app(session, tenant_id="tenant-a")
+    observed: dict[str, object] = {}
+
+    async def fake_build_room_cluster_review(db, *, tenant_id: str, limit: int):
+        observed.update({"db": db, "tenant_id": tenant_id, "limit": limit})
+        return PalaceRoomClusterReview(
+            evidence_signature="sha256:test",
+            generated_at=datetime(2026, 7, 28, tzinfo=timezone.utc),
+            candidate_count=0,
+            evaluated_rooms=3,
+            total_rooms=3,
+            warnings=["No candidate pairs met the review threshold in this bounded scan."],
+        )
+
+    monkeypatch.setattr("app.api.palace.build_room_cluster_review", fake_build_room_cluster_review)
+
+    response = client.get("/api/v1/palace/room-clusters?limit=3")
+
+    assert response.status_code == 200
+    assert response.json()["response_version"] == "room-cluster-review/v1"
+    assert observed == {"db": session, "tenant_id": "tenant-a", "limit": 3}
+    assert session.added == []
+    assert session.executed_statements == []
 
 
 def test_list_palace_mcp_clients_returns_counts_and_secret_safe_config() -> None:
