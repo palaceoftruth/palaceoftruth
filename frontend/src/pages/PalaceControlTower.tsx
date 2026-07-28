@@ -1538,9 +1538,9 @@ export default function PalaceControlTowerPage() {
                         {job.source ? ` • source ${job.source}` : ""}
                       </p>
                       {job.error_message ? <p className="mt-2 text-xs text-rose-300">{job.error_message}</p> : null}
-                      {job.recent_progress_events.length ? (
+                      {(job.recent_progress_events ?? []).length ? (
                         <div className="mt-3 flex flex-wrap gap-2">
-                          {job.recent_progress_events.slice(0, 3).map((event) => (
+                          {(job.recent_progress_events ?? []).slice(0, 3).map((event) => (
                             <span
                               key={`${event.phase}-${event.status}-${event.created_at}`}
                               className="rounded-full border border-zinc-800 bg-black/20 px-2 py-1 text-[11px] text-zinc-400"
