@@ -954,6 +954,9 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
                     "display_name": "Codex remote MCP",
                     "allowed_scopes": ["read", "write"],
                     "metadata": {},
+                    "agent_scope_key": "mara",
+                    "allow_all_agent_scope_reads": True,
+                    "allow_tenant_shared_reads": True,
                     "oauth_revoked_at": None,
                     "oauth_token_ttl_seconds": 1800,
                     "created_at": datetime.now(timezone.utc),
@@ -970,6 +973,9 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
             "client_key": "codex-remote",
             "display_name": "Codex remote MCP",
             "allowed_scopes": ["read", "write"],
+            "agent_scope_key": "mara",
+            "allow_all_agent_scope_reads": True,
+            "allow_tenant_shared_reads": True,
             "token_ttl_seconds": 1800,
         },
     )
@@ -977,6 +983,7 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
     assert response.status_code == 201
     payload = response.json()
     assert payload["client"]["client_key"] == "codex-remote"
+    assert payload["client"]["allow_tenant_shared_reads"] is True
     assert isinstance(payload["client_secret"], str)
     assert payload["client_secret"] not in payload["config_snippets"]["http_oauth_toml"]
     assert "PALACEOFTRUTH_MCP_BEARER_TOKEN" in payload["config_snippets"]["http_oauth_toml"]

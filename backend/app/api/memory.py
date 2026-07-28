@@ -1166,8 +1166,15 @@ async def retrieve_agent_memory_artifacts(
             raise HTTPException(status_code=403, detail="Hermes OAuth client has no canonical agent binding")
         if body.agent_scope_key != bound_agent_scope_key:
             raise HTTPException(status_code=403, detail="Hermes OAuth client must retrieve through its canonical agent scope")
-        if body.workspace_scope_keys or body.session_scope_key or body.include_tenant_shared or body.include_broad_corpus:
+        if body.workspace_scope_keys or body.session_scope_key or body.include_broad_corpus:
             raise HTTPException(status_code=403, detail="Hermes OAuth client may retrieve only same-tenant agent scopes")
+        if body.include_tenant_shared and not bool(
+            getattr(request.state, "mcp_allow_tenant_shared_reads", False)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Hermes OAuth client is not permitted to read tenant-shared memory",
+            )
     started = perf_counter()
     request_params = {
         "agent_scope_key": body.agent_scope_key,
@@ -1211,8 +1218,17 @@ async def retrieve_agent_memory_artifacts(
     }
     try:
         try:
-            delegated_policy = (
-                DelegatedAgentMemoryReadPolicy(
+            cross_agent_requested = bool(
+                any(key != bound_agent_scope_key for key in body.include_agent_scope_keys)
+                or body.include_agent_scope_patterns
+                or body.include_all_permitted_agent_scopes
+            )
+            if is_hermes_client and not cross_agent_requested:
+                delegated_policy = None
+            elif is_hermes_client and bool(
+                getattr(request.state, "mcp_allow_all_agent_scope_reads", False)
+            ):
+                delegated_policy = DelegatedAgentMemoryReadPolicy(
                     tenant_id=request.state.tenant_id,
                     subject_agent_scope_key=bound_agent_scope_key,
                     read_agent_scope_keys=(),
@@ -1222,14 +1238,13 @@ async def retrieve_agent_memory_artifacts(
                     require_access_reason=True,
                     max_cross_agent_scopes=100,
                 )
-                if is_hermes_client and bool(getattr(request.state, "mcp_allow_all_agent_scope_reads", False))
-                else delegated_agent_memory_policy_from_config(
+            else:
+                delegated_policy = delegated_agent_memory_policy_from_config(
                     tenant_id=request.state.tenant_id,
                     agent_scope_key=body.agent_scope_key,
                     raw_policies=settings.palaceoftruth_delegated_agent_memory_read_policies,
                 )
-            )
-            if is_hermes_client and delegated_policy is None:
+            if is_hermes_client and cross_agent_requested and delegated_policy is None:
                 raise HTTPException(status_code=403, detail="Hermes OAuth client is not permitted to read agent scopes")
         except ValueError as config_error:
             logger.error("invalid delegated agent memory policy config: %s", config_error)

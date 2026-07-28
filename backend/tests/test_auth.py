@@ -236,6 +236,9 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
             "client_key": "codex-remote",
             "display_name": "Codex Remote",
             "allowed_scopes": ["read", "write"],
+            "agent_scope_key": "iris",
+            "allow_all_agent_scope_reads": True,
+            "allow_tenant_shared_reads": True,
             "client_revoked_at": None,
         }
     )
@@ -256,6 +259,10 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
     assert request.state.auth_context.client_key == "codex-remote"
     assert request.state.auth_context.client_name == "Codex Remote"
     assert request.state.mcp_client_name == "Codex Remote"
+    assert request.state.auth_context.agent_scope_key == "iris"
+    assert request.state.auth_context.allow_all_agent_scope_reads is True
+    assert request.state.auth_context.allow_tenant_shared_reads is True
+    assert request.state.mcp_allow_tenant_shared_reads is True
     assert request.state.auth_context.scopes == ("read",)
     assert request.state.auth_context.capabilities == frozenset({"read"})
     assert request.state.auth_context.token_hash_reference == auth.hash_secret("raw-token")

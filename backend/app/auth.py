@@ -30,6 +30,7 @@ class AuthContext:
     client_name: str | None = None
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
+    allow_tenant_shared_reads: bool = False
     delegated_agent_scope_keys: tuple[str, ...] = ()
     delegated_workspace_scope_keys: tuple[str, ...] = ()
     delegated_grant_id: Any | None = None
@@ -199,6 +200,7 @@ def _context_from_scopes(
     client_name: str | None = None,
     agent_scope_key: str | None = None,
     allow_all_agent_scope_reads: bool = False,
+    allow_tenant_shared_reads: bool = False,
     delegated_agent_scope_keys: tuple[str, ...] = (),
     delegated_workspace_scope_keys: tuple[str, ...] = (),
     delegated_grant_id: object | None = None,
@@ -217,6 +219,7 @@ def _context_from_scopes(
         client_name=client_name,
         agent_scope_key=agent_scope_key,
         allow_all_agent_scope_reads=allow_all_agent_scope_reads,
+        allow_tenant_shared_reads=allow_tenant_shared_reads,
         delegated_agent_scope_keys=delegated_agent_scope_keys,
         delegated_workspace_scope_keys=delegated_workspace_scope_keys,
         delegated_grant_id=delegated_grant_id,
@@ -239,6 +242,7 @@ def _attach_auth_context(request: Request, context: AuthContext) -> AuthContext:
     request.state.mcp_client_name = context.client_name
     request.state.mcp_agent_scope_key = context.agent_scope_key
     request.state.mcp_allow_all_agent_scope_reads = context.allow_all_agent_scope_reads
+    request.state.mcp_allow_tenant_shared_reads = context.allow_tenant_shared_reads
     request.state.mcp_allowed_scopes = list(context.scopes) if context.scopes else None
     request.state.mcp_token_resource = context.resource
     return context
@@ -266,6 +270,13 @@ def get_auth_context(request: Request) -> AuthContext:
         client_id=getattr(request.state, "mcp_client_id", None),
         client_key=getattr(request.state, "mcp_client_key", None),
         client_name=getattr(request.state, "mcp_client_name", None),
+        agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
+        allow_all_agent_scope_reads=bool(
+            getattr(request.state, "mcp_allow_all_agent_scope_reads", False)
+        ),
+        allow_tenant_shared_reads=bool(
+            getattr(request.state, "mcp_allow_tenant_shared_reads", False)
+        ),
         scopes=scopes,
         resource=token_resource,
     )
@@ -351,6 +362,7 @@ async def verify_memory_auth(
                     c.allowed_scopes,
                     c.agent_scope_key,
                     c.allow_all_agent_scope_reads,
+                    c.allow_tenant_shared_reads,
                     c.oauth_revoked_at AS client_revoked_at,
                     g.revoked_at AS grant_revoked_at,
                     g.agent_scope_keys AS delegated_agent_scope_keys,
@@ -472,6 +484,7 @@ async def verify_memory_auth(
             client_name=result.get("display_name") or result["client_key"],
             agent_scope_key=result.get("agent_scope_key"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
+            allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
             delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
             delegated_grant_id=result.get("delegated_grant_id"),
@@ -514,6 +527,9 @@ async def _verify_scoped_bearer_token(
                     c.client_key,
                     c.display_name,
                     c.allowed_scopes,
+                    c.agent_scope_key,
+                    c.allow_all_agent_scope_reads,
+                    c.allow_tenant_shared_reads,
                     c.oauth_revoked_at AS client_revoked_at,
                     g.revoked_at AS grant_revoked_at,
                     g.agent_scope_keys AS delegated_agent_scope_keys,
@@ -617,6 +633,9 @@ async def _verify_scoped_bearer_token(
             client_id=result["client_id"],
             client_key=result["client_key"],
             client_name=result.get("display_name") or result["client_key"],
+            agent_scope_key=result.get("agent_scope_key"),
+            allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
+            allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
             delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
             delegated_grant_id=result.get("delegated_grant_id"),

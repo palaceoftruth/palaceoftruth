@@ -382,7 +382,7 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
     assert "tenant-key" not in caplog.text
 
 
-def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
+def test_palaceoftruth_hermes_oauth_default_retrieval_stays_in_canonical_agent_scope(
     monkeypatch,
 ) -> None:
     module = load_palaceoftruth_plugin()
@@ -397,7 +397,7 @@ def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
     # A stale workspace default must not leak into a bound Hermes OAuth read.
     monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "workspace")
     monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes")
-    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    # Broad recall alone must not activate delegated retrieval for a bound client.
     monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", "true")
 
     provider = module.PalaceOfTruthMemoryProvider()
@@ -461,6 +461,158 @@ def test_palaceoftruth_hermes_oauth_retrieval_stays_in_canonical_agent_scope(
         if method == "POST" and path == "/api/v1/memory/retrieve" and payload
     ] == [{"type": "agent", "key": "clara"}]
     assert "Clara memory" in text
+
+
+def test_palaceoftruth_hermes_oauth_tenant_shared_uses_constrained_agent_route(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-karen")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "workspace")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "hermes")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_BROAD_CORPUS", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="karen",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert method == "POST"
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.prefetch("shared operating context", session_id="session-1")
+
+    assert seen_payload["agent_scope_key"] == "karen"
+    assert seen_payload["workspace_scope_keys"] == []
+    assert "session_scope_key" not in seen_payload
+    assert seen_payload["include_tenant_shared"] is True
+    assert seen_payload["tenant_shared_policy"] == "fallback_only"
+    assert seen_payload["include_broad_corpus"] is False
+    assert seen_payload["broad_corpus_policy"] == "disabled"
+    assert seen_payload["access_reason"] == (
+        "Hermes agent karen recall of operator-configured shared memory scopes."
+    )
+
+
+def test_palaceoftruth_hermes_oauth_mara_sibling_patterns_are_bounded_and_audited(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-mara")
+    monkeypatch.setenv(
+        "PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS",
+        "agent/karen, agent/clara",
+    )
+    monkeypatch.setenv("PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT", "2")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="mara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert method == "POST"
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.prefetch("agent campaign context", session_id="session-1")
+
+    assert seen_payload["agent_scope_key"] == "mara"
+    assert seen_payload["include_agent_scope_patterns"] == [
+        "agent/karen",
+        "agent/clara",
+    ]
+    assert seen_payload["agent_scope_pattern_limit"] == 2
+    assert seen_payload["workspace_scope_keys"] == []
+    assert "session_scope_key" not in seen_payload
+    assert seen_payload["include_tenant_shared"] is False
+    assert seen_payload["include_broad_corpus"] is False
+    assert seen_payload["access_reason"] == (
+        "Hermes agent mara recall of operator-configured shared memory scopes."
+    )
+
+
+def test_palaceoftruth_hermes_oauth_delegated_route_fallback_is_canonical_self_only(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-mara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "agent/*")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="mara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    fallback_scopes: list[dict] = []
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        if path == "/api/v1/memory/retrieve-agent":
+            raise RuntimeError("delegated route unavailable")
+        assert method == "POST"
+        assert path == "/api/v1/memory/retrieve"
+        assert payload is not None
+        fallback_scopes.append(payload["scope"])
+        return {"trace": {"fallback_used": False}, "results": [], "total": 0}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.prefetch("shared context", session_id="session-1")
+
+    assert fallback_scopes == [{"type": "agent", "key": "mara"}]
 
 
 def test_palaceoftruth_provider_sends_agent_scope_patterns(monkeypatch) -> None:
