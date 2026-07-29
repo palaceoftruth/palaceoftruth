@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -196,6 +196,18 @@ class TenantApiKeyRetirementChecklistItem(BaseModel):
     summary: str
 
 
+class TenantApiKeyRetirementRuntimeCheck(BaseModel):
+    expected_client_key: str | None = None
+    expected_resource: str | None = None
+    expected_scopes: list[str]
+    expected_app_version: str | None = None
+    client_registered: bool
+    client_configuration_matches: bool
+    oauth_token_observed: bool
+    runtime_activity_observed: bool
+    legacy_fallback_activity_detected: bool
+
+
 class TenantApiKeyRetirementReadinessResponse(BaseModel):
     tenant_id: str
     lookback_days: int
@@ -207,6 +219,8 @@ class TenantApiKeyRetirementReadinessResponse(BaseModel):
     active_keys: list[TenantApiKeySummary]
     oauth_clients: list[McpOAuthClientSummary]
     recent_oauth_events: list[McpRequestAuditEventSummary]
+    recent_legacy_mcp_events: list[McpRequestAuditEventSummary]
+    runtime: TenantApiKeyRetirementRuntimeCheck
     checklist: list[TenantApiKeyRetirementChecklistItem]
     break_glass_procedure: str
 
@@ -297,29 +311,6 @@ def _within_lookback(value: datetime | None, *, since: datetime) -> bool:
     return timestamp is not None and timestamp >= since
 
 
-def _is_mcp_runtime_oauth_event(row) -> bool:
-    operation = row["operation"]
-    if isinstance(operation, str) and operation.startswith("mcp."):
-        return True
-
-    params_summary = row["params_summary"] or {}
-    if not isinstance(params_summary, dict):
-        return False
-
-    if params_summary.get("transport") == "mcp":
-        return True
-
-    metadata = params_summary.get("metadata")
-    if isinstance(metadata, dict) and metadata.get("transport") == "mcp":
-        return True
-
-    route = params_summary.get("route")
-    if isinstance(route, str) and route.startswith("/mcp"):
-        return True
-
-    return operation == "oauth.token_issue" and params_summary.get("resource_kind") == "mcp"
-
-
 async def _list_api_key_rows(db: AsyncSession, *, tenant_id: str) -> list[dict]:
     result = await db.execute(
         text(
@@ -367,24 +358,95 @@ async def _list_mcp_oauth_client_rows(db: AsyncSession, *, tenant_id: str) -> li
     return result.mappings().all()
 
 
-async def _list_recent_mcp_request_audit_rows(
+async def _list_runtime_oauth_token_rows(
     db: AsyncSession,
     *,
     tenant_id: str,
+    client_id: uuid.UUID,
+    since: datetime,
     limit: int,
 ) -> list[dict]:
     result = await db.execute(
         text(
             """
+            /* retirement_runtime_oauth_token */
             SELECT id, tenant_id, client_id, client_key, client_name, operation,
                    required_scope, params_summary, status, error_class, app_version, created_at
             FROM mcp_request_audit_events
             WHERE tenant_id = :tenant_id
+              AND client_id = :client_id
+              AND created_at >= :since
+              AND status = 'success'
+              AND operation = 'oauth.token_issue'
             ORDER BY created_at DESC
             LIMIT :limit
             """
         ),
-        {"tenant_id": tenant_id, "limit": limit},
+        {"tenant_id": tenant_id, "client_id": client_id, "since": since, "limit": limit},
+    )
+    return result.mappings().all()
+
+
+async def _list_runtime_activity_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    client_id: uuid.UUID,
+    app_version: str,
+    since: datetime,
+    limit: int,
+) -> list[dict]:
+    result = await db.execute(
+        text(
+            """
+            /* retirement_runtime_activity */
+            SELECT id, tenant_id, client_id, client_key, client_name, operation,
+                   required_scope, params_summary, status, error_class, app_version, created_at
+            FROM mcp_request_audit_events
+            WHERE tenant_id = :tenant_id
+              AND client_id = :client_id
+              AND created_at >= :since
+              AND status = 'success'
+              AND app_version = :app_version
+              AND operation NOT IN ('oauth.token_issue', 'oauth.token_use')
+              AND COALESCE(params_summary ->> 'http_client_id', '') <> 'api-key'
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "app_version": app_version,
+            "since": since,
+            "limit": limit,
+        },
+    )
+    return result.mappings().all()
+
+
+async def _list_legacy_mcp_activity_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    since: datetime,
+    limit: int,
+) -> list[dict]:
+    result = await db.execute(
+        text(
+            """
+            /* retirement_legacy_mcp_activity */
+            SELECT id, tenant_id, client_id, client_key, client_name, operation,
+                   required_scope, params_summary, status, error_class, app_version, created_at
+            FROM mcp_request_audit_events
+            WHERE tenant_id = :tenant_id
+              AND created_at >= :since
+              AND params_summary ->> 'http_client_id' = 'api-key'
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "since": since, "limit": limit},
     )
     return result.mappings().all()
 
@@ -551,6 +613,10 @@ async def list_tenant_api_key_audit_events(
 async def get_tenant_api_key_retirement_readiness(
     tenant_id: str,
     lookback_days: int = 30,
+    expected_client_key: str | None = None,
+    expected_resource: str | None = None,
+    expected_scope: list[str] | None = Query(default=None),
+    expected_app_version: str | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> TenantApiKeyRetirementReadinessResponse:
     """Report whether a tenant is ready to disable MCP API-key fallback.
@@ -562,10 +628,19 @@ async def get_tenant_api_key_retirement_readiness(
     if lookback_days < 1 or lookback_days > 365:
         raise HTTPException(status_code=422, detail="lookback_days must be between 1 and 365")
 
+    expected_client_key = (expected_client_key or "").strip() or None
+    expected_resource = (expected_resource or "").strip() or None
+    expected_app_version = (expected_app_version or "").strip() or None
+    expected_scopes = list(
+        dict.fromkeys(scope.strip() for scope in (expected_scope or []) if scope.strip())
+    )
+    expectation_complete = bool(
+        expected_client_key and expected_resource and expected_scopes and expected_app_version
+    )
+
     since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     api_key_rows = await _list_api_key_rows(db, tenant_id=tenant_id)
     mcp_client_rows = await _list_mcp_oauth_client_rows(db, tenant_id=tenant_id)
-    oauth_event_rows = await _list_recent_mcp_request_audit_rows(db, tenant_id=tenant_id, limit=50)
 
     active_key_rows = [row for row in api_key_rows if row["revoked_at"] is None]
     active_oauth_client_rows = [
@@ -573,35 +648,117 @@ async def get_tenant_api_key_retirement_readiness(
         for row in mcp_client_rows
         if row["oauth_revoked_at"] is None and row["oauth_client_secret_hash"] is not None
     ]
-    active_oauth_client_ids = {row["id"] for row in active_oauth_client_rows}
+    expected_client_row = next(
+        (
+            row
+            for row in active_oauth_client_rows
+            if expected_client_key is not None and row["client_key"] == expected_client_key
+        ),
+        None,
+    )
+    configured_scopes = set(expected_client_row["allowed_scopes"] or []) if expected_client_row else set()
+    configured_resources = (
+        set(expected_client_row.get("allowed_resources") or []) if expected_client_row else set()
+    )
+    client_configuration_matches = bool(
+        expectation_complete
+        and expected_client_row
+        and set(expected_scopes).issubset(configured_scopes)
+        and expected_resource in configured_resources
+    )
+
+    oauth_token_rows: list[dict] = []
+    runtime_activity_rows: list[dict] = []
+    if expected_client_row is not None:
+        oauth_token_rows = await _list_runtime_oauth_token_rows(
+            db,
+            tenant_id=tenant_id,
+            client_id=expected_client_row["id"],
+            since=since,
+            limit=50,
+        )
+        if expected_app_version is not None:
+            runtime_activity_rows = await _list_runtime_activity_rows(
+                db,
+                tenant_id=tenant_id,
+                client_id=expected_client_row["id"],
+                app_version=expected_app_version,
+                since=since,
+                limit=50,
+            )
+    legacy_mcp_rows = await _list_legacy_mcp_activity_rows(
+        db,
+        tenant_id=tenant_id,
+        since=since,
+        limit=50,
+    )
+
+    def token_matches_expectation(row) -> bool:
+        params_summary = row["params_summary"] or {}
+        if not isinstance(params_summary, dict):
+            return False
+        requested_scopes = params_summary.get("requested_scopes")
+        return bool(
+            expected_resource
+            and params_summary.get("requested_resource") == expected_resource
+            and isinstance(requested_scopes, list)
+            and set(expected_scopes).issubset(
+                scope for scope in requested_scopes if isinstance(scope, str)
+            )
+        )
+
+    oauth_token_observed = any(token_matches_expectation(row) for row in oauth_token_rows)
+    runtime_activity_observed = bool(runtime_activity_rows)
+    recent_oauth_activity_detected = oauth_token_observed and runtime_activity_observed
+    legacy_fallback_activity_detected = bool(legacy_mcp_rows)
     recent_api_key_use_detected = any(
         _within_lookback(row["last_used_at"], since=since) for row in active_key_rows
-    )
-    recent_oauth_activity_detected = any(
-        row["status"] == "success"
-        and row["client_id"] in active_oauth_client_ids
-        and _within_lookback(row["created_at"], since=since)
-        and _is_mcp_runtime_oauth_event(row)
-        for row in oauth_event_rows
     )
 
     checklist = [
         TenantApiKeyRetirementChecklistItem(
-            id="oauth-client-registered",
-            status="pass" if active_oauth_client_rows else "block",
+            id="runtime-expectation",
+            status="pass" if expectation_complete else "block",
             summary=(
-                "At least one active MCP OAuth client is registered."
-                if active_oauth_client_rows
-                else "No active MCP OAuth client is registered for this tenant."
+                "Expected MCP client, API resource, scopes, and app version were supplied."
+                if expectation_complete
+                else "Expected MCP client, API resource, scopes, and app version are required."
+            ),
+        ),
+        TenantApiKeyRetirementChecklistItem(
+            id="oauth-client-registered",
+            status="pass" if expected_client_row else "block",
+            summary=(
+                f"Expected MCP OAuth client {expected_client_key} is active."
+                if expected_client_row
+                else "The expected MCP OAuth client is not active."
+            ),
+        ),
+        TenantApiKeyRetirementChecklistItem(
+            id="oauth-client-config",
+            status="pass" if client_configuration_matches else "block",
+            summary=(
+                "Expected MCP OAuth resource and scopes match the registered client."
+                if client_configuration_matches
+                else "Expected MCP OAuth resource or scopes do not match the registered client."
             ),
         ),
         TenantApiKeyRetirementChecklistItem(
             id="oauth-client-observed",
             status="pass" if recent_oauth_activity_detected else "block",
             summary=(
-                f"MCP OAuth client activity was observed within {lookback_days} days."
+                f"Expected OAuth token and app-version runtime activity were observed within {lookback_days} days."
                 if recent_oauth_activity_detected
-                else f"No MCP OAuth client activity was observed within {lookback_days} days."
+                else f"Expected OAuth token and app-version runtime activity were not both observed within {lookback_days} days."
+            ),
+        ),
+        TenantApiKeyRetirementChecklistItem(
+            id="legacy-mcp-activity",
+            status="block" if legacy_fallback_activity_detected else "pass",
+            summary=(
+                f"Legacy API-key MCP caller activity was observed within {lookback_days} days."
+                if legacy_fallback_activity_detected
+                else f"No legacy API-key MCP caller activity was observed within {lookback_days} days."
             ),
         ),
         TenantApiKeyRetirementChecklistItem(
@@ -633,7 +790,11 @@ async def get_tenant_api_key_retirement_readiness(
         tenant_id=tenant_id,
         lookback_days=lookback_days,
         ready_for_oauth_only_mcp=bool(
-            active_oauth_client_rows and recent_oauth_activity_detected and not recent_api_key_use_detected
+            expectation_complete
+            and client_configuration_matches
+            and recent_oauth_activity_detected
+            and not recent_api_key_use_detected
+            and not legacy_fallback_activity_detected
         ),
         active_key_count=len(active_key_rows),
         recent_api_key_use_detected=recent_api_key_use_detected,
@@ -641,7 +802,24 @@ async def get_tenant_api_key_retirement_readiness(
         recent_oauth_activity_detected=recent_oauth_activity_detected,
         active_keys=[_serialize_api_key(row) for row in active_key_rows],
         oauth_clients=[_serialize_mcp_oauth_client(row) for row in mcp_client_rows],
-        recent_oauth_events=[_serialize_mcp_request_audit_event(row) for row in oauth_event_rows],
+        recent_oauth_events=[
+            _serialize_mcp_request_audit_event(row)
+            for row in [*runtime_activity_rows, *oauth_token_rows]
+        ],
+        recent_legacy_mcp_events=[
+            _serialize_mcp_request_audit_event(row) for row in legacy_mcp_rows
+        ],
+        runtime=TenantApiKeyRetirementRuntimeCheck(
+            expected_client_key=expected_client_key,
+            expected_resource=expected_resource,
+            expected_scopes=expected_scopes,
+            expected_app_version=expected_app_version,
+            client_registered=expected_client_row is not None,
+            client_configuration_matches=client_configuration_matches,
+            oauth_token_observed=oauth_token_observed,
+            runtime_activity_observed=runtime_activity_observed,
+            legacy_fallback_activity_detected=legacy_fallback_activity_detected,
+        ),
         checklist=checklist,
         break_glass_procedure=(
             "Set mcp.legacyApiKeyAuthEnabled=true for the affected release. "

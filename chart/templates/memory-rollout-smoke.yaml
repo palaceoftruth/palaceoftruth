@@ -162,6 +162,8 @@ spec:
               value: {{ .Values.mcp.clientKey | quote }}
             - name: PALACEOFTRUTH_MCP_CLIENT_SCOPES
               value: {{ .Values.mcp.clientScopes | quote }}
+            - name: PALACEOFTRUTH_MCP_APP_VERSION
+              value: {{ .Chart.AppVersion | quote }}
             - name: REDIS_SENTINEL_EXPECTED_REPLICAS
               value: {{ include "palaceoftruth.valkeyReplicaCount" . | quote }}
           envFrom:

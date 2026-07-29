@@ -151,6 +151,19 @@ def test_settings_from_env_accepts_oauth_client_secret_without_api_key(monkeypat
     assert settings.oauth_token_url == "https://api.palaceoftruth.test/api/v1/memory/mcp/oauth/token"
 
 
+def test_settings_from_env_parses_legacy_mcp_api_key_auth_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "adapter-key")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED", "false")
+
+    settings = SecondBrainMcpSettings.from_env()
+
+    assert settings.legacy_api_key_auth_enabled is False
+
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED", "sometimes")
+    with pytest.raises(RuntimeError, match="must be a boolean"):
+        SecondBrainMcpSettings.from_env()
+
+
 def test_settings_from_env_accepts_explicit_oauth_resource_and_audience(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
     monkeypatch.delenv("SECONDBRAIN_API_KEY", raising=False)
@@ -201,6 +214,58 @@ def test_mcp_http_auth_accepts_valid_api_key_for_adapter_tenant() -> None:
 
     with _mcp_auth_test_client(transport=transport) as client:
         response = client.post("/mcp", headers={"X-API-Key": "adapter-key"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_mcp_http_auth_rejects_api_key_when_legacy_auth_is_disabled() -> None:
+    transport = _whoami_transport({"adapter-key": "tenant-a"})
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.palaceoftruth.test",
+        api_key="adapter-key",
+        timeout_seconds=5.0,
+        legacy_api_key_auth_enabled=False,
+    )
+
+    with _mcp_auth_test_client(transport=transport, settings=settings) as client:
+        response = client.post("/mcp", headers={"X-API-Key": "adapter-key"})
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "error": "invalid_token",
+        "error_description": "Missing API key or bearer token",
+    }
+
+
+def test_mcp_http_auth_uses_bearer_when_disabled_legacy_key_header_is_also_present() -> None:
+    transport = _whoami_transport(
+        {
+            "adapter-key": "tenant-a",
+            "Bearer caller-token": {
+                "status": "ok",
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "mcp_client_key": "codex-remote",
+                "allowed_scopes": ["read"],
+            },
+        }
+    )
+    settings = SecondBrainMcpSettings(
+        api_base_url="https://api.palaceoftruth.test",
+        api_key="adapter-key",
+        timeout_seconds=5.0,
+        legacy_api_key_auth_enabled=False,
+    )
+
+    with _mcp_auth_test_client(transport=transport, settings=settings) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                "X-API-Key": "stale-caller-key",
+                "Authorization": "Bearer caller-token",
+            },
+        )
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}

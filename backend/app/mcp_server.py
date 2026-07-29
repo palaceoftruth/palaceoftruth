@@ -72,6 +72,10 @@ PALACE_MCP_CLIENT_KEY_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_KEY", "SECONDBRAIN_MCP_C
 PALACE_MCP_CLIENT_NAME_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_NAME", "SECONDBRAIN_MCP_CLIENT_NAME")
 PALACE_MCP_CLIENT_SCOPES_ENVS = ("PALACEOFTRUTH_MCP_CLIENT_SCOPES", "SECONDBRAIN_MCP_CLIENT_SCOPES")
 PALACE_MCP_APP_VERSION_ENVS = ("PALACEOFTRUTH_MCP_APP_VERSION", "SECONDBRAIN_MCP_APP_VERSION")
+PALACE_MCP_LEGACY_API_KEY_AUTH_ENABLED_ENVS = (
+    "PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED",
+    "SECONDBRAIN_MCP_LEGACY_API_KEY_AUTH_ENABLED",
+)
 PALACE_DEFAULT_SCOPE_TYPE_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "SECONDBRAIN_DEFAULT_SCOPE_TYPE")
 PALACE_DEFAULT_SCOPE_KEY_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "SECONDBRAIN_DEFAULT_SCOPE_KEY")
 PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
@@ -473,9 +477,13 @@ class McpHttpAuthResult:
     scopes: tuple[McpOperationScope, ...]
 
 
-def _incoming_mcp_auth_headers(headers: Mapping[str, str]) -> dict[str, str]:
+def _incoming_mcp_auth_headers(
+    headers: Mapping[str, str],
+    *,
+    legacy_api_key_auth_enabled: bool,
+) -> dict[str, str]:
     api_key = headers.get("x-api-key")
-    if api_key and api_key.strip():
+    if legacy_api_key_auth_enabled and api_key and api_key.strip():
         auth_headers = {"X-API-Key": api_key.strip()}
         mcp_scope = headers.get("x-mcp-scope")
         mcp_scopes = headers.get("x-mcp-scopes")
@@ -564,7 +572,10 @@ class McpHttpAuthVerifier:
         self._adapter_tenant_id: str | None = None
 
     async def verify(self, headers: Mapping[str, str]) -> McpHttpAuthResult:
-        auth_headers = _incoming_mcp_auth_headers(headers)
+        auth_headers = _incoming_mcp_auth_headers(
+            headers,
+            legacy_api_key_auth_enabled=self.settings.legacy_api_key_auth_enabled,
+        )
         async with httpx.AsyncClient(
             base_url=self.settings.api_base_url,
             timeout=self.settings.timeout_seconds,
@@ -697,6 +708,7 @@ class SecondBrainMcpSettings:
     client_name: str = "Palace MCP adapter"
     client_scopes: tuple[McpOperationScope, ...] = DEFAULT_MCP_CLIENT_SCOPES
     app_version: str | None = None
+    legacy_api_key_auth_enabled: bool = True
     default_scope_type: ScopeType | None = None
     default_scope_key: str | None = None
 
@@ -740,6 +752,18 @@ class SecondBrainMcpSettings:
             client_scopes = cleaned_scopes or ALL_MCP_OPERATION_SCOPES
 
         app_version, _ = _env_value(PALACE_MCP_APP_VERSION_ENVS)
+        legacy_api_key_auth_raw, legacy_api_key_auth_env = _env_value(
+            PALACE_MCP_LEGACY_API_KEY_AUTH_ENABLED_ENVS,
+            "true",
+        )
+        assert legacy_api_key_auth_raw is not None
+        normalized_legacy_api_key_auth = legacy_api_key_auth_raw.strip().lower()
+        if normalized_legacy_api_key_auth not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise RuntimeError(
+                f"{legacy_api_key_auth_env or PALACE_MCP_LEGACY_API_KEY_AUTH_ENABLED_ENVS[0]} "
+                "must be a boolean"
+            )
+        legacy_api_key_auth_enabled = normalized_legacy_api_key_auth in {"1", "true", "yes", "on"}
         config_defaults = _load_palace_config_defaults()
         default_scope_type_raw, default_scope_type_env = _env_value(
             PALACE_DEFAULT_SCOPE_TYPE_ENVS,
@@ -780,6 +804,7 @@ class SecondBrainMcpSettings:
             client_name=client_name.strip(),
             client_scopes=client_scopes,  # type: ignore[arg-type]
             app_version=app_version or None,
+            legacy_api_key_auth_enabled=legacy_api_key_auth_enabled,
             default_scope_type=default_scope_type,
             default_scope_key=default_scope_key,
         )
