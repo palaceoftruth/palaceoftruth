@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,67 @@ from typing import Any
 import pytest
 
 from scripts import check_memory_rollout_smoke as rollout_smoke
+
+
+_MASTER_NOT_FOUND_LINE = "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+
+
+def _ready_sentinel_pods(count: int = 3) -> list[dict[str, Any]]:
+    return [
+        {
+            "metadata": {
+                "name": f"palaceoftruth-valkey-sentinel-{index}",
+                "uid": f"sentinel-uid-{index}",
+                "labels": {"app": "palaceoftruth-valkey-sentinel"},
+            },
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{"name": "sentinel", "ready": True, "restartCount": 0}],
+            },
+        }
+        for index in range(count)
+    ]
+
+
+def _historical_runtime_worker_state() -> dict[str, Any]:
+    return {
+        "ready": True,
+        "selected_pods": ["worker-abc"],
+        "non_running": [],
+        "unready_pods": [],
+        "missing_markers": [],
+        "readiness_fallback": [],
+        "unresolved_errors": [],
+        "log_read_failures": [],
+        "worker_observations": [
+            {"pod": "worker-abc", "uid": "worker-uid-abc", "restarts": {"worker": 0}}
+        ],
+        "unresolved_error_fingerprints": [
+            {
+                "pod": "worker-abc",
+                "container": "worker",
+                "count": 1,
+                "sha256": hashlib.sha256(_MASTER_NOT_FOUND_LINE.encode("utf-8")).hexdigest(),
+            }
+        ],
+        "sentinel_pods": {
+            "ready": True,
+            "expected": 3,
+            "selected": [
+                {
+                    "pod": f"palaceoftruth-valkey-sentinel-{index}",
+                    "uid": f"sentinel-uid-{index}",
+                    "phase": "Running",
+                    "ready": True,
+                    "terminating": False,
+                }
+                for index in range(3)
+            ],
+            "reason": None,
+        },
+        "historical_master_not_found_hits": [{"pod": "worker-abc", "container": "worker"}],
+    }
 
 
 def test_script_path_execution_can_resolve_sibling_script_imports() -> None:
@@ -600,14 +662,19 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_post_scan_sentin
                     {
                         "metadata": {
                             "name": "worker-abc",
+                            "uid": "worker-uid-abc",
                             "labels": {"app": "palaceoftruth-worker"},
                         },
                         "spec": {"containers": [{"name": "worker"}]},
                         "status": {
                             "phase": "Running",
-                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "restartCount": 0}
+                            ],
                         },
-                    }
+                    },
+                    *_ready_sentinel_pods(),
                 ]
             }
 
@@ -621,7 +688,11 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_post_scan_sentin
         "target": "palaceoftruth",
         "tenant_id": "tenant-a",
         "checks": [
-            {"name": "runtime_dependencies", "status": "passed"},
+            {
+                "name": "runtime_dependencies",
+                "status": "passed",
+                "workers": _historical_runtime_worker_state(),
+            },
             {"name": "memory_job_completion", "status": "passed"},
             {"name": "sentinel_valkey", "status": "passed"},
         ],
@@ -637,6 +708,8 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_post_scan_sentin
         log_since_seconds=3600,
         log_tail_lines=500,
         request_timeout=5,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
     )
     async def healthy_sentinel():
         return SimpleNamespace(
@@ -659,6 +732,121 @@ def test_kubernetes_check_treats_log_marker_as_historical_after_post_scan_sentin
     assert kubernetes_check["post_scan_sentinel"]["healthy"] is True
 
 
+@pytest.mark.parametrize(
+    ("scenario", "expected_probe_calls"),
+    [
+        ("new_post_runtime_error", 1),
+        ("worker_replacement", 1),
+        ("worker_restart", 1),
+        ("post_memory_one_of_three_sentinels", 0),
+    ],
+)
+def test_kubernetes_check_rejects_unstable_post_memory_master_discovery_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    expected_probe_calls: int,
+) -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            worker_uid = "worker-uid-replacement" if scenario == "worker_replacement" else "worker-uid-abc"
+            restart_count = 1 if scenario == "worker_restart" else 0
+            sentinels = _ready_sentinel_pods()
+            if scenario == "post_memory_one_of_three_sentinels":
+                for pod in sentinels[1:]:
+                    pod["status"]["conditions"][0]["status"] = "False"
+                    pod["status"]["containerStatuses"][0]["ready"] = False
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": worker_uid,
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "restartCount": restart_count}
+                            ],
+                        },
+                    },
+                    *sentinels,
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=10.42.5.211:6379\n"
+                f"{_MASTER_NOT_FOUND_LINE}"
+            )
+
+    probe_calls = 0
+
+    async def healthy_sentinel():
+        nonlocal probe_calls
+        probe_calls += 1
+        return SimpleNamespace(
+            master_host="10.42.5.211",
+            master_port=6379,
+            connected_replicas=1,
+        )
+
+    baseline_workers = _historical_runtime_worker_state()
+    if scenario == "new_post_runtime_error":
+        baseline_workers["unresolved_error_fingerprints"] = []
+        baseline_workers["historical_master_not_found_hits"] = []
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", healthy_sentinel)
+    report = {
+        "target": "palaceoftruth",
+        "tenant_id": "tenant-a",
+        "checks": [
+            {
+                "name": "runtime_dependencies",
+                "status": "passed",
+                "workers": baseline_workers,
+            },
+            {"name": "memory_job_completion", "status": "passed"},
+            {"name": "sentinel_valkey", "status": "passed"},
+        ],
+        "alerts": [],
+    }
+    args = SimpleNamespace(
+        skip_kubernetes=False,
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        restart_alert_threshold=3,
+        skip_log_scan=False,
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+
+    rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
+
+    assert [alert["code"] for alert in report["alerts"]] == ["master_not_found"]
+    assert probe_calls == expected_probe_calls
+    kubernetes_check = report["checks"][-1]
+    assert kubernetes_check["status"] == "failed"
+    assert kubernetes_check["master_not_found_hits"] == [
+        {"pod": "worker-abc", "container": "worker"}
+    ]
+    reconciliation = kubernetes_check["post_scan_worker_reconciliation"]
+    assert reconciliation["ready"] is False
+    if scenario == "post_memory_one_of_three_sentinels":
+        assert reconciliation["sentinel_pods"]["ready"] is False
+        assert sum(row["ready"] for row in reconciliation["sentinel_pods"]["selected"]) == 1
+    else:
+        assert reconciliation["worker_recheck_stable"] is False
+
+
 def test_kubernetes_check_fails_closed_when_post_scan_sentinel_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -671,14 +859,19 @@ def test_kubernetes_check_fails_closed_when_post_scan_sentinel_fails(
                     {
                         "metadata": {
                             "name": "worker-abc",
+                            "uid": "worker-uid-abc",
                             "labels": {"app": "palaceoftruth-worker"},
                         },
                         "spec": {"containers": [{"name": "worker"}]},
                         "status": {
                             "phase": "Running",
-                            "containerStatuses": [{"name": "worker", "restartCount": 0}],
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "restartCount": 0}
+                            ],
                         },
-                    }
+                    },
+                    *_ready_sentinel_pods(),
                 ]
             }
 
@@ -696,7 +889,11 @@ def test_kubernetes_check_fails_closed_when_post_scan_sentinel_fails(
         "target": "palaceoftruth",
         "tenant_id": "tenant-a",
         "checks": [
-            {"name": "runtime_dependencies", "status": "passed"},
+            {
+                "name": "runtime_dependencies",
+                "status": "passed",
+                "workers": _historical_runtime_worker_state(),
+            },
             {"name": "memory_job_completion", "status": "passed"},
             {"name": "sentinel_valkey", "status": "passed"},
         ],
@@ -712,6 +909,8 @@ def test_kubernetes_check_fails_closed_when_post_scan_sentinel_fails(
         log_since_seconds=3600,
         log_tail_lines=500,
         request_timeout=5,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
     )
 
     rollout_smoke.check_kubernetes(report, args, kube=FakeKube())
@@ -834,24 +1033,6 @@ def test_runtime_dependencies_require_api_readiness_and_started_workers() -> Non
                 "log_read_failures": [],
             },
         }
-    ]
-
-
-def _ready_sentinel_pods(count: int = 3) -> list[dict[str, Any]]:
-    return [
-        {
-            "metadata": {
-                "name": f"palaceoftruth-valkey-sentinel-{index}",
-                "uid": f"sentinel-uid-{index}",
-                "labels": {"app": "palaceoftruth-valkey-sentinel"},
-            },
-            "status": {
-                "phase": "Running",
-                "conditions": [{"type": "Ready", "status": "True"}],
-                "containerStatuses": [{"name": "sentinel", "ready": True, "restartCount": 0}],
-            },
-        }
-        for index in range(count)
     ]
 
 

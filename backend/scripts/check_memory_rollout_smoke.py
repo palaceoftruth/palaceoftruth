@@ -321,6 +321,19 @@ def _check_passed(report: dict[str, Any], name: str) -> bool:
     )
 
 
+def _passed_check(report: dict[str, Any], name: str) -> dict[str, Any] | None:
+    return next(
+        (
+            check
+            for check in reversed(report.get("checks", []))
+            if isinstance(check, dict)
+            and check.get("name") == name
+            and check.get("status") == "passed"
+        ),
+        None,
+    )
+
+
 def check_api_health(client: HttpClient, report: dict[str, Any]) -> None:
     result = client.request("GET", "/health")
     if result.status >= 400:
@@ -553,6 +566,8 @@ def _reconcile_worker_master_discovery_errors(
     worker_state: dict[str, Any],
     kube: KubernetesClient,
     args: argparse.Namespace,
+    *,
+    baseline_worker_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify an old worker log hit only after the live Sentinel data path passes."""
     unresolved_errors = worker_state.get("unresolved_errors") or []
@@ -584,11 +599,17 @@ def _reconcile_worker_master_discovery_errors(
         return reconciled
 
     second_state = _worker_startup_state(kube, args)
+    baseline = worker_state if baseline_worker_state is None else baseline_worker_state
     stable = (
-        second_state.get("worker_observations") == observations
+        baseline.get("worker_observations") == observations
+        and second_state.get("worker_observations") == observations
+        and baseline.get("unresolved_error_fingerprints")
+        == worker_state.get("unresolved_error_fingerprints")
+        and baseline.get("sentinel_pods") == sentinel_pods
         and second_state.get("unresolved_errors") == unresolved_errors
         and second_state.get("unresolved_error_fingerprints")
         == worker_state.get("unresolved_error_fingerprints")
+        and second_state.get("sentinel_pods") == sentinel_pods
         and (second_state.get("sentinel_pods") or {}).get("ready") is True
         and not any(
             second_state.get(field)
@@ -881,11 +902,26 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
                     master_not_found_hits.append(hit)
 
     post_scan_sentinel: dict[str, Any] | None = None
+    post_scan_worker_reconciliation: dict[str, Any] | None = None
     if master_not_found_hits and prior_memory_path_healthy:
-        post_scan_sentinel = _post_scan_sentinel_state()
-        if post_scan_sentinel["healthy"]:
-            # The second live probe is ordered after the observed marker, so it
-            # can prove the bounded log hit no longer reflects Sentinel state.
+        runtime_check = _passed_check(report, "runtime_dependencies")
+        runtime_workers = runtime_check.get("workers") if isinstance(runtime_check, dict) else None
+        current_workers = _worker_startup_state(kube, args)
+        post_scan_worker_reconciliation = _reconcile_worker_master_discovery_errors(
+            current_workers,
+            kube,
+            args,
+            baseline_worker_state=runtime_workers if isinstance(runtime_workers, dict) else {},
+        )
+        post_scan_sentinel = post_scan_worker_reconciliation.get("sentinel_reconciliation")
+        if (
+            post_scan_worker_reconciliation.get("ready") is True
+            and not post_scan_worker_reconciliation.get("unresolved_errors")
+        ):
+            # A post-memory error is historical only when the exact worker
+            # identity, restart counts, error fingerprint, and expected
+            # Sentinel ensemble remain stable across the runtime and final
+            # scans around a successful live Sentinel probe.
             historical_master_not_found_hits.extend(master_not_found_hits)
             master_not_found_hits = []
 
@@ -912,6 +948,7 @@ def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: Kub
         master_not_found_hits=master_not_found_hits,
         historical_master_not_found_hits=historical_master_not_found_hits,
         post_scan_sentinel=post_scan_sentinel,
+        post_scan_worker_reconciliation=post_scan_worker_reconciliation,
         log_read_failures=log_read_failures,
     )
 
