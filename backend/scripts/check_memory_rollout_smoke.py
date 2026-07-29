@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import ssl
@@ -364,7 +365,9 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
     unready_pods: list[dict[str, Any]] = []
     readiness_fallback: list[dict[str, Any]] = []
     unresolved_errors: list[dict[str, str]] = []
+    unresolved_error_fingerprints: list[dict[str, Any]] = []
     log_read_failures: list[dict[str, str]] = []
+    worker_observations: list[dict[str, Any]] = []
 
     for pod in pods:
         if not isinstance(pod, dict):
@@ -378,6 +381,17 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
         if metadata.get("deletionTimestamp"):
             continue
         selected_pods.append(pod_name)
+        worker_observations.append(
+            {
+                "pod": pod_name,
+                "uid": str(metadata.get("uid") or ""),
+                "restarts": {
+                    str(container_status.get("name") or ""): int(container_status.get("restartCount") or 0)
+                    for container_status in status.get("containerStatuses") or []
+                    if isinstance(container_status, dict)
+                },
+            }
+        )
         phase = str(status.get("phase") or "")
         if phase != "Running":
             non_running.append({"pod": pod_name, "phase": phase})
@@ -435,6 +449,15 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
             absent = [marker for marker in required_markers if marker not in log_text]
             if _has_unresolved_master_discovery_error(log_text):
                 unresolved_errors.append({"pod": pod_name, "container": container_name})
+                error_lines = _master_discovery_error_lines(log_text)
+                unresolved_error_fingerprints.append(
+                    {
+                        "pod": pod_name,
+                        "container": container_name,
+                        "count": len(error_lines),
+                        "sha256": hashlib.sha256("\n".join(error_lines).encode("utf-8")).hexdigest(),
+                    }
+                )
             elif absent and pod_ready and container_name not in unready_containers:
                 # ARQ's readiness probe is a live queue check. It is stronger
                 # evidence than startup strings that can age out of a bounded
@@ -443,7 +466,7 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
             elif absent:
                 missing_markers.append({"pod": pod_name, "container": container_name, "missing": absent})
 
-    return {
+    state = {
         "ready": bool(selected_pods)
         and not non_running
         and not unready_pods
@@ -458,6 +481,136 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
         "unresolved_errors": unresolved_errors,
         "log_read_failures": log_read_failures,
     }
+    if unresolved_errors:
+        state["worker_observations"] = worker_observations
+        state["unresolved_error_fingerprints"] = unresolved_error_fingerprints
+        state["sentinel_pods"] = _sentinel_pod_state(pods, args)
+    return state
+
+
+def _sentinel_pod_state(pods: list[Any], args: argparse.Namespace) -> dict[str, Any]:
+    expected = int(getattr(args, "expected_sentinel_pods", 0) or 0)
+    fragment = str(getattr(args, "sentinel_name_fragment", "valkey-sentinel") or "")
+    if expected <= 0 or not fragment:
+        return {
+            "ready": False,
+            "expected": expected,
+            "selected": [],
+            "reason": "expected Sentinel pod topology is not configured",
+        }
+
+    selected: list[dict[str, Any]] = []
+    for pod in pods:
+        if not isinstance(pod, dict):
+            continue
+        metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        pod_name = str(metadata.get("name") or "")
+        app_label = str((metadata.get("labels") or {}).get("app") or "")
+        if fragment not in pod_name and fragment not in app_label:
+            continue
+        ready_condition = next(
+            (
+                condition
+                for condition in status.get("conditions") or []
+                if isinstance(condition, dict) and condition.get("type") == "Ready"
+            ),
+            {},
+        )
+        container_statuses = [
+            container_status
+            for container_status in status.get("containerStatuses") or []
+            if isinstance(container_status, dict)
+        ]
+        selected.append(
+            {
+                "pod": pod_name,
+                "uid": str(metadata.get("uid") or ""),
+                "phase": str(status.get("phase") or ""),
+                "ready": ready_condition.get("status") == "True"
+                and bool(container_statuses)
+                and all(container_status.get("ready") is True for container_status in container_statuses),
+                "terminating": bool(metadata.get("deletionTimestamp")),
+            }
+        )
+
+    ready = (
+        len(selected) == expected
+        and all(
+            row["uid"] and row["phase"] == "Running" and row["ready"] and not row["terminating"]
+            for row in selected
+        )
+    )
+    return {
+        "ready": ready,
+        "expected": expected,
+        "selected": selected,
+        "reason": None if ready else "Sentinel pod ensemble is incomplete or unready",
+    }
+
+
+def _reconcile_worker_master_discovery_errors(
+    worker_state: dict[str, Any],
+    kube: KubernetesClient,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Classify an old worker log hit only after the live Sentinel data path passes."""
+    unresolved_errors = worker_state.get("unresolved_errors") or []
+    other_blockers = any(
+        worker_state.get(field)
+        for field in (
+            "non_running",
+            "unready_pods",
+            "missing_markers",
+            "log_read_failures",
+        )
+    )
+    sentinel_pods = worker_state.get("sentinel_pods") or {}
+    observations = worker_state.get("worker_observations") or []
+    if (
+        not unresolved_errors
+        or other_blockers
+        or not worker_state.get("selected_pods")
+        or not sentinel_pods.get("ready")
+        or not observations
+        or any(not observation.get("uid") for observation in observations)
+    ):
+        return worker_state
+
+    reconciled = dict(worker_state)
+    sentinel_reconciliation = _post_scan_sentinel_state()
+    reconciled["sentinel_reconciliation"] = sentinel_reconciliation
+    if not sentinel_reconciliation["healthy"]:
+        return reconciled
+
+    second_state = _worker_startup_state(kube, args)
+    stable = (
+        second_state.get("worker_observations") == observations
+        and second_state.get("unresolved_errors") == unresolved_errors
+        and second_state.get("unresolved_error_fingerprints")
+        == worker_state.get("unresolved_error_fingerprints")
+        and (second_state.get("sentinel_pods") or {}).get("ready") is True
+        and not any(
+            second_state.get(field)
+            for field in (
+                "non_running",
+                "unready_pods",
+                "missing_markers",
+                "log_read_failures",
+            )
+        )
+    )
+    reconciled["worker_recheck_stable"] = stable
+    if not stable:
+        return reconciled
+
+    reconciled = dict(second_state)
+    reconciled["sentinel_reconciliation"] = sentinel_reconciliation
+    reconciled["worker_recheck_stable"] = True
+    reconciled["historical_master_not_found_hits"] = list(unresolved_errors)
+    reconciled["unresolved_errors"] = []
+    reconciled["ready"] = True
+    return reconciled
 
 
 def check_runtime_dependencies(
@@ -486,6 +639,7 @@ def check_runtime_dependencies(
         else:
             try:
                 worker_state = _worker_startup_state(kube, args)
+                worker_state = _reconcile_worker_master_discovery_errors(worker_state, kube, args)
             except Exception as exc:
                 worker_state = {"ready": False, "error_class": exc.__class__.__name__, "error": str(exc)}
         last_state = {"api": api_state, "workers": worker_state}
@@ -790,6 +944,14 @@ def _has_unresolved_master_discovery_error(log_text: str) -> bool:
     return last_ready_offset < last_error_offset
 
 
+def _master_discovery_error_lines(log_text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in log_text.splitlines()
+        if "MasterNotFoundError" in line or "No master found" in line
+    ]
+
+
 def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = None) -> dict[str, Any]:
     report: dict[str, Any] = {
         "report": "palace-memory-rollout-smoke",
@@ -844,6 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-scope", action="append", default=[])
     parser.add_argument("--pod-label-selector", default="app.kubernetes.io/name=palaceoftruth")
     parser.add_argument("--worker-name-fragment", default="worker")
+    parser.add_argument(
+        "--expected-sentinel-pods",
+        type=int,
+        default=int(os.getenv("PALACE_ROLLOUT_SMOKE_EXPECTED_SENTINEL_PODS", "0")),
+    )
+    parser.add_argument("--sentinel-name-fragment", default="valkey-sentinel")
     parser.add_argument("--restart-alert-threshold", type=int, default=3)
     parser.add_argument("--log-since-seconds", type=int, default=3600)
     parser.add_argument("--log-tail-lines", type=int, default=500)

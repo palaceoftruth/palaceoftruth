@@ -837,6 +837,401 @@ def test_runtime_dependencies_require_api_readiness_and_started_workers() -> Non
     ]
 
 
+def _ready_sentinel_pods(count: int = 3) -> list[dict[str, Any]]:
+    return [
+        {
+            "metadata": {
+                "name": f"palaceoftruth-valkey-sentinel-{index}",
+                "uid": f"sentinel-uid-{index}",
+                "labels": {"app": "palaceoftruth-valkey-sentinel"},
+            },
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{"name": "sentinel", "ready": True, "restartCount": 0}],
+            },
+        }
+        for index in range(count)
+    ]
+
+
+def test_runtime_dependencies_reconcile_01529_rollout_transient_master_discovery_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": "worker-uid-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "started": True, "restartCount": 0}
+                            ],
+                        },
+                    },
+                    *_ready_sentinel_pods(),
+                ],
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=valkey:6379\n"
+                "Starting worker for 1 functions\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    async def healthy_sentinel():
+        return SimpleNamespace(
+            master_host="valkey-primary",
+            master_port=6379,
+            connected_replicas=1,
+        )
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", healthy_sentinel)
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        dependency_timeout_seconds=1,
+        dependency_interval_seconds=0.01,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args, kube=FakeKube())
+
+    assert report["alerts"] == []
+    worker_state = report["checks"][0]["workers"]
+    assert worker_state["ready"] is True
+    assert worker_state["unresolved_errors"] == []
+    assert worker_state["historical_master_not_found_hits"] == [
+        {"pod": "worker-abc", "container": "worker"}
+    ]
+    assert worker_state["sentinel_reconciliation"] == {
+        "healthy": True,
+        "master": "valkey-primary:6379",
+        "connected_replicas": 1,
+    }
+    assert worker_state["worker_recheck_stable"] is True
+
+
+def test_runtime_dependencies_fail_closed_when_master_discovery_error_is_still_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": "worker-uid-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "started": True, "restartCount": 0}
+                            ],
+                        },
+                    },
+                    *_ready_sentinel_pods(),
+                ],
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=valkey:6379\n"
+                "Starting worker for 1 functions\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    async def failed_sentinel():
+        raise RuntimeError("No master found for 'mymaster'")
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", failed_sentinel)
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        dependency_timeout_seconds=0.01,
+        dependency_interval_seconds=0.01,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args, kube=FakeKube())
+
+    assert [alert["code"] for alert in report["alerts"]] == ["runtime_dependencies_not_ready"]
+    worker_state = report["checks"][0]["workers"]
+    assert worker_state["ready"] is False
+    assert worker_state["unresolved_errors"] == [{"pod": "worker-abc", "container": "worker"}]
+    assert worker_state["sentinel_reconciliation"] == {
+        "healthy": False,
+        "error_class": "RuntimeError",
+        "error": "No master found for 'mymaster'",
+    }
+
+
+@pytest.mark.parametrize(("topology", "selected_count"), [("missing", 0), ("one_of_three_ready", 3)])
+def test_runtime_dependencies_fail_closed_for_missing_or_split_sentinel_pods(
+    monkeypatch: pytest.MonkeyPatch,
+    topology: str,
+    selected_count: int,
+) -> None:
+    sentinel_pods = _ready_sentinel_pods()
+    if topology == "missing":
+        sentinel_pods = []
+    else:
+        for pod in sentinel_pods[1:]:
+            pod["status"]["conditions"][0]["status"] = "False"
+            pod["status"]["containerStatuses"][0]["ready"] = False
+
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": "worker-uid-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "started": True, "restartCount": 0}
+                            ],
+                        },
+                    },
+                    *sentinel_pods,
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=valkey:6379\n"
+                "Starting worker for 1 functions\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    async def sentinel_probe_must_not_run():
+        raise AssertionError("service-level probe must not mask incomplete Sentinel pods")
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", sentinel_probe_must_not_run)
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        dependency_timeout_seconds=0.01,
+        dependency_interval_seconds=0.01,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args, kube=FakeKube())
+
+    assert [alert["code"] for alert in report["alerts"]] == ["runtime_dependencies_not_ready"]
+    sentinel_state = report["checks"][0]["workers"]["sentinel_pods"]
+    assert sentinel_state["ready"] is False
+    assert sentinel_state["expected"] == 3
+    assert len(sentinel_state["selected"]) == selected_count
+
+
+def test_master_discovery_reconciliation_fails_closed_across_worker_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+        reads = 0
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.reads += 1
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": f"worker-uid-{self.reads}",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "started": True, "restartCount": 0}
+                            ],
+                        },
+                    },
+                    *_ready_sentinel_pods(),
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return (
+                "Redis Sentinel startup dependency ready: master=valkey:6379\n"
+                "Starting worker for 1 functions\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+
+    async def healthy_sentinel():
+        return SimpleNamespace(master_host="valkey-primary", master_port=6379, connected_replicas=1)
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", healthy_sentinel)
+    args = SimpleNamespace(
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+    kube = FakeKube()
+    initial_state = rollout_smoke._worker_startup_state(kube, args)
+
+    reconciled = rollout_smoke._reconcile_worker_master_discovery_errors(initial_state, kube, args)
+
+    assert reconciled["ready"] is False
+    assert reconciled["worker_recheck_stable"] is False
+    assert reconciled["unresolved_errors"] == [{"pod": "worker-abc", "container": "worker"}]
+
+
+@pytest.mark.parametrize(
+    ("second_suffix", "expected_stable"),
+    [
+        ("\nWorker health heartbeat completed", True),
+        ("\nredis.exceptions.MasterNotFoundError: No master found for 'mymaster'", False),
+    ],
+)
+def test_master_discovery_reconciliation_ignores_unrelated_logs_but_rejects_new_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    second_suffix: str,
+    expected_stable: bool,
+) -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+        reads = 0
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.reads += 1
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "worker-abc",
+                            "uid": "worker-uid-abc",
+                            "labels": {"app": "palaceoftruth-worker"},
+                        },
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [
+                                {"name": "worker", "ready": True, "started": True, "restartCount": 0}
+                            ],
+                        },
+                    },
+                    *_ready_sentinel_pods(),
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            base = (
+                "Redis Sentinel startup dependency ready: master=valkey:6379\n"
+                "Starting worker for 1 functions\n"
+                "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+            )
+            return base if self.reads == 1 else base + second_suffix
+
+    async def healthy_sentinel():
+        return SimpleNamespace(master_host="valkey-primary", master_port=6379, connected_replicas=1)
+
+    monkeypatch.setattr(rollout_smoke, "check_rollout_gate", healthy_sentinel)
+    args = SimpleNamespace(
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        expected_sentinel_pods=3,
+        sentinel_name_fragment="valkey-sentinel",
+    )
+    kube = FakeKube()
+    initial_state = rollout_smoke._worker_startup_state(kube, args)
+
+    reconciled = rollout_smoke._reconcile_worker_master_discovery_errors(initial_state, kube, args)
+
+    assert reconciled["worker_recheck_stable"] is expected_stable
+    assert reconciled["ready"] is expected_stable
+    if expected_stable:
+        assert reconciled["unresolved_errors"] == []
+    else:
+        assert reconciled["unresolved_errors"] == [{"pod": "worker-abc", "container": "worker"}]
+
+
 def test_runtime_dependencies_accept_ready_long_lived_worker_without_recent_startup_logs() -> None:
     class FakeClient:
         def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
