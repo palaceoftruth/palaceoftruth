@@ -379,6 +379,30 @@ def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
     assert _arg_value(args, "--log-tail-lines") == "3000"
 
 
+def test_chart_only_values_upgrade_reruns_smoke_without_changing_worker_pod_templates() -> None:
+    current = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "mcp.legacyApiKeyAuthEnabled=true",
+    )
+    upgraded = _render_chart(
+        "valkey.sentinel.enabled=true",
+        "mcp.legacyApiKeyAuthEnabled=false",
+    )
+
+    for deployment_name in (
+        "palaceoftruth-worker",
+        "palaceoftruth-media-worker",
+        "palaceoftruth-palace-worker",
+    ):
+        assert (
+            _deployment_by_name(current, deployment_name)["spec"]["template"]
+            == _deployment_by_name(upgraded, deployment_name)["spec"]["template"]
+        )
+
+    upgraded_job = _manifest_by_kind_name_prefix(upgraded, "Job", "palaceoftruth-memory-smoke-")
+    assert upgraded_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+
+
 def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods() -> None:
     manifests = _render_chart("valkey.sentinel.enabled=true")
     sentinel = _deployment_by_name(manifests, "palaceoftruth-valkey-sentinel")

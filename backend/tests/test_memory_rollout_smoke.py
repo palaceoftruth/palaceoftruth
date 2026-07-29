@@ -791,7 +791,11 @@ def test_runtime_dependencies_require_api_readiness_and_started_workers() -> Non
                     {
                         "metadata": {"name": "worker-abc", "labels": {"app": "palaceoftruth-worker"}},
                         "spec": {"containers": [{"name": "worker"}]},
-                        "status": {"phase": "Running"},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [{"name": "worker", "ready": True, "started": True}],
+                        },
                     }
                 ]
             }
@@ -819,8 +823,176 @@ def test_runtime_dependencies_require_api_readiness_and_started_workers() -> Non
             "name": "runtime_dependencies",
             "status": "passed",
             "api": {"ready": True, "http_status": 200, "status": "ok", "dependencies": {"database": "ok", "queue": "ok"}},
-            "workers": {"ready": True, "selected_pods": ["worker-abc"], "non_running": [], "missing_markers": []},
+            "workers": {
+                "ready": True,
+                "selected_pods": ["worker-abc"],
+                "non_running": [],
+                "unready_pods": [],
+                "missing_markers": [],
+                "readiness_fallback": [],
+                "unresolved_errors": [],
+                "log_read_failures": [],
+            },
         }
+    ]
+
+
+def test_runtime_dependencies_accept_ready_long_lived_worker_without_recent_startup_logs() -> None:
+    class FakeClient:
+        def request(self, method: str, path: str, **_: Any) -> rollout_smoke.HttpResult:
+            assert (method, path) == ("GET", "/ready")
+            return rollout_smoke.HttpResult(
+                200,
+                {
+                    "status": "ok",
+                    "dependencies": {"database": {"status": "ok"}, "queue": {"status": "ok"}},
+                },
+            )
+
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {"name": "worker-long-lived", "labels": {"app": "palaceoftruth-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [{"name": "worker", "ready": True, "started": True}],
+                        },
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            assert query == {"container": "worker", "sinceSeconds": 3600, "tailLines": 500}
+            return ""
+
+    report = {"target": "palaceoftruth", "tenant_id": "tenant-a", "checks": [], "alerts": []}
+    args = SimpleNamespace(
+        namespace="palaceoftruth",
+        pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+        worker_name_fragment="worker",
+        log_since_seconds=3600,
+        log_tail_lines=500,
+        request_timeout=5,
+        dependency_timeout_seconds=1,
+        dependency_interval_seconds=0.01,
+    )
+
+    rollout_smoke.check_runtime_dependencies(FakeClient(), report, args, kube=FakeKube())
+
+    assert report["alerts"] == []
+    worker_state = report["checks"][0]["workers"]
+    assert worker_state["ready"] is True
+    assert worker_state["readiness_fallback"] == [
+        {
+            "pod": "worker-long-lived",
+            "container": "worker",
+            "missing": [
+                "Redis Sentinel startup dependency ready",
+                "Starting worker",
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ready_condition", "container_ready", "log_text", "expected_field"),
+    [
+        (
+            "False",
+            False,
+            "Redis Sentinel startup dependency ready: master=valkey:6379\nStarting worker",
+            "unready_pods",
+        ),
+        (
+            "True",
+            True,
+            "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'",
+            "unresolved_errors",
+        ),
+    ],
+)
+def test_worker_startup_state_fails_closed_for_unready_or_unresolved_worker(
+    ready_condition: str,
+    container_ready: bool,
+    log_text: str,
+    expected_field: str,
+) -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {"name": "worker-abc", "labels": {"app": "palaceoftruth-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": ready_condition}],
+                            "containerStatuses": [{"name": "worker", "ready": container_ready}],
+                        },
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            return log_text
+
+    state = rollout_smoke._worker_startup_state(
+        FakeKube(),
+        SimpleNamespace(
+            pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+            worker_name_fragment="worker",
+            log_since_seconds=3600,
+            log_tail_lines=500,
+        ),
+    )
+
+    assert state["ready"] is False
+    assert state[expected_field]
+
+
+def test_worker_startup_state_fails_closed_when_recent_logs_cannot_be_read() -> None:
+    class FakeKube:
+        namespace = "palaceoftruth"
+
+        def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "items": [
+                    {
+                        "metadata": {"name": "worker-abc", "labels": {"app": "palaceoftruth-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                        "status": {
+                            "phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}],
+                            "containerStatuses": [{"name": "worker", "ready": True}],
+                        },
+                    }
+                ]
+            }
+
+        def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
+            raise PermissionError("pods/log denied")
+
+    state = rollout_smoke._worker_startup_state(
+        FakeKube(),
+        SimpleNamespace(
+            pod_label_selector="app.kubernetes.io/instance=palaceoftruth",
+            worker_name_fragment="worker",
+            log_since_seconds=3600,
+            log_tail_lines=500,
+        ),
+    )
+
+    assert state["ready"] is False
+    assert state["log_read_failures"] == [
+        {"pod": "worker-abc", "container": "worker", "error_class": "PermissionError"}
     ]
 
 
