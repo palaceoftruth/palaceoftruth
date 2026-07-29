@@ -46,26 +46,41 @@ After smoke verification, capture the tenant readiness report before disabling
 fallback:
 
 ```bash
+PALACE_EXPECTED_CLIENT=helm-mcp
+PALACE_EXPECTED_RESOURCE=https://api.palace.sarvent.cloud/api/v1
+PALACE_EXPECTED_APP_VERSION=<deployed-app-sha>
+
 curl -fsS \
   -H "X-Admin-Secret: $PALACEOFTRUTH_ADMIN_SECRET" \
-  "https://api.palace.sarvent.cloud/api/v1/admin/tenants/default/api-key-retirement-readiness?lookback_days=30"
+  --get \
+  --data-urlencode lookback_days=30 \
+  --data-urlencode "expected_client_key=${PALACE_EXPECTED_CLIENT}" \
+  --data-urlencode "expected_resource=${PALACE_EXPECTED_RESOURCE}" \
+  --data-urlencode expected_scope=read \
+  --data-urlencode expected_scope=write \
+  --data-urlencode "expected_app_version=${PALACE_EXPECTED_APP_VERSION}" \
+  "https://api.palace.sarvent.cloud/api/v1/admin/tenants/default/api-key-retirement-readiness"
 ```
 
 The report is read-only and secret-safe. It must show:
 
 * `ready_for_oauth_only_mcp: true`
-* at least one active OAuth MCP client
-* recent MCP OAuth client activity from MCP runtime audit events
+* `runtime.client_registered: true`
+* `runtime.client_configuration_matches: true`
+* `runtime.oauth_token_observed: true`
+* `runtime.runtime_activity_observed: true`
+* `runtime.legacy_fallback_activity_detected: false`
+* recent OAuth token evidence for the expected client, API resource, and scopes
+* recent adapter activity stamped with the exact deployed app version
 * no active tenant API key use inside the chosen lookback window
+* no `recent_legacy_mcp_events` whose authenticated HTTP caller used the API-key path
 * any retained active API keys marked only as human-controlled break-glass
 
 Current `palace-sarvent` evidence captured for SAR-992 is recorded in
-`docs/research/sar-992-api-key-retirement-readiness-evidence.md`. As of
-2026-07-07 02:18 UTC, live MCP pods have OAuth client-credentials values, default
-scope `agent/andrew`, and a passing `auth_mode=mcp_oauth` rollout smoke while
-legacy API-key fallback remains enabled. The next gate is the read-only readiness
-report with the human-held admin secret; only disable fallback after that report
-passes for the target tenant and lookback window.
+`docs/research/sar-992-api-key-retirement-readiness-evidence.md`. That artifact
+includes the original staged evidence plus the 2026-07-29 post-SAR-1276
+investigation. Only disable fallback after the explicit-runtime report passes
+for the target tenant and lookback window.
 
 Only then set this to stop mounting the broad `API_KEY` into MCP runtime pods
 and smoke jobs:
@@ -76,8 +91,9 @@ mcp:
 ```
 
 In OAuth-only mode the MCP Deployment and rollout smoke Job do not mount the
-broad `API_KEY` secret. In staged mode they may still mount the fallback secret,
-but they authenticate with either
+broad `API_KEY` secret, and the public MCP middleware rejects caller-supplied
+`X-API-Key` credentials. In staged mode they may still mount the fallback secret,
+and the middleware accepts the legacy caller path, but the adapter authenticates with either
 `PALACEOFTRUTH_MCP_BEARER_TOKEN` or client-credentials OAuth using the configured
 client key, client secret, token URL, resource, and scopes whenever those values
 are present.
@@ -149,6 +165,18 @@ The rollout smoke checks `/memory/whoami` and fails when the observed
 `auth_mode`, tenant, MCP client key, or required scopes do not match the
 expected values.
 
+After the approved OAuth-only deploy, prove the inbound compatibility path is
+closed with a retained break-glass key. The request must return `401`; do not
+print the key or response headers:
+
+```bash
+test "$(
+  curl -sS -o /dev/null -w '%{http_code}' \
+    -H "X-API-Key: ${PALACEOFTRUTH_API_KEY}" \
+    https://mcp.palace.sarvent.cloud/mcp
+)" = "401"
+```
+
 Set `memoryRolloutSmoke.requestTimeoutSeconds: 60` for OAuth staging. The
 SAR-1007 landing proved the OAuth path with a manual 60-second smoke after the
 default 10-second request timeout was too short for the write/job path.
@@ -169,7 +197,12 @@ Run this checklist for each tenant/runtime before changing deployment values:
 * Browser/admin API-key retirement remains out of scope unless a separate
   browser/admin auth plan is approved.
 * The readiness endpoint shows recent MCP OAuth client activity and no recent
-  active tenant API-key use for the tenant and lookback window.
+  active tenant API-key use for the tenant and lookback window. Call it with
+  the exact expected client key, API resource, scopes, and deployed app version;
+  do not rely on aggregate activity from another OAuth client.
+* `recent_legacy_mcp_events` is empty. If it is not, use its redacted operation,
+  caller identity, agent-scope, and timestamp metadata to migrate the caller
+  before disabling fallback.
 * Rollback is documented as re-enabling `mcp.legacyApiKeyAuthEnabled=true`.
 * Production API keys are not rotated, revoked, or deleted without explicit
   human approval for that tenant/runtime.

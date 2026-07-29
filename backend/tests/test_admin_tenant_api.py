@@ -103,8 +103,42 @@ class FakeSession:
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return _Result(rows)
 
-        if "from mcp_request_audit_events" in sql:
+        if "retirement_runtime_oauth_token" in sql:
             rows = [row for row in self.mcp_events if row["tenant_id"] == params["tenant_id"]]
+            rows = [
+                row
+                for row in rows
+                if row["client_id"] == params["client_id"]
+                and row["created_at"] >= params["since"]
+                and row["status"] == "success"
+                and row["operation"] == "oauth.token_issue"
+            ]
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+            return _Result(rows[: params["limit"]])
+
+        if "retirement_runtime_activity" in sql:
+            rows = [
+                row
+                for row in self.mcp_events
+                if row["tenant_id"] == params["tenant_id"]
+                and row["client_id"] == params["client_id"]
+                and row["created_at"] >= params["since"]
+                and row["status"] == "success"
+                and row["app_version"] == params["app_version"]
+                and row["operation"] not in {"oauth.token_issue", "oauth.token_use"}
+                and (row["params_summary"] or {}).get("http_client_id") != "api-key"
+            ]
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+            return _Result(rows[: params["limit"]])
+
+        if "retirement_legacy_mcp_activity" in sql:
+            rows = [
+                row
+                for row in self.mcp_events
+                if row["tenant_id"] == params["tenant_id"]
+                and row["created_at"] >= params["since"]
+                and (row["params_summary"] or {}).get("http_client_id") == "api-key"
+            ]
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return _Result(rows[: params["limit"]])
 
@@ -240,6 +274,7 @@ def _mcp_client_row(
         "client_key": client_key,
         "display_name": "Helm MCP",
         "allowed_scopes": ["read", "write"],
+        "allowed_resources": ["https://api.palace.test/api/v1"],
         "metadata": {"runtime": "mcp"},
         "oauth_client_secret_hash": oauth_client_secret_hash,
         "oauth_revoked_at": datetime.now(timezone.utc) if revoked else None,
@@ -257,6 +292,7 @@ def _mcp_event_row(
     status: str = "success",
     operation: str = "mcp.create_memory_entry",
     params_summary: dict | None = None,
+    app_version: str | None = "test",
     created_at: datetime | None = None,
 ) -> dict:
     return {
@@ -271,9 +307,40 @@ def _mcp_event_row(
         or {"metadata": {"transport": "mcp", "auth_mode": "oauth_client_credentials"}},
         "status": status,
         "error_class": None,
-        "app_version": "test",
+        "app_version": app_version,
         "created_at": created_at or datetime.now(timezone.utc),
     }
+
+
+_RUNTIME_QUERY = (
+    "?expected_client_key=helm-mcp"
+    "&expected_resource=https%3A%2F%2Fapi.palace.test%2Fapi%2Fv1"
+    "&expected_scope=read"
+    "&expected_scope=write"
+    "&expected_app_version=test"
+)
+
+
+def _ready_runtime_events(oauth_client: dict) -> list[dict]:
+    return [
+        _mcp_event_row(
+            tenant_id=oauth_client["tenant_id"],
+            client_id=oauth_client["id"],
+            operation="oauth.token_issue",
+            params_summary={
+                "requested_resource": "https://api.palace.test/api/v1",
+                "requested_scopes": ["read", "write"],
+            },
+            app_version=None,
+        ),
+        _mcp_event_row(
+            tenant_id=oauth_client["tenant_id"],
+            client_id=oauth_client["id"],
+            operation="retrieve_agent_memory",
+            params_summary={"agent_scope_key": "andrew"},
+            app_version="test",
+        ),
+    ]
 
 
 def _client(session: FakeSession) -> TestClient:
@@ -409,12 +476,12 @@ def test_api_key_retirement_readiness_allows_oauth_only_mcp_with_break_glass_key
     session = FakeSession(
         api_keys=[old_key],
         mcp_clients=[oauth_client],
-        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=oauth_client["id"])],
+        mcp_events=_ready_runtime_events(oauth_client),
     )
     client = _client(session)
 
     response = client.get(
-        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
         headers={"X-Admin-Secret": "test-admin-secret"},
     )
 
@@ -424,14 +491,104 @@ def test_api_key_retirement_readiness_allows_oauth_only_mcp_with_break_glass_key
     assert body["active_key_count"] == 1
     assert body["recent_api_key_use_detected"] is False
     assert body["recent_oauth_activity_detected"] is True
+    assert body["runtime"] == {
+        "expected_client_key": "helm-mcp",
+        "expected_resource": "https://api.palace.test/api/v1",
+        "expected_scopes": ["read", "write"],
+        "expected_app_version": "test",
+        "client_registered": True,
+        "client_configuration_matches": True,
+        "oauth_token_observed": True,
+        "runtime_activity_observed": True,
+        "legacy_fallback_activity_detected": False,
+    }
     assert {item["id"]: item["status"] for item in body["checklist"]} == {
+        "runtime-expectation": "pass",
         "oauth-client-registered": "pass",
+        "oauth-client-config": "pass",
         "oauth-client-observed": "pass",
+        "legacy-mcp-activity": "pass",
         "api-key-recent-use": "pass",
         "active-api-keys-retained": "warn",
         "break-glass": "pass",
     }
     assert "api_key" not in json.dumps(body["recent_oauth_events"])
+
+
+def test_api_key_retirement_readiness_requires_explicit_runtime_expectation() -> None:
+    oauth_client = _mcp_client_row(tenant_id="tenant-a")
+    session = FakeSession(
+        mcp_clients=[oauth_client],
+        mcp_events=_ready_runtime_events(oauth_client),
+    )
+
+    response = _client(session).get(
+        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["runtime"]["expected_client_key"] is None
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["runtime-expectation"] == "block"
+
+
+def test_api_key_retirement_readiness_finds_runtime_evidence_behind_noisy_events() -> None:
+    oauth_client = _mcp_client_row(tenant_id="tenant-a")
+    noise = [
+        _mcp_event_row(
+            tenant_id="tenant-a",
+            client_id=uuid.uuid4(),
+            client_key="noisy-client",
+            operation="list_items",
+            params_summary={"route": "/api/v1/items"},
+        )
+        for _ in range(100)
+    ]
+    session = FakeSession(
+        mcp_clients=[oauth_client],
+        mcp_events=[*noise, *_ready_runtime_events(oauth_client)],
+    )
+
+    response = _client(session).get(
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is True
+    assert body["runtime"]["oauth_token_observed"] is True
+    assert body["runtime"]["runtime_activity_observed"] is True
+
+
+def test_api_key_retirement_readiness_reports_legacy_mcp_caller() -> None:
+    oauth_client = _mcp_client_row(tenant_id="tenant-a")
+    legacy_event = _mcp_event_row(
+        tenant_id="tenant-a",
+        client_id=oauth_client["id"],
+        operation="retrieve_agent_memory",
+        params_summary={"http_client_id": "api-key", "agent_scope_key": "barbara"},
+    )
+    session = FakeSession(
+        mcp_clients=[oauth_client],
+        mcp_events=[*_ready_runtime_events(oauth_client), legacy_event],
+    )
+
+    response = _client(session).get(
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready_for_oauth_only_mcp"] is False
+    assert body["runtime"]["legacy_fallback_activity_detected"] is True
+    assert body["recent_legacy_mcp_events"][0]["params_summary"]["agent_scope_key"] == "barbara"
+    statuses = {item["id"]: item["status"] for item in body["checklist"]}
+    assert statuses["legacy-mcp-activity"] == "block"
 
 
 def test_api_key_retirement_readiness_blocks_recent_api_key_use() -> None:
@@ -441,12 +598,12 @@ def test_api_key_retirement_readiness_blocks_recent_api_key_use() -> None:
     session = FakeSession(
         api_keys=[active],
         mcp_clients=[oauth_client],
-        mcp_events=[_mcp_event_row(tenant_id="tenant-a", client_id=oauth_client["id"])],
+        mcp_events=_ready_runtime_events(oauth_client),
     )
     client = _client(session)
 
     response = client.get(
-        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness?lookback_days=30",
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}&lookback_days=30",
         headers={"X-Admin-Secret": "test-admin-secret"},
     )
 
@@ -472,7 +629,7 @@ def test_api_key_retirement_readiness_ignores_legacy_non_oauth_clients() -> None
     client = _client(session)
 
     response = client.get(
-        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
         headers={"X-Admin-Secret": "test-admin-secret"},
     )
 
@@ -500,7 +657,7 @@ def test_api_key_retirement_readiness_requires_activity_from_active_oauth_client
     client = _client(session)
 
     response = client.get(
-        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
         headers={"X-Admin-Secret": "test-admin-secret"},
     )
 
@@ -530,7 +687,7 @@ def test_api_key_retirement_readiness_requires_mcp_specific_oauth_activity() -> 
     client = _client(session)
 
     response = client.get(
-        "/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness",
+        f"/api/v1/admin/tenants/tenant-a/api-key-retirement-readiness{_RUNTIME_QUERY}",
         headers={"X-Admin-Secret": "test-admin-secret"},
     )
 

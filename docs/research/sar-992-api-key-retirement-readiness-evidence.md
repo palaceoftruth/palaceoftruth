@@ -1,5 +1,49 @@
 # SAR-992 API-Key Retirement Readiness Evidence
 
+## 2026-07-29 Post-Smoke-Repair Update
+
+SAR-1276 is deployed and healthy on `k3s-lab/palace-sarvent`: chart
+`0.1.528+b191ea6bbc11`, app `745ca017`, Helm revision 277, and Flux revision
+`231725bf99460f5e256de79bba9a3cbf652779b0`. The repaired rollout hook is
+terminally `Ready=True` / `UpgradeSucceeded`; MCP is 2/2 Ready and the
+compatibility fallback remains enabled.
+
+The fresh secret-safe 30-day readiness report still blocks retirement:
+
+```json
+{
+  "ready_for_oauth_only_mcp": false,
+  "active_key_count": 2,
+  "recent_api_key_use_detected": true,
+  "active_oauth_client_count": 10,
+  "recent_oauth_activity_detected": false
+}
+```
+
+Read-only audit correlation identified a current legacy caller without exposing
+key material. Barbara's `primary-options-trade-finder` cron `7a27de7b6312`
+used the remote MCP API-key path at 2026-07-29 13:06 UTC. The server audit
+recorded `http_client_id=api-key` with `agent_scope_key=barbara`; ingress source
+IP remained the proxy loopback and was not treated as caller attribution.
+
+The report also had correctness gaps that made the negative OAuth result
+ambiguous: it loaded only the newest 50 tenant audit rows before filtering, did
+not require a specific client/resource/scopes/version, and did not surface the
+legacy MCP caller events already present in audit metadata. The SAR-992
+readiness implementation now requires explicit runtime expectations, uses
+purpose-specific lookback queries, reports recent legacy MCP activity, and
+stamps the chart app version into MCP adapter audit rows. The same Helm value
+now controls both the mounted outbound fallback credential and acceptance of
+caller-supplied `X-API-Key` credentials at the public MCP middleware.
+
+Do not disable fallback from this state. First deploy the repaired report with
+fallback retained, migrate the reviewed Barbara caller to OAuth, capture a
+passing explicit-runtime report for the chosen lookback, and obtain approval
+for the exact Flux value change. Keep both tenant keys unchanged as
+human-controlled break-glass.
+
+## Original 2026-07-07 Evidence
+
 Captured: 2026-07-07 02:18 UTC
 
 ## Summary
@@ -150,7 +194,8 @@ deployment source of truth after that readiness report passes.
    `mcp.legacyApiKeyAuthEnabled=false` for `palace-sarvent` while keeping the
    OAuth client values, default scope, and rollout-smoke assertions enabled.
 4. Deploy and verify the MCP deployment and memory-smoke job no longer mount
-   `PALACEOFTRUTH_API_KEY`, while `/memory/whoami` and smoke evidence still show
+   `PALACEOFTRUTH_API_KEY`, a caller-supplied retained key receives `401` from
+   the public MCP endpoint, and `/memory/whoami` plus smoke evidence still show
    `auth_mode=mcp_oauth`.
 5. Keep tenant API keys as human-controlled break-glass unless the human
    separately approves rotation, revocation, or deletion for that tenant.

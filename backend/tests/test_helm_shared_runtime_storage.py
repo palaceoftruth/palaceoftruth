@@ -286,9 +286,12 @@ def test_mcp_deployment_defaults_to_explicit_legacy_api_key_fallback() -> None:
     manifests = _render_chart()
     deployment = _deployment_by_name(manifests, "palaceoftruth-mcp")
     env = _container_env(deployment["spec"]["template"]["spec"]["containers"][0])
+    config = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
 
     assert env["PALACEOFTRUTH_API_KEY"]["valueFrom"]["secretKeyRef"]["key"] == "API_KEY"
     assert env["PALACEOFTRUTH_MCP_CLIENT_KEY"]["value"] == "helm-mcp"
+    assert env["PALACEOFTRUTH_MCP_APP_VERSION"]["value"] == config["data"]["APP_VERSION"]
+    assert env["PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED"]["value"] == "true"
 
 
 def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> None:
@@ -307,6 +310,7 @@ def test_mcp_oauth_only_mode_omits_broad_api_key_and_mounts_oauth_secret() -> No
     assert env["PALACEOFTRUTH_MCP_OAUTH_TOKEN_URL"]["value"] == "https://api.palace.example/api/v1/memory/mcp/oauth/token"
     assert env["PALACEOFTRUTH_MCP_OAUTH_RESOURCE"]["value"] == "https://api.palace.example/api/v1"
     assert env["PALACEOFTRUTH_MCP_OAUTH_AUDIENCE"]["value"] == "https://api.palace.example/api/v1"
+    assert env["PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED"]["value"] == "false"
 
 
 def test_mcp_deployment_renders_default_memory_scope_env() -> None:
@@ -338,9 +342,11 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
     job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
     container = job["spec"]["template"]["spec"]["containers"][0]
     env = _container_env(container)
+    config = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
 
     assert "PALACEOFTRUTH_API_KEY" not in env
     assert env["PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["key"] == "MCP_CLIENT_SECRET"
+    assert env["PALACEOFTRUTH_MCP_APP_VERSION"]["value"] == config["data"]["APP_VERSION"]
     assert "--expected-auth-mode" in container["args"]
     assert "mcp_oauth" in container["args"]
     assert container["args"].count("--expected-scope") == 2
