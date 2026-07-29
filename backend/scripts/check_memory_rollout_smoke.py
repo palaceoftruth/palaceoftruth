@@ -361,6 +361,10 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
     selected_pods: list[str] = []
     missing_markers: list[dict[str, Any]] = []
     non_running: list[dict[str, str]] = []
+    unready_pods: list[dict[str, Any]] = []
+    readiness_fallback: list[dict[str, Any]] = []
+    unresolved_errors: list[dict[str, str]] = []
+    log_read_failures: list[dict[str, str]] = []
 
     for pod in pods:
         if not isinstance(pod, dict):
@@ -378,28 +382,81 @@ def _worker_startup_state(kube: KubernetesClient, args: argparse.Namespace) -> d
         if phase != "Running":
             non_running.append({"pod": pod_name, "phase": phase})
             continue
+        ready_condition = next(
+            (
+                condition
+                for condition in status.get("conditions") or []
+                if isinstance(condition, dict) and condition.get("type") == "Ready"
+            ),
+            {},
+        )
+        container_statuses = {
+            str(container_status.get("name") or ""): container_status
+            for container_status in status.get("containerStatuses") or []
+            if isinstance(container_status, dict)
+        }
+        pod_ready = ready_condition.get("status") == "True"
+        unready_containers = [
+            str(container.get("name") or "")
+            for container in pod.get("spec", {}).get("containers") or []
+            if isinstance(container, dict)
+            and (
+                not isinstance(container_statuses.get(str(container.get("name") or "")), dict)
+                or container_statuses[str(container.get("name") or "")].get("ready") is not True
+            )
+        ]
+        if not pod_ready or unready_containers:
+            unready_pods.append(
+                {
+                    "pod": pod_name,
+                    "ready_condition": ready_condition.get("status"),
+                    "unready_containers": unready_containers,
+                }
+            )
         for container in pod.get("spec", {}).get("containers") or []:
             container_name = container.get("name") if isinstance(container, dict) else None
             if not container_name:
                 continue
-            log_text = kube.get_text(
-                f"/api/v1/namespaces/{kube.namespace}/pods/{pod_name}/log",
-                query={
-                    "container": container_name,
-                    "sinceSeconds": args.log_since_seconds,
-                    "tailLines": args.log_tail_lines,
-                },
-            )
+            try:
+                log_text = kube.get_text(
+                    f"/api/v1/namespaces/{kube.namespace}/pods/{pod_name}/log",
+                    query={
+                        "container": container_name,
+                        "sinceSeconds": args.log_since_seconds,
+                        "tailLines": args.log_tail_lines,
+                    },
+                )
+            except Exception as exc:
+                log_read_failures.append(
+                    {"pod": pod_name, "container": container_name, "error_class": exc.__class__.__name__}
+                )
+                continue
             required_markers = ("Redis Sentinel startup dependency ready", "Starting worker")
             absent = [marker for marker in required_markers if marker not in log_text]
-            if absent:
+            if _has_unresolved_master_discovery_error(log_text):
+                unresolved_errors.append({"pod": pod_name, "container": container_name})
+            elif absent and pod_ready and container_name not in unready_containers:
+                # ARQ's readiness probe is a live queue check. It is stronger
+                # evidence than startup strings that can age out of a bounded
+                # log window during values-only/chart-only upgrades.
+                readiness_fallback.append({"pod": pod_name, "container": container_name, "missing": absent})
+            elif absent:
                 missing_markers.append({"pod": pod_name, "container": container_name, "missing": absent})
 
     return {
-        "ready": bool(selected_pods) and not non_running and not missing_markers,
+        "ready": bool(selected_pods)
+        and not non_running
+        and not unready_pods
+        and not missing_markers
+        and not unresolved_errors
+        and not log_read_failures,
         "selected_pods": selected_pods,
         "non_running": non_running,
+        "unready_pods": unready_pods,
         "missing_markers": missing_markers,
+        "readiness_fallback": readiness_fallback,
+        "unresolved_errors": unresolved_errors,
+        "log_read_failures": log_read_failures,
     }
 
 
