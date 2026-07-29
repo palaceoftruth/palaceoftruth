@@ -351,6 +351,7 @@ def test_rollout_smoke_oauth_only_mode_verifies_oauth_identity_without_api_key()
     assert "mcp_oauth" in container["args"]
     assert container["args"].count("--expected-scope") == 2
     assert _arg_value(container["args"], "--request-timeout") == "60"
+    assert _arg_value(container["args"], "--expected-sentinel-pods") == "3"
 
 
 def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:

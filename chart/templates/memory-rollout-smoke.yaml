@@ -88,6 +88,8 @@ spec:
             - {{ .Values.memoryRolloutSmoke.scopeKey | quote }}
             - --pod-label-selector
             - {{ printf "app.kubernetes.io/instance=%s" .Release.Name | quote }}
+            - --expected-sentinel-pods
+            - {{ include "palaceoftruth.valkeySentinelCount" . | quote }}
             - --restart-alert-threshold
             - {{ .Values.memoryRolloutSmoke.restartAlertThreshold | quote }}
             - --log-since-seconds
