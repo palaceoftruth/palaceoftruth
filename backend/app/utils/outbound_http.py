@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -99,8 +99,9 @@ def validate_public_http_url(
     *,
     resolve: bool = True,
     resolver: Resolver | None = None,
+    trusted_exact_hosts: Collection[str] = (),
 ) -> str:
-    """Return a normalized URL only when every resolved address is globally routable."""
+    """Return a normalized URL for a public or explicitly trusted exact host."""
 
     normalized, host = _normalized_http_url(url)
     if not resolve:
@@ -112,7 +113,8 @@ def validate_public_http_url(
     else:
         addresses = _resolved_addresses(host, resolver=resolver)
 
-    if any(not address.is_global for address in addresses):
+    trusted_hosts = {value.lower().rstrip(".") for value in trusted_exact_hosts}
+    if any(not address.is_global for address in addresses) and host not in trusted_hosts:
         raise OutboundUrlError("URL must not target private, loopback, link-local, or reserved addresses")
     return normalized
 
@@ -128,12 +130,14 @@ def resolve_public_http_target(
     url: str,
     *,
     resolver: Resolver | None = None,
+    trusted_exact_hosts: Collection[str] = (),
 ) -> ValidatedHttpTarget:
-    """Resolve once and select a public address that callers can connect to directly."""
+    """Resolve once and pin a public or operator-trusted exact host."""
 
     normalized, host = _normalized_http_url(url)
     addresses = _resolved_addresses(host, resolver=resolver)
-    if any(not address.is_global for address in addresses):
+    trusted_hosts = {value.lower().rstrip(".") for value in trusted_exact_hosts}
+    if any(not address.is_global for address in addresses) and host not in trusted_hosts:
         raise OutboundUrlError("URL must not target private, loopback, link-local, or reserved addresses")
     # Stable selection makes behavior predictable while still failing closed if
     # even one mixed DNS answer points at a non-public destination.
@@ -168,11 +172,17 @@ async def request_public_http_async(
     client: httpx.AsyncClient,
     method: str,
     url: str,
+    *,
+    trusted_exact_hosts: Collection[str] = (),
     **kwargs,
 ) -> httpx.Response:
     """Issue one DNS-pinned request while preserving HTTP Host and TLS SNI."""
 
-    target = await asyncio.to_thread(resolve_public_http_target, url)
+    target = await asyncio.to_thread(
+        resolve_public_http_target,
+        url,
+        trusted_exact_hosts=trusted_exact_hosts,
+    )
     connect_url, host_header, extensions = _pinned_request_parts(target)
     headers = httpx.Headers(kwargs.pop("headers", None))
     headers["Host"] = host_header
@@ -190,11 +200,17 @@ async def stream_public_http_async(
     client: httpx.AsyncClient,
     method: str,
     url: str,
+    *,
+    trusted_exact_hosts: Collection[str] = (),
     **kwargs,
 ):
     """Stream one DNS-pinned response while preserving HTTP Host and TLS SNI."""
 
-    target = await asyncio.to_thread(resolve_public_http_target, url)
+    target = await asyncio.to_thread(
+        resolve_public_http_target,
+        url,
+        trusted_exact_hosts=trusted_exact_hosts,
+    )
     connect_url, host_header, extensions = _pinned_request_parts(target)
     headers = httpx.Headers(kwargs.pop("headers", None))
     headers["Host"] = host_header

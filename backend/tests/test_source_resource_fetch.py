@@ -83,3 +83,22 @@ async def test_redirect_is_returned_for_worker_policy_validation() -> None:
 
     assert result.outcome == "redirect"
     assert result.redirect_url == "https://example.test/moved"
+
+
+@pytest.mark.asyncio
+async def test_private_literal_requires_an_exact_trusted_host() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"internal fixture")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        blocked = await fetch_http_resource("http://10.42.0.31/source", client=client)
+        allowed = await fetch_http_resource(
+            "http://10.42.0.31/source",
+            client=client,
+            trusted_exact_hosts=("10.42.0.31",),
+        )
+
+    assert blocked.outcome == "failure"
+    assert blocked.failure_reason and blocked.failure_reason.startswith("unsafe_url:")
+    assert allowed.outcome == "success"
+    assert allowed.body == b"internal fixture"

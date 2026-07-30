@@ -93,6 +93,9 @@ config:
   sourceResourceRefreshLeaseSeconds: "900"
   # Exact comma-separated hosts only. Empty keeps dispatch fail-closed.
   sourceResourceRefreshAllowedHosts: ""
+  # Exact subset of allowed hosts that may resolve to private addresses.
+  # Keep empty unless the watched source is operator-owned infrastructure.
+  sourceResourceRefreshTrustedPrivateHosts: ""
   # X oEmbed capture needs no credentials. Facebook public post capture can use
   # a Meta app token from the app secret plus this Graph API version.
   facebookGraphApiVersion: "v25.0"

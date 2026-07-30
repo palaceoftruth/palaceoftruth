@@ -60,6 +60,7 @@ async def fetch_http_resource(
     last_modified: str | None = None,
     timeout_seconds: float = 30.0,
     client: httpx.AsyncClient | None = None,
+    trusted_exact_hosts: tuple[str, ...] = (),
 ) -> HttpRefreshResult:
     """GET a resource with validators; never fall back to a HEAD request."""
 
@@ -84,9 +85,14 @@ async def fetch_http_resource(
                 url,
                 headers=headers,
                 follow_redirects=False,
+                trusted_exact_hosts=trusted_exact_hosts,
             )
         else:
-            safe_url = validate_public_http_url(url, resolve=False)
+            safe_url = validate_public_http_url(
+                url,
+                resolve=False,
+                trusted_exact_hosts=trusted_exact_hosts,
+            )
             response = await request_client.get(safe_url, headers=headers, follow_redirects=False)
     except OutboundUrlError as exc:
         return HttpRefreshResult("failure", None, failure_reason=f"unsafe_url:{exc}")
@@ -100,7 +106,11 @@ async def fetch_http_resource(
 
     # A pinned request's transport URL contains the selected IP. Preserve the
     # canonical caller URL in observations and redirect resolution.
-    final_url = validate_public_http_url(url, resolve=False)
+    final_url = validate_public_http_url(
+        url,
+        resolve=False,
+        trusted_exact_hosts=trusted_exact_hosts,
+    )
     response_headers = response.headers
     if 300 <= response.status_code < 400 and response_headers.get("Location"):
         return HttpRefreshResult(

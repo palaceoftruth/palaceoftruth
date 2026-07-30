@@ -30,3 +30,20 @@ async def test_missing_robots_is_explicitly_allowed() -> None:
 
     assert result.allowed is True
     assert result.decision == "robots_missing"
+
+
+@pytest.mark.asyncio
+async def test_private_literal_robots_requires_an_exact_trusted_host() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        blocked = await evaluate_robots("http://10.42.0.31/source", client=client)
+        allowed = await evaluate_robots(
+            "http://10.42.0.31/source",
+            client=client,
+            trusted_exact_hosts=("10.42.0.31",),
+        )
+
+    assert blocked == type(blocked)(False, "robots_unsafe_url")
+    assert allowed == type(allowed)(True, "robots_missing")

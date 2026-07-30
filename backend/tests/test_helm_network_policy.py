@@ -116,3 +116,22 @@ def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:
         config_map["data"]["PALACE_SYNC_S3_ALLOWED_ENDPOINT_HOSTS"]
         == "minio.example.com"
     )
+
+
+def test_source_refresh_private_host_allowlist_is_wired_into_runtime_config() -> None:
+    manifests = _render_chart(
+        "config.sourceResourceRefreshAllowedHosts=fixture.internal",
+        "config.sourceResourceRefreshTrustedPrivateHosts=fixture.internal",
+    )
+    config_map = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("kind") == "ConfigMap"
+        and manifest.get("metadata", {}).get("name") == "palaceoftruth-config"
+    )
+
+    assert config_map["data"]["SOURCE_RESOURCE_REFRESH_ALLOWED_HOSTS"] == "fixture.internal"
+    assert (
+        config_map["data"]["SOURCE_RESOURCE_REFRESH_TRUSTED_PRIVATE_HOSTS"]
+        == "fixture.internal"
+    )

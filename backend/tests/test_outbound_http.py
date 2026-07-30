@@ -70,6 +70,32 @@ def test_rejects_mixed_public_and_private_dns_answers() -> None:
         )
 
 
+def test_private_dns_requires_an_exact_operator_trusted_host() -> None:
+    resolver = _resolver("10.42.0.31")
+
+    with pytest.raises(OutboundUrlError):
+        validate_public_http_url(
+            "http://palace-source-canary.palace-sarvent.svc.cluster.local/",
+            resolver=resolver,
+        )
+    with pytest.raises(OutboundUrlError):
+        validate_public_http_url(
+            "http://other.palace-sarvent.svc.cluster.local/",
+            resolver=resolver,
+            trusted_exact_hosts=(
+                "palace-source-canary.palace-sarvent.svc.cluster.local",
+            ),
+        )
+
+    assert validate_public_http_url(
+        "http://palace-source-canary.palace-sarvent.svc.cluster.local/",
+        resolver=resolver,
+        trusted_exact_hosts=(
+            "palace-source-canary.palace-sarvent.svc.cluster.local",
+        ),
+    ) == "http://palace-source-canary.palace-sarvent.svc.cluster.local/"
+
+
 def test_accepts_only_global_dns_answers() -> None:
     assert (
         validate_public_http_url(
@@ -101,7 +127,7 @@ async def test_async_request_pins_ip_and_preserves_host_and_sni(monkeypatch) -> 
     monkeypatch.setattr(
         outbound_http,
         "resolve_public_http_target",
-        lambda _url: ValidatedHttpTarget(
+        lambda _url, **_kwargs: ValidatedHttpTarget(
             "https://public.example/hook",
             "public.example",
             __import__("ipaddress").ip_address("93.184.216.34"),
@@ -135,7 +161,7 @@ async def test_async_request_formats_ipv6_literal_host_header(monkeypatch) -> No
     monkeypatch.setattr(
         outbound_http,
         "resolve_public_http_target",
-        lambda _url: ValidatedHttpTarget(
+        lambda _url, **_kwargs: ValidatedHttpTarget(
             f"https://[{public_ipv6}]:8443/resource",
             public_ipv6,
             __import__("ipaddress").ip_address(public_ipv6),
