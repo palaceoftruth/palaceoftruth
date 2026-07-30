@@ -71,6 +71,7 @@ def test_public_egress_excludes_private_and_local_addresses() -> None:
         ipv4["except"]
     )
     assert {"::1/128", "fc00::/7", "fe80::/10"} <= set(ipv6["except"])
+    assert "::ffff:0:0/96" not in ipv6["except"]
 
 
 def test_policy_can_be_disabled_explicitly() -> None:

@@ -109,15 +109,16 @@ spec:
         - protocol: TCP
           port: {{ . }}
         {{- end }}
-    # IPv6 public web endpoints. IPv4-mapped, translation, discard-only,
-    # documentation, unique-local, link-local, and multicast ranges are denied.
+    # IPv6 public web endpoints. Translation, discard-only, documentation,
+    # unique-local, link-local, and multicast ranges are denied. Kubernetes
+    # rejects IPv4-mapped IPv6 entries in ipBlock.except; those destinations
+    # are governed by the IPv4 rule above.
     - to:
         - ipBlock:
             cidr: ::/0
             except:
               - ::/128
               - ::1/128
-              - ::ffff:0:0/96
               - 64:ff9b::/96
               - 100::/64
               - 2001:2::/48
