@@ -32,6 +32,7 @@ async def evaluate_robots(
     user_agent: str = "PalaceOfTruthSourceRefresh",
     timeout_seconds: float = 10.0,
     client: httpx.AsyncClient | None = None,
+    trusted_exact_hosts: tuple[str, ...] = (),
 ) -> RobotsDecision:
     """Fail closed when robots cannot be checked; absent robots allows crawling."""
 
@@ -46,10 +47,15 @@ async def evaluate_robots(
                 target_url,
                 headers={"User-Agent": user_agent},
                 follow_redirects=False,
+                trusted_exact_hosts=trusted_exact_hosts,
             )
         else:
             response = await request_client.get(
-                validate_public_http_url(target_url, resolve=False),
+                validate_public_http_url(
+                    target_url,
+                    resolve=False,
+                    trusted_exact_hosts=trusted_exact_hosts,
+                ),
                 headers={"User-Agent": user_agent},
                 follow_redirects=False,
             )

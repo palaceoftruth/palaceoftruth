@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     # Comma-separated exact DNS hosts. An empty value keeps dispatch fail-closed
     # even when the enable flag is accidentally set.
     source_resource_refresh_allowed_hosts: str = ""
+    # Exact subset of allowed hosts that may resolve to private addresses.
+    # Keep empty unless the watched source is operator-owned infrastructure.
+    source_resource_refresh_trusted_private_hosts: str = ""
 
     # Social post capture
     facebook_oembed_access_token: str = ""

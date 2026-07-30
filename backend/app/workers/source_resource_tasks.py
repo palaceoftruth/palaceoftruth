@@ -211,6 +211,23 @@ async def refresh_source_resource(
         if resource is None:
             logger.info("source resource refresh ignored stale lease resource_id=%s", resource_id)
             return
+        allowed_hosts = parse_refresh_allowed_hosts(
+            settings.source_resource_refresh_allowed_hosts
+        )
+        trusted_private_hosts = parse_refresh_allowed_hosts(
+            settings.source_resource_refresh_trusted_private_hosts
+        )
+        if not _resource_host_is_allowed(resource, allowed_hosts):
+            logger.warning(
+                "source resource refresh blocked by current host allowlist resource_id=%s",
+                resource_id,
+            )
+            return
+        if set(trusted_private_hosts) - set(allowed_hosts):
+            logger.error(
+                "source resource trusted-private hosts must be a subset of allowed hosts"
+            )
+            return
         url = resource.canonical_url
         etag = resource.validator_etag
         last_modified = resource.validator_last_modified
@@ -221,6 +238,7 @@ async def refresh_source_resource(
         etag=etag,
         last_modified=last_modified,
         now=now,
+        trusted_exact_hosts=trusted_private_hosts,
     )
 
     schedule_palace_run = False
@@ -531,6 +549,7 @@ async def _fetch_with_robots(
     etag: str | None,
     last_modified: str | None,
     now: datetime,
+    trusted_exact_hosts: tuple[str, ...] = (),
 ):
     """Fetch only same-origin, robots-allowed redirect targets."""
 
@@ -544,12 +563,20 @@ async def _fetch_with_robots(
         robots = (
             RobotsDecision(bool(resource.robots_allowed), resource.robots_decision or "robots_cached")
             if cached_robots and hop == 0
-            else await evaluate_robots(current_url)
+            else await evaluate_robots(
+                current_url,
+                trusted_exact_hosts=trusted_exact_hosts,
+            )
         )
         if not robots.allowed:
             return None, robots
         async with _host_fairness.acquire(current_url):
-            result = await fetch_http_resource(current_url, etag=etag, last_modified=last_modified)
+            result = await fetch_http_resource(
+                current_url,
+                etag=etag,
+                last_modified=last_modified,
+                trusted_exact_hosts=trusted_exact_hosts,
+            )
         if result.outcome != "redirect":
             return result, robots
         if result.redirect_url is None:

@@ -224,6 +224,92 @@ async def test_no_network_refresh_entrypoint_rejects_malformed_identifiers() -> 
 
 
 @pytest.mark.asyncio
+async def test_refresh_rechecks_current_host_allowlist_before_network(monkeypatch) -> None:
+    lease_token = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    resource = _resource(due_at=now)
+    resource.refresh_lease_token = lease_token
+    resource.refresh_lease_expires_at = now + timedelta(minutes=5)
+
+    class _Session:
+        async def scalar(self, _statement):
+            return resource
+
+    class _Manager:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fail_fetch(*_args, **_kwargs):
+        raise AssertionError("disallowed stored jobs must not perform network requests")
+
+    monkeypatch.setattr(source_resource_tasks, "async_session", lambda: _Manager())
+    monkeypatch.setattr(source_resource_tasks, "_fetch_with_robots", fail_fetch)
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_allowed_hosts",
+        "different.example",
+    )
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_trusted_private_hosts",
+        "",
+    )
+
+    await source_resource_tasks.refresh_source_resource(
+        {},
+        str(resource.id),
+        resource.tenant_id,
+        str(lease_token),
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejects_trusted_private_hosts_outside_allowlist(monkeypatch) -> None:
+    lease_token = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    resource = _resource(due_at=now)
+    resource.refresh_lease_token = lease_token
+    resource.refresh_lease_expires_at = now + timedelta(minutes=5)
+
+    class _Session:
+        async def scalar(self, _statement):
+            return resource
+
+    class _Manager:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fail_fetch(*_args, **_kwargs):
+        raise AssertionError("invalid trusted-private configuration must fail closed")
+
+    monkeypatch.setattr(source_resource_tasks, "async_session", lambda: _Manager())
+    monkeypatch.setattr(source_resource_tasks, "_fetch_with_robots", fail_fetch)
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_allowed_hosts",
+        "example.com",
+    )
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_trusted_private_hosts",
+        "internal.example",
+    )
+
+    await source_resource_tasks.refresh_source_resource(
+        {},
+        str(resource.id),
+        resource.tenant_id,
+        str(lease_token),
+    )
+
+
+@pytest.mark.asyncio
 async def test_refresh_rechecks_lease_with_a_fresh_post_fetch_timestamp(monkeypatch) -> None:
     """A result observed after the lease expires must be discarded, not persisted."""
 
@@ -278,6 +364,16 @@ async def test_refresh_rechecks_lease_with_a_fresh_post_fetch_timestamp(monkeypa
     monkeypatch.setattr(source_resource_tasks, "datetime", _Clock)
     monkeypatch.setattr(source_resource_tasks, "async_session", lambda: next(managers))
     monkeypatch.setattr(source_resource_tasks, "fetch_http_resource", _fetch)
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_allowed_hosts",
+        "example.com",
+    )
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_trusted_private_hosts",
+        "",
+    )
 
     await source_resource_tasks.refresh_source_resource({}, str(resource.id), resource.tenant_id, str(lease_token))
 
