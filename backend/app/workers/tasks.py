@@ -29,6 +29,10 @@ from app.services.memory import (
     STALE_MEMORY_QUEUED_MINUTES,
     is_stale_memory_job,
 )
+from app.services.relationships import (
+    RELATIONSHIP_EXTRACTION_MARKER_KEY,
+    RELATIONSHIP_EXTRACTION_MARKER_VERSION,
+)
 from app.services.source_subscriptions import reflect_source_subscription_entry_for_job
 from app.workers.queues import (
     DEFAULT_WORKER_QUEUE,
@@ -354,6 +358,10 @@ async def backfill_deferred_relationships(
                       AND i.deleted_at IS NULL
                       AND i.summary IS NOT NULL
                       AND i.metadata ? 'memory_entry'
+                      AND (
+                          i.metadata -> :marker_key ->> 'version' IS DISTINCT FROM :marker_version
+                          OR i.metadata -> :marker_key ->> 'content_hash' IS DISTINCT FROM i.content_hash
+                      )
                       AND NOT EXISTS (
                           SELECT 1
                           FROM item_relationships r
@@ -363,7 +371,12 @@ async def backfill_deferred_relationships(
                     ORDER BY i.updated_at ASC, i.id ASC
                     LIMIT :limit
                 """),
-                {"tenant_id": tenant_id, "limit": limit},
+                {
+                    "tenant_id": tenant_id,
+                    "limit": limit,
+                    "marker_key": RELATIONSHIP_EXTRACTION_MARKER_KEY,
+                    "marker_version": RELATIONSHIP_EXTRACTION_MARKER_VERSION,
+                },
             )
         ).fetchall()
 

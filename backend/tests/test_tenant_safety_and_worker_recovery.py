@@ -1141,8 +1141,16 @@ async def test_backfill_deferred_relationships_throttles_memory_items(monkeypatc
     assert lock_params == {"lock_key": "relationship-backfill:tenant-a"}
     backfill_sql, backfill_params = session.execute_calls[1]
     assert "i.metadata ? 'memory_entry'" in backfill_sql
+    assert "_palace_relationship_extraction" not in backfill_sql
+    assert "i.metadata -> :marker_key ->> 'version' IS DISTINCT FROM :marker_version" in backfill_sql
+    assert "i.metadata -> :marker_key ->> 'content_hash' IS DISTINCT FROM i.content_hash" in backfill_sql
     assert "NOT EXISTS" in backfill_sql
-    assert backfill_params == {"tenant_id": "tenant-a", "limit": 2}
+    assert backfill_params == {
+        "tenant_id": "tenant-a",
+        "limit": 2,
+        "marker_key": "_palace_relationship_extraction",
+        "marker_version": "1",
+    }
     assert redis.enqueued == [
         ("extract_relationships", {"item_id": str(item_ids[0]), "tenant_id": "tenant-a"}),
         ("extract_relationships", {"item_id": str(item_ids[1]), "tenant_id": "tenant-a", "_defer_by": 9}),
