@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import model_validator
 from urllib.parse import urlparse
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.embedding_profile import (
     DEFAULT_LOCAL_HTTP_EMBEDDING_PATH,
     DEFAULT_EMBEDDING_MODEL,
@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     palace_default_s3_bucket: str = ""
     palace_default_s3_prefix: str = ""
     palace_default_s3_endpoint_url: str = ""
+    # Comma-separated exact endpoint hosts permitted for custom S3 sources.
+    # The host from palace_default_s3_endpoint_url is implicitly included.
+    palace_sync_s3_allowed_endpoint_hosts: str = ""
     palace_default_s3_region: str = ""
     palace_default_s3_allowed_extensions: str = ".md"
     palace_default_s3_scan_interval_seconds: int = 900
@@ -155,7 +158,14 @@ class Settings(BaseSettings):
     github_pat: str = ""
     palaceoftruth_sync_source_credential_key: str = ""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    # Settings validation errors can be emitted during startup and captured by
+    # container logs. Never include the raw input mapping because it may contain
+    # API keys, database credentials, or other deployment secrets.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     @model_validator(mode="after")
     def validate_embedding_profile(self) -> "Settings":

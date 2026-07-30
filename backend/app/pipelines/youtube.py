@@ -16,6 +16,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from app.config import settings
 from app.models.job import Job
 from app.pipelines.base import BasePipeline, PendingAvailabilityError
+from app.utils.outbound_http import validate_public_http_url, validate_public_http_url_async
 
 _URL_RE = re.compile(r'https?://[^\s\)\]>\"\']+')
 
@@ -527,6 +528,7 @@ class MediaPipeline(BasePipeline):
     """
 
     async def extract(self, url: str, job_id: str = "unknown") -> tuple[str, dict[str, Any]]:
+        url = await validate_public_http_url_async(url)
         loop = asyncio.get_event_loop()
         audio_path: str | None = None
         transcription_inputs: list[TranscriptionChunk] = []
@@ -847,6 +849,10 @@ class MediaPipeline(BasePipeline):
 
     @staticmethod
     def _download_audio(url: str, job_id: str) -> tuple[str, dict[str, Any]]:
+        # Re-resolve immediately before handing the URL to yt-dlp. yt-dlp owns
+        # subsequent provider redirects, so workload egress policy is also
+        # required to make DNS-rebinding attempts fail closed.
+        url = validate_public_http_url(url)
         os.makedirs(_TEMP_DIR, exist_ok=True)
         output_template = f"{_TEMP_DIR}/{job_id}.%(ext)s"
 

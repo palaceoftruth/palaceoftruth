@@ -13,6 +13,12 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from app.utils.outbound_http import (
+    OutboundUrlError,
+    request_public_http_async,
+    validate_public_http_url,
+)
+
 
 @dataclass(frozen=True)
 class HttpRefreshResult:
@@ -71,7 +77,19 @@ async def fetch_http_resource(
     # receives its own robots and source-identity check before it is fetched.
     request_client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False)
     try:
-        response = await request_client.get(url, headers=headers, follow_redirects=False)
+        if owns_client:
+            response = await request_public_http_async(
+                request_client,
+                "GET",
+                url,
+                headers=headers,
+                follow_redirects=False,
+            )
+        else:
+            safe_url = validate_public_http_url(url, resolve=False)
+            response = await request_client.get(safe_url, headers=headers, follow_redirects=False)
+    except OutboundUrlError as exc:
+        return HttpRefreshResult("failure", None, failure_reason=f"unsafe_url:{exc}")
     except httpx.TimeoutException:
         return HttpRefreshResult("failure", None, failure_reason="timeout")
     except httpx.RequestError as exc:
@@ -80,14 +98,16 @@ async def fetch_http_resource(
         if owns_client:
             await request_client.aclose()
 
-    final_url = str(response.url)
+    # A pinned request's transport URL contains the selected IP. Preserve the
+    # canonical caller URL in observations and redirect resolution.
+    final_url = validate_public_http_url(url, resolve=False)
     response_headers = response.headers
     if 300 <= response.status_code < 400 and response_headers.get("Location"):
         return HttpRefreshResult(
             "redirect",
             response.status_code,
             final_url=final_url,
-            redirect_url=str(response.url.join(response_headers["Location"])),
+            redirect_url=str(httpx.URL(final_url).join(response_headers["Location"])),
         )
     if response.status_code == 304:
         return HttpRefreshResult(

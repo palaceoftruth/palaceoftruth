@@ -99,6 +99,9 @@ def test_firecrawl_surfaces_http_error_detail(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_webpage_pipeline_uses_firecrawl_before_local_article_scraper(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def validate_test_url(url: str) -> str:
+        return url
+
     def fake_firecrawl(url: str, config: FirecrawlConfig):
         assert url == "https://example.test/article"
         assert config.provider == "firecrawl-self-hosted"
@@ -108,6 +111,7 @@ def test_webpage_pipeline_uses_firecrawl_before_local_article_scraper(monkeypatc
         raise AssertionError("local scraper should not run when Firecrawl succeeds")
 
     monkeypatch.setattr(webpage_module, "scrape_with_firecrawl", fake_firecrawl)
+    monkeypatch.setattr(webpage_module, "validate_public_http_url_async", validate_test_url)
     monkeypatch.setattr(WebpagePipeline, "_scrape", staticmethod(fail_scrape))
 
     pipeline = WebpagePipeline(

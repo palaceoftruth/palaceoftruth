@@ -113,6 +113,9 @@ config:
   palaceDefaultS3Bucket: ""
   palaceDefaultS3Prefix: ""
   palaceDefaultS3EndpointUrl: ""
+  # Exact comma-separated hosts permitted for custom S3-compatible endpoints.
+  # The host in palaceDefaultS3EndpointUrl is also permitted automatically.
+  palaceSyncS3AllowedEndpointHosts: ""
   palaceDefaultS3Region: ""
   palaceDefaultS3AllowedExtensions: ".md"
   palaceDefaultS3ScanIntervalSeconds: "900"
@@ -414,6 +417,38 @@ podDisruptionBudgets:
     minAvailable: 1
   valkeySentinel:
     minAvailable: 2
+
+# Restrict runtime pods to the Palace services they need plus public web
+# endpoints. This is enabled by default because webpage/feed/media ingestion
+# handles tenant-supplied URLs. The application also validates destinations;
+# this policy is the network-layer backstop against DNS rebinding and redirect
+# chains that resolve to cluster-local or private infrastructure.
+networkPolicy:
+  enabled: true
+  # DNS must work with both CoreDNS and node-local DNS implementations. The
+  # policy therefore permits only TCP/UDP port 53 to any address; all non-DNS
+  # private egress remains denied.
+  allowDns: true
+  # Public HTTP(S) excludes private, loopback, link-local, documentation,
+  # benchmark, multicast, and reserved address ranges for IPv4 and IPv6.
+  publicEgress:
+    enabled: true
+    ports:
+      - 80
+      - 443
+  # Extra NetworkPolicy egress rules for deployment-owned private services.
+  # Keep these narrow: specify both an ipBlock or selector and required ports.
+  # Typical uses are an external private Postgres/Valkey, an in-cluster
+  # Firecrawl service, a private S3-compatible endpoint, or an OAuth issuer.
+  # Example:
+  # additionalEgress:
+  #   - to:
+  #       - ipBlock:
+  #           cidr: 10.20.30.40/32
+  #     ports:
+  #       - protocol: TCP
+  #         port: 443
+  additionalEgress: []
 
 migrations:
   # Runs Alembic once per rendered app release. Backend pods wait for the

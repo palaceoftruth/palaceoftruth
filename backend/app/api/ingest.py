@@ -18,6 +18,7 @@ from app.services.image_analysis import build_image_analysis_metadata, image_byt
 from app.services.item_dates import apply_effective_date
 from app.utils.hash import compute_content_hash
 from app.utils.job_payloads import build_retry_payload
+from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
 from app.utils.webhook import maybe_dispatch_webhook, validate_webhook_url
 from app.workers.queues import enqueue_worker_job
 
@@ -283,19 +284,21 @@ async def ingest_media(
     db: AsyncSession = Depends(get_db),
 ):
     """Ingest any audio/video URL supported by yt-dlp (YouTube, podcasts, Vimeo, etc.)."""
-    if not request_body.url.startswith("http"):
-        raise HTTPException(status_code=422, detail="Invalid URL")
+    try:
+        media_url = await validate_public_http_url_async(request_body.url)
+    except OutboundUrlError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid URL: {exc}") from exc
 
     webhook_url = validate_webhook_url(request_body.webhook_url) if request_body.webhook_url else None
     retry_payload = build_retry_payload(
         task_name="process_media",
         task_kwargs={
-            "url": request_body.url,
+            "url": media_url,
             "model": request_body.model,
         },
     )
     item, job = await _create_item_and_job(
-        db, "media", title=request_body.url, source_url=request_body.url,
+        db, "media", title=media_url, source_url=media_url,
         tenant_id=request.state.tenant_id,
         webhook_url=webhook_url, signing_key=request.state.key_hash if webhook_url else None,
         payload=retry_payload,
@@ -307,7 +310,7 @@ async def ingest_media(
         item=item,
         task_name="process_media",
         task_kwargs={
-            "url": request_body.url,
+            "url": media_url,
             "tenant_id": request.state.tenant_id,
             "model": request_body.model,
         },
@@ -340,19 +343,21 @@ async def ingest_webpage(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    if not request_body.url.startswith("http"):
-        raise HTTPException(status_code=422, detail="Invalid URL")
+    try:
+        webpage_url = await validate_public_http_url_async(request_body.url)
+    except OutboundUrlError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid URL: {exc}") from exc
 
     webhook_url = validate_webhook_url(request_body.webhook_url) if request_body.webhook_url else None
     retry_payload = build_retry_payload(
         task_name="process_webpage",
         task_kwargs={
-            "url": request_body.url,
+            "url": webpage_url,
             "model": request_body.model,
         },
     )
     item, job = await _create_item_and_job(
-        db, "webpage", title=request_body.url, source_url=request_body.url,
+        db, "webpage", title=webpage_url, source_url=webpage_url,
         tenant_id=request.state.tenant_id,
         webhook_url=webhook_url, signing_key=request.state.key_hash if webhook_url else None,
         payload=retry_payload,
@@ -364,7 +369,7 @@ async def ingest_webpage(
         item=item,
         task_name="process_webpage",
         task_kwargs={
-            "url": request_body.url,
+            "url": webpage_url,
             "tenant_id": request.state.tenant_id,
             "model": request_body.model,
         },
@@ -715,19 +720,19 @@ def _build_batch_task_payload(
     entry: BatchIngestItem,
     *,
     tenant_id: str,
+    validated_url: str | None = None,
 ) -> tuple[str, str, str, dict[str, Any]]:
     source_type, task_name = _BATCH_TYPE_MAP[entry.type]
-    title = entry.title or entry.url or "Untitled"
+    effective_url = validated_url or entry.url
+    title = entry.title or effective_url or "Untitled"
     task_kwargs: dict[str, Any] = {
         "tenant_id": tenant_id,
         "model": entry.model,
     }
     if entry.type in ("youtube", "media", "webpage"):
-        if not entry.url:
+        if not effective_url:
             raise HTTPException(status_code=422, detail=f"url required for type {entry.type}")
-        if not entry.url.startswith("http"):
-            raise HTTPException(status_code=422, detail="Invalid URL")
-        task_kwargs["url"] = entry.url
+        task_kwargs["url"] = effective_url
         return source_type, task_name, title, task_kwargs
 
     if not entry.content:
@@ -748,14 +753,35 @@ async def ingest_batch(
     signing_key = request.state.key_hash if webhook_url else None
     results = []
     prepared_entries: list[tuple[BatchIngestItem, str, str, str, dict[str, Any]]] = []
-    for entry in body.items:
+    validation_limit = asyncio.Semaphore(10)
+
+    async def validate_batch_entry(entry: BatchIngestItem) -> str | None:
+        if entry.type not in ("youtube", "media", "webpage"):
+            return None
+        if not entry.url:
+            raise HTTPException(status_code=422, detail=f"url required for type {entry.type}")
+        async with validation_limit:
+            try:
+                return await validate_public_http_url_async(entry.url)
+            except OutboundUrlError as exc:
+                raise HTTPException(status_code=422, detail="Invalid URL") from exc
+
+    validated_urls = await asyncio.gather(*(validate_batch_entry(entry) for entry in body.items))
+    for entry, validated_url in zip(body.items, validated_urls, strict=True):
         # Validate every entry before creating any rows so an invalid payload cannot leave partial side effects.
         prepared_entries.append(
-            (entry, *_build_batch_task_payload(entry, tenant_id=request.state.tenant_id))
+            (
+                entry,
+                *_build_batch_task_payload(
+                    entry,
+                    tenant_id=request.state.tenant_id,
+                    validated_url=validated_url,
+                ),
+            )
         )
     for entry, source_type, task_name, title, task_kwargs in prepared_entries:
         item, job = await _create_item_and_job(
-            db, source_type, title=title, source_url=entry.url,
+            db, source_type, title=title, source_url=task_kwargs.get("url"),
             tenant_id=request.state.tenant_id,
             webhook_url=webhook_url, signing_key=signing_key,
             payload=build_retry_payload(task_name=task_name, task_kwargs=task_kwargs),

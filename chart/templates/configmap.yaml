@@ -91,6 +91,7 @@ data:
   PALACE_DEFAULT_S3_BUCKET: {{ .Values.config.palaceDefaultS3Bucket | quote }}
   PALACE_DEFAULT_S3_PREFIX: {{ .Values.config.palaceDefaultS3Prefix | quote }}
   PALACE_DEFAULT_S3_ENDPOINT_URL: {{ .Values.config.palaceDefaultS3EndpointUrl | quote }}
+  PALACE_SYNC_S3_ALLOWED_ENDPOINT_HOSTS: {{ .Values.config.palaceSyncS3AllowedEndpointHosts | quote }}
   PALACE_DEFAULT_S3_REGION: {{ .Values.config.palaceDefaultS3Region | quote }}
   PALACE_DEFAULT_S3_ALLOWED_EXTENSIONS: {{ .Values.config.palaceDefaultS3AllowedExtensions | quote }}
   PALACE_DEFAULT_S3_SCAN_INTERVAL_SECONDS: {{ .Values.config.palaceDefaultS3ScanIntervalSeconds | quote }}

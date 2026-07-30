@@ -10,6 +10,8 @@ GH_SETUP_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "setup-gh" / "action.
 TRUSTED_RUNNER = "palace-trusted-amd64"
 HOSTED_RUNNER = "ubuntu-24.04"
 GH_SETUP_ACTION = "./.github/actions/setup-gh"
+CHECKOUT_ACTION = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+COMMIT_PINNED_ACTION = re.compile(r"^[^./][^@]*@[0-9a-f]{40}$")
 
 
 def _load_workflow() -> dict:
@@ -81,6 +83,19 @@ def test_workflow_does_not_use_privileged_pr_target_event() -> None:
     assert "pull_request_target" not in triggers
 
 
+def test_remote_actions_are_commit_pinned() -> None:
+    workflow = _load_workflow()
+
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            action = step.get("uses")
+            if not action or action.startswith("./"):
+                continue
+            assert COMMIT_PINNED_ACTION.fullmatch(action), (
+                f"{job_name} uses mutable remote action reference {action}"
+            )
+
+
 def test_every_trusted_job_using_gh_provisions_the_pinned_cli_first() -> None:
     jobs = _load_workflow()["jobs"]
     jobs_using_gh: set[str] = set()
@@ -105,7 +120,7 @@ def test_every_trusted_job_using_gh_provisions_the_pinned_cli_first() -> None:
         checkout_indexes = [
             index
             for index, step in enumerate(steps)
-            if step.get("uses") == "actions/checkout@v6"
+            if step.get("uses") == CHECKOUT_ACTION
         ]
         assert len(checkout_indexes) == 1
         assert len(setup_indexes) == 1

@@ -6,6 +6,7 @@ from pathlib import Path
 import app.api.ingest as ingest_api
 import httpx
 import app.api.capture as capture_api
+import app.utils.outbound_http as outbound_http
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -201,7 +202,11 @@ class _MockImageCandidateClient:
 
 
 def _allow_public_image_candidate_dns(monkeypatch) -> None:
-    monkeypatch.setattr(capture_api.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 0))])
+    monkeypatch.setattr(
+        outbound_http.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 0))],
+    )
 
 
 def _mock_image_candidate_downloads(monkeypatch, handler) -> None:
@@ -448,7 +453,8 @@ def test_browser_capture_social_post_accepts_valid_image_candidates(monkeypatch)
     _allow_public_image_candidate_dns(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "https://pbs.twimg.com/media/post-image.jpg"
+        assert str(request.url) == "https://93.184.216.34/media/post-image.jpg"
+        assert request.headers["Host"] == "pbs.twimg.com"
         return httpx.Response(
             200,
             headers={"content-type": "image/jpeg", "content-length": str(len(PNG_1X1_BYTES))},

@@ -1,4 +1,5 @@
 """Feed CRUD + action endpoints."""
+import asyncio
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from app.auth import require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.schemas.feed import FeedCreate, FeedUpdate, FeedOut, FeedListResponse, OPMLImportResponse
+from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -57,6 +59,10 @@ async def list_feeds(request: Request, db: AsyncSession = Depends(get_db)):
 async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Depends(get_db)):
     tenant_id = request.state.tenant_id
     poll_interval = max(body.poll_interval, settings.feed_poll_min_interval)
+    try:
+        feed_url = await validate_public_http_url_async(body.url)
+    except OutboundUrlError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid feed URL: {exc}") from exc
 
     try:
         result = await db.execute(
@@ -66,7 +72,7 @@ async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Dep
                 "RETURNING *"
             ),
             {
-                "url": body.url,
+                "url": feed_url,
                 "name": body.name,
                 "auto_tags": body.auto_tags,
                 "poll_interval": poll_interval,
@@ -300,7 +306,25 @@ async def import_opml(
 
     tenant_id = request.state.tenant_id
 
-    for url in urls:
+    async def validate_import_url(raw_url: str) -> str | None:
+        try:
+            return await validate_public_http_url_async(raw_url)
+        except OutboundUrlError:
+            return None
+
+    # Bound both resolver concurrency and the number of scheduled coroutines so
+    # a large OPML document cannot amplify into an unbounded task set.
+    validated_urls: list[str | None] = []
+    for offset in range(0, len(urls), 10):
+        validated_urls.extend(
+            await asyncio.gather(
+                *(validate_import_url(url) for url in urls[offset : offset + 10])
+            )
+        )
+    for url in validated_urls:
+        if url is None:
+            skipped += 1
+            continue
         result = await db.execute(
             text(
                 "INSERT INTO feeds (url, poll_interval, tenant_id) VALUES (:url, :poll_interval, :tenant_id) "

@@ -8,6 +8,12 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from app.utils.outbound_http import (
+    OutboundUrlError,
+    request_public_http_async,
+    validate_public_http_url,
+)
+
 
 @dataclass(frozen=True)
 class RobotsDecision:
@@ -32,7 +38,23 @@ async def evaluate_robots(
     owns_client = client is None
     request_client = client or httpx.AsyncClient(timeout=timeout_seconds)
     try:
-        response = await request_client.get(robots_url(url), headers={"User-Agent": user_agent})
+        target_url = robots_url(url)
+        if owns_client:
+            response = await request_public_http_async(
+                request_client,
+                "GET",
+                target_url,
+                headers={"User-Agent": user_agent},
+                follow_redirects=False,
+            )
+        else:
+            response = await request_client.get(
+                validate_public_http_url(target_url, resolve=False),
+                headers={"User-Agent": user_agent},
+                follow_redirects=False,
+            )
+    except OutboundUrlError:
+        return RobotsDecision(False, "robots_unsafe_url")
     except httpx.RequestError:
         return RobotsDecision(False, "robots_unavailable")
     finally:
