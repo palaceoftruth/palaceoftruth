@@ -104,6 +104,8 @@ def test_relationship_extraction_scopes_queries_to_item_tenant() -> None:
         title="Source",
         summary="Source summary",
         tenant_id="tenant-a",
+        content_hash="source-content-hash",
+        metadata_={},
     )
     db = _FakeDB(item)
     service = RelationshipService(db, embedder=object(), llm=_FakeLLM())
@@ -124,6 +126,10 @@ def test_relationship_extraction_scopes_queries_to_item_tenant() -> None:
     assert "RETURNING 1" in upsert_sql
     assert upsert_params["source"] == str(item_id)
     assert upsert_params["tenant_id"] == "tenant-a"
+    marker = item.metadata_["_palace_relationship_extraction"]
+    assert marker["version"] == "1"
+    assert marker["content_hash"] == "source-content-hash"
+    assert marker["candidate_count"] == 1
     assert db.committed is True
 
 
@@ -134,6 +140,8 @@ def test_relationship_extraction_skips_insert_when_endpoint_disappears() -> None
         title="Source",
         summary="Source summary",
         tenant_id="tenant-a",
+        content_hash="source-content-hash",
+        metadata_={},
     )
     db = _FakeDB(item, insert_scalar_value=None)
     service = RelationshipService(db, embedder=object(), llm=_FakeLLM())
@@ -152,6 +160,8 @@ def test_relationship_extraction_records_bounded_telemetry() -> None:
         title="Source",
         summary="Source summary",
         tenant_id="tenant-a",
+        content_hash="source-content-hash",
+        metadata_={},
     )
     db = _FakeDB(item)
     service = RelationshipService(db, embedder=object(), llm=_FakeLLM())
@@ -162,6 +172,35 @@ def test_relationship_extraction_records_bounded_telemetry() -> None:
     assert snapshot["extractions"] == [(("unknown", "valid", "false"), 1)]
     assert snapshot["edges"] == [(("unknown",), 1)]
     assert snapshot["retries"] == [(("unknown",), 0)]
+
+
+def test_relationship_extraction_marks_successful_no_match_attempt() -> None:
+    item_id = uuid.uuid4()
+    item = SimpleNamespace(
+        id=item_id,
+        title="Source",
+        summary="Source summary",
+        tenant_id="tenant-a",
+        content_hash="source-content-hash",
+        metadata_={"memory_entry": {"scope_type": "workspace"}},
+    )
+    db = _FakeDB(item)
+    service = RelationshipService(
+        db,
+        embedder=object(),
+        llm=_DetailedFakeLLM(relationship="none", confidence=0.0, outcome="empty"),
+    )
+
+    asyncio.run(service.find_relationships(item_id, tenant_id="tenant-a"))
+
+    assert len(db.execute_calls) == 2
+    assert item.metadata_["memory_entry"] == {"scope_type": "workspace"}
+    marker = item.metadata_["_palace_relationship_extraction"]
+    assert marker["version"] == "1"
+    assert marker["content_hash"] == "source-content-hash"
+    assert marker["candidate_count"] == 1
+    assert marker["completed_at"].endswith("+00:00")
+    assert db.committed is True
 
 
 def test_exact_candidate_classification_persists_only_an_allowed_ready_pair() -> None:

@@ -23,6 +23,7 @@ from app.schemas.palace import PalaceRetrieveResponse, PalaceRetrieveTrace
 from app.schemas.search import SearchResult
 from app.services.memory import (
     MEMORY_JOB_TYPE,
+    _build_relationship_doctor_state,
     accept_canonical_memory_entry,
     accept_memory_artifact,
     build_memory_idempotency_key,
@@ -103,6 +104,34 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rollbacks += 1
+
+
+def test_relationship_doctor_counts_only_actionable_unattempted_memory_items() -> None:
+    class RelationshipDoctorSession:
+        def __init__(self) -> None:
+            self.calls = []
+            self.results = iter([42, 11, 7])
+
+        async def scalar(self, statement, params):
+            self.calls.append((str(statement), params))
+            return next(self.results)
+
+    db = RelationshipDoctorSession()
+
+    result = asyncio.run(_build_relationship_doctor_state(db, tenant_id="tenant-a"))
+
+    assert result.relationship_edges == 42
+    assert result.ready_items_without_relationships == 11
+    assert result.deferred_memory_candidates == 7
+    deferred_sql, deferred_params = db.calls[2]
+    assert "i.summary IS NOT NULL" in deferred_sql
+    assert "IS DISTINCT FROM :marker_version" in deferred_sql
+    assert "IS DISTINCT FROM i.content_hash" in deferred_sql
+    assert deferred_params == {
+        "tenant_id": "tenant-a",
+        "marker_key": "_palace_relationship_extraction",
+        "marker_version": "1",
+    }
 
 
 class FakeEmbedder:

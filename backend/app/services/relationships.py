@@ -2,6 +2,7 @@
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Collection
 
@@ -19,6 +20,8 @@ from app.services.search import _embedding_search_plan
 logger = logging.getLogger(__name__)
 
 _CANDIDATE_LIMIT = 5
+RELATIONSHIP_EXTRACTION_MARKER_KEY = "_palace_relationship_extraction"
+RELATIONSHIP_EXTRACTION_MARKER_VERSION = "1"
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,7 @@ class RelationshipService:
             )
         ).fetchall()
 
+        attempted_candidates = 0
         for row in rows:
             if row.summary:
                 await self._classify_candidate_records(
@@ -129,6 +133,20 @@ class RelationshipService:
                     target=row,
                     tenant_id=tenant_id,
                 )
+                attempted_candidates += 1
+
+        if attempted_candidates:
+            # Persist successful no-match attempts too. Without this marker,
+            # deferred backfills continually reselect the same oldest items
+            # whenever every candidate is classified as unrelated.
+            metadata = dict(item.metadata_ or {})
+            metadata[RELATIONSHIP_EXTRACTION_MARKER_KEY] = {
+                "version": RELATIONSHIP_EXTRACTION_MARKER_VERSION,
+                "content_hash": item.content_hash,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_count": attempted_candidates,
+            }
+            item.metadata_ = metadata
 
         await self.db.commit()
 
