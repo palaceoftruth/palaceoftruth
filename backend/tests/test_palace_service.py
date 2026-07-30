@@ -3264,6 +3264,20 @@ def test_sync_source_create_accepts_s3_shape() -> None:
     assert body.allowed_extensions == [".md"]
 
 
+def test_s3_endpoint_requires_exact_operator_allowlist(monkeypatch) -> None:
+    monkeypatch.setattr(
+        palace_service.settings,
+        "palace_sync_s3_allowed_endpoint_hosts",
+        "minio.example.com",
+    )
+    assert (
+        palace_service._validate_s3_endpoint_url("https://minio.example.com:9443")
+        == "https://minio.example.com:9443/"
+    )
+    with pytest.raises(ValueError, match="PALACE_SYNC_S3_ALLOWED_ENDPOINT_HOSTS"):
+        palace_service._validate_s3_endpoint_url("https://attacker.example.com")
+
+
 def test_sync_source_create_accepts_repo_github_pat_shape() -> None:
     body = SyncSourceCreate(
         name="Private repo",

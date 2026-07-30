@@ -1,4 +1,5 @@
 """ARQ task functions for RSS/Atom feed ingestion."""
+import asyncio
 import logging
 import os
 import uuid
@@ -274,6 +275,7 @@ async def poll_all_feeds(ctx: dict) -> None:
 async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None:
     """Fetch feed XML, parse entries, enqueue per-article jobs."""
     import feedparser
+    from app.utils.outbound_http import fetch_public_http_bytes
 
     async with async_session() as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
@@ -288,8 +290,13 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None
             headers["If-Modified-Since"] = feed.last_modified
 
         try:
-            parsed = feedparser.parse(feed.url, request_headers=headers)
-            status = getattr(parsed, "status", 200)
+            feed_bytes, response = await asyncio.to_thread(
+                fetch_public_http_bytes,
+                feed.url,
+                headers=headers,
+                raise_for_status=False,
+            )
+            status = response.status_code
             if status == 304:
                 # Not modified — update timestamp and return
                 feed.last_fetched_at = datetime.now(timezone.utc)
@@ -298,6 +305,10 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None
                 return
             if status >= 400:
                 raise ValueError(f"HTTP {status}")
+            parsed = feedparser.parse(
+                feed_bytes,
+                response_headers=dict(response.headers),
+            )
         except Exception as exc:
             feed.consecutive_failures += 1
             feed.last_error = str(exc)[:500]

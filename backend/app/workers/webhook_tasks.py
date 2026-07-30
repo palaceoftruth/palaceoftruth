@@ -10,6 +10,7 @@ import httpx
 from app.database import async_session
 from app.models.job import Job
 from app.services.webhook_payload import build_webhook_payload
+from app.utils.outbound_http import OutboundUrlError, request_public_http_async
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,17 @@ async def deliver_webhook(
         headers["X-Hub-Signature-256"] = _sign(body, signing_key)
 
     try:
+        # Resolve again immediately before every attempt. Admission-time DNS is
+        # not trusted because records can change while a job waits in the queue.
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.post(webhook_url, content=body, headers=headers)
+            response = await request_public_http_async(
+                client,
+                "POST",
+                webhook_url,
+                content=body,
+                headers=headers,
+                follow_redirects=False,
+            )
 
         if response.status_code < 500:
             # 2xx, 3xx, 4xx — treat as delivered (caller's problem if 4xx)
@@ -71,7 +81,7 @@ async def deliver_webhook(
         # 5xx — retriable
         raise _RetriableError(f"HTTP {response.status_code}")
 
-    except (httpx.ConnectError, httpx.TimeoutException, _RetriableError) as exc:
+    except (httpx.ConnectError, httpx.TimeoutException, OutboundUrlError, _RetriableError) as exc:
         next_attempt = attempt + 1
         if next_attempt >= _MAX_ATTEMPTS:
             logger.error(

@@ -1,6 +1,4 @@
 import hashlib
-import ipaddress
-import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +16,12 @@ from app.models.item import Item
 from app.models.web_save import WebSave
 from app.schemas.ingest import BrowserCaptureRequest, BrowserCaptureResponse, BrowserImageCandidate
 from app.utils.job_payloads import build_retry_payload
+from app.utils.outbound_http import (
+    OutboundUrlError,
+    stream_public_http_async,
+    validate_public_http_url,
+    validate_public_http_url_async,
+)
 from app.utils.webhook import validate_webhook_url
 from app.api.ingest import (
     _create_item_and_job,
@@ -134,40 +138,23 @@ def _host_matches(hostname: str, suffix: str) -> bool:
     return hostname == suffix or hostname.endswith(f".{suffix}")
 
 
-def _hostname_is_private(hostname: str) -> bool:
-    try:
-        addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            raise HTTPException(status_code=422, detail="image candidate host could not be resolved") from exc
-        addresses = []
-        for info in infos:
-            try:
-                addresses.append(ipaddress.ip_address(info[4][0]))
-            except ValueError:
-                continue
-    if not addresses:
-        raise HTTPException(status_code=422, detail="image candidate host could not be resolved")
-    return any(
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-        for address in addresses
-    )
-
-
 def _assert_public_candidate_host(normalized_url: str) -> str:
-    hostname = urlparse(normalized_url).hostname
-    if not hostname:
-        raise HTTPException(status_code=422, detail="image candidate host is required")
-    if _hostname_is_private(hostname):
-        raise HTTPException(status_code=422, detail="image candidate host is not allowed")
-    return hostname
+    try:
+        safe_url = validate_public_http_url(normalized_url, resolve=False)
+    except OutboundUrlError as exc:
+        raise HTTPException(status_code=422, detail="image candidate host is not allowed") from exc
+    return urlparse(safe_url).hostname or ""
+
+
+async def _assert_allowed_image_host_async(*, image_url: str, source_url: str) -> None:
+    try:
+        safe_url = await validate_public_http_url_async(image_url)
+    except OutboundUrlError as exc:
+        raise HTTPException(status_code=422, detail="image candidate host is not allowed") from exc
+    image_host = urlparse(safe_url).hostname or ""
+    allowed_suffixes = _allowed_image_host_suffixes(source_url)
+    if not allowed_suffixes or not any(_host_matches(image_host, suffix) for suffix in allowed_suffixes):
+        raise HTTPException(status_code=422, detail="image candidate host is not allowed for source post")
 
 
 def _allowed_image_host_suffixes(source_url: str) -> tuple[str, ...]:
@@ -214,10 +201,15 @@ async def _download_image_candidate(
 ) -> _DownloadedImageCandidate:
     current_url = normalized_candidate_url
     for _redirect in range(_CANDIDATE_REDIRECT_LIMIT + 1):
-        _assert_allowed_image_host(image_url=current_url, source_url=source_url)
+        await _assert_allowed_image_host_async(image_url=current_url, source_url=source_url)
         try:
-            response_context = client.stream("GET", current_url, follow_redirects=False)
-        except httpx.HTTPError as exc:
+            response_context = stream_public_http_async(
+                client,
+                "GET",
+                current_url,
+                follow_redirects=False,
+            )
+        except (httpx.HTTPError, OutboundUrlError) as exc:
             raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
 
         try:
@@ -234,8 +226,8 @@ async def _download_image_candidate(
 
                 if response.status_code >= 400:
                     raise HTTPException(status_code=422, detail="image candidate returned an error")
-                final_url = str(response.url)
-                _assert_allowed_image_host(image_url=final_url, source_url=source_url)
+                final_url = current_url
+                await _assert_allowed_image_host_async(image_url=final_url, source_url=source_url)
                 media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                 if media_type not in _IMAGE_MEDIA_TYPES:
                     raise HTTPException(status_code=422, detail="image candidate content type is not allowed")
@@ -253,7 +245,7 @@ async def _download_image_candidate(
                     if len(content) > _CANDIDATE_IMAGE_SIZE_LIMIT:
                         raise HTTPException(status_code=413, detail="image candidate is too large")
                 image_bytes = bytes(content)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, OutboundUrlError) as exc:
             raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
         byte_hash = hashlib.sha256(image_bytes).hexdigest()
         return _DownloadedImageCandidate(
@@ -560,6 +552,11 @@ async def capture_browser(
     db: AsyncSession = Depends(get_db),
 ) -> BrowserCaptureResponse:
     normalized_url = _normalize_http_url(body.url)
+    if normalized_url is not None:
+        try:
+            normalized_url = await validate_public_http_url_async(normalized_url)
+        except OutboundUrlError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid capture URL: {exc}") from exc
     resolved_kind = _resolve_capture_kind(body, normalized_url)
     route = "note" if resolved_kind == "selection_note" else "media" if resolved_kind == "media" else "webpage"
     tags = _clean_tags(body.tags)

@@ -1,0 +1,138 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-restricted-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  # Restrict only HTTP-facing and asynchronous application runtimes. Chart
+  # hooks and operator-managed database pods keep their own lifecycle access.
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - {{ include "palaceoftruth.fullname" . }}-backend
+          - {{ include "palaceoftruth.fullname" . }}-worker
+          - {{ include "palaceoftruth.fullname" . }}-media-worker
+          - {{ include "palaceoftruth.fullname" . }}-palace-worker
+          - {{ include "palaceoftruth.mcpServiceName" . }}
+          - {{ include "palaceoftruth.fullname" . }}-frontend
+  policyTypes:
+    - Egress
+  egress:
+    {{- if .Values.networkPolicy.allowDns }}
+    # Portable DNS allowance for CoreDNS and node-local DNS. Restricting this
+    # by pod selector would break clusters whose DNS cache uses host networking.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        - ipBlock:
+            cidr: ::/0
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    # Frontend and MCP call the backend through its ClusterIP.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "palaceoftruth.fullname" . }}-backend
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- if .Values.postgres.enabled }}
+    # CloudNativePG labels every generated instance pod with its cluster name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ include "palaceoftruth.postgresClusterName" . }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    {{- if .Values.valkey.enabled }}
+    # Allow both standalone and Sentinel topologies without permitting access
+    # to unrelated same-namespace workloads.
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - {{ include "palaceoftruth.valkeyServiceName" . }}
+                  - {{ include "palaceoftruth.valkeyPrimaryName" . }}
+                  - {{ include "palaceoftruth.valkeyReplicaName" . }}
+                  - {{ include "palaceoftruth.valkeySentinelName" . }}
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 26379
+    {{- end }}
+    {{- if .Values.localEmbeddingService.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.localEmbeddingService.port }}
+    {{- end }}
+    {{- if .Values.networkPolicy.publicEgress.enabled }}
+    # IPv4 public web endpoints. Private, loopback, link-local, carrier-grade
+    # NAT, documentation, benchmark, multicast, and reserved ranges are denied.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        {{- range .Values.networkPolicy.publicEgress.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # IPv6 public web endpoints. IPv4-mapped, translation, discard-only,
+    # documentation, unique-local, link-local, and multicast ranges are denied.
+    - to:
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::/128
+              - ::1/128
+              - ::ffff:0:0/96
+              - 64:ff9b::/96
+              - 100::/64
+              - 2001:2::/48
+              - 2001:db8::/32
+              - fc00::/7
+              - fe80::/10
+              - ff00::/8
+      ports:
+        {{- range .Values.networkPolicy.publicEgress.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.additionalEgress }}
+    # Operator-reviewed exceptions for legitimate deployment-owned endpoints.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

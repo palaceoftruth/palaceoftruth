@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Awaitable, Callable, Iterable, Sequence
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlsplit
 
 import boto3
 from fastapi import HTTPException
@@ -111,6 +111,7 @@ from app.services.source_trust_summary import build_source_trust_health_summary
 from app.services.wakeup_briefs import build_wakeup_brief_summary
 from app.utils.crypto import decrypt_secret, encrypt_secret
 from app.utils.hash import compute_content_hash
+from app.utils.outbound_http import OutboundUrlError, parse_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -534,6 +535,34 @@ def _resolve_repo_credential_ciphertext(
     raise HTTPException(status_code=422, detail=f"Unsupported repo credential type: {credential_type}")
 
 
+def _validate_s3_endpoint_url(endpoint_url: str) -> str:
+    """Require custom S3 endpoints to match an operator-configured exact host."""
+
+    try:
+        normalized_endpoint = parse_http_url(endpoint_url)
+    except OutboundUrlError as exc:
+        raise ValueError(f"Invalid S3 endpoint_url: {exc}") from exc
+    endpoint_host = (urlsplit(normalized_endpoint).hostname or "").lower().rstrip(".")
+    allowed_endpoint_hosts = {
+        host.strip().lower().rstrip(".")
+        for host in settings.palace_sync_s3_allowed_endpoint_hosts.split(",")
+        if host.strip()
+    }
+    if settings.palace_default_s3_endpoint_url:
+        try:
+            default_endpoint = parse_http_url(settings.palace_default_s3_endpoint_url)
+        except OutboundUrlError:
+            default_endpoint = ""
+        default_host = (urlsplit(default_endpoint).hostname or "").lower().rstrip(".")
+        if default_host:
+            allowed_endpoint_hosts.add(default_host)
+    if endpoint_host not in allowed_endpoint_hosts:
+        raise ValueError(
+            "S3 endpoint_url host is not in PALACE_SYNC_S3_ALLOWED_ENDPOINT_HOSTS"
+        )
+    return normalized_endpoint
+
+
 def _resolve_sync_source_values(
     *,
     source_kind: str,
@@ -558,8 +587,11 @@ def _resolve_sync_source_values(
     if source_kind == "s3":
         if not bucket:
             raise HTTPException(status_code=422, detail="S3 sync source requires a bucket")
-        if endpoint_url and not endpoint_url.startswith(("http://", "https://")):
-            raise HTTPException(status_code=422, detail="S3 endpoint_url must start with http:// or https://")
+        if endpoint_url:
+            try:
+                endpoint_url = _validate_s3_endpoint_url(endpoint_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         normalized_prefix = _normalize_sync_prefix(prefix) or None
         resolved_root_path = _sync_source_locator(
             source_kind=source_kind,
@@ -4305,7 +4337,9 @@ def _iter_repo_sync_files(
 def _make_s3_client(source: SyncSource):
     client_kwargs: dict[str, object] = {}
     if source.endpoint_url:
-        client_kwargs["endpoint_url"] = source.endpoint_url
+        # Revalidate stored configuration at use time so a tightened allowlist
+        # takes effect without requiring a source record update.
+        client_kwargs["endpoint_url"] = _validate_s3_endpoint_url(source.endpoint_url)
     if source.region:
         client_kwargs["region_name"] = source.region
 

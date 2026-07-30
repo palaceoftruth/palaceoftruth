@@ -46,10 +46,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
       - name: Run backend smoke tests
         working-directory: backend
@@ -116,14 +116,14 @@ jobs:
 
       - name: Upload agent memory reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: agent-memory-ci-reports
           path: artifacts/agent-memory/*.json
           if-no-files-found: error
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
 
@@ -134,7 +134,7 @@ jobs:
           npm run build
 
       - name: Install Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.14.0
 
@@ -144,6 +144,13 @@ jobs:
           helm template palaceoftruth chart
           helm template palaceoftruth chart --set highAvailability.enabled=true
           helm template palaceoftruth chart --set mcp.enabled=true --set ingress.mcpHost=mcp.palaceoftruth.example.com
+
+      - name: Verify Helm network policy
+        working-directory: backend
+        run: |
+          uv run --python 3.12 --with pytest python -m pytest \
+            tests/test_helm_network_policy.py \
+            -q
 
   build-push:
     needs: validate
@@ -155,7 +162,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -185,7 +192,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY_HOST }}
           username: ${{ github.actor }}
@@ -213,10 +220,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Build and push backend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: ./backend
           platforms: linux/amd64
@@ -230,7 +237,7 @@ jobs:
           cache-to: type=inline
 
       - name: Build and push frontend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: ./frontend
           platforms: linux/amd64
@@ -245,7 +252,7 @@ jobs:
 
       - name: Build and push Hermes plugin artifact
         if: steps.hermes_plugin.outputs.changed == 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: ./third_party_plugins/hermes/memory/palaceoftruth
           file: ./third_party_plugins/hermes/memory/palaceoftruth/Dockerfile
@@ -306,7 +313,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -378,7 +385,7 @@ jobs:
       packages: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -422,13 +429,13 @@ jobs:
 
       - name: Install Helm
         if: steps.release_scope.outputs.skip != 'true'
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.14.0
 
       - name: Log in to GHCR
         if: steps.release_scope.outputs.skip != 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY_HOST }}
           username: ${{ github.actor }}

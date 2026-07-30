@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.models.job import Job
+from app.utils.outbound_http import OutboundUrlError
 from app.utils.webhook import maybe_dispatch_webhook
 from app.workers.webhook_tasks import deliver_webhook
 
@@ -107,31 +108,21 @@ async def test_deliver_webhook_uses_snapshot_even_if_job_state_changes(monkeypat
         completed_at=None,
     )
 
-    class _FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url: str, content: bytes, headers: dict) -> _FakeResponse:
-            delivered.append(
-                {
-                    "url": url,
-                    "body": json.loads(content.decode()),
-                    "headers": headers,
-                }
-            )
-            return _FakeResponse(200)
+    async def fake_request(_client, _method, url: str, content: bytes, headers: dict, **_kwargs):
+        delivered.append(
+            {
+                "url": url,
+                "body": json.loads(content.decode()),
+                "headers": headers,
+            }
+        )
+        return _FakeResponse(200)
 
     monkeypatch.setattr(
         "app.workers.webhook_tasks.async_session",
         lambda: _FakeSessionManager(_FakeSession(job)),
     )
-    monkeypatch.setattr("app.workers.webhook_tasks.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("app.workers.webhook_tasks.request_public_http_async", fake_request)
 
     await deliver_webhook(
         {"redis": _FakeRedis()},
@@ -166,3 +157,38 @@ async def test_deliver_webhook_uses_snapshot_even_if_job_state_changes(monkeypat
     }
     assert delivered[0]["headers"]["Content-Type"] == "application/json"
     assert delivered[0]["headers"]["X-Hub-Signature-256"].startswith("sha256=")
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_revalidates_dns_for_each_attempt(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    job = Job(
+        id=job_id,
+        job_type="note",
+        tenant_id="tenant-a",
+        status="completed",
+        progress=100,
+    )
+    redis = _FakeRedis()
+
+    async def reject_rebound_target(*_args, **_kwargs):
+        raise OutboundUrlError("URL resolved to a private address")
+
+    monkeypatch.setattr(
+        "app.workers.webhook_tasks.async_session",
+        lambda: _FakeSessionManager(_FakeSession(job)),
+    )
+    monkeypatch.setattr(
+        "app.workers.webhook_tasks.request_public_http_async",
+        reject_rebound_target,
+    )
+
+    await deliver_webhook(
+        {"redis": redis},
+        job_id=str(job_id),
+        webhook_url="https://rebound.example/hook",
+        attempt=0,
+    )
+
+    assert redis.enqueued[0][0] == "deliver_webhook"
+    assert redis.enqueued[0][1]["attempt"] == 1

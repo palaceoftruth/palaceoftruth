@@ -19,6 +19,11 @@ from app.services.firecrawl import (
     firecrawl_config_from_settings,
     scrape_with_firecrawl,
 )
+from app.utils.outbound_http import (
+    OutboundUrlError,
+    fetch_public_http_bytes,
+    validate_public_http_url_async,
+)
 
 _WORDS_PER_MINUTE = 200
 
@@ -54,6 +59,7 @@ class WebpagePipeline(BasePipeline):
         self.firecrawl_config = firecrawl_config or firecrawl_config_from_settings(settings)
 
     async def extract(self, url: str, job_id: str = "unknown", **_kwargs) -> tuple[str, dict[str, Any]]:
+        url = await validate_public_http_url_async(url)
         social_platform = detect_social_post_platform(url)
 
         loop = asyncio.get_event_loop()
@@ -163,9 +169,10 @@ class WebpagePipeline(BasePipeline):
                 if capture:
                     return capture.html, capture.text, capture.metadata
 
-        html = trafilatura.fetch_url(url)
-        if not html:
+        raw_html, response = fetch_public_http_bytes(url)
+        if not raw_html:
             return None, None, metadata
+        html = raw_html.decode(response.encoding or "utf-8", errors="replace")
         meta = trafilatura.extract_metadata(html)
         article = trafilatura.extract(
             html,
@@ -200,6 +207,23 @@ class WebpagePipeline(BasePipeline):
             browser = await pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
             try:
                 page = await browser.new_page()
+                async def guard_outbound_request(route) -> None:
+                    request_url = route.request.url
+                    if not request_url.startswith(("http://", "https://")):
+                        await route.continue_()
+                        return
+                    try:
+                        await validate_public_http_url_async(request_url)
+                    except OutboundUrlError:
+                        logger.warning("blocked unsafe browser request from %s to %s", url, request_url)
+                        await route.abort("blockedbyclient")
+                        return
+                    await route.continue_()
+
+                # Browser navigation, redirects, and subresources all pass
+                # through this guard. Cluster egress policy remains the final
+                # defense against the browser's own DNS resolution race.
+                await page.route("**/*", guard_outbound_request)
                 await page.set_extra_http_headers({
                     "User-Agent": (
                         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

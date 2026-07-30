@@ -62,6 +62,27 @@ def test_settings_keep_openai_embedding_profile_defaults() -> None:
     assert settings.embedding_profile_name == "openai-text-embedding-3-small-1536"
 
 
+def test_settings_validation_errors_do_not_disclose_secret_inputs() -> None:
+    secret_values = {
+        "database_url": "postgresql+asyncpg://palace:database-secret@example.test/palace",
+        "openai_api_key": "openai-secret-sentinel",
+        "openrouter_api_key": "openrouter-secret-sentinel",
+        "api_key": "api-secret-sentinel",
+        "github_pat": "github-secret-sentinel",
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        config.Settings(
+            **secret_values,
+            relationship_classification_temperature=3,
+        )
+
+    error_message = str(exc_info.value)
+    assert "RELATIONSHIP_CLASSIFICATION_TEMPERATURE" in error_message
+    for secret in secret_values.values():
+        assert secret not in error_message
+
+
 def test_settings_expose_frozen_relationship_classifier_profile() -> None:
     settings = config.Settings(**_settings_kwargs())
 
