@@ -75,6 +75,10 @@ from app.services.memory_entries import (
 from app.services.memory_telemetry import record_scope_guard_violation, record_semantic_recall
 from app.services.palace import retrieve_palace
 from app.services.queue_telemetry import build_worker_backpressure
+from app.services.relationships import (
+    RELATIONSHIP_EXTRACTION_MARKER_KEY,
+    RELATIONSHIP_EXTRACTION_MARKER_VERSION,
+)
 from app.services.search import RetrievalDependencyUnavailableError, SearchService
 from app.services.embedder import EmbeddingRequestError
 from app.services.source_trust_summary import get_source_trust_summaries
@@ -2479,14 +2483,23 @@ async def _build_relationship_doctor_state(
             WHERE i.tenant_id = :tenant_id
               AND i.status = 'ready'
               AND i.deleted_at IS NULL
+              AND i.summary IS NOT NULL
               AND i.metadata ? 'memory_entry'
+              AND (
+                  i.metadata -> :marker_key ->> 'version' IS DISTINCT FROM :marker_version
+                  OR i.metadata -> :marker_key ->> 'content_hash' IS DISTINCT FROM i.content_hash
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM item_relationships r
                   WHERE r.source_item_id = i.id OR r.target_item_id = i.id
               )
             """
         ),
-        {"tenant_id": tenant_id},
+        {
+            "tenant_id": tenant_id,
+            "marker_key": RELATIONSHIP_EXTRACTION_MARKER_KEY,
+            "marker_version": RELATIONSHIP_EXTRACTION_MARKER_VERSION,
+        },
     )
     return MemoryRetrievalDoctorRelationshipState(
         relationship_edges=int(relationship_edges or 0),
