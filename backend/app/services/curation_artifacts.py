@@ -517,4 +517,8 @@ async def update_candidate_curation_artifact(
             artifact.deprecated_at = _utc_now()
     _record_artifact_event(db, artifact=artifact, event_type="updated", previous_snapshot=previous_snapshot)
     await db.flush()
+    # PostgreSQL computes updated_at during the UPDATE. Reload server-generated
+    # fields before FastAPI serializes the artifact outside SQLAlchemy's async
+    # greenlet context, where an implicit refresh would raise MissingGreenlet.
+    await db.refresh(artifact)
     return artifact
