@@ -28,6 +28,7 @@ class FakeSession:
         self.statements = []
         self.commits = 0
         self.rollbacks = 0
+        self.refreshes = []
 
     def add(self, obj):
         if isinstance(obj, CandidateCurationArtifact):
@@ -66,6 +67,9 @@ class FakeSession:
 
     async def rollback(self):
         self.rollbacks += 1
+
+    async def refresh(self, obj):
+        self.refreshes.append(obj)
 
 
 def _artifact(*, tenant_id: str = "tenant-a", status: str = "draft") -> CandidateCurationArtifact:
@@ -470,6 +474,7 @@ def test_review_inbox_accept_promotes_only_source_backed_artifacts() -> None:
     assert body["artifacts"][0]["metadata"]["review_inbox"]["resolved"] is True
     assert artifact.approved_at is not None
     assert session.commits == 1
+    assert session.refreshes == [artifact]
 
 
 def test_review_inbox_accept_rejects_source_backed_draft() -> None:
