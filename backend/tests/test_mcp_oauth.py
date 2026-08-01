@@ -1,6 +1,7 @@
 import uuid
 import base64
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -366,6 +367,7 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
             "state": "opaque-client-state",
             "code_challenge": "A" * 43,
             "code_challenge_method": "S256",
+            "all_memory_scopes": "true",
         },
         follow_redirects=False,
     )
@@ -379,6 +381,8 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
     assert session.authorization_interactions[0]["state"] == "opaque-client-state"
     assert session.authorization_interactions[0]["browser_session_hash"]
     assert session.authorization_interactions[0]["csrf_token_hash"]
+    assert json.loads(session.authorization_interactions[0]["agent_scope_keys"]) == ["*"]
+    assert json.loads(session.authorization_interactions[0]["workspace_scope_keys"]) == ["*"]
 
 
 def test_mcp_host_authorization_uses_the_frontend_consent_host_and_shared_cookie_domain(monkeypatch) -> None:
@@ -473,6 +477,7 @@ def test_mcp_oauth_consent_summary_requires_the_tenant_bound_browser_session(mon
         "scopes": ["read"],
         "agent_scope_keys": ["codex"],
         "workspace_scope_keys": ["palaceoftruth"],
+        "all_memory_scopes": False,
         "expires_at": interaction["expires_at"].isoformat(),
     }
 

@@ -91,6 +91,8 @@ def _enforce_delegated_grant_retrieval(request: Request, *, agent_scope_keys: li
         return
     allowed_agents = set(getattr(context, "delegated_agent_scope_keys", ()) or ())
     allowed_workspaces = set(getattr(context, "delegated_workspace_scope_keys", ()) or ())
+    if "*" in allowed_agents and "*" in allowed_workspaces:
+        return
     # Empty lists intentionally authorize no scopes; grants never imply tenant-wide access.
     if tenant_shared or broad or any(key not in allowed_agents for key in agent_scope_keys) or any(key not in allowed_workspaces for key in workspace_scope_keys):
         raise HTTPException(status_code=403, detail="Delegated OAuth grant does not permit the requested memory scopes")
@@ -100,6 +102,11 @@ def _delegated_grant_write_denial(request: Request, scope: MemoryScope) -> str |
     """Return a fail-closed denial when a delegated grant narrows a write."""
     context = getattr(request.state, "auth_context", None)
     if context is None or getattr(context, "delegated_grant_id", None) is None:
+        return None
+    if (
+        "*" in set(getattr(context, "delegated_agent_scope_keys", ()) or ())
+        and "*" in set(getattr(context, "delegated_workspace_scope_keys", ()) or ())
+    ):
         return None
     if scope.type == "agent" and scope.key in set(getattr(context, "delegated_agent_scope_keys", ()) or ()):
         return None

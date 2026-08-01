@@ -1956,12 +1956,24 @@ def test_delegated_grant_write_allowlists_apply_to_single_and_batch_entries(monk
             ]
         },
     )
+    delegated_agents[:] = ["*"]
+    delegated_workspaces[:] = ["*"]
+    wildcard_tenant_shared = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "scope": {"type": "tenant_shared", "key": None}},
+    )
+    wildcard_workspace = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "scope": {"type": "workspace", "key": "future-workspace"}},
+    )
 
     assert allowed.status_code == 202
     assert denied.status_code == 403
     assert "does not permit" in denied.json()["detail"]
     assert batch.status_code == 202
     assert empty_allowlist.status_code == 403
+    assert wildcard_tenant_shared.status_code == 202
+    assert wildcard_workspace.status_code == 202
     assert [entry["status"] for entry in batch.json()["results"]] == ["queued", "failed", "failed"]
     assert all(
         entry["error"]["reason_code"] == "delegated_grant_scope_denied"

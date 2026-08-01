@@ -84,10 +84,11 @@ export default function OAuthConsent() {
             <div className="sb-panel-muted p-4"><p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Palace tenant</p><p className="mt-2 break-all text-base font-medium text-zinc-100">{interaction.tenant_id}</p></div>
           </div>
           <div className="sb-panel-muted p-4"><p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Protected resource</p><p className="mt-2 break-all text-sm text-zinc-200">{interaction.resource}</p></div>
+          {interaction.all_memory_scopes ? <div className="flex gap-3 rounded-2xl border border-amber-700/40 bg-amber-950/30 p-4 text-sm leading-6 text-amber-100"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />This client is requesting read and write access across all memory scopes in this Palace tenant.</div> : null}
           <div className="grid gap-3 sm:grid-cols-2">
             <ScopeList label="Requested scopes" values={interaction.scopes} empty="No scopes were requested." />
-            <ScopeList label="Agent restrictions" values={interaction.agent_scope_keys} empty="No agent-specific restriction was requested." />
-            <ScopeList label="Workspace restrictions" values={interaction.workspace_scope_keys} empty="No workspace-specific restriction was requested." />
+            <ScopeList label="Agent restrictions" values={interaction.all_memory_scopes ? [] : interaction.agent_scope_keys} empty={interaction.all_memory_scopes ? "All agent scopes in this tenant." : "No agent-specific access was requested."} />
+            <ScopeList label="Workspace restrictions" values={interaction.all_memory_scopes ? [] : interaction.workspace_scope_keys} empty={interaction.all_memory_scopes ? "All workspace and tenant-shared scopes." : "No workspace-specific access was requested."} />
             <div className="sb-panel-muted p-4"><p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Access lifetime</p><p className="mt-3 text-sm leading-6 text-zinc-300">Access can continue through rotating refresh tokens for up to 30 days, or until you disconnect or a tenant administrator revokes the grant.</p></div>
           </div>
           <div className="flex gap-3 rounded-2xl border border-emerald-800/30 bg-emerald-950/20 p-4 text-sm leading-6 text-emerald-100"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />Your browser API key authenticates this decision but is never added to the authorization code or callback.</div>
