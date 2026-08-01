@@ -1058,6 +1058,7 @@ export interface McpOAuthAuthorizationInteraction {
   scopes: string[];
   agent_scope_keys: string[];
   workspace_scope_keys: string[];
+  all_memory_scopes: boolean;
   expires_at: string;
 }
 

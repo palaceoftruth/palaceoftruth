@@ -49,3 +49,12 @@ the OAuth Resource Indicators `resource` parameter.
 
 Unsupported scopes must fail closed during client registration, token issuance,
 bearer validation, and API-key MCP scope-header validation.
+
+## Delegated Memory Boundaries
+
+Authorization-code clients have no delegated memory access by default. A
+tenant control plane that needs access to every current and future memory scope
+may add `all_memory_scopes=true` to the authorization request. Palace records
+that choice as an explicit wildcard grant and shows the tenant-wide read/write
+access on the consent screen before approval. Omitting the parameter leaves the
+agent and workspace allowlists empty and fail-closed.

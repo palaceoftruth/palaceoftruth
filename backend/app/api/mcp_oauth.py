@@ -498,6 +498,7 @@ async def begin_mcp_authorization(
     code_challenge_method: str = Query(),
     scope: str | None = Query(None),
     state: str | None = Query(None),
+    all_memory_scopes: bool = Query(False),
 ) -> RedirectResponse:
     """Create a tenant-bound consent interaction for a confidential PKCE client.
 
@@ -555,6 +556,9 @@ async def begin_mcp_authorization(
         browser_session = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        # A wildcard is an explicit, consent-visible tenant-control-plane grant.
+        # Empty delegated lists remain fail-closed for ordinary clients.
+        delegated_scope_keys = ["*"] if all_memory_scopes else []
         await db.execute(
             text(
                 """
@@ -563,7 +567,8 @@ async def begin_mcp_authorization(
                      redirect_uri, state, pkce_challenge, browser_session_hash, csrf_token_hash, expires_at)
                 VALUES
                     (CAST(:id AS uuid), :tenant_id, :client_id, :resource, CAST(:scopes AS jsonb),
-                     CAST('[]' AS jsonb), CAST('[]' AS jsonb), :redirect_uri, :state, :pkce_challenge,
+                     CAST(:agent_scope_keys AS jsonb), CAST(:workspace_scope_keys AS jsonb),
+                     :redirect_uri, :state, :pkce_challenge,
                      :browser_session_hash, :csrf_token_hash, :expires_at)
                 """
             ),
@@ -573,6 +578,8 @@ async def begin_mcp_authorization(
                 "client_id": client_row["id"],
                 "resource": requested_resource,
                 "scopes": json.dumps(requested_scopes),
+                "agent_scope_keys": json.dumps(delegated_scope_keys),
+                "workspace_scope_keys": json.dumps(delegated_scope_keys),
                 "redirect_uri": redirect_uri,
                 "state": state,
                 "pkce_challenge": code_challenge,
@@ -642,6 +649,10 @@ async def get_mcp_authorization_interaction(
         "scopes": interaction["scopes"],
         "agent_scope_keys": interaction["agent_scope_keys"],
         "workspace_scope_keys": interaction["workspace_scope_keys"],
+        "all_memory_scopes": (
+            "*" in _list_of_strings(interaction["agent_scope_keys"])
+            and "*" in _list_of_strings(interaction["workspace_scope_keys"])
+        ),
         "expires_at": interaction["expires_at"].isoformat(),
     }
 

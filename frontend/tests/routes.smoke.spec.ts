@@ -115,6 +115,7 @@ test.describe("Route smoke", () => {
           scopes: ["read", "write:workspace"],
           agent_scope_keys: ["codex"],
           workspace_scope_keys: ["palaceoftruth"],
+          all_memory_scopes: false,
         },
       });
     });
