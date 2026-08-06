@@ -85,6 +85,7 @@ async def stats(request: Request, db: AsyncSession = Depends(get_db)):
             select(func.count()).select_from(Item).where(
                 Item.tenant_id == tid,
                 Item.status != "failed",
+                Item.deleted_at.is_(None),
             )
         )
     ).scalar_one()
