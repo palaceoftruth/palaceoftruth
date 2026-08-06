@@ -309,7 +309,12 @@ def test_stats_match_library_counts_and_explain_embedding_chunks() -> None:
         "active_memory_jobs": 3,
         "feed_count": 4,
     }
-    assert any("items.status != 'failed'" in sql for sql in session.execute_sql)
+    total_items_query = next(
+        sql
+        for sql in session.execute_sql
+        if "items.status != 'failed'" in sql and "count(*)" in sql.lower()
+    )
+    assert "items.deleted_at IS NULL" in total_items_query
     assert any("count(distinct(embeddings.item_id))" in sql.lower() for sql in session.execute_sql)
     assert any("item_relationships" in sql and "NOT (EXISTS" in sql for sql in session.execute_sql)
 
