@@ -899,6 +899,57 @@ class MediaPipeline(BasePipeline):
 
         return audio_path, meta
 
+    async def _fallback_transcribe(
+        self,
+        audio_path: str,
+        *,
+        exc: BaseException,
+        reason: str,
+        primary_provider: Any,
+        fallback_provider: Any,
+        chunk_index: int,
+        chunk_count: int,
+        duration_seconds: float,
+        attempt_number: int,
+        job_id: str | None,
+    ) -> dict[str, Any]:
+        """Transcribe one chunk on OpenAI after the configured provider failed.
+
+        Always emits a progress event carrying ``fallback_transcription_provider`` so a
+        silently-degraded pipeline is visible in job progress rather than only in logs.
+        """
+        logger.warning(
+            "%s %s for chunk %d/%d; falling back to %s: %s",
+            primary_provider.display_name,
+            reason,
+            chunk_index,
+            chunk_count,
+            fallback_provider.display_name,
+            exc,
+        )
+        if job_id is not None:
+            await self._set_extract_progress(
+                job_id,
+                self._transcribe_progress(chunk_index, chunk_count),
+                "transcribe",
+                message=(
+                    f"{primary_provider.display_name} {reason}; falling back to OpenAI "
+                    f"for chunk {chunk_index}/{chunk_count}"
+                ),
+                metadata={
+                    "transcription_provider": primary_provider.name,
+                    "fallback_transcription_provider": fallback_provider.name,
+                    "fallback_reason": reason,
+                    "chunk_index": chunk_index,
+                    "chunk_count": chunk_count,
+                    "duration_seconds": duration_seconds,
+                    "size_bytes": self._file_size_bytes(audio_path),
+                    "attempt": attempt_number,
+                    "error_class": exc.__class__.__name__,
+                },
+            )
+        return await fallback_provider.transcribe(audio_path)
+
     async def _transcribe(
         self,
         audio_path: str,
@@ -910,7 +961,11 @@ class MediaPipeline(BasePipeline):
         job_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         primary_provider = _configured_transcription_provider()
-        fallback_provider = OpenAITranscriptionProvider() if primary_provider.name != "openai" else None
+        fallback_provider = (
+            OpenAITranscriptionProvider()
+            if primary_provider.name != "openai" and settings.transcription_fallback_to_openai
+            else None
+        )
         response_dict: dict[str, Any] | None = None
         for attempt in range(settings.transcription_transient_retries + 1):
             attempt_number = attempt + 1
@@ -963,37 +1018,39 @@ class MediaPipeline(BasePipeline):
             except TranscriptionProviderUnavailable as exc:
                 if fallback_provider is None:
                     raise
-                logger.warning(
-                    "%s unavailable for chunk %d/%d; falling back to OpenAI: %s",
-                    primary_provider.display_name,
-                    chunk_index,
-                    chunk_count,
-                    exc,
+                response_dict = await self._fallback_transcribe(
+                    audio_path,
+                    exc=exc,
+                    reason="unavailable",
+                    primary_provider=primary_provider,
+                    fallback_provider=fallback_provider,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                    duration_seconds=duration_seconds,
+                    attempt_number=attempt_number,
+                    job_id=job_id,
                 )
-                if job_id is not None:
-                    await self._set_extract_progress(
-                        job_id,
-                        self._transcribe_progress(chunk_index, chunk_count),
-                        "transcribe",
-                        message=(
-                            f"{primary_provider.display_name} unavailable; falling back to OpenAI "
-                            f"for chunk {chunk_index}/{chunk_count}"
-                        ),
-                        metadata={
-                            "transcription_provider": primary_provider.name,
-                            "fallback_transcription_provider": fallback_provider.name,
-                            "chunk_index": chunk_index,
-                            "chunk_count": chunk_count,
-                            "duration_seconds": duration_seconds,
-                            "size_bytes": self._file_size_bytes(audio_path),
-                            "attempt": attempt_number,
-                            "error_class": exc.__class__.__name__,
-                        },
-                    )
-                response_dict = await fallback_provider.transcribe(audio_path)
                 break
             except Exception as exc:
-                if not _is_transient_transcription_error(exc) or attempt >= settings.transcription_transient_retries:
+                transient = _is_transient_transcription_error(exc)
+                if transient and attempt >= settings.transcription_transient_retries and fallback_provider is not None:
+                    # lux (or any non-OpenAI provider) is unreachable and retries are spent.
+                    # Fall back rather than losing the job. Non-transient errors (4xx) are
+                    # deliberately excluded: those indicate a bug we want surfaced, not masked.
+                    response_dict = await self._fallback_transcribe(
+                        audio_path,
+                        exc=exc,
+                        reason="unreachable",
+                        primary_provider=primary_provider,
+                        fallback_provider=fallback_provider,
+                        chunk_index=chunk_index,
+                        chunk_count=chunk_count,
+                        duration_seconds=duration_seconds,
+                        attempt_number=attempt_number,
+                        job_id=job_id,
+                    )
+                    break
+                if not transient or attempt >= settings.transcription_transient_retries:
                     if job_id is not None:
                         await self._set_extract_progress(
                             job_id,

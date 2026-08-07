@@ -1659,3 +1659,128 @@ async def test_transcribe_falls_back_to_openai_when_assemblyai_key_missing(monke
     ]
     assert session.progress_events[1].metadata_["transcription_provider"] == "assemblyai"
     assert session.progress_events[1].metadata_["fallback_transcription_provider"] == "openai"
+
+
+def _fake_openai_transcriptions(monkeypatch, counter: dict[str, int]) -> None:
+    """Patch AsyncOpenAI so the fallback provider returns a canned transcript."""
+
+    class FakeTranscriptions:
+        async def create(self, **_kwargs):
+            counter["calls"] += 1
+            return {"text": "Fallback transcript"}
+
+    class FakeAudio:
+        def __init__(self) -> None:
+            self.transcriptions = FakeTranscriptions()
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs) -> None:
+            self.audio = FakeAudio()
+
+    monkeypatch.setattr("app.pipelines.youtube.AsyncOpenAI", FakeOpenAI)
+
+
+def _use_unreachable_gateway(monkeypatch, exc: Exception) -> dict[str, int]:
+    """Configure local_whisperx against a gateway whose every request raises ``exc``."""
+    attempts = {"gateway": 0}
+
+    class FailingAsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            attempts["gateway"] += 1
+            raise exc
+
+    monkeypatch.setattr("app.pipelines.youtube.httpx.AsyncClient", FailingAsyncClient)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_provider", "local_whisperx")
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_url", "http://llm-gateway.test:8080")
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_token", "gateway-token")
+    monkeypatch.setattr("app.pipelines.youtube.settings.local_whisperx_model", "whisperx/distil-large-v3")
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_transient_retries", 1)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_retry_backoff_seconds", 0.0)
+    return attempts
+
+
+@pytest.mark.asyncio
+async def test_transcribe_falls_back_to_openai_when_gateway_unreachable(monkeypatch, tmp_path: Path) -> None:
+    """An offline lux exhausts transient retries, then completes the job on OpenAI."""
+    audio_path = tmp_path / "chunk.m4a"
+    audio_path.write_bytes(b"audio")
+    counter = {"calls": 0}
+    _fake_openai_transcriptions(monkeypatch, counter)
+    attempts = _use_unreachable_gateway(monkeypatch, httpx.ConnectError("connection refused"))
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_fallback_to_openai", True)
+
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    session = FakePipelineSession(
+        job=Job(id=job_id, item_id=item_id, job_type="media", tenant_id="tenant-a", status="processing", progress=0),
+        item=Item(id=item_id, tenant_id="tenant-a", title="Gateway down", source_type="media", status="processing"),
+    )
+    pipeline = MediaPipeline(session, None, None)  # type: ignore[arg-type]
+    text, segments = await pipeline._transcribe(str(audio_path), job_id=str(job_id))
+
+    assert text == "Fallback transcript"
+    assert segments == []
+    # Two gateway attempts (initial + 1 retry), then exactly one OpenAI call.
+    assert attempts["gateway"] == 2
+    assert counter["calls"] == 1
+
+    fallback_events = [
+        event for event in session.progress_events
+        if event.metadata_ and event.metadata_.get("fallback_transcription_provider")
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0].metadata_["transcription_provider"] == "local_whisperx"
+    assert fallback_events[0].metadata_["fallback_transcription_provider"] == "openai"
+    assert fallback_events[0].metadata_["fallback_reason"] == "unreachable"
+    assert fallback_events[0].metadata_["error_class"] == "ConnectError"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_raises_when_gateway_unreachable_and_fallback_disabled(monkeypatch, tmp_path: Path) -> None:
+    """With the fallback off, audio never reaches OpenAI even when lux is down."""
+    audio_path = tmp_path / "chunk.m4a"
+    audio_path.write_bytes(b"audio")
+    counter = {"calls": 0}
+    _fake_openai_transcriptions(monkeypatch, counter)
+    attempts = _use_unreachable_gateway(monkeypatch, httpx.ConnectError("connection refused"))
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_fallback_to_openai", False)
+
+    pipeline = MediaPipeline(None, None, None)  # type: ignore[arg-type]
+    with pytest.raises(httpx.ConnectError):
+        await pipeline._transcribe(str(audio_path))
+
+    assert attempts["gateway"] == 2
+    assert counter["calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_transcribe_does_not_fall_back_on_non_transient_gateway_error(monkeypatch, tmp_path: Path) -> None:
+    """A 400 signals a malformed request; surface it rather than masking it with OpenAI spend."""
+    audio_path = tmp_path / "chunk.m4a"
+    audio_path.write_bytes(b"audio")
+    counter = {"calls": 0}
+    _fake_openai_transcriptions(monkeypatch, counter)
+    bad_request = httpx.HTTPStatusError(
+        "bad request",
+        request=httpx.Request("POST", "http://llm-gateway.test:8080/v1/audio/transcriptions"),
+        response=httpx.Response(400, json={"detail": "unsupported response_format"}),
+    )
+    attempts = _use_unreachable_gateway(monkeypatch, bad_request)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_fallback_to_openai", True)
+
+    pipeline = MediaPipeline(None, None, None)  # type: ignore[arg-type]
+    with pytest.raises(httpx.HTTPStatusError):
+        await pipeline._transcribe(str(audio_path))
+
+    # Non-transient: no retry, no fallback.
+    assert attempts["gateway"] == 1
+    assert counter["calls"] == 0

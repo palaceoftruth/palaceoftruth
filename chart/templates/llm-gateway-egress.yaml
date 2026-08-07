@@ -1,0 +1,34 @@
+{{- if .Values.llmGatewayEgress.enabled }}
+{{- if not .Values.llmGatewayEgress.tailnetFqdn }}
+{{- fail "llmGatewayEgress.enabled requires llmGatewayEgress.tailnetFqdn (e.g. lux.tilapia-turtle.ts.net)" }}
+{{- end }}
+{{- if not .Values.llmGatewayEgress.proxyGroup }}
+{{- fail "llmGatewayEgress.enabled requires llmGatewayEgress.proxyGroup (an existing egress ProxyGroup)" }}
+{{- end }}
+{{/*
+Tailnet egress to a self-hosted host (the llm-gateway on the GPU box).
+
+The Tailscale operator watches for the annotations below and rewrites
+spec.externalName to its own generated proxy Service in the tailscale
+namespace. Do not set externalName here — the operator owns that field, and
+cluster DNS does not resolve *.ts.net directly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-llm-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tailnet-egress
+  annotations:
+    tailscale.com/tailnet-fqdn: {{ .Values.llmGatewayEgress.tailnetFqdn | quote }}
+    tailscale.com/proxy-group: {{ .Values.llmGatewayEgress.proxyGroup | quote }}
+spec:
+  type: ExternalName
+  ports:
+    - name: http
+      port: {{ .Values.llmGatewayEgress.port }}
+      targetPort: {{ .Values.llmGatewayEgress.port }}
+      protocol: TCP
+{{- end }}
