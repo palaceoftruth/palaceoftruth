@@ -10,8 +10,11 @@ Tailnet egress to a self-hosted host (the llm-gateway on the GPU box).
 
 The Tailscale operator watches for the annotations below and rewrites
 spec.externalName to its own generated proxy Service in the tailscale
-namespace. Do not set externalName here — the operator owns that field, and
-cluster DNS does not resolve *.ts.net directly.
+namespace. Never point externalName at the *.ts.net name: cluster DNS does not
+resolve it. The API server still requires the field at creation, so this
+declares the same inert "placeholder" the other tailnet egress Services in this
+cluster use. Helm's three-way merge only patches fields whose manifest value
+changed, so the operator's value survives subsequent upgrades.
 */}}
 apiVersion: v1
 kind: Service
@@ -26,6 +29,7 @@ metadata:
     tailscale.com/proxy-group: {{ .Values.llmGatewayEgress.proxyGroup | quote }}
 spec:
   type: ExternalName
+  externalName: placeholder
   ports:
     - name: http
       port: {{ .Values.llmGatewayEgress.port }}

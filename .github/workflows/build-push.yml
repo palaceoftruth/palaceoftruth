@@ -150,6 +150,7 @@ jobs:
         run: |
           uv run --python 3.12 --with pytest python -m pytest \
             tests/test_helm_network_policy.py \
+            tests/test_helm_llm_gateway_egress.py \
             -q
 
   build-push:
