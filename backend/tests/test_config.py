@@ -295,6 +295,18 @@ def test_settings_accept_local_whisperx_transcription_provider() -> None:
     assert settings.local_whisperx_model == "whisperx/small"
 
 
+def test_settings_transcription_fallback_to_openai_defaults_on_and_is_overridable() -> None:
+    assert config.Settings(**_settings_kwargs()).transcription_fallback_to_openai is True
+
+    disabled = config.Settings(
+        **_settings_kwargs(
+            transcription_provider="local_whisperx",
+            transcription_fallback_to_openai=False,
+        )
+    )
+    assert disabled.transcription_fallback_to_openai is False
+
+
 def test_settings_reject_unknown_transcription_provider() -> None:
     with pytest.raises(ValidationError, match="TRANSCRIPTION_PROVIDER"):
         config.Settings(**_settings_kwargs(transcription_provider="local-whisper"))

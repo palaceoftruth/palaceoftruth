@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     transcription_transient_retries: int = 2
     transcription_retry_backoff_seconds: float = 2.0
     transcription_max_parallel_chunks: int = 2
+    # When a non-OpenAI provider fails terminally (unavailable, or transient
+    # failures exhausted), retry the chunk on OpenAI instead of failing the job.
+    # Disable to guarantee audio never leaves the configured provider.
+    transcription_fallback_to_openai: bool = True
     vision_model: str = "gpt-4o-mini"
 
     # OpenRouter (LLM)

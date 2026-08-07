@@ -33,6 +33,11 @@ data:
   EMBEDDING_LOCAL_HTTP_TRUNCATE: {{ .Values.config.embeddingLocalHttpTruncate | quote }}
   TRANSCRIPTION_PROVIDER: {{ .Values.config.transcriptionProvider | quote }}
   WHISPER_MODEL: {{ .Values.config.whisperModel | quote }}
+  {{- if .Values.config.llmGatewayUrl }}
+  LLM_GATEWAY_URL: {{ .Values.config.llmGatewayUrl | quote }}
+  {{- end }}
+  LOCAL_WHISPERX_MODEL: {{ .Values.config.localWhisperxModel | quote }}
+  TRANSCRIPTION_FALLBACK_TO_OPENAI: {{ .Values.config.transcriptionFallbackToOpenai | quote }}
   ASSEMBLYAI_BASE_URL: {{ .Values.config.assemblyaiBaseUrl | quote }}
   ASSEMBLYAI_SPEECH_MODEL: {{ .Values.config.assemblyaiSpeechModel | quote }}
   ASSEMBLYAI_POLL_INTERVAL_SECONDS: {{ .Values.config.assemblyaiPollIntervalSeconds | quote }}
@@ -45,6 +50,9 @@ data:
   TRANSCRIPTION_TRANSIENT_RETRIES: {{ .Values.config.transcriptionTransientRetries | quote }}
   TRANSCRIPTION_RETRY_BACKOFF_SECONDS: {{ .Values.config.transcriptionRetryBackoffSeconds | quote }}
   TRANSCRIPTION_MAX_PARALLEL_CHUNKS: {{ .Values.config.transcriptionMaxParallelChunks | quote }}
+  TRANSCRIPTION_MAX_DURATION_SECONDS: {{ .Values.config.transcriptionMaxDurationSeconds | quote }}
+  TRANSCRIPTION_MAX_CHUNK_SECONDS: {{ .Values.config.transcriptionMaxChunkSeconds | quote }}
+  TRANSCRIPTION_MAX_UPLOAD_BYTES: {{ .Values.config.transcriptionMaxUploadBytes | quote }}
   CHUNK_SIZE: {{ .Values.config.chunkSize | quote }}
   CHUNK_OVERLAP: {{ .Values.config.chunkOverlap | quote }}
   SEARCH_LIMIT: {{ .Values.config.searchLimit | quote }}
