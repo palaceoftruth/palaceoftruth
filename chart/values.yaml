@@ -58,6 +58,10 @@ config:
   mediaTenantFairDispatchBatchSize: "6"
   mediaTenantFairCandidateLimit: "100"
   transcriptionRequestTimeoutSeconds: "300"
+  # Connect is budgeted separately from read: a dropped link blackholes the SYN,
+  # so sharing the (potentially multi-hour) read budget would stall a job for
+  # that whole budget instead of retrying or falling back.
+  transcriptionConnectTimeoutSeconds: "10.0"
   # OpenAI-shaped defaults. For local_whisperx (500MB uploads, one job at a
   # time) see the gateway tuning notes in the transcription docs.
   transcriptionMaxDurationSeconds: "1400"
@@ -65,6 +69,9 @@ config:
   transcriptionMaxUploadBytes: "26214400"
   transcriptionTransientRetries: "2"
   transcriptionRetryBackoffSeconds: "2.0"
+  # Ceiling on the exponential backoff, so a high retry count stays responsive
+  # to a provider that recovers early instead of sleeping for minutes.
+  transcriptionRetryMaxDelaySeconds: "60.0"
   transcriptionMaxParallelChunks: "2"
   chunkSize: "500"
   chunkOverlap: "50"

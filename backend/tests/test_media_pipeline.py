@@ -13,7 +13,12 @@ from app.models.item import Item
 from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.pipelines.base import BasePipeline, stable_merge_tags
 from app.pipelines.youtube import MediaPendingAvailabilityError, MediaPipeline, MediaTranscriptionLimitError, TranscriptionChunk
-from app.pipelines.youtube import _render_transcript
+from app.pipelines.youtube import (
+    LocalWhisperXTranscriptionProvider,
+    _render_transcript,
+    _transcription_retry_delay,
+    _transcription_timeout,
+)
 from app.workers.queues import (
     DEFAULT_WORKER_QUEUE,
     MEDIA_FAIR_DISPATCH_TASK_NAME,
@@ -1385,7 +1390,7 @@ async def test_transcribe_retries_transient_openai_failures(monkeypatch, tmp_pat
 
     class FakeOpenAI:
         def __init__(self, **kwargs) -> None:
-            assert kwargs["timeout"] == 4
+            assert kwargs["timeout"].read == 4
             self.audio = FakeAudio()
 
     async def fake_sleep(delay: float) -> None:
@@ -1784,3 +1789,67 @@ async def test_transcribe_does_not_fall_back_on_non_transient_gateway_error(monk
     # Non-transient: no retry, no fallback.
     assert attempts["gateway"] == 1
     assert counter["calls"] == 0
+
+
+def test_transcription_timeout_splits_connect_from_read(monkeypatch) -> None:
+    """A long read budget must not become a long connect budget.
+
+    httpx.Timeout(x) applies x to every phase, so the multi-hour read budget a
+    2h chunk needs would also mean a 2h wait on an unreachable provider — the
+    retry and OpenAI-fallback paths would never run in any useful time.
+    """
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_request_timeout_seconds", 5400)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_connect_timeout_seconds", 10.0)
+
+    timeout = _transcription_timeout()
+
+    assert timeout.connect == 10.0
+    assert timeout.read == 5400
+    assert timeout.write == 5400
+    assert timeout.pool == 5400
+
+
+def test_transcription_retry_delay_is_exponential_then_capped(monkeypatch) -> None:
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_retry_backoff_seconds", 5.0)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_retry_max_delay_seconds", 60.0)
+
+    delays = [_transcription_retry_delay(attempt) for attempt in range(8)]
+
+    # Doubles until it reaches the cap, then holds there so a provider that
+    # recovers early is retried promptly instead of after a multi-minute sleep.
+    assert delays == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0, 60.0]
+
+
+def test_transcription_retry_delay_cap_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_retry_backoff_seconds", 2.0)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_retry_max_delay_seconds", float("inf"))
+
+    assert [_transcription_retry_delay(attempt) for attempt in range(4)] == [2.0, 4.0, 8.0, 16.0]
+
+
+@pytest.mark.asyncio
+async def test_local_whisperx_uses_split_connect_timeout(monkeypatch, tmp_path: Path) -> None:
+    audio_path = tmp_path / "clip.mp3"
+    audio_path.write_bytes(b"audio")
+
+    captured: dict[str, object] = {}
+    original_client = httpx.AsyncClient
+
+    class RecordingClient(original_client):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("app.pipelines.youtube.httpx.AsyncClient", RecordingClient)
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_url", "http://gateway.invalid:8080")
+    monkeypatch.setattr("app.pipelines.youtube.settings.llm_gateway_token", "token")
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_request_timeout_seconds", 5400)
+    monkeypatch.setattr("app.pipelines.youtube.settings.transcription_connect_timeout_seconds", 3.0)
+
+    provider = LocalWhisperXTranscriptionProvider()
+    with pytest.raises(Exception):
+        await provider.transcribe(str(audio_path))
+
+    timeout = captured["timeout"]
+    assert timeout.connect == 3.0
+    assert timeout.read == 5400

@@ -47,8 +47,10 @@ data:
   MEDIA_TENANT_FAIR_DISPATCH_BATCH_SIZE: {{ .Values.config.mediaTenantFairDispatchBatchSize | quote }}
   MEDIA_TENANT_FAIR_CANDIDATE_LIMIT: {{ .Values.config.mediaTenantFairCandidateLimit | quote }}
   TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS: {{ .Values.config.transcriptionRequestTimeoutSeconds | quote }}
+  TRANSCRIPTION_CONNECT_TIMEOUT_SECONDS: {{ .Values.config.transcriptionConnectTimeoutSeconds | quote }}
   TRANSCRIPTION_TRANSIENT_RETRIES: {{ .Values.config.transcriptionTransientRetries | quote }}
   TRANSCRIPTION_RETRY_BACKOFF_SECONDS: {{ .Values.config.transcriptionRetryBackoffSeconds | quote }}
+  TRANSCRIPTION_RETRY_MAX_DELAY_SECONDS: {{ .Values.config.transcriptionRetryMaxDelaySeconds | quote }}
   TRANSCRIPTION_MAX_PARALLEL_CHUNKS: {{ .Values.config.transcriptionMaxParallelChunks | quote }}
   TRANSCRIPTION_MAX_DURATION_SECONDS: {{ .Values.config.transcriptionMaxDurationSeconds | quote }}
   TRANSCRIPTION_MAX_CHUNK_SECONDS: {{ .Values.config.transcriptionMaxChunkSeconds | quote }}

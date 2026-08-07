@@ -55,8 +55,16 @@ class Settings(BaseSettings):
     media_tenant_fair_dispatch_batch_size: int = 2
     media_tenant_fair_candidate_limit: int = 100
     transcription_request_timeout_seconds: int = 300
+    # Read timeouts must cover a whole chunk, but a connect that long turns an
+    # unreachable provider into a multi-hour hang instead of a fast retry, since
+    # a dropped link blackholes the SYN rather than refusing it.
+    transcription_connect_timeout_seconds: float = 10.0
     transcription_transient_retries: int = 2
     transcription_retry_backoff_seconds: float = 2.0
+    # Ceiling on the exponential backoff. Without it, later retries sleep for
+    # many minutes and a provider that recovers early is not noticed until the
+    # whole delay elapses.
+    transcription_retry_max_delay_seconds: float = 60.0
     transcription_max_parallel_chunks: int = 2
     # When a non-OpenAI provider fails terminally (unavailable, or transient
     # failures exhausted), retry the chunk on OpenAI instead of failing the job.

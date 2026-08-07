@@ -389,6 +389,26 @@ def _is_transient_transcription_error(exc: BaseException) -> bool:
     return False
 
 
+def _transcription_timeout() -> httpx.Timeout:
+    """Long read budget for a whole chunk, short connect budget for an outage.
+
+    httpx.Timeout(x) applies x to connect as well as read. With the multi-hour
+    read budget a long chunk needs, an unreachable provider would hang for that
+    entire budget on every attempt, so the retry/fallback path never runs in any
+    useful time.
+    """
+    return httpx.Timeout(
+        settings.transcription_request_timeout_seconds,
+        connect=settings.transcription_connect_timeout_seconds,
+    )
+
+
+def _transcription_retry_delay(attempt: int) -> float:
+    """Exponential backoff, capped so a recovered provider is retried promptly."""
+    delay = settings.transcription_retry_backoff_seconds * (2**attempt)
+    return min(delay, settings.transcription_retry_max_delay_seconds)
+
+
 def _cleanup_media_temp_files(*, job_id: str, audio_path: str | None, chunks: list[TranscriptionChunk]) -> None:
     paths = {chunk.path for chunk in chunks if chunk.cleanup}
     if audio_path:
@@ -412,7 +432,9 @@ class OpenAITranscriptionProvider:
     display_name = "OpenAI"
 
     async def transcribe(self, audio_path: str) -> dict[str, Any]:
-        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=settings.transcription_request_timeout_seconds)
+        # Same split as the self-hosted providers: this is the fallback path, so
+        # it must fail fast when it cannot connect rather than stalling the job.
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=_transcription_timeout())
         with open(audio_path, "rb") as f:
             transcript = await asyncio.wait_for(
                 client.audio.transcriptions.create(
@@ -436,7 +458,7 @@ class AssemblyAITranscriptionProvider:
         if not settings.assemblyai_api_key:
             raise TranscriptionProviderUnavailable("ASSEMBLYAI_API_KEY is required for AssemblyAI transcription")
 
-        timeout = httpx.Timeout(settings.transcription_request_timeout_seconds)
+        timeout = _transcription_timeout()
         headers = {"authorization": settings.assemblyai_api_key}
         async with httpx.AsyncClient(
             base_url=settings.assemblyai_base_url.rstrip("/"),
@@ -491,7 +513,7 @@ class LocalWhisperXTranscriptionProvider:
             "response_format": "verbose_json",
             "diarize": "true",
         }
-        timeout = httpx.Timeout(settings.transcription_request_timeout_seconds)
+        timeout = _transcription_timeout()
         async with httpx.AsyncClient(
             base_url=settings.llm_gateway_url.rstrip("/"),
             headers=headers,
@@ -1069,7 +1091,7 @@ class MediaPipeline(BasePipeline):
                             },
                         )
                     raise
-                delay = settings.transcription_retry_backoff_seconds * (2**attempt)
+                delay = _transcription_retry_delay(attempt)
                 if job_id is not None:
                     await self._set_extract_progress(
                         job_id,
