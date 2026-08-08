@@ -8,8 +8,10 @@ ConfigMap or a process argument.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +212,115 @@ def test_repeat_upgrades_can_recreate_the_hook_secret() -> None:
     # hook-succeeded would delete the password the whole release depends on.
     assert "hook-succeeded" not in policy
     assert "hook-failed" not in policy
+
+
+def _sed_supports_gnu_in_place() -> bool:
+    """Whether ``sed -i SCRIPT FILE`` edits in place, as it does on Alpine.
+
+    BSD sed reads the argument after ``-i`` as a backup suffix instead, so on a
+    macOS workstation the script's ``sed -i`` steps fail and the tests below
+    would be measuring the wrong thing. CI runs on Linux, where they run for
+    real.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "probe"
+        target.write_text("a")
+        subprocess.run(
+            ["/bin/sh", "-c", f'sed -i "s/a/b/" "{target}"'], capture_output=True
+        )
+        return target.read_text() == "b"
+
+
+requires_gnu_sed = pytest.mark.skipif(
+    not _sed_supports_gnu_in_place(),
+    reason="the init script targets Alpine's GNU-style `sed -i`",
+)
+
+
+def _run_init_config_script(role: str, tmp_path: Path, existing_conf: str) -> str:
+    """Run the real init-config script against a fixture config file.
+
+    The script is executed verbatim apart from the config path, so these tests
+    exercise the shell and awk the cluster actually runs -- not a paraphrase of
+    it.
+    """
+    manifests = _render_chart("highAvailability.enabled=true")
+    statefulset = _by_name(manifests, "StatefulSet", f"palaceoftruth-valkey-{role}")
+    init = statefulset["spec"]["template"]["spec"]["initContainers"][0]
+    assert init["name"] == "init-config"
+
+    conf = tmp_path / "valkey.conf"
+    conf.write_text(existing_conf)
+    script = init["args"][0].replace("/data/valkey.conf", str(conf))
+
+    subprocess.run(
+        ["/bin/sh", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "VALKEY_PASSWORD": "s3cret-literal"},
+    )
+    return conf.read_text()
+
+
+@requires_gnu_sed
+@pytest.mark.parametrize("role", ["primary", "replica"])
+@pytest.mark.parametrize(
+    "password_token",
+    [
+        # What CONFIG REWRITE leaves behind on a data volume that predates auth.
+        "nopass",
+        # ...and what it leaves behind once a password is in play. A stale hash
+        # locks out every client just as effectively as nopass leaves the door
+        # open.
+        "#c0ffee",
+        ">an-old-password",
+    ],
+)
+def test_a_stale_default_user_acl_cannot_defeat_requirepass(
+    role: str, password_token: str, tmp_path: Path
+) -> None:
+    # Valkey applies `user` directives after the rest of the config, so this
+    # line wins over requirepass. This is exactly how the first production
+    # rollout of this chart ended up with an unauthenticated Valkey.
+    result = _run_init_config_script(
+        role,
+        tmp_path,
+        f"appendonly yes\nuser default on {password_token} sanitize-payload ~* &* +@all\n",
+    )
+
+    assert "user default on >s3cret-literal sanitize-payload ~* &* +@all" in result
+    assert "nopass" not in result
+    assert "#c0ffee" not in result
+    assert "an-old-password" not in result
+    assert "requirepass s3cret-literal" in result
+    assert "masterauth s3cret-literal" in result
+
+
+@requires_gnu_sed
+@pytest.mark.parametrize("role", ["primary", "replica"])
+def test_a_config_without_an_acl_line_is_left_to_requirepass(
+    role: str, tmp_path: Path
+) -> None:
+    # With no `user default` directive at all, requirepass governs the default
+    # user on its own. Synthesising an ACL rule here would be a way to get the
+    # two out of step later.
+    result = _run_init_config_script(role, tmp_path, "appendonly yes\n")
+
+    assert "user default" not in result
+    assert "requirepass s3cret-literal" in result
+
+
+@requires_gnu_sed
+@pytest.mark.parametrize("role", ["primary", "replica"])
+def test_rerunning_the_init_script_is_idempotent(role: str, tmp_path: Path) -> None:
+    # Every pod restart reruns this against the same persistent volume.
+    once = _run_init_config_script(
+        role, tmp_path, "appendonly yes\nuser default on nopass ~* +@all\n"
+    )
+    twice = _run_init_config_script(role, tmp_path, once)
+
+    assert twice == once
 
 
 def test_auth_can_be_disabled_for_local_and_test_installs() -> None:
