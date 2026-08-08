@@ -159,6 +159,59 @@ def test_the_password_is_rendered_in_exactly_one_manifest() -> None:
     assert carriers == [f"Secret/{SECRET_NAME}"]
 
 
+def _hook_phases(manifest: dict[str, Any]) -> set[str]:
+    annotations = manifest["metadata"].get("annotations", {})
+    return {phase.strip() for phase in annotations.get("helm.sh/hook", "").split(",") if phase.strip()}
+
+
+def _hook_weight(manifest: dict[str, Any]) -> int:
+    annotations = manifest["metadata"].get("annotations", {})
+    return int(annotations.get("helm.sh/hook-weight", "0"))
+
+
+def test_the_secret_is_created_before_every_hook_that_consumes_it() -> None:
+    # Helm applies all pre-upgrade hooks before any normal resource, so a hook
+    # that mounts REDIS_PASSWORD cannot depend on the Secret being a normal
+    # resource. It wedges in CreateContainerConfigError instead -- which is
+    # exactly how the first upgrade of this chart failed.
+    manifests = _render_chart(
+        "highAvailability.enabled=true",
+        "memoryRolloutSmoke.enabled=true",
+    )
+    secret = _by_name(manifests, "Secret", SECRET_NAME)
+
+    assert "pre-upgrade" in _hook_phases(secret)
+    assert "pre-install" in _hook_phases(secret)
+
+    consumers = [
+        manifest
+        for manifest in manifests
+        if "REDIS_PASSWORD" in yaml.safe_dump(manifest)
+        and _hook_phases(manifest) & {"pre-install", "pre-upgrade"}
+    ]
+    # A guard against the assertion below passing vacuously if the migration
+    # Job ever stops being a pre-upgrade hook.
+    assert consumers, "expected at least one pre-phase hook to consume the password"
+
+    for consumer in consumers:
+        assert _hook_weight(secret) < _hook_weight(consumer), (
+            f"{consumer['kind']}/{consumer['metadata']['name']} runs at weight "
+            f"{_hook_weight(consumer)}, at or before the Secret's {_hook_weight(secret)}"
+        )
+
+
+def test_repeat_upgrades_can_recreate_the_hook_secret() -> None:
+    # Helm errors rather than adopting a hook resource that already exists, so
+    # without this delete policy the *second* upgrade fails.
+    secret = _by_name(_render_chart(), "Secret", SECRET_NAME)
+
+    policy = secret["metadata"]["annotations"]["helm.sh/hook-delete-policy"]
+    assert "before-hook-creation" in policy
+    # hook-succeeded would delete the password the whole release depends on.
+    assert "hook-succeeded" not in policy
+    assert "hook-failed" not in policy
+
+
 def test_auth_can_be_disabled_for_local_and_test_installs() -> None:
     manifests = _render_chart("valkey.auth.enabled=false")
 
