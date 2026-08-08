@@ -1,20 +1,27 @@
+# Host port publishing for local development.
+#
+# Every mapping is bound to 127.0.0.1 on purpose. Docker publishes to 0.0.0.0 by
+# default and inserts its own iptables rules, which bypass a host firewall -- an
+# unqualified "6379:6379" exposes an unauthenticated Valkey (and with it the ARQ
+# job queue) to every machine on the local network. Loopback binding keeps these
+# services reachable from the developer's own tools and nothing else.
 services:
   postgres:
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   backend:
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   mcp:
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
 
   frontend:
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"

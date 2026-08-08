@@ -13,7 +13,7 @@ if __package__ in {None, ""}:
 from redis.asyncio import Redis
 from redis.asyncio.sentinel import Sentinel
 
-from scripts.wait_for_redis_sentinel import load_config_from_env
+from scripts.wait_for_redis_sentinel import load_config_from_env, redis_auth_kwargs
 
 
 logger = logging.getLogger("palaceoftruth.redis_sentinel_rollout_gate")
@@ -49,7 +49,13 @@ async def check_rollout_gate(*, sentinel_factory=Sentinel, redis_factory=Redis) 
     payload = b"sentinel-ready"
     try:
         master_host, master_port = await sentinel.discover_master(config.master_name)
-        redis = redis_factory(host=master_host, port=master_port, socket_timeout=2.0, socket_connect_timeout=2.0)
+        redis = redis_factory(
+            host=master_host,
+            port=master_port,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+            **redis_auth_kwargs(),
+        )
         await redis.ping()
         replication_info = await redis.info("replication")
         role = str(replication_info.get("role", "")).lower()

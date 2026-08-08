@@ -223,6 +223,103 @@ non-ARQ clients). ARQ and the app use REDIS_SENTINEL_HOSTS instead.
 {{- end }}
 
 {{/*
+Whether the bundled Valkey requires a password on its data port.
+*/}}
+{{- define "palaceoftruth.valkeyAuthEnabled" -}}
+{{- if and .Values.valkey.enabled .Values.valkey.auth.enabled }}true{{ else }}false{{ end -}}
+{{- end }}
+
+{{/*
+Secret holding the Valkey password. Either operator-supplied (existingSecret,
+typically produced by ExternalSecrets) or chart-managed.
+*/}}
+{{- define "palaceoftruth.valkeyAuthSecretName" -}}
+{{- if .Values.valkey.auth.existingSecret }}
+{{- .Values.valkey.auth.existingSecret }}
+{{- else }}
+{{- printf "%s-valkey-auth" (include "palaceoftruth.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{- define "palaceoftruth.valkeyAuthSecretKey" -}}
+{{- .Values.valkey.auth.existingSecretKey | default "valkey-password" }}
+{{- end }}
+
+{{/*
+Password value for the chart-managed Valkey auth Secret. Rendered in exactly
+one place (valkey-auth-secret.yaml); every other manifest references the Secret
+by key so the generated value never differs between manifests within a render.
+*/}}
+{{- define "palaceoftruth.valkeyAuthPassword" -}}
+{{- if .Values.valkey.auth.password }}
+{{- .Values.valkey.auth.password }}
+{{- else }}
+{{- $name := printf "%s-valkey-auth" (include "palaceoftruth.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $current := "" }}
+{{- if $existing }}
+{{- $current = index (default dict $existing.data) (include "palaceoftruth.valkeyAuthSecretKey" .) | default "" }}
+{{- end }}
+{{- if $current }}
+{{- $current | b64dec }}
+{{- else }}
+{{- randAlphaNum 32 }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Environment block giving application pods the Valkey credentials. REDIS_URL
+stays in the ConfigMap without credentials; the password is injected separately
+so it is never written to a ConfigMap. The app applies these to both the direct
+DSN connection and the Sentinel-discovered primary.
+*/}}
+{{- define "palaceoftruth.redisAuthEnvVars" -}}
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" -}}
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
+      key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Environment block for a Valkey data-node container: the password used to render
+the server config, plus REDISCLI_AUTH so exec probes can authenticate without
+placing the password in argv. Never apply this to a Sentinel container --
+Sentinel is not password-protected and valkey-cli treats an unwanted AUTH as a
+connection failure.
+*/}}
+{{- define "palaceoftruth.valkeyServerAuthEnvVars" -}}
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" -}}
+- name: VALKEY_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
+      key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
+- name: REDISCLI_AUTH
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
+      key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Shell fragment that (re)writes the auth directives of a Valkey config file from
+$VALKEY_PASSWORD. Stale directives are stripped first so a rotated password is
+picked up, and so a Sentinel CONFIG REWRITE cannot leave two conflicting lines.
+Takes the config file path as the context.
+*/}}
+{{- define "palaceoftruth.valkeyAuthConfigScript" -}}
+sed -i '/^requirepass /d;/^masterauth /d' {{ . }}
+printf 'requirepass %s\n' "$VALKEY_PASSWORD" >> {{ . }}
+printf 'masterauth %s\n' "$VALKEY_PASSWORD" >> {{ . }}
+chmod 600 {{ . }}
+{{- end }}
+
+{{/*
 App secrets secret name.
 */}}
 {{- define "palaceoftruth.appSecretName" -}}
