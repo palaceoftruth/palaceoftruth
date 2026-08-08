@@ -249,6 +249,10 @@ def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks
     assert browser["container"]["image"].startswith(
         "mcr.microsoft.com/playwright:v1.59.1-noble@sha256:"
     )
+    assert not any(
+        step.get("uses", "").startswith("actions/setup-node@")
+        for step in browser["steps"]
+    )
     browser_test_step = next(
         step for step in browser["steps"] if step.get("name") == "Run mocked Playwright suite"
     )
