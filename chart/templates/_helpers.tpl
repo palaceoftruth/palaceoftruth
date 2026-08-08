@@ -316,6 +316,34 @@ Takes the config file path as the context.
 sed -i '/^requirepass /d;/^masterauth /d' {{ . }}
 printf 'requirepass %s\n' "$VALKEY_PASSWORD" >> {{ . }}
 printf 'masterauth %s\n' "$VALKEY_PASSWORD" >> {{ . }}
+# requirepass alone is not enough. Valkey applies `user` directives in a second
+# pass after the rest of the config, so a `user default ... nopass` line -- which
+# CONFIG REWRITE writes into the data directory on its own -- silently overrides
+# requirepass. The server then accepts unauthenticated clients while rejecting
+# authenticated ones with "AUTH called without any password configured for the
+# default user". Rewrite only the password token, so the rest of the rule
+# (sanitize-payload, key and channel patterns) survives untouched.
+awk '
+  BEGIN { pw = ENVIRON["VALKEY_PASSWORD"] }
+  /^user default / {
+    line = ""
+    set = 0
+    for (i = 1; i <= NF; i++) {
+      token = $i
+      # nopass, >plaintext, #sha256 and <plaintext are the ACL password tokens.
+      if (token == "nopass" || token ~ /^[><#]/) {
+        if (set) { continue }
+        token = ">" pw
+        set = 1
+      }
+      line = (line == "" ? token : line " " token)
+    }
+    if (set == 0) { line = line " >" pw }
+    print line
+    next
+  }
+  { print }
+' {{ . }} > {{ . }}.tmp && mv {{ . }}.tmp {{ . }}
 chmod 600 {{ . }}
 {{- end }}
 
