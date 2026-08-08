@@ -9,6 +9,7 @@ from app.models.source_subscription import SourceSubscription, SourceSubscriptio
 from app.models.api_key import (
     ApiKey,
     ApiKeyAuditEvent,
+    BrowserExtensionPairingKey,
     McpOAuthAccessToken,
     McpOAuthAuthorizationCode,
     McpOAuthAuthorizationInteraction,
@@ -55,6 +56,7 @@ __all__ = [
     "SourceSubscriptionEntry",
     "ApiKey",
     "ApiKeyAuditEvent",
+    "BrowserExtensionPairingKey",
     "McpOAuthAccessToken",
     "McpOAuthAuthorizationCode",
     "McpOAuthAuthorizationInteraction",

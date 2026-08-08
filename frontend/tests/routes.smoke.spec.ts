@@ -281,6 +281,20 @@ test.describe("Route smoke", () => {
   });
 
   test("settings route exposes utility metadata and saves browser-local preferences", async ({ page }) => {
+    const pairingRequests: Array<{ headers: Record<string, string>; body: string | null }> = [];
+    await page.route("**/api/v1/palace/browser-extension-pairing-keys", async (route) => {
+      pairingRequests.push({ headers: route.request().headers(), body: route.request().postData() });
+      await route.fulfill({
+        status: 201,
+        json: {
+          pairing_key: "palpair_one-time-secret-not-persisted",
+          tenant_id: "tenant-a",
+          purpose: "browser_extension_token",
+          expires_at: "2099-08-07T12:10:00Z",
+          expires_in: 600,
+        },
+      });
+    });
     await page.goto(`/settings?e2e=${Date.now()}`);
 
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
@@ -292,6 +306,17 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("Browser API key saved")).toBeVisible();
     await expect(page.getByText("API key saved for this browser.")).toBeVisible();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBe("tenant-browser-key");
+
+    await page.getByRole("button", { name: "Generate pairing key" }).click();
+    await expect(page.getByTestId("pairing-key-reveal")).toBeVisible();
+    await expect(page.getByLabel("One-time pairing key")).toHaveValue("palpair_one-time-secret-not-persisted");
+    await expect(page.getByText("Tenant tenant-a")).toBeVisible();
+    expect(pairingRequests).toHaveLength(1);
+    expect(pairingRequests[0].headers["x-api-key"]).toBe("tenant-browser-key");
+    expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("palpair_one-time-secret-not-persisted");
+
+    await page.getByRole("button", { name: "Dismiss pairing key" }).click();
+    await expect(page.getByLabel("One-time pairing key")).toHaveCount(0);
 
     await page.getByRole("button", { name: "Clear" }).click();
     await expect(page.getByText("Browser API key needed")).toBeVisible();

@@ -948,6 +948,14 @@ export interface McpOAuthClientRegisterResponse {
   config_snippets?: McpClientConfigSnippets | null;
 }
 
+export interface BrowserExtensionPairingKey {
+  pairing_key: string;
+  tenant_id: string;
+  purpose: "browser_extension_token";
+  expires_at: string;
+  expires_in: number;
+}
+
 export interface McpOAuthGrantSummary {
   id: string;
   client_id: string;

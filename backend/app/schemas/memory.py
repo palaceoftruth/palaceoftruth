@@ -330,6 +330,18 @@ class BrowserExtensionTokenIssueResponse(BaseModel):
     expires_at: datetime
 
 
+class BrowserExtensionPairingKeyIssueRequest(BaseModel):
+    expires_in: int = Field(600, ge=60, le=1800)
+
+
+class BrowserExtensionPairingKeyIssueResponse(BaseModel):
+    pairing_key: str
+    tenant_id: str
+    purpose: Literal["browser_extension_token"] = "browser_extension_token"
+    expires_at: datetime
+    expires_in: int
+
+
 class McpOAuthProtectedResourceMetadata(BaseModel):
     resource: str
     authorization_servers: list[str]

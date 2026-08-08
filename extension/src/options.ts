@@ -31,7 +31,7 @@ form?.addEventListener("submit", (event) => {
   const baseUrl = apiBaseUrl?.value.trim() ?? "";
   const key = apiKey?.value.trim() ?? "";
   if (!baseUrl || !key) {
-    setMessage("Palace URL and pairing API key are required.", "error");
+    setMessage("Palace URL and one-time pairing key are required.", "error");
     return;
   }
   const version =
@@ -41,7 +41,7 @@ form?.addEventListener("submit", (event) => {
     .then((credentials) => saveCredentials(credentials))
     .then(() => {
       if (apiKey) apiKey.value = "";
-      setMessage("Scoped capture token saved. The pairing API key was not stored.", "success");
+      setMessage("Scoped capture token saved. The one-time pairing key was not stored.", "success");
     })
     .catch((error: unknown) => {
       setMessage(error instanceof Error ? error.message : "Unable to save settings.", "error");

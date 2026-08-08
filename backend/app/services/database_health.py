@@ -71,6 +71,7 @@ EXPECTED_TABLES = frozenset(
         "job_progress_events",
         "api_keys",
         "api_key_audit_events",
+        "browser_extension_pairing_keys",
         "mcp_clients",
         "mcp_request_audit_events",
         "mcp_oauth_access_tokens",
@@ -97,6 +98,7 @@ EXPECTED_INDEXES = frozenset(
         "idx_items_tenant_status",
         "idx_jobs_tenant_status",
         "idx_api_keys_key_hash",
+        "ix_browser_extension_pairing_keys_tenant_created_at",
         "ix_mcp_clients_tenant_last_seen",
         "ix_mcp_request_audit_events_tenant_created_at",
         "ix_mcp_request_audit_events_client_id",
@@ -162,6 +164,10 @@ MIGRATION_EXPECTATIONS = (
         ("search_vector tsvector", "idx_items_search_vector", "USING GIN"),
     ),
     MigrationExpectation("tenant API key table", ("api_keys", "key_hash", "idx_api_keys_key_hash")),
+    MigrationExpectation(
+        "browser extension pairing keys",
+        ("browser_extension_pairing_keys", "credential_hash", "used_at", "browser_extension_token"),
+    ),
     MigrationExpectation(
         "tenant-scoped memory idempotency indexes",
         ("idx_items_content_hash_tenant_unique", "idx_items_idempotency_key_tenant_unique"),

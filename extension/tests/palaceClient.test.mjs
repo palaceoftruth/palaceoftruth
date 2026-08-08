@@ -120,7 +120,7 @@ test("403 returns auth_error", async () => {
   });
 });
 
-test("pairing API key is exchanged for a scoped capture token", async () => {
+test("one-time pairing key is exchanged for a scoped capture token", async () => {
   const calls = [];
   const result = await issueExtensionToken("https://palaceoftruth.test/", "pairing-key", "0.1.0", async (url, init) => {
     calls.push({ url, init });
@@ -137,7 +137,8 @@ test("pairing API key is exchanged for a scoped capture token", async () => {
     expiresAt: "2026-06-01T00:00:00Z",
   });
   assert.equal(calls[0].url, "https://palaceoftruth.test/api/v1/palace/browser-extension-tokens");
-  assert.equal(calls[0].init.headers["X-API-Key"], "pairing-key");
+  assert.equal(calls[0].init.headers["X-Palace-Pairing-Key"], "pairing-key");
+  assert.equal(calls[0].init.headers["X-API-Key"], undefined);
   assert.deepEqual(JSON.parse(calls[0].init.body), {
     display_name: "Palace Capture Extension",
     extension_version: "0.1.0",
