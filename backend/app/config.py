@@ -19,6 +19,12 @@ class Settings(BaseSettings):
 
     # Redis — standard connection
     redis_url: str = "redis://localhost:6379"
+    # Redis credentials. Kept out of REDIS_URL so the URL can live in a
+    # ConfigMap while the password comes from a Secret. When set, these
+    # override any credentials embedded in REDIS_URL and are also applied to
+    # the Sentinel-discovered primary.
+    redis_username: str = ""
+    redis_password: str = ""
     # Redis Sentinel — when set, overrides redis_url for ARQ connections.
     # Format: comma-separated "host:port" entries, e.g. "valkey-sentinel:26379".
     redis_sentinel_hosts: str = ""
@@ -268,9 +274,19 @@ def make_redis_settings():  # type: ignore[return]
             sentinels.append((host, int(port_str) if port_str else 26379))
         if not sentinels:
             raise ValueError("REDIS_SENTINEL_HOSTS must include at least one host")
+        # redis-py applies these connection kwargs to the discovered primary.
+        # Sentinel itself is not password-protected (see chart comments), so
+        # the same credentials are not needed for sentinel discovery.
         return RedisSettings(
             host=sentinels,
             sentinel=True,
             sentinel_master=settings.redis_sentinel_master,
+            username=settings.redis_username or None,
+            password=settings.redis_password or None,
         )
-    return RedisSettings.from_dsn(settings.redis_url)
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    if settings.redis_username:
+        redis_settings.username = settings.redis_username
+    if settings.redis_password:
+        redis_settings.password = settings.redis_password
+    return redis_settings

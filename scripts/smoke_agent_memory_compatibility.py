@@ -2606,13 +2606,20 @@ def _live_deploy_state(args: argparse.Namespace) -> dict[str, Any]:
 
 def _git_coordinates() -> dict[str, Any]:
     def run_git(*parts: str) -> str:
-        result = subprocess.run(
-            ["git", *parts],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        try:
+            result = subprocess.run(
+                ["git", *parts],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            # These coordinates are diagnostic metadata, not a result. A loaded
+            # CI runner can push `git status` past the timeout, and git may be
+            # missing entirely in a slim container; neither should fail a report
+            # that the rest of this helper already degrades to "unknown".
+            return "unknown"
         if result.returncode != 0:
             return "unknown"
         return result.stdout.strip() or "unknown"

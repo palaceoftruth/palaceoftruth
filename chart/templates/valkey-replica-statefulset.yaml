@@ -70,6 +70,15 @@ spec:
                 sed -i '/^replicaof /d;/^slaveof /d' /data/valkey.conf
                 echo "replicaof {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379" >> /data/valkey.conf
               fi
+              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+              # masterauth is what lets this replica finish its handshake with a
+              # password-protected primary.
+              {{- include "palaceoftruth.valkeyAuthConfigScript" "/data/valkey.conf" | nindent 14 }}
+              {{- end }}
+          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+          env:
+            {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -77,6 +86,12 @@ spec:
         - name: valkey
           image: {{ .Values.valkey.image }}
           command: ["valkey-server", "/data/valkey.conf"]
+          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+          # REDISCLI_AUTH lets the exec probes authenticate without exposing the
+          # password in the probe command line.
+          env:
+            {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379
@@ -96,7 +111,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
         {{- if .Values.valkey.metrics.enabled }}
-        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:6379") | nindent 8 }}
+        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:6379" "auth" true) | nindent 8 }}
         {{- end }}
       {{- if and .Values.valkey.metrics.enabled (or .Values.valkey.metrics.existingSecret .Values.valkey.metrics.passwordFileKey) }}
       volumes:

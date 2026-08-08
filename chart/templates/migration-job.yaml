@@ -40,6 +40,7 @@ spec:
           command: ["python", "-m", "app.wait_for_database"]
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: MIGRATION_DB_WAIT_TIMEOUT_SECONDS
               value: {{ .Values.migrations.readiness.timeoutSeconds | quote }}
             - name: MIGRATION_DB_WAIT_INTERVAL_SECONDS
@@ -57,6 +58,7 @@ spec:
             {{- toYaml .Values.migrations.command | nindent 12 }}
           env:
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: REDIS_URL
               value: {{ include "palaceoftruth.redisUrl" . | quote }}
           envFrom:

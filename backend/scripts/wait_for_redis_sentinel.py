@@ -60,6 +60,24 @@ def _positive_float_env(name: str, default: float) -> float:
     return value
 
 
+def redis_auth_kwargs() -> dict[str, str]:
+    """Connection credentials for the Sentinel-discovered primary.
+
+    Valkey data nodes require a password; Sentinel itself does not (redis-py
+    does not forward these credentials to sentinel connections). Returns an
+    empty mapping when no credentials are configured, so unauthenticated local
+    and test setups keep working unchanged.
+    """
+    kwargs: dict[str, str] = {}
+    username = os.getenv("REDIS_USERNAME", "").strip()
+    password = os.getenv("REDIS_PASSWORD", "").strip()
+    if username:
+        kwargs["username"] = username
+    if password:
+        kwargs["password"] = password
+    return kwargs
+
+
 def load_config_from_env() -> SentinelStartupConfig | None:
     raw_hosts = os.getenv("REDIS_SENTINEL_HOSTS", "").strip()
     if not raw_hosts:
@@ -78,7 +96,13 @@ async def verify_sentinel_master(config: SentinelStartupConfig, *, sentinel_fact
     redis = None
     try:
         master_host, master_port = await sentinel.discover_master(config.master_name)
-        redis = redis_factory(host=master_host, port=master_port, socket_timeout=2.0, socket_connect_timeout=2.0)
+        redis = redis_factory(
+            host=master_host,
+            port=master_port,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+            **redis_auth_kwargs(),
+        )
         await redis.ping()
         info = await redis.info("replication")
         role = str(info.get("role", "")).lower()

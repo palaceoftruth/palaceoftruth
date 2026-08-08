@@ -22,10 +22,17 @@ def _render_chart(*set_args: str) -> list[dict[str, Any]]:
     return [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
 
 
+def _policies(manifests: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        manifest["metadata"]["name"]: manifest
+        for manifest in manifests
+        if manifest.get("kind") == "NetworkPolicy"
+    }
+
+
 def _network_policy(manifests: list[dict[str, Any]]) -> dict[str, Any]:
-    policies = [manifest for manifest in manifests if manifest.get("kind") == "NetworkPolicy"]
-    assert len(policies) == 1
-    return policies[0]
+    """The egress policy. Ingress policies are asserted separately below."""
+    return _policies(manifests)["palaceoftruth-restricted-egress"]
 
 
 def test_restricted_egress_is_enabled_by_default() -> None:
@@ -100,6 +107,124 @@ def test_external_database_and_valkey_are_not_broadly_allowed() -> None:
 
     assert "cnpg.io/cluster" not in serialized_rules
     assert "palaceoftruth-valkey" not in serialized_rules
+
+
+def _peer_apps(rule: dict[str, Any]) -> set[str]:
+    apps: set[str] = set()
+    for peer in rule.get("from", []):
+        selector = peer.get("podSelector", {})
+        for expression in selector.get("matchExpressions", []):
+            if expression.get("key") == "app":
+                apps.update(expression.get("values", []))
+        app = selector.get("matchLabels", {}).get("app")
+        if app:
+            apps.add(app)
+    return apps
+
+
+def _ports(rule: dict[str, Any]) -> set[int]:
+    return {port["port"] for port in rule.get("ports", [])}
+
+
+def test_ingress_policies_are_enabled_by_default() -> None:
+    policies = _policies(_render_chart())
+
+    assert {
+        "palaceoftruth-valkey-ingress",
+        "palaceoftruth-postgres-ingress",
+        "palaceoftruth-app-ingress",
+        "palaceoftruth-frontend-ingress",
+    } <= set(policies)
+    for name, policy in policies.items():
+        if name.endswith("-ingress"):
+            assert policy["spec"]["policyTypes"] == ["Ingress"]
+
+
+def test_valkey_ingress_is_limited_to_application_pods() -> None:
+    policy = _policies(_render_chart())["palaceoftruth-valkey-ingress"]
+
+    app_rule = next(
+        rule for rule in policy["spec"]["ingress"] if "palaceoftruth-backend" in _peer_apps(rule)
+    )
+    assert _ports(app_rule) == {6379, 26379}
+    # The release-time Jobs also talk to Valkey; excluding them would wedge deploys.
+    assert {
+        "palaceoftruth-worker",
+        "palaceoftruth-media-worker",
+        "palaceoftruth-palace-worker",
+        "palaceoftruth-migration",
+        "palaceoftruth-memory-rollout-smoke",
+    } <= _peer_apps(app_rule)
+    # Nothing else in the cluster, and no namespace-wide or empty allowance.
+    # MCP and the frontend never touch the queue.
+    assert not {"palaceoftruth-frontend", "palaceoftruth-mcp"} & _peer_apps(app_rule)
+    assert all(rule.get("from") for rule in policy["spec"]["ingress"])
+
+
+def test_postgres_ingress_allows_the_cnpg_operator_and_replication() -> None:
+    policy = _policies(_render_chart())["palaceoftruth-postgres-ingress"]
+    rules = policy["spec"]["ingress"]
+
+    assert policy["spec"]["podSelector"] == {
+        "matchLabels": {"cnpg.io/cluster": "palaceoftruth-postgres"}
+    }
+    assert any(_peer_apps(rule) and _ports(rule) == {5432} for rule in rules)
+    assert any(
+        peer.get("podSelector", {}).get("matchLabels", {}).get("cnpg.io/cluster")
+        == "palaceoftruth-postgres"
+        for rule in rules
+        for peer in rule.get("from", [])
+    )
+    assert any(
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+            "kubernetes.io/metadata.name"
+        )
+        == "cnpg-system"
+        for rule in rules
+        for peer in rule.get("from", [])
+    )
+
+
+def test_app_ingress_covers_backend_and_mcp_ports() -> None:
+    policy = _policies(_render_chart())["palaceoftruth-app-ingress"]
+
+    assert policy["spec"]["podSelector"]["matchExpressions"][0]["values"] == [
+        "palaceoftruth-backend",
+        "palaceoftruth-mcp",
+    ]
+    in_cluster = next(
+        rule for rule in policy["spec"]["ingress"] if "palaceoftruth-frontend" in _peer_apps(rule)
+    )
+    assert in_cluster and _ports(in_cluster) == {8000, 8765}
+    assert any(
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+            "kubernetes.io/metadata.name"
+        )
+        == "ingress-nginx"
+        for rule in policy["spec"]["ingress"]
+        for peer in rule.get("from", [])
+    )
+
+
+def test_ingress_policies_can_be_disabled_without_losing_egress() -> None:
+    policies = _policies(_render_chart("networkPolicy.ingress.enabled=false"))
+
+    assert set(policies) == {"palaceoftruth-restricted-egress"}
+
+
+def test_data_tier_ingress_policies_follow_the_bundled_components() -> None:
+    policies = _policies(_render_chart("postgres.enabled=false", "valkey.enabled=false"))
+
+    assert "palaceoftruth-valkey-ingress" not in policies
+    assert "palaceoftruth-postgres-ingress" not in policies
+
+
+def test_frontend_stays_reachable_when_no_ingress_namespace_is_configured() -> None:
+    policy = _policies(
+        _render_chart("networkPolicy.ingress.ingressControllerNamespace=")
+    )["palaceoftruth-frontend-ingress"]
+
+    assert policy["spec"]["ingress"] == [{}]
 
 
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:

@@ -14,6 +14,10 @@ from app.workers.media_fairness import dispatch_tenant_fair_media_jobs
 from app.workers.source_subscription_tasks import poll_all_source_subscriptions, poll_source_subscription_task, queue_discovered_source_subscription_entries, diagnose_stale_queued_source_subscription_entries_task
 from app.workers.source_resource_tasks import dispatch_due_source_resources, refresh_source_resource
 from app.workers.palace_tasks import palace_run_build, run_sync_source, poll_sync_sources, recover_palace_backlog, refresh_dirty_palace_rooms, run_palace_maintenance, repair_palace_artifacts, recompute_palace_tunnel_strengths, refresh_caught_up_wakeup_briefs, run_diary_rollup_maintenance, run_fact_registry_extraction, run_fact_registry_contradiction_sweep, run_wakeup_story_refresh, run_memory_dream_refresh, sweep_palace_index_integrity, mark_item_dirty_and_schedule, mark_items_dirty_and_schedule, watch_local_sync_sources
+from app.workers.serialization import (
+    job_deserializer as json_job_deserializer,
+    job_serializer as json_job_serializer,
+)
 from app.workers.queues import (
     DEFAULT_WORKER_QUEUE,
     MEDIA_WORKER_QUEUE,
@@ -109,6 +113,9 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = make_redis_settings()
+    # JSON, not ARQ's default pickle: a queue write must never be code execution.
+    job_serializer = json_job_serializer
+    job_deserializer = json_job_deserializer
     health_check_interval = WORKER_HEALTH_CHECK_INTERVAL_SECONDS
     health_check_key = worker_health_check_key(queue_name)
     job_timeout = 1800  # 30 min — long YouTube videos can take >5 min to download + transcribe
@@ -124,6 +131,9 @@ class MediaWorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = make_redis_settings()
+    # JSON, not ARQ's default pickle: a queue write must never be code execution.
+    job_serializer = json_job_serializer
+    job_deserializer = json_job_deserializer
     health_check_interval = WORKER_HEALTH_CHECK_INTERVAL_SECONDS
     health_check_key = worker_health_check_key(queue_name)
     job_timeout = 1800  # 30 min — long YouTube videos can take >5 min to download + transcribe
@@ -164,6 +174,9 @@ class PalaceWorkerSettings:
     on_startup = palace_startup
     on_shutdown = palace_shutdown
     redis_settings = make_redis_settings()
+    # JSON, not ARQ's default pickle: a queue write must never be code execution.
+    job_serializer = json_job_serializer
+    job_deserializer = json_job_deserializer
     health_check_interval = WORKER_HEALTH_CHECK_INTERVAL_SECONDS
     health_check_key = worker_health_check_key(queue_name)
     job_timeout = 1800  # 30 min — long YouTube videos can take >5 min to download + transcribe

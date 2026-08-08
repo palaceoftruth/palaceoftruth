@@ -17,14 +17,25 @@ def _settings_kwargs(**overrides):
     return values
 
 
+def _redis_settings_stub(**overrides):
+    values = {
+        "redis_sentinel_hosts": "",
+        "redis_sentinel_master": "mymaster",
+        "redis_url": "redis://unused:6379",
+        "redis_username": "",
+        "redis_password": "",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_make_redis_settings_uses_sentinel_host_list(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         config,
         "settings",
-        SimpleNamespace(
+        _redis_settings_stub(
             redis_sentinel_hosts="valkey-sentinel:26379, backup-sentinel:26380",
             redis_sentinel_master="palace-primary",
-            redis_url="redis://unused:6379",
         ),
     )
 
@@ -42,15 +53,56 @@ def test_make_redis_settings_rejects_empty_sentinel_hosts(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         config,
         "settings",
-        SimpleNamespace(
-            redis_sentinel_hosts=", ,",
-            redis_sentinel_master="mymaster",
-            redis_url="redis://unused:6379",
-        ),
+        _redis_settings_stub(redis_sentinel_hosts=", ,"),
     )
 
     with pytest.raises(ValueError, match="REDIS_SENTINEL_HOSTS"):
         config.make_redis_settings()
+
+
+def test_make_redis_settings_applies_credentials_to_the_sentinel_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        config,
+        "settings",
+        _redis_settings_stub(
+            redis_sentinel_hosts="valkey-sentinel:26379",
+            redis_password="s3cret",
+        ),
+    )
+
+    redis_settings = config.make_redis_settings()
+
+    assert redis_settings.password == "s3cret"
+
+
+def test_redis_credentials_override_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The URL lives in a ConfigMap; the password comes from a Secret and wins.
+    monkeypatch.setattr(
+        config,
+        "settings",
+        _redis_settings_stub(
+            redis_url="redis://stale:old-password@valkey:6379",
+            redis_username="palace",
+            redis_password="s3cret",
+        ),
+    )
+
+    redis_settings = config.make_redis_settings()
+
+    assert redis_settings.username == "palace"
+    assert redis_settings.password == "s3cret"
+
+
+def test_redis_settings_stay_anonymous_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "settings", _redis_settings_stub())
+
+    redis_settings = config.make_redis_settings()
+
+    assert redis_settings.password is None
 
 
 def test_settings_keep_openai_embedding_profile_defaults() -> None:

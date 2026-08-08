@@ -170,12 +170,16 @@ def test_image_builds_are_parallel_cached_and_digest_bound() -> None:
     assert frontend["outputs"]["frontend_digest"] == "${{ steps.frontend.outputs.digest }}"
 
     for job in (backend, frontend):
+        buildx_step = next(
+            step for step in job["steps"] if step.get("name") == "Set up Docker Buildx"
+        )
+        assert buildx_step["with"]["driver"] == "docker"
+
         for step in job["steps"]:
             if not step.get("uses", "").startswith("docker/build-push-action@"):
                 continue
-            cache_to = step["with"]["cache-to"]
-            assert "type=registry" in cache_to
-            assert "mode=max" in cache_to
+            assert "cache-to" not in step["with"]
+            assert "type=registry" in step["with"]["cache-from"]
 
     digest_step = next(
         step for step in publish_chart["steps"] if step.get("name") == "Record published image digests"

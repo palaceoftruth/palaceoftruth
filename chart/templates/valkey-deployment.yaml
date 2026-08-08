@@ -24,6 +24,18 @@ spec:
       containers:
         - name: valkey
           image: {{ .Values.valkey.image }}
+          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+          # The password is written to a private file rather than passed as a
+          # server argument, because argv is readable from /proc.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              printf 'requirepass %s\n' "$VALKEY_PASSWORD" > /etc/valkey/valkey.conf
+              exec valkey-server /etc/valkey/valkey.conf
+          env:
+            {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379
@@ -33,13 +45,23 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+            - name: valkey-config
+              mountPath: /etc/valkey
+            {{- end }}
         {{- if .Values.valkey.metrics.enabled }}
-        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:6379") | nindent 8 }}
+        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:6379" "auth" true) | nindent 8 }}
         {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "palaceoftruth.valkeyServiceName" . }}-data
+        {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+        # Generated config lives in memory, never on the data volume.
+        - name: valkey-config
+          emptyDir:
+            medium: Memory
+        {{- end }}
         {{- if .Values.valkey.metrics.enabled }}
         {{- include "palaceoftruth.valkeyExporterPasswordVolume" . | nindent 8 }}
         {{- end }}

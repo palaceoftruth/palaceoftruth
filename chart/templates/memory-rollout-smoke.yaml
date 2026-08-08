@@ -168,6 +168,7 @@ spec:
               value: {{ .Chart.AppVersion | quote }}
             - name: REDIS_SENTINEL_EXPECTED_REPLICAS
               value: {{ include "palaceoftruth.valkeyReplicaCount" . | quote }}
+            {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config

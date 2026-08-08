@@ -515,9 +515,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
-          # ARC's DinD daemon already has BuildKit and the containerd image store.
-          # Reuse it directly so setup does not start a nested BuildKit container,
-          # which fails CDI discovery on the k3s-lab runner nodes.
+          # ARC's DinD daemon already has BuildKit. Reuse it directly so setup
+          # does not start a nested BuildKit container, which fails CDI discovery
+          # on the runner nodes. This driver can import registry caches here but
+          # cannot export them without the containerd image store.
           driver: docker
 
       - name: Build and push backend runtime
@@ -532,7 +533,6 @@ jobs:
           sbom: false
           tags: ${{ steps.release.outputs.backend_runtime_image }}:${{ steps.dependencies.outputs.key }}
           cache-from: type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
-          cache-to: type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache,mode=max
 
       - name: Build and push backend CI image
         id: backend_ci
@@ -548,7 +548,6 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.release.outputs.backend_ci_image }}:buildcache
             type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
-          cache-to: type=registry,ref=${{ steps.release.outputs.backend_ci_image }}:buildcache,mode=max
 
       - name: Build and push backend application
         id: backend
@@ -566,7 +565,6 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.release.outputs.backend_image }}:buildcache
             type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
-          cache-to: type=registry,ref=${{ steps.release.outputs.backend_image }}:buildcache,mode=max
 
       - name: Build and push Hermes plugin artifact
         if: steps.hermes_plugin.outputs.changed == 'true'
@@ -583,7 +581,6 @@ jobs:
             ${{ steps.release.outputs.hermes_plugin_image }}:${{ steps.tag.outputs.sha }}
             ${{ steps.release.outputs.hermes_plugin_image }}:latest
           cache-from: type=registry,ref=${{ steps.release.outputs.hermes_plugin_image }}:buildcache
-          cache-to: type=registry,ref=${{ steps.release.outputs.hermes_plugin_image }}:buildcache,mode=max
 
       - name: Package Hermes plugin release assets
         if: steps.hermes_plugin.outputs.changed == 'true'
@@ -670,8 +667,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
-          # Match the trusted ARC backend build: use DinD's BuildKit and
-          # containerd image store rather than starting nested BuildKit.
+          # Match the trusted ARC backend build: use DinD's BuildKit rather than
+          # starting a nested BuildKit container. Registry cache export is
+          # intentionally omitted because this driver cannot support it here.
           driver: docker
 
       - name: Build and push frontend application
@@ -687,7 +685,6 @@ jobs:
             ${{ steps.release.outputs.frontend_image }}:${{ steps.tag.outputs.sha }}
             ${{ steps.release.outputs.frontend_image }}:latest
           cache-from: type=registry,ref=${{ steps.release.outputs.frontend_image }}:buildcache
-          cache-to: type=registry,ref=${{ steps.release.outputs.frontend_image }}:buildcache,mode=max
 
   publish-agent-plugin:
     needs:
