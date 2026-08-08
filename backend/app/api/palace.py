@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,8 @@ from app.models.source_resource import SourceResource, SourceResourceAlias, Sour
 from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
+    BrowserExtensionPairingKeyIssueRequest,
+    BrowserExtensionPairingKeyIssueResponse,
     McpClientConfigSnippets,
     McpOAuthClientAgentScopeBindingRequest,
     McpOAuthClientListResponse,
@@ -556,13 +558,161 @@ async def revoke_palace_mcp_client(
     return McpOAuthClientRevokeResponse(tenant_id=tenant_id, client=_serialize_mcp_client(row))
 
 
-@router.post("/browser-extension-tokens", response_model=BrowserExtensionTokenIssueResponse, status_code=201, dependencies=[Depends(require_api_capability("admin"))])
-async def issue_browser_extension_token(
-    body: BrowserExtensionTokenIssueRequest,
+async def _record_pairing_audit(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    pairing_id: uuid.UUID,
+    operation: str,
+    status: str,
+    details: dict,
+    client_id: uuid.UUID | None = None,
+    app_version: str | None = None,
+) -> None:
+    """Record pairing lifecycle metadata without accepting raw credentials."""
+    await db.execute(
+        text(
+            """
+            INSERT INTO mcp_request_audit_events
+                (tenant_id, client_id, client_key, client_name, operation, required_scope,
+                 params_summary, status, app_version)
+            VALUES
+                (:tenant_id, :client_id, :client_key, 'Palace Capture pairing', :operation, NULL,
+                 CAST(:params_summary AS jsonb), :status, :app_version)
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "client_key": f"browser-extension-pairing:{pairing_id}",
+            "operation": operation,
+            "params_summary": json.dumps(details),
+            "status": status,
+            "app_version": app_version,
+        },
+    )
+
+
+@router.post(
+    "/browser-extension-pairing-keys",
+    response_model=BrowserExtensionPairingKeyIssueResponse,
+    status_code=201,
+    dependencies=[Depends(require_api_capability("admin"))],
+)
+async def issue_browser_extension_pairing_key(
+    body: BrowserExtensionPairingKeyIssueRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> BrowserExtensionTokenIssueResponse:
+) -> BrowserExtensionPairingKeyIssueResponse:
     tenant_id = request.state.tenant_id
+    pairing_key = f"palpair_{secrets.token_urlsafe(32)}"
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in)
+    result = await db.execute(
+        text(
+            """
+            INSERT INTO browser_extension_pairing_keys
+                (tenant_id, credential_hash, purpose, issued_by, expires_at)
+            VALUES
+                (:tenant_id, :credential_hash, 'browser_extension_token', :issued_by, :expires_at)
+            RETURNING id
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "credential_hash": hash_secret(pairing_key),
+            "issued_by": request.state.auth_mode,
+            "expires_at": expires_at,
+        },
+    )
+    pairing_id = result.mappings().one()["id"]
+    await _record_pairing_audit(
+        db,
+        tenant_id=tenant_id,
+        pairing_id=pairing_id,
+        operation="browser_extension.pairing_issue",
+        status="success",
+        details={"purpose": "browser_extension_token", "expires_in": body.expires_in},
+    )
+    await db.commit()
+    return BrowserExtensionPairingKeyIssueResponse(
+        pairing_key=pairing_key,
+        tenant_id=tenant_id,
+        expires_at=expires_at,
+        expires_in=body.expires_in,
+    )
+
+
+@router.post("/browser-extension-tokens", response_model=BrowserExtensionTokenIssueResponse, status_code=201)
+async def issue_browser_extension_token(
+    body: BrowserExtensionTokenIssueRequest,
+    pairing_key: str | None = Header(None, alias="X-Palace-Pairing-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> BrowserExtensionTokenIssueResponse:
+    if not pairing_key or not pairing_key.startswith("palpair_") or len(pairing_key) < 32 or len(pairing_key) > 128:
+        raise HTTPException(status_code=403, detail="Invalid pairing key")
+    pairing_result = await db.execute(
+        text(
+            """
+            SELECT id, tenant_id, expires_at, used_at
+            FROM browser_extension_pairing_keys
+            WHERE credential_hash = :credential_hash AND purpose = 'browser_extension_token'
+            """
+        ),
+        {"credential_hash": hash_secret(pairing_key)},
+    )
+    pairing = pairing_result.mappings().one_or_none()
+    if pairing is None:
+        raise HTTPException(status_code=403, detail="Invalid pairing key")
+    tenant_id = pairing["tenant_id"]
+    now = datetime.now(timezone.utc)
+    if pairing["used_at"] is not None:
+        await _record_pairing_audit(
+            db,
+            tenant_id=tenant_id,
+            pairing_id=pairing["id"],
+            operation="browser_extension.pairing_reuse_rejected",
+            status="denied",
+            details={"reason": "already_used"},
+            app_version=body.extension_version,
+        )
+        await db.commit()
+        raise HTTPException(status_code=403, detail="Pairing key has already been used")
+    if pairing["expires_at"] <= now:
+        await _record_pairing_audit(
+            db,
+            tenant_id=tenant_id,
+            pairing_id=pairing["id"],
+            operation="browser_extension.pairing_expired",
+            status="denied",
+            details={"reason": "expired"},
+            app_version=body.extension_version,
+        )
+        await db.commit()
+        raise HTTPException(status_code=403, detail="Pairing key has expired")
+    consumed = await db.execute(
+        text(
+            """
+            UPDATE browser_extension_pairing_keys
+            SET used_at = :used_at
+            WHERE id = :pairing_id AND used_at IS NULL AND expires_at > :used_at
+            RETURNING id
+            """
+        ),
+        {"pairing_id": pairing["id"], "used_at": now},
+    )
+    if consumed.mappings().one_or_none() is None:
+        await db.rollback()
+        await _record_pairing_audit(
+            db,
+            tenant_id=tenant_id,
+            pairing_id=pairing["id"],
+            operation="browser_extension.pairing_reuse_rejected",
+            status="denied",
+            details={"reason": "concurrent_or_expired"},
+            app_version=body.extension_version,
+        )
+        await db.commit()
+        raise HTTPException(status_code=403, detail="Pairing key is no longer valid")
     scopes = ["capture:write", "capture:job:read"]
     access_token = secrets.token_urlsafe(48)
     client_key = f"browser-extension:{secrets.token_urlsafe(18)}"
@@ -611,31 +761,15 @@ async def issue_browser_extension_token(
             "expires_at": expires_at,
         },
     )
-    await db.execute(
-        text(
-            """
-            INSERT INTO mcp_request_audit_events
-                (tenant_id, client_id, client_key, client_name, operation, required_scope,
-                 params_summary, status, app_version)
-            VALUES
-                (:tenant_id, :client_id, :client_key, :client_name, 'browser_extension.token_issue', NULL,
-                 CAST(:params_summary AS jsonb), 'success', :app_version)
-            """
-        ),
-        {
-            "tenant_id": tenant_id,
-            "client_id": client_id,
-            "client_key": client_key,
-            "client_name": body.display_name,
-            "params_summary": json.dumps(
-                {
-                    "scopes": scopes,
-                    "token_ttl_seconds": body.token_ttl_seconds,
-                    "extension_version": body.extension_version,
-                }
-            ),
-            "app_version": body.extension_version,
-        },
+    await _record_pairing_audit(
+        db,
+        tenant_id=tenant_id,
+        pairing_id=pairing["id"],
+        client_id=client_id,
+        operation="browser_extension.pairing_exchange",
+        status="success",
+        details={"scopes": scopes, "token_ttl_seconds": body.token_ttl_seconds},
+        app_version=body.extension_version,
     )
     await db.commit()
     return BrowserExtensionTokenIssueResponse(

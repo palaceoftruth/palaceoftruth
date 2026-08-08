@@ -103,6 +103,7 @@ class FakeSession:
         self.scalar_results = list(scalar_results or [])
         self.execute_results = list(execute_results or [])
         self.executed_statements = []
+        self.executed_params = []
 
     async def get(self, model, key):
         return self.objects.get((model, key))
@@ -114,10 +115,14 @@ class FakeSession:
 
     async def execute(self, _statement, _params=None):
         self.executed_statements.append(_statement)
+        self.executed_params.append(_params or {})
         rows = self.execute_results.pop(0) if self.execute_results else []
         return _FakeScalarResult(rows)
 
     async def commit(self):
+        return None
+
+    async def rollback(self):
         return None
 
     async def refresh(self, _obj):
@@ -1145,13 +1150,73 @@ def test_register_palace_mcp_client_rejects_unknown_scope() -> None:
     assert response.status_code == 422
 
 
-def test_issue_browser_extension_token_returns_scoped_public_token() -> None:
-    client_id = uuid.uuid4()
-    session = FakeSession(execute_results=[[{"id": client_id}], [], []])
+def test_issue_browser_extension_pairing_key_returns_raw_key_once_and_persists_only_hash() -> None:
+    pairing_id = uuid.uuid4()
+    session = FakeSession(execute_results=[[{"id": pairing_id}], []])
     client = _build_app(session)
 
     response = client.post(
+        "/api/v1/palace/browser-extension-pairing-keys",
+        json={"expires_in": 600},
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["pairing_key"].startswith("palpair_")
+    assert payload["tenant_id"] == "tenant-a"
+    assert payload["purpose"] == "browser_extension_token"
+    assert payload["expires_in"] == 600
+    all_persisted_values = json.dumps(session.executed_params, default=str)
+    assert payload["pairing_key"] not in all_persisted_values
+    assert "browser_extension.pairing_issue" in all_persisted_values
+
+
+def test_issue_browser_extension_pairing_key_requires_operator_authorization() -> None:
+    session = FakeSession()
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+
+    async def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/palace/browser-extension-pairing-keys",
+        json={"expires_in": 600},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing API key or bearer token"
+    assert session.executed_params == []
+
+
+def test_issue_browser_extension_token_returns_scoped_public_token() -> None:
+    pairing_id = uuid.uuid4()
+    client_id = uuid.uuid4()
+    pairing_key = "palpair_abcdefghijklmnopqrstuvwxyz1234567890"
+    session = FakeSession(
+        execute_results=[
+            [{
+                "id": pairing_id,
+                "tenant_id": "tenant-a",
+                "expires_at": datetime.now(timezone.utc).replace(year=2099),
+                "used_at": None,
+            }],
+            [{"id": pairing_id}],
+            [{"id": client_id}],
+            [],
+            [],
+        ]
+    )
+    # Exchange tenant identity comes exclusively from the hashed pairing record,
+    # never from a broad API-key auth context supplied by the caller.
+    client = _build_app(session, tenant_id="tenant-other")
+
+    response = client.post(
         "/api/v1/palace/browser-extension-tokens",
+        headers={"X-Palace-Pairing-Key": pairing_key},
         json={
             "display_name": "Palace Capture Extension",
             "extension_version": "0.1.0",
@@ -1166,6 +1231,112 @@ def test_issue_browser_extension_token_returns_scoped_public_token() -> None:
     assert payload["tenant_id"] == "tenant-a"
     assert payload["client_key"].startswith("browser-extension:")
     assert isinstance(payload["access_token"], str)
+    persisted = json.dumps(session.executed_params, default=str)
+    assert pairing_key not in persisted
+    assert payload["access_token"] not in persisted
+    assert "capture:write" in persisted
+    assert "capture:job:read" in persisted
+    assert "browser_extension.pairing_exchange" in persisted
+
+
+def test_browser_extension_pairing_key_rejects_replay_and_redacts_audit() -> None:
+    pairing_id = uuid.uuid4()
+    pairing_key = "palpair_abcdefghijklmnopqrstuvwxyz1234567890"
+    session = FakeSession(
+        execute_results=[
+            [{
+                "id": pairing_id,
+                "tenant_id": "tenant-a",
+                "expires_at": datetime.now(timezone.utc).replace(year=2099),
+                "used_at": datetime.now(timezone.utc),
+            }],
+            [],
+        ]
+    )
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/browser-extension-tokens",
+        headers={"X-Palace-Pairing-Key": pairing_key},
+        json={"extension_version": "0.1.0"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Pairing key has already been used"
+    persisted = json.dumps(session.executed_params, default=str)
+    assert pairing_key not in persisted
+    assert "browser_extension.pairing_reuse_rejected" in persisted
+
+
+def test_browser_extension_pairing_key_rejects_expired_key_for_bound_tenant() -> None:
+    pairing_id = uuid.uuid4()
+    session = FakeSession(
+        execute_results=[
+            [{
+                "id": pairing_id,
+                "tenant_id": "tenant-b",
+                "expires_at": datetime(2020, 1, 1, tzinfo=timezone.utc),
+                "used_at": None,
+            }],
+            [],
+        ]
+    )
+    client = _build_app(session, tenant_id="tenant-a")
+
+    response = client.post(
+        "/api/v1/palace/browser-extension-tokens",
+        headers={"X-Palace-Pairing-Key": "palpair_abcdefghijklmnopqrstuvwxyz1234567890"},
+        json={"extension_version": "0.1.0"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Pairing key has expired"
+    persisted = json.dumps(session.executed_params, default=str)
+    assert "tenant-b" in persisted
+    assert "browser_extension.pairing_expired" in persisted
+
+
+def test_browser_extension_pairing_key_atomically_rejects_concurrent_reuse() -> None:
+    pairing_id = uuid.uuid4()
+    session = FakeSession(
+        execute_results=[
+            [{
+                "id": pairing_id,
+                "tenant_id": "tenant-a",
+                "expires_at": datetime.now(timezone.utc).replace(year=2099),
+                "used_at": None,
+            }],
+            [],
+            [],
+        ]
+    )
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/browser-extension-tokens",
+        headers={"X-Palace-Pairing-Key": "palpair_abcdefghijklmnopqrstuvwxyz1234567890"},
+        json={"extension_version": "0.1.0"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Pairing key is no longer valid"
+    persisted = json.dumps(session.executed_params, default=str)
+    assert "browser_extension.pairing_reuse_rejected" in persisted
+    assert "concurrent_or_expired" in persisted
+
+
+def test_browser_extension_token_rejects_missing_or_malformed_pairing_key() -> None:
+    client = _build_app(FakeSession())
+
+    missing = client.post("/api/v1/palace/browser-extension-tokens", json={})
+    malformed = client.post(
+        "/api/v1/palace/browser-extension-tokens",
+        headers={"X-Palace-Pairing-Key": "tenant-api-key"},
+        json={},
+    )
+
+    assert missing.status_code == 403
+    assert malformed.status_code == 403
 
 
 def test_revoke_palace_mcp_client_scopes_to_current_tenant() -> None:

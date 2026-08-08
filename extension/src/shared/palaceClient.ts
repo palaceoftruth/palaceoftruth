@@ -97,7 +97,7 @@ function buildBaseEndpoint(apiBaseUrl: string, path: string): string {
 
 export async function issueExtensionToken(
   apiBaseUrl: string,
-  apiKey: string,
+  pairingKey: string,
   extensionVersion: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PalaceCredentials> {
@@ -106,7 +106,7 @@ export async function issueExtensionToken(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-API-Key": apiKey,
+      "X-Palace-Pairing-Key": pairingKey,
     },
     body: JSON.stringify({
       display_name: "Palace Capture Extension",

@@ -22,11 +22,11 @@ are limited to explicit Web Save records.
 
 ## Configuration
 
-The extension needs a Palace base URL and a temporary pairing API key during setup.
+The extension needs a Palace base URL and a temporary one-time pairing key generated in Palace Settings.
 
 - Local default Palace URL: `https://palaceoftruth.test`
 - Local API URL behind that frontend: `https://api.palaceoftruth.test`
-- Pairing key input: a tenant API key with permission to request a browser-capture token
+- Pairing key input: a short-lived, single-use Palace Capture pairing key
 - Stored credential: the scoped capture token returned by Palace, not the pairing key
 
 The capture token is revocable server-side and scoped to browser capture, job-status reads, and active Web Save lookup. If capture starts returning authentication errors, re-pair the extension from Settings.

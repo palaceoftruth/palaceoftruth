@@ -44,6 +44,7 @@ def test_database_health_expectations_track_palace_critical_surfaces() -> None:
         "items",
         "embeddings",
         "api_keys",
+        "browser_extension_pairing_keys",
         "mcp_clients",
         "job_progress_events",
         "source_subscriptions",
@@ -57,6 +58,7 @@ def test_database_health_expectations_track_palace_critical_surfaces() -> None:
         "idx_embedding_profile_vectors_halfvec_1024_hnsw",
         "idx_embedding_profile_vectors_halfvec_1536_hnsw",
         "idx_items_search_vector",
+        "ix_browser_extension_pairing_keys_tenant_created_at",
     } <= EXPECTED_INDEXES
 
 

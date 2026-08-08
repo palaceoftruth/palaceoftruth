@@ -39,6 +39,7 @@ import type {
   PalaceSourceResourceDetail,
   PalaceSourceResourceListResponse,
   PalaceSourceResourceSummary,
+  BrowserExtensionPairingKey,
   ReviewInboxAction,
   ReviewInboxActionResponse,
   ReviewInboxResponse,
@@ -423,6 +424,12 @@ export const api = {
 
   revokePalaceMcpClient: (clientId: string) =>
     req<McpOAuthClientRevokeResponse>(`/palace/mcp-clients/${clientId}/revoke`, { method: "POST" }),
+
+  issueBrowserExtensionPairingKey: () =>
+    req<BrowserExtensionPairingKey>("/palace/browser-extension-pairing-keys", {
+      method: "POST",
+      body: JSON.stringify({ expires_in: 600 }),
+    }),
 
   listPalaceMcpGrants: () => req<McpOAuthGrantListResponse>("/palace/mcp-grants"),
 

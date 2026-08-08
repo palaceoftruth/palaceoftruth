@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { CheckCircle2, Key, SlidersHorizontal, Trash2 } from "lucide-react";
+import { CheckCircle2, ClipboardCopy, Key, Loader2, ShieldCheck, SlidersHorizontal, Trash2, X } from "lucide-react";
 
-import { BROWSER_API_KEY_STORAGE_KEY, readBrowserApiKey } from "../api/client";
+import { api, BROWSER_API_KEY_STORAGE_KEY, readBrowserApiKey } from "../api/client";
+import type { BrowserExtensionPairingKey } from "../api/types";
 import PageHeader from "../components/PageHeader";
 
 const STORAGE_KEY_PER_PAGE = "sb:per_page";
@@ -33,6 +34,10 @@ export default function Settings() {
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [storageError, setStorageError] = useState(false);
+  const [pairing, setPairing] = useState<BrowserExtensionPairingKey | null>(null);
+  const [pairingLoading, setPairingLoading] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
+  const [pairingCopied, setPairingCopied] = useState(false);
 
   const handleSaveApiKey = () => {
     const trimmed = browserApiKey.trim();
@@ -74,6 +79,30 @@ export default function Settings() {
 
     if (!nextStorageError) {
       setTimeout(() => setSaved(false), 2000);
+    }
+  };
+
+  const handleGeneratePairingKey = async () => {
+    setPairingLoading(true);
+    setPairingError(null);
+    setPairingCopied(false);
+    try {
+      setPairing(await api.issueBrowserExtensionPairingKey());
+    } catch (error) {
+      setPairing(null);
+      setPairingError(error instanceof Error ? error.message : "Unable to generate a pairing key.");
+    } finally {
+      setPairingLoading(false);
+    }
+  };
+
+  const handleCopyPairingKey = async () => {
+    if (!pairing) return;
+    try {
+      await navigator.clipboard.writeText(pairing.pairing_key);
+      setPairingCopied(true);
+    } catch {
+      setPairingError("Clipboard access was blocked. Select and copy the key manually.");
     }
   };
 
@@ -168,6 +197,65 @@ export default function Settings() {
               ? "API key saved for this browser."
               : "Use Clear on shared machines after finishing a browser session."}
         </p>
+      </section>
+
+      <section className="sb-panel sb-panel-padding space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-2xl border border-emerald-700/30 bg-emerald-950/40 p-3">
+            <ShieldCheck className="h-5 w-5 text-emerald-300" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="sb-section-title">Pair Palace Capture</p>
+            <p className="mt-2 text-sm leading-7 text-zinc-300">
+              Generate a dedicated one-time key for the browser extension. It can only mint a scoped capture token.
+            </p>
+            <p className="mt-2 text-sm text-zinc-500">
+              The key expires after 10 minutes, works once, and is never stored or shown again by Palace.
+            </p>
+          </div>
+        </div>
+
+        {!pairing ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={() => void handleGeneratePairingKey()}
+              disabled={pairingLoading || !hasBrowserApiKey}
+              className="sb-button-primary"
+            >
+              {pairingLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Key className="h-4 w-4" />}
+              {pairingLoading ? "Generating…" : "Generate pairing key"}
+            </button>
+            <p className={`text-sm ${pairingError ? "text-amber-200" : "text-zinc-500"}`}>
+              {pairingError ?? (hasBrowserApiKey ? "Requires tenant admin access." : "Save an admin tenant API key above first.")}
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-emerald-700/40 bg-emerald-950/25 p-4" data-testid="pairing-key-reveal">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.22em] text-emerald-300">Shown once</p>
+                <p className="mt-2 text-sm text-zinc-300">
+                  Tenant <span className="font-medium text-zinc-100">{pairing.tenant_id}</span> · Palace Capture token only
+                </p>
+              </div>
+              <button type="button" onClick={() => setPairing(null)} className="sb-button-secondary" aria-label="Dismiss pairing key">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+              <input aria-label="One-time pairing key" readOnly value={pairing.pairing_key} className="sb-input font-mono" />
+              <button type="button" onClick={() => void handleCopyPairingKey()} className="sb-button-primary">
+                <ClipboardCopy className="h-4 w-4" />
+                {pairingCopied ? "Copied" : "Copy key"}
+              </button>
+            </div>
+            <p className="mt-3 text-sm text-amber-100">
+              Expires {new Date(pairing.expires_at).toLocaleString()}. Paste it into Palace Capture now; it becomes invalid after one exchange.
+            </p>
+            {pairingError ? <p className="mt-2 text-sm text-amber-200">{pairingError}</p> : null}
+          </div>
+        )}
       </section>
 
       <section className="sb-panel sb-panel-padding space-y-5">

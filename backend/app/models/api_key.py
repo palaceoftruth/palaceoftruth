@@ -31,6 +31,19 @@ class ApiKeyAuditEvent(Base):
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
 
+class BrowserExtensionPairingKey(Base):
+    __tablename__ = "browser_extension_pairing_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    purpose: Mapped[str] = mapped_column(Text, server_default="browser_extension_token", nullable=False)
+    issued_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class McpClient(Base):
     __tablename__ = "mcp_clients"
 
