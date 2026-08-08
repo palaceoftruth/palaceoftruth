@@ -1,4 +1,5 @@
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -1548,6 +1549,34 @@ def test_codex_bridge_report_checks_setup_lifecycle_and_tool_surface(
         "lifecycle_payload": "ok",
         "mcp_tool_surface": "ok",
     }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(cmd=["git", "status"], timeout=5),
+        FileNotFoundError("git"),
+    ],
+)
+def test_git_coordinates_degrade_when_git_is_slow_or_missing(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    # These coordinates are diagnostic metadata. A loaded CI runner can push
+    # `git status` past the timeout and slim containers may ship no git at all;
+    # neither may take down the surrounding report.
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(smoke_module.subprocess, "run", explode)
+
+    coordinates = smoke_module._git_coordinates()
+
+    assert coordinates["branch"] == "unknown"
+    assert coordinates["head"] == "unknown"
+    # `dirty` is derived from the same "unknown" sentinel, so an undetermined
+    # tree reports as dirty. That is the pre-existing behaviour for every other
+    # git failure mode here, and the pessimistic side to err on.
+    assert coordinates["dirty"] is True
 
 
 def test_startup_context_report_composes_offline_evidence_without_live_calls(

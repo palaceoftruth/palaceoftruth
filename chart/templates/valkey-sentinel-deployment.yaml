@@ -42,7 +42,24 @@ spec:
         # emptyDir so those writes don't hit a read-only mount.
         - name: init-sentinel-config
           image: {{ .Values.valkey.image }}
-          command: ["/bin/sh", "-c", "cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf
+              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+              # Kept out of the ConfigMap: the monitored primary's password
+              # must not be readable to anyone who can read ConfigMaps.
+              printf 'sentinel auth-pass %s %s\n' {{ .Values.valkey.sentinel.masterName | quote }} "$VALKEY_PASSWORD" >> /data/sentinel.conf
+              chmod 600 /data/sentinel.conf
+              {{- end }}
+          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
+                  key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
+          {{- end }}
           volumeMounts:
             - name: sentinel-config-template
               mountPath: /etc/sentinel-template
@@ -52,6 +69,18 @@ spec:
         - name: sentinel
           image: {{ .Values.valkey.image }}
           command: ["valkey-sentinel", "/data/sentinel.conf"]
+          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+          # Deliberately not REDISCLI_AUTH: Sentinel's own port has no
+          # requirepass, and valkey-cli treats an unwanted AUTH as a failed
+          # connection. The readiness probe applies this only to the one
+          # command that talks to a data node.
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
+                  key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
+          {{- end }}
           ports:
             - name: sentinel
               containerPort: 26379
@@ -70,7 +99,7 @@ spec:
                   valkey-cli -p 26379 --raw sentinel ckquorum {{ .Values.valkey.sentinel.masterName | quote }} | grep -q '^OK'
                   set -- $(valkey-cli -p 26379 --raw sentinel get-master-addr-by-name {{ .Values.valkey.sentinel.masterName | quote }})
                   test "$#" -eq 2
-                  test "$(valkey-cli -h "$1" -p "$2" --raw role | head -n 1)" = "master"
+                  test "$({{ if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}REDISCLI_AUTH="$VALKEY_PASSWORD" {{ end }}valkey-cli -h "$1" -p "$2" --raw role | head -n 1)" = "master"
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
@@ -81,7 +110,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
         {{- if .Values.valkey.metrics.enabled }}
-        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:26379") | nindent 8 }}
+        {{- /* Sentinel's port is unauthenticated, so the exporter must not send AUTH. */}}
+        {{- include "palaceoftruth.valkeyExporterContainer" (dict "root" . "address" "redis://127.0.0.1:26379" "auth" false) | nindent 8 }}
         {{- end }}
       volumes:
         - name: sentinel-config-template

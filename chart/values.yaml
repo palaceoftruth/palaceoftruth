@@ -259,6 +259,39 @@ postgres:
 valkey:
   enabled: true
   image: valkey/valkey:8-alpine
+
+  # Password authentication on the Valkey data port. Keep this on: ARQ job
+  # payloads are executable work items, so an unauthenticated 6379 lets any pod
+  # that can reach it schedule work on every worker.
+  #
+  # Password resolution order:
+  #   1. auth.existingSecret — an operator- or ExternalSecrets-managed Secret.
+  #   2. auth.password — a literal, rendered into a chart-managed Secret.
+  #   3. Neither (the default) — the chart generates a random password into
+  #      <release>-valkey-auth and reuses it forever via `lookup`. No rotation
+  #      chore, and the password never appears in git.
+  #
+  # Option 3 depends on `lookup`, which only resolves when Helm runs a real
+  # install/upgrade against a cluster. That covers `helm install/upgrade` and
+  # Flux's helm-controller, which performs genuine Helm actions -- so the
+  # generated password is stable across reconciles there. It does NOT cover
+  # plain `helm template` (CI renders, and Argo CD's default renderer), where
+  # `lookup` yields nothing and every render mints a fresh password. Installs
+  # reconciled that way must use option 1 or 2.
+  #
+  # Option 3 also requires the reconciling controller's ServiceAccount to hold
+  # `get` on Secrets in the release namespace; without it `lookup` silently
+  # returns empty and the password rotates on every reconcile. Flux's default
+  # install satisfies this.
+  #
+  # The generated Secret carries `helm.sh/resource-policy: keep` so an
+  # uninstall cannot orphan a persisted dataset behind a password nobody holds.
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretKey: valkey-password
+    password: ""
+
   storage:
     size: 1Gi
   resources:
@@ -488,6 +521,28 @@ networkPolicy:
   #       - protocol: TCP
   #         port: 443
   additionalEgress: []
+
+  # Inbound restrictions. Without these, any pod in any namespace can open a
+  # session to Valkey (6379), Postgres (5432), the backend API (8000) and the
+  # MCP server (8765) — the egress policy above constrains only outbound
+  # traffic. Valkey in particular has no other tenant boundary: an ARQ queue
+  # write is a work item a worker will execute.
+  ingress:
+    enabled: true
+    # Namespace hosting the ingress controller that fronts backend and MCP.
+    # Matched on the standard kubernetes.io/metadata.name label. Set to "" to
+    # skip the rule (e.g. when the controller runs in this namespace).
+    ingressControllerNamespace: ingress-nginx
+    # Namespace running Prometheus. Permitted to scrape the exporter and
+    # application metrics ports only. Set to "" to skip.
+    monitoringNamespace: monitoring
+    # Namespace running the CloudNativePG operator. It must reach the Postgres
+    # instance pods to manage the cluster; blocking it wedges failover and
+    # backups. Set to "" to skip when postgres.enabled=false.
+    cnpgOperatorNamespace: cnpg-system
+    # Extra inbound rules for deployment-owned peers, appended to the app-tier
+    # policy. Same shape as a NetworkPolicy ingress rule.
+    additionalIngress: []
 
 migrations:
   # Runs Alembic once per rendered app release. Backend pods wait for the

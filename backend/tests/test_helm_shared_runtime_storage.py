@@ -661,7 +661,13 @@ def test_standalone_valkey_exporter_renders_hardened_sidecar_and_metrics_service
     env = _container_env(exporter)
 
     assert exporter["image"] == "oliver006/redis_exporter:v1.77.0"
-    assert env == {"REDIS_ADDR": {"name": "REDIS_ADDR", "value": "redis://127.0.0.1:6379"}}
+    assert env["REDIS_ADDR"] == {"name": "REDIS_ADDR", "value": "redis://127.0.0.1:6379"}
+    # Valkey requires a password by default, so the exporter must authenticate.
+    assert env["REDIS_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+        "name": "palaceoftruth-valkey-auth",
+        "key": "valkey-password",
+    }
+    assert set(env) == {"REDIS_ADDR", "REDIS_PASSWORD"}
     assert exporter["ports"] == [{"name": "metrics", "containerPort": 9121, "protocol": "TCP"}]
     assert exporter["securityContext"] == {
         "allowPrivilegeEscalation": False,

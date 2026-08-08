@@ -37,6 +37,10 @@ from app.services.llm import LLMService
 from app.services.palace import create_sync_source
 from app.services.prometheus_metrics import HttpMetricsRecorder, monotonic_seconds
 from app.wait_for_database import wait_for_writable_database
+from app.workers.serialization import (
+    job_deserializer as json_job_deserializer,
+    job_serializer as json_job_serializer,
+)
 
 logger = logging.getLogger(__name__)
 _HTTP_METRICS = HttpMetricsRecorder()
@@ -150,7 +154,13 @@ async def lifespan(app: FastAPI):
     await _seed_default_palace_sync_source()
 
     # ARQ Redis pool for enqueueing tasks
-    app.state.arq_pool = await create_pool(make_redis_settings())
+    # JSON serializers must match the workers'; ARQ's pickle default would turn
+    # any queue write into remote code execution inside a worker.
+    app.state.arq_pool = await create_pool(
+        make_redis_settings(),
+        job_serializer=json_job_serializer,
+        job_deserializer=json_job_deserializer,
+    )
     logger.info("ARQ pool ready")
 
     # Shared AI services for search/chat API path

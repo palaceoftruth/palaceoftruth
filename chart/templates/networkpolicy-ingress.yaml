@@ -1,0 +1,237 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.ingress.enabled }}
+{{- $fullname := include "palaceoftruth.fullname" . }}
+{{- /*
+Pods allowed to open sessions to the data tier. The migration and rollout-smoke
+Jobs are included because both connect to Postgres or Valkey as part of a
+release; leaving them out wedges deploys rather than failing loudly. The MCP
+server is deliberately absent: it is a pure HTTP client of the backend API and
+holds no database or queue credentials.
+*/}}
+{{- $dataPeers := list
+      (printf "%s-backend" $fullname)
+      (printf "%s-worker" $fullname)
+      (printf "%s-media-worker" $fullname)
+      (printf "%s-palace-worker" $fullname)
+      (printf "%s-migration" $fullname)
+      (printf "%s-memory-rollout-smoke" $fullname)
+}}
+{{- /* Pods allowed to call the backend API and the MCP server. */}}
+{{- $appPeers := append $dataPeers (include "palaceoftruth.mcpServiceName" .) }}
+{{- $monitoringNamespace := .Values.networkPolicy.ingress.monitoringNamespace }}
+{{- $ingressNamespace := .Values.networkPolicy.ingress.ingressControllerNamespace }}
+{{- if .Values.valkey.enabled }}
+---
+# Valkey holds the ARQ queues. A write to a queue is a work item some worker
+# will execute, so inbound access is restricted to the pods that legitimately
+# enqueue or consume jobs. This is the network half of the fix; the other half
+# is requirepass (valkey.auth) plus JSON job serialization in the app.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-valkey-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - {{ include "palaceoftruth.valkeyServiceName" . }}
+          - {{ include "palaceoftruth.valkeyPrimaryName" . }}
+          - {{ include "palaceoftruth.valkeyReplicaName" . }}
+          - {{ include "palaceoftruth.valkeySentinelName" . }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Application pods reaching the data port and, in Sentinel mode, the
+    # Sentinel port for primary discovery.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  {{- range $dataPeers }}
+                  - {{ . }}
+                  {{- end }}
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 26379
+    {{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+    # Replication and Sentinel quorum are pod-to-pod within the Valkey tier.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - {{ include "palaceoftruth.valkeyPrimaryName" . }}
+                  - {{ include "palaceoftruth.valkeyReplicaName" . }}
+                  - {{ include "palaceoftruth.valkeySentinelName" . }}
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 26379
+    {{- end }}
+    {{- if and .Values.valkey.metrics.enabled $monitoringNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.valkey.metrics.port }}
+    {{- end }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# CloudNativePG labels every instance pod with its cluster name. The operator
+# keeps full access: denying it breaks failover, backups and status reporting.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-postgres-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: {{ include "palaceoftruth.postgresClusterName" . }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  {{- range $dataPeers }}
+                  - {{ . }}
+                  {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Streaming replication between instances of this cluster.
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ include "palaceoftruth.postgresClusterName" . }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- if .Values.networkPolicy.ingress.cnpgOperatorNamespace }}
+    # The operator uses 8000 for instance status and 5432 for management.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingress.cnpgOperatorNamespace }}
+    {{- end }}
+    {{- if $monitoringNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 9187
+    {{- end }}
+{{- end }}
+---
+# Backend API and MCP server. Both are reached through the ingress controller
+# and from in-cluster callers; nothing else in the cluster needs them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-app-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - {{ $fullname }}-backend
+          - {{ include "palaceoftruth.mcpServiceName" . }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Frontend, MCP and the workers all call the backend; MCP is called by the
+    # backend. One rule covers both selected tiers.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  {{- range $appPeers }}
+                  - {{ . }}
+                  {{- end }}
+                  - {{ $fullname }}-frontend
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: {{ .Values.mcp.port }}
+    {{- if $ingressNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: {{ .Values.mcp.port }}
+    {{- end }}
+    {{- if $monitoringNamespace }}
+    # Prometheus scrapes /metrics on the same port the API serves.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- end }}
+    {{- with .Values.networkPolicy.ingress.additionalIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# The frontend is only ever reached through the ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-frontend-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $fullname }}-frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- if $ingressNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: 80
+    {{- else }}
+    # No ingress-controller namespace configured; leave the tier reachable
+    # rather than rendering a policy that black-holes all web traffic.
+    - {}
+    {{- end }}
+{{- end }}

@@ -6,6 +6,13 @@ process arguments or rendered environment values.
 {{- define "palaceoftruth.valkeyExporterContainer" -}}
 {{- $root := .root -}}
 {{- $secretConfigured := or $root.Values.valkey.metrics.existingSecret $root.Values.valkey.metrics.passwordFileKey -}}
+{{- /*
+`auth` says whether the scraped endpoint requires a password. It is false for
+Sentinel, whose port is unauthenticated and which rejects an unsolicited AUTH.
+An explicit password-file wiring always wins, so operators can keep pointing the
+exporter at their own credential map.
+*/ -}}
+{{- $chartAuth := and (not $secretConfigured) .auth (eq (include "palaceoftruth.valkeyAuthEnabled" $root) "true") -}}
 - name: valkey-exporter
   image: {{ $root.Values.valkey.metrics.image }}
   imagePullPolicy: {{ $root.Values.valkey.metrics.imagePullPolicy }}
@@ -15,6 +22,12 @@ process arguments or rendered environment values.
     {{- if $secretConfigured }}
     - name: REDIS_PASSWORD_FILE
       value: /run/secrets/valkey-exporter/password.json
+    {{- else if $chartAuth }}
+    - name: REDIS_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "palaceoftruth.valkeyAuthSecretName" $root }}
+          key: {{ include "palaceoftruth.valkeyAuthSecretKey" $root }}
     {{- end }}
   ports:
     - name: metrics
