@@ -266,15 +266,26 @@ valkey:
   #
   # Password resolution order:
   #   1. auth.existingSecret — an operator- or ExternalSecrets-managed Secret.
-  #      This is the correct choice for GitOps installs.
   #   2. auth.password — a literal, rendered into a chart-managed Secret.
-  #   3. Neither — the chart generates a random password into
-  #      <release>-valkey-auth and reuses it on upgrade via `lookup`.
+  #   3. Neither (the default) — the chart generates a random password into
+  #      <release>-valkey-auth and reuses it forever via `lookup`. No rotation
+  #      chore, and the password never appears in git.
   #
-  # Option 3 depends on `lookup`, which returns nothing under plain
-  # `helm template` (including Argo CD renders that do not enable it). In that
-  # mode every render produces a fresh password and churns the Secret, so
-  # continuously-reconciled installs must use option 1 or 2.
+  # Option 3 depends on `lookup`, which only resolves when Helm runs a real
+  # install/upgrade against a cluster. That covers `helm install/upgrade` and
+  # Flux's helm-controller, which performs genuine Helm actions -- so the
+  # generated password is stable across reconciles there. It does NOT cover
+  # plain `helm template` (CI renders, and Argo CD's default renderer), where
+  # `lookup` yields nothing and every render mints a fresh password. Installs
+  # reconciled that way must use option 1 or 2.
+  #
+  # Option 3 also requires the reconciling controller's ServiceAccount to hold
+  # `get` on Secrets in the release namespace; without it `lookup` silently
+  # returns empty and the password rotates on every reconcile. Flux's default
+  # install satisfies this.
+  #
+  # The generated Secret carries `helm.sh/resource-policy: keep` so an
+  # uninstall cannot orphan a persisted dataset behind a password nobody holds.
   auth:
     enabled: true
     existingSecret: ""

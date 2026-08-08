@@ -143,12 +143,20 @@ def test_every_client_workload_receives_the_password() -> None:
         ), f"{name} has no Redis credentials"
 
 
-def test_the_password_never_lands_in_a_configmap() -> None:
+def test_the_password_is_rendered_in_exactly_one_manifest() -> None:
+    # This is what makes the generated default safe. The password template uses
+    # randAlphaNum when no existing Secret is found, so a second render site
+    # would produce a *different* value in the same render and lock the app out
+    # of its own Valkey. Every consumer must reference the Secret by key.
     manifests = _render_chart("valkey.auth.password=s3cret-literal")
 
-    for manifest in manifests:
-        if manifest.get("kind") == "ConfigMap":
-            assert "s3cret-literal" not in yaml.safe_dump(manifest)
+    carriers = [
+        f"{manifest['kind']}/{manifest['metadata']['name']}"
+        for manifest in manifests
+        if "s3cret-literal" in yaml.safe_dump(manifest)
+    ]
+
+    assert carriers == [f"Secret/{SECRET_NAME}"]
 
 
 def test_auth_can_be_disabled_for_local_and_test_installs() -> None:
