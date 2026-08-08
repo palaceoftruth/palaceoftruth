@@ -81,7 +81,7 @@ async function mockGraph(
     | { type: "success"; json: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } }
     | { type: "error"; status?: number; body?: string },
 ) {
-  await page.route("**/api/v1/graph", async (route) => {
+  await page.route("**/api/v1/graph?*", async (route) => {
     if (options.type === "error") {
       await route.fulfill({
         status: options.status ?? 503,
@@ -161,12 +161,12 @@ test.describe("Route smoke", () => {
   });
 
   test("home route sends the browser API key from local storage", async ({ page }) => {
-    const seenKeys: string[] = [];
+    const seenKeys: Array<{ endpoint: string; key: string }> = [];
     await page.addInitScript(() => {
       localStorage.setItem("sb:browser_api_key", "browser-test-key");
     });
     await page.route("**/api/v1/stats", async (route) => {
-      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      seenKeys.push({ endpoint: "stats", key: route.request().headers()["x-api-key"] ?? "" });
       await route.fulfill({
         json: {
           total_items: 0,
@@ -180,11 +180,11 @@ test.describe("Route smoke", () => {
       });
     });
     await page.route("**/api/v1/items?*", async (route) => {
-      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      seenKeys.push({ endpoint: "items", key: route.request().headers()["x-api-key"] ?? "" });
       await route.fulfill({ json: { items: [], total: 0, page: 1, per_page: 10 } });
     });
     await page.route("**/api/v1/export?*", async (route) => {
-      seenKeys.push(route.request().headers()["x-api-key"] ?? "");
+      seenKeys.push({ endpoint: "export", key: route.request().headers()["x-api-key"] ?? "" });
       await route.fulfill({
         body: "export",
         headers: { "Content-Type": "application/zip" },
@@ -195,7 +195,9 @@ test.describe("Route smoke", () => {
 
     await expect(page.getByRole("heading", { name: "Home" })).toBeVisible();
     await page.getByRole("button", { name: "Export JSON" }).click();
-    await expect.poll(() => seenKeys).toEqual(["browser-test-key", "browser-test-key", "browser-test-key"]);
+    await expect.poll(() => seenKeys.some(({ endpoint }) => endpoint === "export")).toBe(true);
+    expect(seenKeys.length).toBeGreaterThanOrEqual(3);
+    expect(seenKeys.every(({ key }) => key === "browser-test-key")).toBe(true);
   });
 
   test("api docs route requests and renders the OpenAPI document", async ({ page }) => {

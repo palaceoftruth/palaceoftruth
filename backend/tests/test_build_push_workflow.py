@@ -12,6 +12,7 @@ HOSTED_RUNNER = "ubuntu-24.04"
 GH_SETUP_ACTION = "./.github/actions/setup-gh"
 CHECKOUT_ACTION = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
 COMMIT_PINNED_ACTION = re.compile(r"^[^./][^@]*@[0-9a-f]{40}$")
+OCI_PINNED_ACTION = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
 
 
 def _load_workflow() -> dict:
@@ -33,16 +34,21 @@ def _expected_validation_runner(event_name: str, head_repository: str | None) ->
 
 def test_validation_preserves_one_job_name_and_routes_by_pr_trust() -> None:
     workflow = _load_workflow()
-    validate = workflow["jobs"]["validate"]
+    classify = workflow["jobs"]["classify"]
+    validate = workflow["jobs"]["ci-gate"]
 
+    assert _normalize_expression(classify["runs-on"]) == (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.head.repo.full_name != github.repository && "
+        "'ubuntu-24.04' || 'palace-trusted-amd64' }}"
+    )
     assert _normalize_expression(validate["runs-on"]) == (
         "${{ github.event_name == 'pull_request' && "
         "github.event.pull_request.head.repo.full_name != github.repository && "
         "'ubuntu-24.04' || 'palace-trusted-amd64' }}"
     )
-    assert validate["if"] == (
-        "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'"
-    )
+    assert validate["name"] == "validate"
+    assert validate["if"] == "always()"
     assert _expected_validation_runner("pull_request", "palaceoftruth/palaceoftruth") == TRUSTED_RUNNER
     assert _expected_validation_runner("pull_request", "contributor/palaceoftruth") == HOSTED_RUNNER
     assert _expected_validation_runner("push", None) == TRUSTED_RUNNER
@@ -55,17 +61,28 @@ def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:
         "github.event_name == 'push' || "
         "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
     )
+    classified_main_push_or_dispatch = (
+        "needs.classify.outputs.chart_release_only != 'true' && "
+        f"({main_push_or_dispatch})"
+    )
 
-    assert jobs["build-push"]["runs-on"] == TRUSTED_RUNNER
-    assert jobs["build-push"]["if"] == main_push_or_dispatch
+    assert jobs["build-backend"]["runs-on"] == TRUSTED_RUNNER
+    assert _normalize_expression(jobs["build-backend"]["if"]) == classified_main_push_or_dispatch
+    assert jobs["build-frontend"]["runs-on"] == TRUSTED_RUNNER
+    assert _normalize_expression(jobs["build-frontend"]["if"]) == classified_main_push_or_dispatch
     assert jobs["publish-chart"]["runs-on"] == TRUSTED_RUNNER
     assert jobs["publish-chart"]["if"] == main_push_or_dispatch
     assert jobs["publish-agent-plugin"]["runs-on"] == TRUSTED_RUNNER
-    assert jobs["publish-agent-plugin"]["if"] == (
+    assert _normalize_expression(jobs["publish-agent-plugin"]["if"]) == (
+        "needs.classify.outputs.chart_release_only != 'true' && "
         "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     )
-    assert jobs["build-push"]["permissions"] == {
+    assert jobs["build-backend"]["permissions"] == {
         "contents": "write",
+        "packages": "write",
+    }
+    assert jobs["build-frontend"]["permissions"] == {
+        "contents": "read",
         "packages": "write",
     }
     assert jobs["publish-agent-plugin"]["permissions"] == {"contents": "write"}
@@ -91,7 +108,7 @@ def test_remote_actions_are_commit_pinned() -> None:
             action = step.get("uses")
             if not action or action.startswith("./"):
                 continue
-            assert COMMIT_PINNED_ACTION.fullmatch(action), (
+            assert COMMIT_PINNED_ACTION.fullmatch(action) or OCI_PINNED_ACTION.fullmatch(action), (
                 f"{job_name} uses mutable remote action reference {action}"
             )
 
@@ -128,7 +145,160 @@ def test_every_trusted_job_using_gh_provisions_the_pinned_cli_first() -> None:
         assert checkout_indexes[0] < setup_indexes[0]
         assert setup_indexes[0] < min(gh_step_indexes)
 
-    assert jobs_using_gh == {"build-push", "publish-agent-plugin", "publish-chart"}
+    assert jobs_using_gh == {"build-backend", "publish-agent-plugin", "publish-chart"}
+
+
+def test_image_builds_are_parallel_cached_and_digest_bound() -> None:
+    jobs = _load_workflow()["jobs"]
+    backend = jobs["build-backend"]
+    frontend = jobs["build-frontend"]
+    publish_chart = jobs["publish-chart"]
+
+    assert backend["needs"] == ["classify", "ci-gate"]
+    assert frontend["needs"] == ["classify", "ci-gate"]
+    assert publish_chart["needs"] == ["build-backend", "build-frontend"]
+
+    backend_steps = {step.get("id"): step for step in backend["steps"] if step.get("id")}
+    assert backend_steps["backend_runtime"]["with"]["target"] == "backend-runtime"
+    assert backend_steps["backend_ci"]["with"]["target"] == "backend-ci"
+    assert backend_steps["backend"]["with"]["target"] == "app"
+    assert backend["outputs"]["backend_digest"] == "${{ steps.backend.outputs.digest }}"
+    assert backend["outputs"]["backend_runtime_digest"] == (
+        "${{ steps.backend_runtime.outputs.digest }}"
+    )
+    assert backend["outputs"]["backend_ci_digest"] == "${{ steps.backend_ci.outputs.digest }}"
+    assert frontend["outputs"]["frontend_digest"] == "${{ steps.frontend.outputs.digest }}"
+
+    for job in (backend, frontend):
+        for step in job["steps"]:
+            if not step.get("uses", "").startswith("docker/build-push-action@"):
+                continue
+            cache_to = step["with"]["cache-to"]
+            assert "type=registry" in cache_to
+            assert "mode=max" in cache_to
+
+    digest_step = next(
+        step for step in publish_chart["steps"] if step.get("name") == "Record published image digests"
+    )
+    assert digest_step["env"]["BACKEND_DIGEST"] == (
+        "${{ needs.build-backend.outputs.backend_digest }}"
+    )
+    assert digest_step["env"]["FRONTEND_DIGEST"] == (
+        "${{ needs.build-frontend.outputs.frontend_digest }}"
+    )
+
+
+def test_validation_fans_out_to_required_lanes_and_aggregates_one_gate() -> None:
+    jobs = _load_workflow()["jobs"]
+    lane_names = [
+        "backend-fast",
+        "backend-database",
+        "frontend",
+        "helm-policy",
+        "extension",
+        "browser",
+    ]
+    gate = jobs["ci-gate"]
+
+    assert gate["name"] == "validate"
+    assert gate["needs"] == ["classify", *lane_names]
+    assert gate["if"] == "always()"
+    assert gate["permissions"] == {}
+    assert jobs["build-backend"]["needs"] == ["classify", "ci-gate"]
+    assert jobs["build-frontend"]["needs"] == ["classify", "ci-gate"]
+    assert jobs["publish-agent-plugin"]["needs"] == ["classify", "ci-gate"]
+
+    expected_runner = _normalize_expression(jobs["classify"]["runs-on"])
+    for lane_name in lane_names:
+        lane = jobs[lane_name]
+        assert lane["needs"] == "classify"
+        assert _normalize_expression(lane["runs-on"]) == expected_runner
+
+    gate_step = gate["steps"][0]
+    assert gate_step["env"]["HELM_POLICY_RESULT"] == "${{ needs.helm-policy.result }}"
+    assert 'if [ "$CHART_RELEASE_ONLY" = "true" ]' in gate_step["run"]
+    assert "All required validation lanes succeeded." in gate_step["run"]
+
+
+def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks() -> None:
+    jobs = _load_workflow()["jobs"]
+
+    backend_step = next(
+        step for step in jobs["backend-fast"]["steps"] if step.get("name") == "Run backend test suite"
+    )
+    assert "python -m pytest tests" in backend_step["run"]
+    assert "--ignore=tests/test_retrieval_query_plans.py" in backend_step["run"]
+    assert "--ignore-glob='tests/test_helm_*.py'" in backend_step["run"]
+
+    database_step = next(
+        step
+        for step in jobs["backend-database"]["steps"]
+        if step.get("name") == "Verify query plans and migration round trip"
+    )
+    assert "tests/test_retrieval_query_plans.py" in database_step["run"]
+    assert "verify_migration_roundtrip.py" in database_step["run"]
+
+    helm_steps = jobs["helm-policy"]["steps"]
+    actionlint_step = next(step for step in helm_steps if step.get("name") == "Lint GitHub Actions")
+    assert OCI_PINNED_ACTION.fullmatch(actionlint_step["uses"])
+    assert "chart_release_only" not in jobs["helm-policy"]["if"]
+    assert any("tests/test_helm_*.py" in step.get("run", "") for step in helm_steps)
+
+    assert any("npm test" in step.get("run", "") for step in jobs["extension"]["steps"])
+    browser = jobs["browser"]
+    assert browser["container"]["image"].startswith(
+        "mcr.microsoft.com/playwright:v1.59.1-noble@sha256:"
+    )
+    browser_test_step = next(
+        step for step in browser["steps"] if step.get("name") == "Run mocked Playwright suite"
+    )
+    assert "npm run test:e2e -- --workers=1" in browser_test_step["run"]
+    assert browser_test_step["env"]["HOME"] == "/root"
+
+    report_step = next(
+        step for step in browser["steps"] if step.get("name") == "Upload Playwright report"
+    )
+    assert report_step["if"] == "${{ !cancelled() }}"
+    assert report_step["uses"] == (
+        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    )
+    assert report_step["with"]["retention-days"] == "14"
+
+    failure_step = next(
+        step
+        for step in browser["steps"]
+        if step.get("name") == "Upload Playwright failure artifacts"
+    )
+    assert failure_step["if"] == "${{ failure() }}"
+    assert failure_step["with"]["retention-days"] == "7"
+
+    playwright_config = (REPO_ROOT / "frontend" / "playwright.config.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "retries: process.env.CI ? 2 : 0" in playwright_config
+    assert '["html", { open: "never" }]' in playwright_config
+    assert 'outputDir: process.env.CI' in playwright_config
+    assert 'screenshot: "only-on-failure"' in playwright_config
+    assert 'trace: "on-first-retry"' in playwright_config
+
+
+def test_backend_dockerfile_uses_pinned_locked_image_targets() -> None:
+    dockerfile = (REPO_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "FROM python:3.12-slim@sha256:" in dockerfile
+    assert "FROM ghcr.io/astral-sh/uv:0.11.29@sha256:" in dockerfile
+    assert "AS backend-ci" in dockerfile
+    assert "AS backend-runtime" in dockerfile
+    assert "AS app" in dockerfile
+    assert "uv sync --frozen --no-dev --no-install-project" in dockerfile
+    assert "uv sync --frozen --all-groups --no-install-project" in dockerfile
+    assert dockerfile.index("AS backend-ci") < dockerfile.index("apt-get install")
+    assert dockerfile.index("AS backend-ci") < dockerfile.index("playwright install")
+
+    frontend_dockerfile = (REPO_ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM node:22-alpine@sha256:" in frontend_dockerfile
+    assert "FROM nginx:alpine@sha256:" in frontend_dockerfile
+    assert "RUN npm ci" in frontend_dockerfile
 
 
 def test_github_cli_setup_is_version_and_checksum_pinned() -> None:
