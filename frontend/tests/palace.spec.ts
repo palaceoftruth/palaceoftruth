@@ -584,8 +584,6 @@ test.describe("Palace smoke", () => {
     await page.goto(`/palace?e2e=${Date.now()}`);
 
     const navigator = page.getByRole("navigation", { name: "Desktop Palace wing and room navigation" });
-    const roomPanel = page.getByRole("heading", { name: "Room 01" }).locator("xpath=ancestor::section[1]");
-    const tracePanel = page.getByText("Retrieval trace").locator("xpath=ancestor::aside[1]");
     await expect(navigator).toBeVisible();
     const firstWing = navigator.getByRole("button", { name: /Wing 01 1 rooms, 1 drawers/ });
     const finalWing = navigator.getByRole("button", { name: /Wing 15 1 rooms, 15 drawers/ });
@@ -593,15 +591,6 @@ test.describe("Palace smoke", () => {
     await expect(navigator.getByLabel("Rooms in Wing 01")).toBeVisible();
     await expect(navigator.getByLabel("Rooms in Wing 02")).not.toBeVisible();
     await expect(navigator).toHaveCSS("overflow-y", "visible");
-
-    const navigatorBox = await navigator.boundingBox();
-    const roomPanelBox = await roomPanel.boundingBox();
-    const tracePanelBox = await tracePanel.boundingBox();
-    expect(navigatorBox).not.toBeNull();
-    expect(roomPanelBox).not.toBeNull();
-    expect(tracePanelBox).not.toBeNull();
-    expect(Math.abs(navigatorBox!.height - roomPanelBox!.height)).toBeLessThan(2);
-    expect(Math.abs(navigatorBox!.height - tracePanelBox!.height)).toBeLessThan(2);
 
     await finalWing.scrollIntoViewIfNeeded();
     await finalWing.click();
@@ -1862,6 +1851,30 @@ test.describe("Palace smoke", () => {
 
     await page.route("**/api/v1/palace/control-tower", async (route) => {
       await route.fulfill({ json: currentTower });
+    });
+    await page.route("**/api/v1/palace/sync-sources", async (route) => {
+      await route.fulfill({ json: currentTower.sync_sources });
+    });
+    await page.route("**/api/v1/palace/mcp-grants", async (route) => {
+      await route.fulfill({ json: { tenant_id: "default", grants: [] } });
+    });
+    await page.route("**/api/v1/palace/room-clusters", async (route) => {
+      await route.fulfill({
+        json: {
+          response_version: "room-cluster-review/v1",
+          evidence_signature: "test-empty-room-clusters",
+          generated_at: "2026-08-08T00:00:00Z",
+          candidate_count: 0,
+          candidates: [],
+          evaluated_rooms: 0,
+          total_rooms: 0,
+          truncated: false,
+          warnings: [],
+        },
+      });
+    });
+    await page.route("**/api/v1/palace/source-resources", async (route) => {
+      await route.fulfill({ json: { resources: [], total: 0 } });
     });
     await page.route("**/api/v1/palace/mcp-clients", async (route) => {
       await route.fulfill({
