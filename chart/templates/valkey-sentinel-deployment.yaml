@@ -25,6 +25,8 @@ spec:
         # Palace releases do not recycle the Sentinel ensemble.
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "valkeySentinel") | nindent 6 }}
       # Spread sentinel pods across nodes to prevent a single node failure
       # from taking out quorum.
       affinity:
@@ -42,6 +44,7 @@ spec:
         # emptyDir so those writes don't hit a read-only mount.
         - name: init-sentinel-config
           image: {{ .Values.valkey.image }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
           command: ["/bin/sh", "-ec"]
           args:
             - |
@@ -68,6 +71,7 @@ spec:
       containers:
         - name: sentinel
           image: {{ .Values.valkey.image }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
           command: ["valkey-sentinel", "/data/sentinel.conf"]
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # Deliberately not REDISCLI_AUTH: Sentinel's own port has no

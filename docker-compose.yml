@@ -217,7 +217,7 @@ services:
       - "traefik.http.routers.palaceoftruth-frontend.rule=Host(`palaceoftruth.test`) || Host(`www.palaceoftruth.test`)"
       - "traefik.http.routers.palaceoftruth-frontend.entrypoints=websecure"
       - "traefik.http.routers.palaceoftruth-frontend.tls=true"
-      - "traefik.http.services.palaceoftruth-frontend.loadbalancer.server.port=80"
+      - "traefik.http.services.palaceoftruth-frontend.loadbalancer.server.port=8080"
       - "traefik.docker.network=traefik"
     depends_on:
       - backend

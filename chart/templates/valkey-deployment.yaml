@@ -21,9 +21,12 @@ spec:
         app: {{ include "palaceoftruth.valkeyServiceName" . }}
         {{- include "palaceoftruth.labels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "valkey") | nindent 6 }}
       containers:
         - name: valkey
           image: {{ .Values.valkey.image }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "valkey") | nindent 10 }}
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # The password is written to a private file rather than passed as a
           # server argument, because argv is readable from /proc.

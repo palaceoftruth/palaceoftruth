@@ -1,4 +1,7 @@
 {{- if .Values.postgres.enabled }}
+{{- if and .Values.postgres.backup.requireBackup (not .Values.postgres.backup.enabled) }}
+{{- fail "postgres.backup.requireBackup=true but postgres.backup.enabled=false: configure objectStore backups or clear requireBackup" }}
+{{- end }}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:

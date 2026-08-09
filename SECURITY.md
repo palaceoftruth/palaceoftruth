@@ -25,6 +25,32 @@ Do not open a public issue for secrets, authentication bypasses, tenant isolatio
 - Webhook and repo/source sync inputs must not expose internal services, local files, or cluster credentials.
 - Documentation, examples, PRs, and benchmark artifacts must not include raw secrets, bearer tokens, private transcript text, or production data dumps.
 
+## Cluster Hardening Defaults
+
+The Helm chart ships hardened defaults rather than leaving them to each
+deployment:
+
+- Every pod satisfies the Kubernetes `restricted` Pod Security Standard: non-root
+  uid, `RuntimeDefault` seccomp, all capabilities dropped, no privilege
+  escalation, and a read-only root filesystem.
+- The namespace carries `pod-security.kubernetes.io/{enforce,audit,warn}`
+  labels so a workload that drops its securityContext is rejected rather than
+  admitted quietly.
+- ServiceAccount tokens are not auto-mounted. The one exception is the memory
+  rollout smoke Job, which holds a minimal read-only Role for pods and pod
+  logs.
+- Ingress NetworkPolicies restrict Postgres, Valkey, the API, and the MCP
+  server to the pods that legitimately reach them.
+- Postgres carries explicit resource requests, so the database is never the
+  first pod evicted under node memory pressure.
+
+Backups cannot be on by default, because the destination and credentials are
+environment-owned. Set `postgres.backup.requireBackup: true` in production
+values so a release without backups fails to render.
+
+See [INTEGRATIONS.md](INTEGRATIONS.md) for the values that control these and
+for the supported ways to relax one workload.
+
 ## Local Development
 
 Use `.env.example` as a template and keep `.env` out of git. Generate strong local values for:

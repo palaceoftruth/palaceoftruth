@@ -11,4 +11,4 @@ spec:
     app: {{ include "palaceoftruth.fullname" . }}-frontend
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: {{ .Values.frontend.containerPort }}

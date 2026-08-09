@@ -588,7 +588,9 @@ def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonit
 
     postgres_cluster = _manifest_by_kind_name(manifests, "Cluster", "palaceoftruth-postgres")
     assert postgres_cluster["spec"]["postgresql"]["parameters"] == {"shared_buffers": "128MB"}
-    assert "resources" not in postgres_cluster["spec"]
+    # The cluster ships explicit requests so it is never BestEffort. Sizing is
+    # asserted in test_helm_pod_security.py.
+    assert postgres_cluster["spec"]["resources"]["requests"]["memory"]
     assert not any(manifest.get("kind") == "PodMonitor" for manifest in manifests)
 
 

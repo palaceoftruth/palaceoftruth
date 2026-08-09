@@ -8,7 +8,8 @@ metadata:
 data:
   default.conf: |
     server {
-        listen 80;
+        # nginx-unprivileged cannot bind below 1024 as a non-root user.
+        listen {{ .Values.frontend.containerPort }};
         root /usr/share/nginx/html;
         index index.html;
         client_max_body_size 100m;

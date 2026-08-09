@@ -79,6 +79,68 @@ oci://ghcr.io/palaceoftruth/palaceoftruth/palaceoftruth
 External operators can also use the local chart path above without publishing an
 OCI chart first.
 
+### Pod Hardening
+
+Every pod the chart renders satisfies the Kubernetes `restricted` Pod Security
+Standard by default. Workloads inherit this; there is no per-workload opt-in to
+forget.
+
+| Level | Setting |
+| --- | --- |
+| Pod | `runAsNonRoot: true`, `runAsUser`/`runAsGroup`/`fsGroup` 10001, `seccompProfile: RuntimeDefault` |
+| Container | `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]` |
+| Pod | `automountServiceAccountToken: false` |
+
+Because the root filesystem is read-only, application containers mount two
+`emptyDir` volumes: `/tmp` for temp files and staged media, and
+`podSecurity.homeDir` (default `/home/palace`) for the MCP credential cache.
+`HOME` is set to that path.
+
+The only pod that mounts a ServiceAccount token is the memory rollout smoke
+Job, which reads pods and pod logs through a minimal namespaced Role to verify
+a rollout.
+
+The frontend runs `nginx-unprivileged`, which cannot bind a port below 1024 as
+a non-root user. It listens on `frontend.containerPort` (default 8080); the
+Service still publishes 80, so ingress configuration is unchanged.
+
+When `namespace.create=true`, the chart labels the namespace for Pod Security
+Admission:
+
+```yaml
+podSecurity:
+  admission:
+    enabled: true
+    enforce: restricted
+    audit: restricted
+    warn: restricted
+    version: latest
+```
+
+Enforcing `restricted` rejects any future workload that drops its
+securityContext. Adding these labels to a namespace that already holds pods
+created by other tooling can block those pods on their next restart; start
+with `enforce: baseline` and keep `audit`/`warn` at `restricted`, then tighten
+once the audit annotations are clean.
+
+Relax a single workload through `podSecurity.overrides.<workload>`, which is
+merged last:
+
+```yaml
+podSecurity:
+  overrides:
+    localEmbedding:
+      container:
+        readOnlyRootFilesystem: false
+```
+
+Recognized keys: `backend`, `frontend`, `worker`, `mediaWorker`,
+`palaceWorker`, `mcp`, `migration`, `memoryRolloutSmoke`, `valkey`,
+`valkeySentinel`, `localEmbedding`. The Valkey metrics exporter keeps its own
+`valkey.metrics.securityContext`. `podSecurity.enabled: false` removes all
+securityContexts; that is a debugging escape hatch, not a supported
+configuration.
+
 ### Install
 
 ```bash
@@ -100,6 +162,19 @@ helm upgrade palaceoftruth oci://ghcr.io/palaceoftruth/palaceoftruth/palaceoftru
   --version "$CHART_VERSION" \
   -f my-values.yaml
 ```
+
+Upgrading an install that predates the pod hardening defaults changes two
+things at the pod level:
+
+- Pods now run as uid 10001 with `fsGroup: 10001`. Kubernetes recursively
+  changes group ownership of every mounted volume on the first mount after the
+  upgrade, so the first Valkey and shared-runtime pod start can be slow on a
+  large volume.
+- If `namespace.create=true`, the namespace gains
+  `pod-security.kubernetes.io/enforce: restricted`. Pods in that namespace
+  created by other tooling are then blocked on their next restart. Set
+  `podSecurity.admission.enforce: baseline` for the first upgrade, confirm the
+  audit annotations are clean, then tighten.
 
 ### Minimal `values.yaml` Override
 
@@ -380,15 +455,40 @@ postgres:
   parameters:
     shared_buffers: "128MB"
     max_connections: "100"
+  # Shipped defaults, not a sizing recommendation. They exist so the database
+  # is never BestEffort and therefore never the first pod evicted under node
+  # memory pressure. Raise them from observed load. CPU deliberately has no
+  # limit: throttling a primary during checkpoint or vacuum is worse than
+  # letting it burst.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 1Gi
 ```
 
 ### CNPG-I Backups with Barman Cloud
 
-The chart can render a default-off Barman Cloud `ObjectStore`, attach it as the
-cluster WAL archiver, and create a CNPG `ScheduledBackup`. Install a compatible
+The chart can render a Barman Cloud `ObjectStore`, attach it as the cluster WAL
+archiver, and create a CNPG `ScheduledBackup`. Install a compatible
 [Barman Cloud plugin](https://cloudnative-pg.io/plugin-barman-cloud/docs/intro/)
 and its CRDs before enabling this feature. Keep bucket endpoints, credential
 secret references, schedules, and retention policy in environment-owned values.
+
+Backups are off by default because they need a `destinationPath` and
+credentials that only the operator of a given environment holds; a default-on
+chart would fail to render everywhere. The chart compensates in two ways:
+
+- Every install that runs Postgres without backups prints a warning in the
+  Helm NOTES output.
+- Setting `postgres.backup.requireBackup: true` turns that warning into a
+  render-time failure. Set it in production values so an unprotected database
+  can never ship unnoticed.
+
+`objectStore.retentionPolicy` defaults to `30d` so enabling backups cannot
+create an unbounded bucket by accident. Set it to `""` only when the object
+store's own lifecycle policy owns expiry.
 
 ```yaml
 postgres:

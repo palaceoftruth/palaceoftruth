@@ -31,7 +31,13 @@ FROM backend-dependencies AS backend-runtime
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg git openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Chromium goes to a shared, world-readable path rather than root's cache, so a
+# non-root runtime user can execute it. The default location is /root/.cache,
+# which is mode 0700 and therefore unreadable once the container drops root.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN DEBIAN_FRONTEND=noninteractive playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright \
     && rm -rf /var/lib/apt/lists/*
 
 FROM backend-runtime AS app
@@ -40,5 +46,23 @@ COPY scripts/ scripts/
 COPY tests/fixtures/sar_1083_relationship_canary_fixture.json tests/fixtures/sar_1083_relationship_canary_fixture.json
 COPY alembic/ alembic/
 COPY alembic.ini .
+
+# Bake the bytecode cache in. The runtime root filesystem is read-only, so
+# without this every import would retry and fail to write __pycache__.
+RUN python -m compileall -q app scripts alembic
+
+# Run as a non-root user so a code-execution bug does not land as uid 0. The
+# uid matches chart/values.yaml podSecurity.runAsUser; HOME is a real directory
+# here for the compose stack, and the chart mounts an emptyDir over it because
+# the cluster root filesystem is read-only.
+RUN groupadd --gid 10001 palace \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/palace palace \
+    # Docker seeds a fresh named volume from the image path it covers, so
+    # creating this directory here is what makes the compose temp_files volume
+    # writable by the non-root user. Kubernetes uses fsGroup instead.
+    && mkdir -p /tmp/palaceoftruth \
+    && chown palace:palace /tmp/palaceoftruth /home/palace
+ENV HOME=/home/palace
+USER 10001:10001
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

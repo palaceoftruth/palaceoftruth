@@ -43,6 +43,8 @@ spec:
         app: {{ include "palaceoftruth.valkeyReplicaName" . }}
         {{- include "palaceoftruth.labels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "valkey") | nindent 6 }}
       {{- if .Values.valkey.sentinel.primaryReplicaAntiAffinity.enabled }}
       # Keep every replica apart from the named primary. Operators must enable
       # this only where two eligible hostnames are available.
@@ -57,6 +59,7 @@ spec:
       initContainers:
         - name: init-config
           image: {{ .Values.valkey.image }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "valkey") | nindent 10 }}
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -85,6 +88,7 @@ spec:
       containers:
         - name: valkey
           image: {{ .Values.valkey.image }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "valkey") | nindent 10 }}
           command: ["valkey-server", "/data/valkey.conf"]
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # REDISCLI_AUTH lets the exec probes authenticate without exposing the
