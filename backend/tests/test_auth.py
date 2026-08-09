@@ -39,10 +39,13 @@ class FakeSession:
     async def execute(self, statement, params=None):
         sql = str(statement).lower()
         params = params or {}
-        if "select id, tenant_id from api_keys" in sql:
+        if "from api_keys" in sql and sql.startswith("select"):
             return _Result(self.row)
         if "update api_keys set last_used_at" in sql:
             self.updates.append(params["id"])
+            return _Result(None)
+        if "update api_keys set key_hash" in sql:
+            self.updates.append(params)
             return _Result(None)
         if "from mcp_oauth_access_tokens" in sql:
             return _Result(self.row)
@@ -74,29 +77,91 @@ def _request() -> Request:
 @pytest.mark.asyncio
 async def test_verify_api_key_sets_tenant_and_updates_last_used(monkeypatch) -> None:
     key_id = uuid.uuid4()
-    session = FakeSession({"id": key_id, "tenant_id": "tenant-a"})
+    session = FakeSession(
+        {
+            "id": key_id,
+            "tenant_id": "tenant-a",
+            "scopes": ["read", "write"],
+            "key_hash": auth.hash_secret("raw-key"),
+        }
+    )
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
     request = _request()
     result = await auth.verify_api_key(request, api_key="raw-key")
 
     assert result == "raw-key"
-    assert request.state.auth_context == auth.AuthContext(
-        tenant_id="tenant-a",
-        auth_mode="api_key",
-        subject_id=str(key_id),
-        token_hash_reference=auth.hash_secret("raw-key"),
-        audit_metadata={"api_key_id": str(key_id)},
-    )
-    assert request.state.auth_context.capabilities == frozenset()
+    context = request.state.auth_context
+    assert context.tenant_id == "tenant-a"
+    assert context.auth_mode == "api_key"
+    assert context.subject_id == str(key_id)
+    assert context.token_hash_reference == auth.hash_secret("raw-key")
+    # The stored grant, not a header, is what the principal carries.
+    assert context.scopes == ("read", "write")
+    assert context.capabilities == frozenset({"read", "write"})
+    assert context.audit_metadata == {
+        "api_key_id": str(key_id),
+        "api_key_granted_scopes": ["read", "write"],
+    }
     assert session.updates == [key_id]
     assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_rejects_row_without_stored_scopes(monkeypatch) -> None:
+    """A NULL or malformed scopes column must deny, not fall back to open."""
+    session = FakeSession(
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "scopes": None,
+            "key_hash": auth.hash_secret("raw-key"),
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_api_key(_request(), api_key="raw-key")
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_upgrades_legacy_hash_when_pepper_set(monkeypatch) -> None:
+    key_id = uuid.uuid4()
+    legacy_hash = auth._legacy_hash_secret("raw-key")
+    session = FakeSession(
+        {
+            "id": key_id,
+            "tenant_id": "tenant-a",
+            "scopes": ["read"],
+            "key_hash": legacy_hash,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+
+    request = _request()
+    await auth.verify_api_key(request, api_key="raw-key")
+
+    peppered = auth.hash_secret("raw-key")
+    assert peppered.startswith(auth.PEPPERED_HASH_PREFIX)
+    assert peppered != legacy_hash
+    # The legacy row authenticated, then was rewritten in the new format.
+    assert session.updates == [key_id, {"hash": peppered, "id": key_id}]
 
 
 @pytest.mark.asyncio
 async def test_require_mcp_scope_requires_scope_header_for_api_key() -> None:
     request = _request()
     request.state.auth_mode = "api_key"
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+        scopes=("read",),
+        capabilities=frozenset({"read"}),
+    )
 
     dependency = auth.require_mcp_scope("write")
 
@@ -108,27 +173,86 @@ async def test_require_mcp_scope_requires_scope_header_for_api_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_require_mcp_scope_accepts_api_key_scope_header() -> None:
+async def test_require_mcp_scope_narrows_stored_grant_with_header() -> None:
     request = _request()
     request.state.tenant_id = "tenant-a"
     request.state.key_hash = "key-hash"
     request.state.auth_mode = "api_key"
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+        scopes=("read", "write", "write:workspace", "write:agent"),
+        capabilities=frozenset({"read", "write", "write:workspace", "write:agent"}),
+    )
 
     dependency = auth.require_mcp_scope("write")
     await dependency(request, _="raw-key", mcp_scope="write", mcp_scopes="write:workspace,read")
 
-    assert request.state.mcp_allowed_scopes == ["write", "write:workspace", "read"]
-    assert request.state.auth_context.scopes == ("write", "write:workspace", "read")
+    # write:agent is in the grant but not in the header, so the call drops it.
+    assert request.state.mcp_allowed_scopes == ["read", "write", "write:workspace"]
+    assert request.state.auth_context.scopes == ("read", "write", "write:workspace")
     assert request.state.auth_context.has_capability("write")
+    metadata = request.state.auth_context.audit_metadata
+    assert metadata["api_key_granted_scopes"] == ["read", "write", "write:agent", "write:workspace"]
+    assert metadata["mcp_requested_scopes"] == ["read", "write", "write:workspace"]
+    assert metadata["mcp_effective_scopes"] == ["read", "write", "write:workspace"]
 
 
 @pytest.mark.asyncio
-async def test_require_capability_accepts_admin_api_key_scope_header() -> None:
+async def test_require_mcp_scope_header_cannot_widen_stored_grant() -> None:
+    """C-01: a header asking for more than the row holds must not grant it."""
+    request = _request()
+    request.state.tenant_id = "tenant-a"
+    request.state.key_hash = "key-hash"
+    request.state.auth_mode = "api_key"
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+        scopes=("read",),
+        capabilities=frozenset({"read"}),
+    )
+
+    dependency = auth.require_mcp_scope("write")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key", mcp_scope="write", mcp_scopes="admin")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "API key missing write MCP scope"
+
+
+@pytest.mark.asyncio
+async def test_require_capability_rejects_admin_header_without_stored_admin() -> None:
+    """I-01: admin still satisfies every check, but only from a stored grant."""
+    request = _request()
+    request.state.tenant_id = "tenant-a"
+    request.state.key_hash = "key-hash"
+    request.state.auth_mode = "api_key"
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+        scopes=("read",),
+        capabilities=frozenset({"read"}),
+    )
+
+    dependency = auth.require_capability("write:workspace")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key", mcp_scope="admin", mcp_scopes=None)
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_capability_accepts_stored_admin_grant() -> None:
     request = _request()
     request.state.auth_context = auth.AuthContext(
         tenant_id="tenant-a",
         auth_mode="api_key",
         token_hash_reference="key-hash",
+        scopes=("admin",),
+        capabilities=frozenset({"admin"}),
     )
     request.state.tenant_id = "tenant-a"
     request.state.auth_mode = "api_key"
@@ -142,12 +266,14 @@ async def test_require_capability_accepts_admin_api_key_scope_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_require_api_capability_preserves_legacy_api_key_access() -> None:
+async def test_require_api_capability_accepts_stored_api_key_grant() -> None:
     request = _request()
     request.state.auth_context = auth.AuthContext(
         tenant_id="tenant-a",
         auth_mode="api_key",
         token_hash_reference="key-hash",
+        scopes=("read", "write"),
+        capabilities=frozenset({"read", "write"}),
     )
     request.state.tenant_id = "tenant-a"
     request.state.auth_mode = "api_key"
@@ -155,6 +281,50 @@ async def test_require_api_capability_preserves_legacy_api_key_access() -> None:
 
     dependency = auth.require_api_capability("write")
     await dependency(request, _="raw-key")
+
+
+@pytest.mark.asyncio
+async def test_require_api_capability_rejects_api_key_missing_stored_scope() -> None:
+    """H-01: this path used to return before any check for api_key mode."""
+    request = _request()
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="api_key",
+        token_hash_reference="key-hash",
+        scopes=("read",),
+        capabilities=frozenset({"read"}),
+    )
+    request.state.tenant_id = "tenant-a"
+    request.state.auth_mode = "api_key"
+    request.state.key_hash = "key-hash"
+
+    dependency = auth.require_api_capability("write")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "API key missing write scope"
+
+
+@pytest.mark.asyncio
+async def test_require_api_capability_rejects_unknown_auth_mode() -> None:
+    """L-01: an unset or unrecognized auth mode used to fall through to success."""
+    request = _request()
+    request.state.auth_context = auth.AuthContext(
+        tenant_id="tenant-a",
+        auth_mode="future_mode",
+        token_hash_reference="key-hash",
+        scopes=("write",),
+        capabilities=frozenset({"write"}),
+    )
+    request.state.tenant_id = "tenant-a"
+    request.state.auth_mode = "future_mode"
+
+    dependency = auth.require_api_capability("write")
+    with pytest.raises(HTTPException) as exc_info:
+        await dependency(request, _="raw-key")
+
+    assert exc_info.value.status_code == 403
 
 
 @pytest.mark.asyncio

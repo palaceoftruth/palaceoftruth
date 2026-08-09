@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.search import router
 from app import auth
 from app.auth import AuthContext, verify_memory_auth
+from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.schemas.search import SearchResult
 
@@ -132,6 +133,8 @@ def _client(monkeypatch, service_cls=RecordingSearchService) -> TestClient:
             tenant_id="tenant-a",
             auth_mode="api_key",
             token_hash_reference="key-hash",
+            scopes=LEGACY_API_KEY_SCOPES,
+            capabilities=frozenset(LEGACY_API_KEY_SCOPES),
         )
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"

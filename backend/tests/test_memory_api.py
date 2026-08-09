@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from app.api.memory import _enforce_delegated_grant_retrieval, router
-from app.auth import verify_memory_auth
+from app.auth import AuthContext, verify_memory_auth
+from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.main import app as main_app
 from app.models.item import Item
@@ -253,16 +254,36 @@ def _build_app(
         yield session
 
     async def override_verify(request: Request):
+        # Every authenticated principal now carries a mode and a scope grant;
+        # an unset mode is denied, so the fixture supplies the api_key default.
+        effective_auth_mode = auth_mode or "api_key"
+        granted_scopes = tuple(
+            mcp_allowed_scopes if mcp_allowed_scopes is not None else LEGACY_API_KEY_SCOPES
+        )
         request.state.tenant_id = tenant_id
         request.state.key_hash = "key-hash"
-        request.state.auth_mode = auth_mode
+        request.state.auth_mode = effective_auth_mode
         request.state.mcp_client_key = mcp_client_key
         request.state.mcp_allowed_scopes = mcp_allowed_scopes
+        request.state.auth_context = AuthContext(
+            tenant_id=tenant_id,
+            auth_mode=effective_auth_mode,
+            token_hash_reference="key-hash",
+            client_key=mcp_client_key,
+            scopes=granted_scopes,
+            capabilities=frozenset(granted_scopes),
+        )
         return "raw-key"
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[verify_memory_auth] = override_verify
-    return TestClient(app)
+    # Tests that do not pin an auth mode stand in for a normal API-key client,
+    # which always sends the narrowing scope header. Tests that pin the mode
+    # control their own headers.
+    default_headers = (
+        {"X-MCP-Scopes": ",".join(LEGACY_API_KEY_SCOPES)} if auth_mode is None else {}
+    )
+    return TestClient(app, headers=default_headers)
 
 
 def _legacy_payload(memory_kind: str = "task_retrospective") -> dict:
@@ -695,10 +716,12 @@ def test_memory_whoami_returns_authenticated_tenant() -> None:
     assert response.json() == {
         "status": "ok",
         "tenant_id": "tenant-a",
-        "auth_mode": None,
+        # The scope gate reports the grant it acted under, which is the stored
+        # grant narrowed by the caller's header.
+        "auth_mode": "api_key",
         "mcp_client_id": None,
         "mcp_client_key": None,
-        "allowed_scopes": [],
+        "allowed_scopes": list(LEGACY_API_KEY_SCOPES),
         "resource": None,
         "audience": None,
         "token_hash_prefix": "key-hash",
@@ -1687,12 +1710,23 @@ def test_memory_api_key_scope_specific_grant_allows_workspace_write(monkeypatch)
     async def override_get_db():
         yield FakeSession()
 
+    granted_scopes = ("read", "write", "write:workspace")
+
     async def override_verify(request: Request):
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
         request.state.auth_mode = "api_key"
         request.state.mcp_client_key = None
         request.state.mcp_allowed_scopes = None
+        # The stored grant is what authorizes the workspace write; the headers
+        # below can only narrow it.
+        request.state.auth_context = AuthContext(
+            tenant_id="tenant-a",
+            auth_mode="api_key",
+            token_hash_reference="key-hash",
+            scopes=granted_scopes,
+            capabilities=frozenset(granted_scopes),
+        )
         return "raw-key"
 
     async def fake_accept_canonical_memory_entry(
@@ -4138,6 +4172,14 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
     async def override_verify(request: Request):
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
+        request.state.auth_mode = "api_key"
+        request.state.auth_context = AuthContext(
+            tenant_id="tenant-a",
+            auth_mode="api_key",
+            token_hash_reference="key-hash",
+            scopes=LEGACY_API_KEY_SCOPES,
+            capabilities=frozenset(LEGACY_API_KEY_SCOPES),
+        )
         return "raw-key"
 
     async def fake_accept_canonical_memory_entry(
@@ -4205,7 +4247,9 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
     main_app.dependency_overrides[verify_memory_auth] = override_verify
 
     try:
-        client = TestClient(main_app)
+        client = TestClient(
+            main_app, headers={"X-MCP-Scopes": ",".join(LEGACY_API_KEY_SCOPES)}
+        )
 
         whoami_response = client.get("/api/v1/memory/whoami")
         write_response = client.post("/api/v1/memory/entries", json=_canonical_payload())
@@ -4224,10 +4268,10 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
     assert whoami_response.json() == {
         "status": "ok",
         "tenant_id": "tenant-a",
-        "auth_mode": None,
+        "auth_mode": "api_key",
         "mcp_client_id": None,
         "mcp_client_key": None,
-        "allowed_scopes": [],
+        "allowed_scopes": list(LEGACY_API_KEY_SCOPES),
         "resource": None,
         "audience": None,
         "token_hash_prefix": "key-hash",

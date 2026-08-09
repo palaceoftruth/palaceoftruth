@@ -89,7 +89,16 @@ class Settings(BaseSettings):
 
     # API auth
     api_key: str
-    cors_allowed_origins: str = "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
+    # Server-side pepper for stored credential verifiers (API keys, OAuth
+    # secrets, access and refresh tokens, extension tokens, pairing keys).
+    # When set, verifiers are stored as HMAC-SHA256 under this value, so a
+    # database read alone no longer yields a usable verifier. Leave blank to
+    # keep the legacy unsalted SHA-256 format; existing rows upgrade to the
+    # peppered format the next time the credential authenticates. Rotating the
+    # pepper invalidates every stored credential, so treat it as a secret with
+    # the same lifetime as the database.
+    credential_pepper: str = ""
+    cors_allowed_origins: str ="https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
 
     # Chunking
     chunk_size: int = 500

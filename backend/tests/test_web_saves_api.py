@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.api.web_saves import router as web_saves_router
 from app.auth import AuthContext, verify_capture_job_read_auth, verify_memory_auth
+from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -55,7 +56,7 @@ def _client(session: FakeSession) -> TestClient:
         yield session
 
     async def override_verify(request: Request):
-        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash")
+        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash", scopes=LEGACY_API_KEY_SCOPES, capabilities=frozenset(LEGACY_API_KEY_SCOPES))
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
         request.state.auth_mode = "api_key"

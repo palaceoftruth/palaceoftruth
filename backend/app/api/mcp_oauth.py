@@ -13,7 +13,7 @@ from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Que
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.auth import compare_secret, hash_secret, verify_api_key
+from app.auth import compare_secret, hash_secret, secret_hash_candidates, verify_api_key
 from app.database import async_session
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
@@ -329,11 +329,16 @@ async def _issue_authorization_code_access_token(
                    g.revoked_at, c.used_at, c.expires_at
             FROM mcp_oauth_authorization_codes c
             JOIN mcp_oauth_delegated_grants g ON g.id = c.grant_id AND g.tenant_id = c.tenant_id
-            WHERE c.code_hash = :code_hash AND c.tenant_id = :tenant_id
+            WHERE c.code_hash IN (:code_hash, :legacy_code_hash) AND c.tenant_id = :tenant_id
             FOR UPDATE
             """
         ),
-        {"code_hash": hash_secret(code), "tenant_id": client_row["tenant_id"]},
+        # Accept both digest formats so a credential issued before the pepper
+        # was configured still resolves. See auth.secret_hash_candidates.
+        dict(
+            zip(("code_hash", "legacy_code_hash"), secret_hash_candidates(code)),
+            tenant_id=client_row["tenant_id"],
+        ),
     )
     row = result.mappings().one_or_none()
     now = datetime.now(timezone.utc)
@@ -447,9 +452,12 @@ async def _issue_refresh_access_token(*, db, client_row, refresh_token: str | No
         FROM mcp_oauth_refresh_tokens r
         JOIN mcp_oauth_refresh_token_families f ON f.id = r.family_id AND f.tenant_id = r.tenant_id
         JOIN mcp_oauth_delegated_grants g ON g.id = f.grant_id AND g.tenant_id = f.tenant_id
-        WHERE r.token_hash = :token_hash AND r.tenant_id = :tenant_id
+        WHERE r.token_hash IN (:token_hash, :legacy_token_hash) AND r.tenant_id = :tenant_id
         FOR UPDATE
-    """), {"token_hash": hash_secret(refresh_token), "tenant_id": client_row["tenant_id"]})
+    """), dict(
+        zip(("token_hash", "legacy_token_hash"), secret_hash_candidates(refresh_token)),
+        tenant_id=client_row["tenant_id"],
+    ))
     row = result.mappings().one_or_none()
     if row is None or row["client_id"] != client_row["id"]:
         raise HTTPException(status_code=400, detail="invalid_grant")
@@ -950,11 +958,16 @@ async def revoke_mcp_access_token(
                 SELECT f.id FROM mcp_oauth_refresh_tokens r
                 JOIN mcp_oauth_refresh_token_families f ON f.id = r.family_id AND f.tenant_id = r.tenant_id
                 JOIN mcp_oauth_delegated_grants g ON g.id = f.grant_id AND g.tenant_id = f.tenant_id
-                WHERE r.token_hash = :token_hash AND r.tenant_id = :tenant_id AND g.client_id = :client_id
+                WHERE r.token_hash IN (:token_hash, :legacy_token_hash)
+                  AND r.tenant_id = :tenant_id AND g.client_id = :client_id
                 FOR UPDATE
                 """
             ),
-            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"], "client_id": caller["id"]},
+            dict(
+                zip(("token_hash", "legacy_token_hash"), secret_hash_candidates(token)),
+                tenant_id=caller["tenant_id"],
+                client_id=caller["id"],
+            ),
         )
         family_row = family.mappings().one_or_none()
         if family_row is not None:
@@ -965,15 +978,15 @@ async def revoke_mcp_access_token(
             text(
                 "UPDATE mcp_oauth_access_tokens "
                 "SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) "
-                "WHERE token_hash = :token_hash "
+                "WHERE token_hash IN (:token_hash, :legacy_token_hash) "
                 "  AND tenant_id = :tenant_id "
                 "  AND client_id = :client_id"
             ),
-            {
-                "token_hash": hash_secret(token),
-                "tenant_id": caller["tenant_id"],
-                "client_id": caller["id"],
-            },
+            dict(
+                zip(("token_hash", "legacy_token_hash"), secret_hash_candidates(token)),
+                tenant_id=caller["tenant_id"],
+                client_id=caller["id"],
+            ),
         )
         await _record_oauth_endpoint_audit_event(
             db,
@@ -1013,13 +1026,17 @@ async def introspect_mcp_access_token(
                     c.oauth_revoked_at AS client_revoked_at
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
-                WHERE t.token_hash = :token_hash
+                WHERE t.token_hash IN (:token_hash, :legacy_token_hash)
                   AND t.tenant_id = :tenant_id
                   AND t.client_id = :client_id
                 LIMIT 1
                 """
             ),
-            {"token_hash": hash_secret(token), "tenant_id": caller["tenant_id"], "client_id": caller["id"]},
+            dict(
+                zip(("token_hash", "legacy_token_hash"), secret_hash_candidates(token)),
+                tenant_id=caller["tenant_id"],
+                client_id=caller["id"],
+            ),
         )
         row = result.mappings().one_or_none()
         if row is None:

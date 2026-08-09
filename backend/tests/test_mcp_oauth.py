@@ -10,9 +10,14 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api import mcp_oauth
-from app.auth import hash_secret
+from app.auth import hash_secret, secret_hash_candidates
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 from app.schemas.memory import McpOAuthAuthorizationServerMetadata
+
+
+def legacy_hash_secret(secret: str) -> str:
+    """Return the pre-pepper hash the dual-read lookups still accept."""
+    return secret_hash_candidates(secret)[1]
 
 
 class _MappingRows:
@@ -730,7 +735,10 @@ def test_mcp_oauth_revoke_is_idempotent(monkeypatch) -> None:
     assert response.json() == {"revoked": True}
     assert session.revoked == [
         {
+            # The revoke matches both hash formats so a token stored before the
+            # credential pepper can still be revoked.
             "token_hash": hash_secret("raw-token"),
+            "legacy_token_hash": legacy_hash_secret("raw-token"),
             "tenant_id": "tenant-a",
             "client_id": client_row["id"],
         }
@@ -758,6 +766,7 @@ def test_mcp_oauth_revoke_scopes_to_authenticated_tenant_client(monkeypatch) -> 
     assert session.revoked == [
         {
             "token_hash": hash_secret("raw-token"),
+            "legacy_token_hash": legacy_hash_secret("raw-token"),
             "tenant_id": "tenant-b",
             "client_id": tenant_b["id"],
         }

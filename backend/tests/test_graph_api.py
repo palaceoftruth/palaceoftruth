@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app import auth
 from app.api.graph import router
 from app.auth import AuthContext, verify_memory_auth
+from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.models.item import Item
 from app.models.relationship import ItemRelationship
@@ -127,6 +128,8 @@ def _client(session: GraphSession) -> TestClient:
             tenant_id="tenant-a",
             auth_mode="api_key",
             token_hash_reference="key-hash",
+            scopes=LEGACY_API_KEY_SCOPES,
+            capabilities=frozenset(LEGACY_API_KEY_SCOPES),
         )
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"

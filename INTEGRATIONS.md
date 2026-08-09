@@ -352,7 +352,8 @@ kubectl create secret generic palaceoftruth-app-secrets \
   --from-literal=OPENAI_API_KEY=sk-... \
   --from-literal=OPENROUTER_API_KEY=sk-or-... \
   --from-literal=API_KEY=your-api-key \
-  --from-literal=PALACEOFTRUTH_ADMIN_SECRET=your-admin-secret
+  --from-literal=PALACEOFTRUTH_ADMIN_SECRET=your-admin-secret \
+  --from-literal=CREDENTIAL_PEPPER=your-credential-pepper
 
 # Registry pull secret (if using private GHCR packages)
 kubectl create secret docker-registry palaceoftruth-registry \
@@ -692,6 +693,14 @@ curl -H "X-API-Key: ${PALACEOFTRUTH_API_KEY}" https://api.palaceoftruth.example.
 ```
 
 The key is set via the `API_KEY` environment variable (provided through secrets).
+
+Each key carries a scope grant stored on its `api_keys` row. The `X-MCP-Scope`
+and `X-MCP-Scopes` headers narrow that grant for one call and cannot add a
+scope to it, so give a key the scopes it needs when you register or rotate it
+with the `scopes` field. Stored credential verifiers are peppered HMAC-SHA256
+when `CREDENTIAL_PEPPER` is set; both hash formats are accepted, so the pepper
+can be introduced on a running deployment, but changing it later invalidates
+every credential hashed with the previous value.
 
 ---
 
