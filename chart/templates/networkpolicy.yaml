@@ -81,7 +81,8 @@ spec:
               app: {{ include "palaceoftruth.localEmbeddingServiceName" . }}
       ports:
         - protocol: TCP
-          port: {{ .Values.localEmbeddingService.port }}
+          # Egress policies match the destination pod port, not the Service port.
+          port: {{ .Values.localEmbeddingService.containerPort }}
     {{- end }}
     {{- if .Values.networkPolicy.publicEgress.enabled }}
     # IPv4 public web endpoints. Private, loopback, link-local, carrier-grade

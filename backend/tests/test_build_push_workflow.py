@@ -305,8 +305,18 @@ def test_backend_dockerfile_uses_pinned_locked_image_targets() -> None:
 
     frontend_dockerfile = (REPO_ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM node:22-alpine@sha256:" in frontend_dockerfile
-    assert "FROM nginx:alpine@sha256:" in frontend_dockerfile
+    # nginx-unprivileged, not the official nginx image: the pod runs as a
+    # non-root user with NET_BIND_SERVICE dropped and a read-only root.
+    assert "FROM nginxinc/nginx-unprivileged:alpine@sha256:" in frontend_dockerfile
     assert "RUN npm ci" in frontend_dockerfile
+
+    # The chart sets runAsNonRoot with runAsUser 10001, so the image must
+    # already own its runtime paths at that uid.
+    assert "USER 10001:10001" in dockerfile
+    assert "ENV HOME=/home/palace" in dockerfile
+    # Chromium must live outside root's 0700 cache to stay executable.
+    assert "ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in dockerfile
+    assert dockerfile.index("playwright install") < dockerfile.index("USER 10001")
 
 
 def test_github_cli_setup_is_version_and_checksum_pinned() -> None:

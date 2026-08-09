@@ -24,12 +24,15 @@ spec:
         app: {{ include "palaceoftruth.mcpServiceName" . }}
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "mcp") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: mcp
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "mcp") | nindent 10 }}
           command:
             - python
             - scripts/palaceoftruth_mcp.py
@@ -44,6 +47,7 @@ spec:
           ports:
             - containerPort: {{ .Values.mcp.port }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             - name: PALACEOFTRUTH_API_BASE_URL
               value: {{ include "palaceoftruth.mcpApiBaseUrl" . | quote }}
             {{- if .Values.mcp.legacyApiKeyAuthEnabled }}
@@ -114,6 +118,10 @@ spec:
               port: {{ .Values.mcp.port }}
             initialDelaySeconds: 15
             periodSeconds: 20
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
           resources:
             {{- toYaml .Values.mcp.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
 {{- end }}

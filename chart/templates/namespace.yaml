@@ -5,4 +5,27 @@ metadata:
   name: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
+    {{- if .Values.podSecurity.admission.enabled }}
+    {{- /*
+    Pod Security Admission. Every workload in this chart renders a securityContext
+    that satisfies the restricted profile, so enforcing it here rejects a future
+    workload that drops one rather than admitting it silently.
+
+    An existing install that carries deployment-owned pods in this namespace
+    should move to enforce: baseline with warn/audit: restricted first, fix what
+    the warnings report, then enforce.
+    */}}
+    {{- with .Values.podSecurity.admission.enforce }}
+    pod-security.kubernetes.io/enforce: {{ . | quote }}
+    pod-security.kubernetes.io/enforce-version: {{ $.Values.podSecurity.admission.version | quote }}
+    {{- end }}
+    {{- with .Values.podSecurity.admission.audit }}
+    pod-security.kubernetes.io/audit: {{ . | quote }}
+    pod-security.kubernetes.io/audit-version: {{ $.Values.podSecurity.admission.version | quote }}
+    {{- end }}
+    {{- with .Values.podSecurity.admission.warn }}
+    pod-security.kubernetes.io/warn: {{ . | quote }}
+    pod-security.kubernetes.io/warn-version: {{ $.Values.podSecurity.admission.version | quote }}
+    {{- end }}
+    {{- end }}
 {{- end }}

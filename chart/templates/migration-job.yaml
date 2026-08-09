@@ -30,6 +30,8 @@ spec:
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "migration") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       {{- if .Values.migrations.readiness.enabled }}
@@ -37,8 +39,12 @@ spec:
         - name: wait-for-writable-database
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
           command: ["python", "-m", "app.wait_for_database"]
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: MIGRATION_DB_WAIT_TIMEOUT_SECONDS
@@ -54,9 +60,13 @@ spec:
         - name: migrate
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
           command:
             {{- toYaml .Values.migrations.command | nindent 12 }}
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: REDIS_URL
@@ -68,4 +78,6 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
 {{- end }}

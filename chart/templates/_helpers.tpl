@@ -407,6 +407,91 @@ Shared upload artifact storage used by API and worker pods for handoff artifacts
 {{- end }}
 
 {{/*
+Baseline workload hardening.
+
+Every chart-owned pod renders the same pod- and container-level
+securityContext so a new workload inherits the hardened defaults instead of
+opting into them. Both helpers take a two-element list: the root context and
+the override key under podSecurity.overrides (use "" for no override).
+
+Precedence is podSecurity.<pod|container> over the computed baseline, then
+podSecurity.overrides.<key>.<pod|container> over that, so a deployment can
+relax exactly one workload without restating the baseline.
+*/}}
+{{- define "palaceoftruth.podSecurityContext" -}}
+{{- $root := index . 0 -}}
+{{- $key := index . 1 -}}
+{{- $security := $root.Values.podSecurity -}}
+{{- if $security.enabled -}}
+{{- $base := dict
+      "runAsNonRoot" true
+      "runAsUser" $security.runAsUser
+      "runAsGroup" $security.runAsGroup
+      "fsGroup" $security.fsGroup
+      "seccompProfile" $security.seccompProfile
+-}}
+{{- $merged := mergeOverwrite $base (deepCopy (default (dict) $security.pod)) -}}
+{{- if $key -}}
+{{- $override := default (dict) (index (default (dict) $security.overrides) $key) -}}
+{{- $merged = mergeOverwrite $merged (deepCopy (default (dict) $override.pod)) -}}
+{{- end -}}
+securityContext:
+  {{- toYaml $merged | nindent 2 }}
+{{- end -}}
+{{- end }}
+
+{{- define "palaceoftruth.containerSecurityContext" -}}
+{{- $root := index . 0 -}}
+{{- $key := index . 1 -}}
+{{- $security := $root.Values.podSecurity -}}
+{{- if $security.enabled -}}
+{{- $base := dict
+      "allowPrivilegeEscalation" false
+      "readOnlyRootFilesystem" true
+      "capabilities" (dict "drop" (list "ALL"))
+-}}
+{{- $merged := mergeOverwrite $base (deepCopy (default (dict) $security.container)) -}}
+{{- if $key -}}
+{{- $override := default (dict) (index (default (dict) $security.overrides) $key) -}}
+{{- $merged = mergeOverwrite $merged (deepCopy (default (dict) $override.container)) -}}
+{{- end -}}
+securityContext:
+  {{- toYaml $merged | nindent 2 }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Writable scratch for a read-only root filesystem.
+
+/tmp is the only path the application writes outside its declared volumes:
+uploads stream through tempfile, exports build a zip there, and yt-dlp and
+ffmpeg stage media there. HOME is separate because the MCP client writes
+~/.hermes/palaceoftruth.json, and a read-only / would fail that at import time.
+*/}}
+{{- define "palaceoftruth.scratchVolumeMounts" -}}
+- name: scratch-tmp
+  mountPath: /tmp
+- name: scratch-home
+  mountPath: {{ .Values.podSecurity.homeDir | quote }}
+{{- end }}
+
+{{- define "palaceoftruth.scratchVolumes" -}}
+- name: scratch-tmp
+  emptyDir: {}
+- name: scratch-home
+  emptyDir: {}
+{{- end }}
+
+{{/*
+HOME for the backend image. Kept in one place so the chart, the Dockerfile and
+the compose stack cannot drift apart.
+*/}}
+{{- define "palaceoftruth.homeEnv" -}}
+- name: HOME
+  value: {{ .Values.podSecurity.homeDir | quote }}
+{{- end }}
+
+{{/*
 Image tag reference.
 Prefer an explicit override, otherwise default to the chart appVersion so
 each published chart revision renders immutable image tags.

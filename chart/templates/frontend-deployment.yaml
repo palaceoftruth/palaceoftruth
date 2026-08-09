@@ -23,27 +23,43 @@ spec:
         app: {{ include "palaceoftruth.fullname" . }}-frontend
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "frontend") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: frontend
           image: {{ include "palaceoftruth.frontendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "frontend") | nindent 10 }}
           ports:
-            - containerPort: 80
+            - containerPort: {{ .Values.frontend.containerPort }}
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: {{ .Values.frontend.containerPort }}
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
+            # Mounted straight into conf.d, not into templates/. The entrypoint
+            # would otherwise have to render templates/ into a writable
+            # conf.d, and the config holds no envsubst variables.
             - name: nginx-config
-              mountPath: /etc/nginx/templates/default.conf.template
+              mountPath: /etc/nginx/conf.d/default.conf
               subPath: default.conf
+            # nginx keeps its pid and temp paths under /var/cache/nginx and
+            # /tmp, so both stay writable while the root filesystem does not.
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: scratch-tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
       volumes:
         - name: nginx-config
           configMap:
             name: {{ include "palaceoftruth.fullname" . }}-frontend-nginx
+        - name: nginx-cache
+          emptyDir: {}
+        - name: scratch-tmp
+          emptyDir: {}

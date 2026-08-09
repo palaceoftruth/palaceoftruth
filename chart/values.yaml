@@ -145,6 +145,57 @@ config:
   palaceDefaultS3ScanIntervalSeconds: "900"
   palaceDefaultS3ForcePathStyle: "false"
 
+# Baseline workload hardening applied to every pod this chart owns.
+#
+# Without this block a container runs as uid 0 with a writable root filesystem,
+# the full default capability set and no seccomp filter, so any code-execution
+# bug lands with root in a container that already ships ffmpeg, git and ssh.
+# The values are numeric ids rather than a reliance on the image USER directive,
+# so the manifest itself states the identity and Pod Security Admission can
+# verify it.
+podSecurity:
+  enabled: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  # Also owns mounted volumes, so the PVC-backed workloads (Valkey data, the
+  # shared upload-artifact volume, the embedding model cache) stay writable.
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+  # Writable HOME for a read-only root filesystem. Must match the ENV HOME in
+  # backend/Dockerfile; the chart mounts an emptyDir here.
+  homeDir: /home/palace
+  # Merged over the computed pod-level securityContext of every workload.
+  pod: {}
+  # Merged over the computed container-level securityContext of every container.
+  container: {}
+  # Per-workload relaxations, applied last. Recognized keys: backend, frontend,
+  # worker, mediaWorker, palaceWorker, mcp, migration, memoryRolloutSmoke,
+  # valkey, valkeySentinel, localEmbedding. The Valkey metrics exporter keeps
+  # its own container securityContext at valkey.metrics.securityContext and is
+  # not reachable through these overrides. For example, to let a third-party
+  # embedding image write to its root filesystem:
+  #   overrides:
+  #     localEmbedding:
+  #       container:
+  #         readOnlyRootFilesystem: false
+  overrides: {}
+  # Namespace-level Pod Security Admission labels. This is the cluster-side
+  # backstop: without an enforce label, a workload that loses its
+  # securityContext is admitted silently instead of being rejected.
+  admission:
+    enabled: true
+    # Set to "" to skip an individual mode.
+    enforce: restricted
+    audit: restricted
+    warn: restricted
+    version: latest
+  # Kubernetes mounts a ServiceAccount token into every pod by default. No
+  # workload here calls the Kubernetes API except the memory rollout smoke Job,
+  # which has its own ServiceAccount and a minimal Role, so the credential is
+  # pure attack surface everywhere else.
+  automountServiceAccountToken: false
+
 # External Secrets Operator integration. Disabled by default so the public chart
 # can render without operator-specific secret-store IDs.
 externalSecrets:
@@ -207,9 +258,21 @@ postgres:
   image: ghcr.io/cloudnative-pg/postgresql:16.4
   storage:
     size: 5Gi
-  # CNPG pod requests/limits belong in the environment overlay so each cluster
-  # can be sized from observed workload data.
-  resources: {}
+  # An empty resources block puts the database in BestEffort QoS, which makes
+  # it the first pod the kubelet evicts under node memory pressure. These are
+  # deliberately modest floors, not a sizing recommendation: raise them in the
+  # environment overlay from observed workload data.
+  #
+  # Memory request equals limit so the cluster is at least Burstable and cannot
+  # be evicted ahead of BestEffort pods. CPU has a request but no limit on
+  # purpose — a CPU limit throttles a database during checkpoints and vacuum,
+  # and throttling a Postgres primary is worse than letting it burst.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 1Gi
   # These are rendered as CNPG PostgreSQL parameters. Keep deployment-specific
   # tuning in the environment overlay. Setting a pg_stat_statements.* key lets
   # CNPG manage the required preload library and extension safely.
@@ -233,11 +296,21 @@ postgres:
       enabled: false
       interval: 30s
       labels: {}
-  # Optional CNPG-I/Barman Cloud backups. The Barman Cloud plugin and its CRDs
-  # must already be installed; keep destination and credential references in
-  # the environment-specific values repository.
+  # CNPG-I/Barman Cloud backups. The Barman Cloud plugin and its CRDs must
+  # already be installed; keep destination and credential references in the
+  # environment-specific values repository.
+  #
+  # This cannot default to true: a backup needs an objectStore destinationPath
+  # and credentials that only the operator of a given environment holds, so a
+  # default-on chart would fail to render everywhere. Instead the chart renders
+  # a loud NOTES warning on every install where Postgres runs without backups,
+  # and requireBackup below turns that warning into a hard failure for
+  # environments that must never deploy an unprotected database.
   backup:
     enabled: false
+    # Set true in production overlays. Rendering then fails unless backups are
+    # configured, so a missing backup block cannot ship silently.
+    requireBackup: false
     pluginName: barman-cloud.cloudnative-pg.io
     objectStore:
       # name defaults to <postgres cluster name>-backup when empty.
@@ -246,9 +319,10 @@ postgres:
       # destinationPath and the provider-specific credential references belong
       # here (or use workload identity supported by the provider).
       configuration: {}
-      # Barman recovery-window retention, for example "30d". Empty delegates
-      # retention to the environment's object-store lifecycle policy.
-      retentionPolicy: ""
+      # Barman recovery window. A default is set so enabling backups cannot
+      # produce an unbounded, ever-growing bucket by accident. Set it to ""
+      # only when the object store's own lifecycle policy owns expiry.
+      retentionPolicy: 30d
     scheduledBackup:
       # CNPG schedules use six cron fields, including seconds.
       schedule: "0 0 0 * * *"
@@ -409,8 +483,13 @@ localEmbeddingService:
   modelId: Alibaba-NLP/gte-modernbert-base
   embeddingDimensions: "768"
   embeddingProfileName: local-http-gte-modernbert-base
+  # Service port. The container listens on containerPort instead: the pod runs
+  # as a non-root user with NET_BIND_SERVICE dropped, so it cannot bind 80.
   port: 80
+  containerPort: 8080
   command: []
+  # When set, this replaces the default --model-id/--port arguments; include
+  # --port containerPort yourself.
   args: []
   env:
     HF_HOME: /data
@@ -744,6 +823,10 @@ palaceWorker:
 
 frontend:
   replicas: 1
+  # The frontend image is nginx-unprivileged, which cannot bind a port below
+  # 1024 as a non-root user. The Service still publishes 80, so nothing outside
+  # the pod changes.
+  containerPort: 8080
   rollingUpdate:
     maxUnavailable: 0
     maxSurge: 1

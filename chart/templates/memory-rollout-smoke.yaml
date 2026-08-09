@@ -65,12 +65,18 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "palaceoftruth.fullname" . }}-memory-rollout-smoke
+      # The only workload here that calls the Kubernetes API: it reads pods and
+      # pod logs through the minimal Role above to verify the rollout. Every
+      # other pod sets automountServiceAccountToken: false.
+      automountServiceAccountToken: true
+      {{- include "palaceoftruth.podSecurityContext" (list . "memoryRolloutSmoke") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: memory-rollout-smoke
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "memoryRolloutSmoke") | nindent 10 }}
           command:
             - python
             - -m
@@ -123,6 +129,7 @@ spec:
             - {{ . | quote }}
             {{- end }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -172,6 +179,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
           resources:
             {{- toYaml .Values.memoryRolloutSmoke.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
 {{- end }}

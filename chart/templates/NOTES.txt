@@ -1,0 +1,42 @@
+Palace of Truth {{ .Chart.Version }} is installed as release {{ .Release.Name }}
+in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.postgres.enabled }}
+{{- if .Values.postgres.backup.enabled }}
+
+Postgres backups: ON
+  ObjectStore : {{ default (printf "%s-backup" (include "palaceoftruth.postgresClusterName" .)) .Values.postgres.backup.objectStore.name }}
+  Schedule    : {{ .Values.postgres.backup.scheduledBackup.schedule }} (six fields; the first is seconds)
+  Retention   : {{ default "delegated to the object store lifecycle policy" .Values.postgres.backup.objectStore.retentionPolicy }}
+
+  A backup that has never been restored is not a backup. Rehearse a recovery
+  into a scratch cluster and record the date it last succeeded.
+{{- else }}
+
+WARNING: Postgres backups are OFF.
+  This release runs a database with no scheduled backup and no WAL archive,
+  so a lost volume is lost data. Backups need an object-store destination and
+  credentials that belong to this environment, which is why the chart cannot
+  turn them on for you.
+
+  To enable:
+    postgres.backup.enabled: true
+    postgres.backup.objectStore.configuration.destinationPath: s3://BUCKET/PATH
+    plus the provider credential references (or workload identity)
+
+  The Barman Cloud plugin and its CRDs must be installed in the cluster first.
+  Set postgres.backup.requireBackup=true in production values so this can
+  never ship unnoticed again.
+{{- end }}
+{{- end }}
+
+{{- if not .Values.podSecurity.enabled }}
+
+WARNING: podSecurity.enabled=false. Pods render without runAsNonRoot,
+  seccomp, dropped capabilities or a read-only root filesystem. This is an
+  escape hatch for debugging, not a supported configuration.
+{{- else if not .Values.podSecurity.admission.enabled }}
+
+NOTE: Pod Security Admission labels are not applied to the namespace, so
+  nothing stops a future workload from running privileged here.
+{{- end }}

@@ -20,18 +20,22 @@ spec:
         app: {{ include "palaceoftruth.fullname" . }}-worker
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "worker") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: worker
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "worker") | nindent 10 }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.WorkerSettings"]
           readinessProbe:
             exec:
               command: ["arq", "app.workers.worker.WorkerSettings", "--check"]
             {{- toYaml .Values.worker.readinessProbe | nindent 12 }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
           envFrom:
@@ -40,11 +44,13 @@ spec:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
       volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
 {{- if .Values.mediaWorker.enabled }}
 ---
@@ -70,12 +76,15 @@ spec:
         app: {{ include "palaceoftruth.fullname" . }}-media-worker
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "mediaWorker") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: media-worker
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "mediaWorker") | nindent 10 }}
           command:
             {{- toYaml .Values.mediaWorker.command | nindent 12 }}
           readinessProbe:
@@ -83,6 +92,7 @@ spec:
               command: ["arq", "app.workers.worker.MediaWorkerSettings", "--check"]
             {{- toYaml .Values.mediaWorker.readinessProbe | nindent 12 }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: ARQ_QUEUE_NAME
@@ -95,11 +105,13 @@ spec:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.mediaWorker.resources | nindent 12 }}
       volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
 {{- end }}
 ---
@@ -125,18 +137,22 @@ spec:
         app: {{ include "palaceoftruth.fullname" . }}-palace-worker
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "palaceWorker") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: palace-worker
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "palaceWorker") | nindent 10 }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]
           readinessProbe:
             exec:
               command: ["arq", "app.workers.worker.PalaceWorkerSettings", "--check"]
             {{- toYaml .Values.palaceWorker.readinessProbe | nindent 12 }}
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
           envFrom:
@@ -145,9 +161,11 @@ spec:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.palaceWorker.resources | nindent 12 }}
       volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

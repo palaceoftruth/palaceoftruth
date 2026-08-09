@@ -25,6 +25,8 @@ spec:
         app: {{ include "palaceoftruth.fullname" . }}-backend
         {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "backend") | nindent 6 }}
       imagePullSecrets:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       {{- if .Values.migrations.enabled }}
@@ -32,6 +34,7 @@ spec:
         - name: wait-for-migrations
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "backend") | nindent 10 }}
           command:
             - /bin/sh
             - -ec
@@ -48,19 +51,24 @@ spec:
               echo "Timed out waiting for database migrations to reach Alembic head." >&2
               exit 1
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
           envFrom:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
       {{- end }}
       containers:
         - name: backend
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "backend") | nindent 10 }}
           ports:
             - containerPort: 8000
           env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
           envFrom:
@@ -69,6 +77,7 @@ spec:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           startupProbe:
@@ -94,4 +103,5 @@ spec:
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
       volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

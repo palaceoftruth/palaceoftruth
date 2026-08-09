@@ -228,7 +228,7 @@ spec:
               kubernetes.io/metadata.name: {{ $ingressNamespace }}
       ports:
         - protocol: TCP
-          port: 80
+          port: {{ .Values.frontend.containerPort }}
     {{- else }}
     # No ingress-controller namespace configured; leave the tier reachable
     # rather than rendering a policy that black-holes all web traffic.
