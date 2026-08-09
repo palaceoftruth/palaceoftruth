@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import hash_secret, require_api_capability
+from app.auth import hash_secret, require_api_capability, secret_hash_candidates
 from app.database import async_session, get_db
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
@@ -655,10 +655,13 @@ async def issue_browser_extension_token(
             """
             SELECT id, tenant_id, expires_at, used_at
             FROM browser_extension_pairing_keys
-            WHERE credential_hash = :credential_hash AND purpose = 'browser_extension_token'
+            WHERE credential_hash IN (:credential_hash, :legacy_credential_hash)
+              AND purpose = 'browser_extension_token'
             """
         ),
-        {"credential_hash": hash_secret(pairing_key)},
+        # A pairing key issued before the pepper was configured still carries a
+        # legacy digest until it is used, so match both formats.
+        dict(zip(("credential_hash", "legacy_credential_hash"), secret_hash_candidates(pairing_key))),
     )
     pairing = pairing_result.mappings().one_or_none()
     if pairing is None:

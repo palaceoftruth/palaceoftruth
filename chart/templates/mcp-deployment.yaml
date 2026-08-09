@@ -94,6 +94,8 @@ spec:
               value: {{ .Chart.AppVersion | quote }}
             - name: PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED
               value: {{ .Values.mcp.legacyApiKeyAuthEnabled | quote }}
+            - name: PALACEOFTRUTH_MCP_FORWARD_CALLER_IDENTITY
+              value: {{ .Values.mcp.forwardCallerIdentity | quote }}
             {{- if .Values.mcp.defaultScopeType }}
             - name: PALACEOFTRUTH_DEFAULT_SCOPE_TYPE
               value: {{ .Values.mcp.defaultScopeType | quote }}

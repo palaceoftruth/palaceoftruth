@@ -275,6 +275,16 @@ headers. Read routes send `X-MCP-Scope: read`; write routes send
 `write:workspace`, or `write:session`, in `X-MCP-Scopes`. The repo smoke and
 import scripts add those headers automatically.
 
+The headers narrow, they do not grant. Every API key carries a scope grant
+stored on its `api_keys` row, and the request is authorized against the
+intersection of that grant and the headers. A header can therefore drop a scope
+for one call, but it can never add one the key does not hold — including
+`admin`. A key with an empty stored grant is refused at authentication. Set a
+key's grant with `scopes` on tenant registration or key rotation
+(`POST /api/v1/admin/tenants` and the key-rotation route); keys that existed
+before this change keep their previous privilege, so narrow them by rotating to
+a key with an explicit `scopes` list.
+
 Memory writes return a durability contract for clients. A `202` response means
 Palace accepted a durable item/job before enqueueing background work. Clients
 should persist `job_id`, poll `poll_url` after `poll_after_seconds`, and inspect

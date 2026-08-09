@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.api.chat import _get_service, chat_stream, router
 from app.auth import AuthContext, verify_memory_auth
+from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.schemas.artifact_citation import ArtifactCitation
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.retrieval_provenance import RetrievalProvenance
@@ -73,7 +74,7 @@ def _client(service: object) -> TestClient:
     app.include_router(router, prefix="/api/v1")
 
     async def override_verify(request: Request):
-        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash")
+        request.state.auth_context = AuthContext(tenant_id="tenant-a", auth_mode="api_key", token_hash_reference="key-hash", scopes=LEGACY_API_KEY_SCOPES, capabilities=frozenset(LEGACY_API_KEY_SCOPES))
         request.state.tenant_id = "tenant-a"
         request.state.key_hash = "key-hash"
         request.state.auth_mode = "api_key"

@@ -58,6 +58,104 @@ DEFAULT_MCP_CLIENT_SCOPES: tuple[McpOperationScope, ...] = (
 )
 
 
+# Scope grant persisted for tenant API keys that existed before per-key scopes
+# were stored (migration 055). It reproduces the privilege those keys already
+# had: every REST capability gate passed unconditionally, and the MCP scope
+# gate accepted any self-declared header. Narrowing an individual key is an
+# operator action, not something the migration can infer.
+LEGACY_API_KEY_SCOPES: tuple[McpOperationScope, ...] = (
+    "read",
+    "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
+    "admin",
+    "capture:write",
+    "capture:job:read",
+)
+
+# Scope grant given to an API key created after migration 055 when the caller
+# does not ask for a specific set. It covers every routine memory and capture
+# surface but withholds "admin", which now has to be requested on purpose.
+DEFAULT_API_KEY_SCOPES: tuple[McpOperationScope, ...] = (
+    "read",
+    "write",
+    "write:agent",
+    "write:workspace",
+    "write:session",
+    "capture:write",
+    "capture:job:read",
+)
+
+# Required scope for every MCP operation that reaches _run_mcp_operation.
+# Dispatch fails closed on any operation missing an entry, so a new tool cannot
+# ship without an explicit authorization decision. Tool aliases (palace_search,
+# palace_remember, ...) delegate to the base tool and are covered by its entry.
+MCP_OPERATION_SCOPES: dict[str, McpOperationScope] = {
+    # read surfaces
+    "connection_info": "read",
+    "whoami": "read",
+    "get_memory_job": "read",
+    "list_memory_entries": "read",
+    "list_memory_scopes": "read",
+    "list_memory_jobs": "read",
+    "get_graph": "read",
+    "get_item_relationships": "read",
+    "list_temporal_facts": "read",
+    "get_claim_support": "read",
+    "get_answer_audit": "read",
+    "get_palace_room": "read",
+    "get_wakeup_brief": "read",
+    "get_wakeup_context": "read",
+    "get_retrieval_doctor": "read",
+    "retrieve_memory": "read",
+    "retrieve_agent_memory": "read",
+    "retrieve_memory_trajectory": "read",
+    "palace_semantic_recall": "read",
+    "search_items": "read",
+    "list_tags": "read",
+    "list_items": "read",
+    # write surfaces
+    "create_memory_entry": "write",
+    "create_memory_entries_batch": "write",
+    "capture_checkpoint": "write",
+    # maintenance surfaces
+    "backfill_deferred_relationships": "admin",
+}
+
+# Additional scope demanded by a write whose destination is an explicitly
+# requested scope. This is what makes write:agent / write:workspace /
+# write:session real rather than decorative: holding plain "write" grants
+# tenant_shared writes only.
+MCP_DESTINATION_SCOPES: dict[str, McpOperationScope] = {
+    "agent": "write:agent",
+    "workspace": "write:workspace",
+    "session": "write:session",
+    "tenant_shared": "write",
+}
+
+
+class UnmappedMcpOperationError(LookupError):
+    """Raised when an operation has no entry in MCP_OPERATION_SCOPES."""
+
+
+def required_scope_for_operation(operation: str) -> McpOperationScope:
+    """Return the scope an operation needs, failing closed when unmapped."""
+    try:
+        return MCP_OPERATION_SCOPES[operation]
+    except KeyError as exc:
+        raise UnmappedMcpOperationError(
+            f"MCP operation {operation!r} has no required scope; refusing to dispatch"
+        ) from exc
+
+
+def destination_scope_for(scope_type: str | None) -> McpOperationScope | None:
+    """Return the extra scope a write to ``scope_type`` needs, if any."""
+    if scope_type is None:
+        return None
+    return MCP_DESTINATION_SCOPES.get(scope_type)
+
+
 def serialize_mcp_scope_catalog() -> list[dict[str, str]]:
     return [
         {

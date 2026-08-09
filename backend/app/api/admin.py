@@ -1,5 +1,4 @@
 """Admin endpoints for tenant and control-plane operations."""
-import hashlib
 import json
 import os
 import secrets
@@ -16,6 +15,7 @@ from app.database import get_db
 from app.models.job import Job
 from app.schemas.bundle import AdminImportResponse, AdminJobResponse
 from app.auth import hash_secret
+from app.mcp_scopes import DEFAULT_API_KEY_SCOPES, VALID_MCP_OPERATION_SCOPES
 from app.schemas.memory import (
     McpOAuthClientAgentScopeBindingRequest,
     McpOAuthClientRegisterRequest,
@@ -69,6 +69,9 @@ def _verify_admin(x_admin_secret: str | None = Header(None, alias="X-Admin-Secre
 class RegisterTenantRequest(BaseModel):
     tenant_id: str
     description: str | None = None
+    # Omit to receive DEFAULT_API_KEY_SCOPES. Any value here is the whole grant
+    # for the new key; the MCP scope headers can only narrow it later.
+    scopes: list[str] | None = None
 
     @field_validator("tenant_id")
     @classmethod
@@ -89,6 +92,7 @@ class RegisterTenantRequest(BaseModel):
 class TenantApiKeySummary(BaseModel):
     id: uuid.UUID
     tenant_id: str
+    scopes: list[str] = []
     description: str | None = None
     created_at: datetime
     revoked_at: datetime | None = None
@@ -113,6 +117,7 @@ class TenantApiKeyListResponse(BaseModel):
 class RotateTenantApiKeyRequest(BaseModel):
     description: str | None = None
     revoke_existing: bool = True
+    scopes: list[str] | None = None
 
     @field_validator("description")
     @classmethod
@@ -260,6 +265,7 @@ def _serialize_api_key(row) -> TenantApiKeySummary:
     return TenantApiKeySummary(
         id=row["id"],
         tenant_id=row["tenant_id"],
+        scopes=list(row.get("scopes") or []),
         description=row["description"],
         created_at=row["created_at"],
         revoked_at=revoked_at,
@@ -314,7 +320,7 @@ def _within_lookback(value: datetime | None, *, since: datetime) -> bool:
 async def _list_api_key_rows(db: AsyncSession, *, tenant_id: str) -> list[dict]:
     result = await db.execute(
         text(
-            "SELECT id, tenant_id, description, created_at, revoked_at "
+            "SELECT id, tenant_id, scopes, description, created_at, revoked_at "
             ", last_used_at "
             "FROM api_keys "
             "WHERE tenant_id = :tenant_id "
@@ -328,7 +334,7 @@ async def _list_api_key_rows(db: AsyncSession, *, tenant_id: str) -> list[dict]:
 async def _active_api_key_row(db: AsyncSession, *, tenant_id: str) -> dict | None:
     result = await db.execute(
         text(
-            "SELECT id, tenant_id, description, created_at, revoked_at "
+            "SELECT id, tenant_id, scopes, description, created_at, revoked_at "
             ", last_used_at "
             "FROM api_keys "
             "WHERE tenant_id = :tenant_id AND revoked_at IS NULL "
@@ -451,23 +457,39 @@ async def _list_legacy_mcp_activity_rows(
     return result.mappings().all()
 
 
+def _normalize_api_key_scopes(scopes: list[str] | None) -> list[str]:
+    """Validate a requested API-key grant, or fall back to the default grant."""
+    if scopes is None:
+        return list(DEFAULT_API_KEY_SCOPES)
+    normalized = list(dict.fromkeys(scope.strip() for scope in scopes if scope.strip()))
+    invalid = sorted(set(normalized) - VALID_MCP_OPERATION_SCOPES)
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unsupported API key scopes: {', '.join(invalid)}")
+    if not normalized:
+        raise HTTPException(status_code=400, detail="API key scopes must not be empty")
+    return normalized
+
+
 async def _insert_api_key(
     db: AsyncSession,
     *,
     tenant_id: str,
     description: str | None,
+    scopes: list[str] | None = None,
 ) -> tuple[str, dict]:
     raw_key = secrets.token_hex(32)
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_hash = hash_secret(raw_key)
+    granted_scopes = _normalize_api_key_scopes(scopes)
     result = await db.execute(
         text(
-            "INSERT INTO api_keys (tenant_id, key_hash, description) "
-            "VALUES (:tenant_id, :key_hash, :description) "
-            "RETURNING id, tenant_id, description, created_at, revoked_at, last_used_at"
+            "INSERT INTO api_keys (tenant_id, key_hash, scopes, description) "
+            "VALUES (:tenant_id, :key_hash, CAST(:scopes AS jsonb), :description) "
+            "RETURNING id, tenant_id, scopes, description, created_at, revoked_at, last_used_at"
         ),
         {
             "tenant_id": tenant_id,
             "key_hash": key_hash,
+            "scopes": json.dumps(granted_scopes),
             "description": description,
         },
     )
@@ -541,6 +563,7 @@ async def register_tenant(
         db,
         tenant_id=body.tenant_id,
         description=body.description,
+        scopes=body.scopes,
     )
     await _record_api_key_audit_event(
         db,
@@ -1006,6 +1029,7 @@ async def rotate_tenant_api_key(
         db,
         tenant_id=tenant_id,
         description=body.description,
+        scopes=body.scopes,
     )
     await _record_api_key_audit_event(
         db,

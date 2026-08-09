@@ -11,7 +11,12 @@ class ApiKey(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Unsalted SHA-256 hex for rows created before migration 055, or
+    # "hmac-sha256$<hex>" once the key re-authenticates with a pepper set.
     key_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Authoritative scope grant for this key. The X-MCP-Scope headers can only
+    # narrow it; they can never add a scope that is not stored here.
+    scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

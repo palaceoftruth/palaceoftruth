@@ -25,6 +25,26 @@ Do not open a public issue for secrets, authentication bypasses, tenant isolatio
 - Webhook and repo/source sync inputs must not expose internal services, local files, or cluster credentials.
 - Documentation, examples, PRs, and benchmark artifacts must not include raw secrets, bearer tokens, private transcript text, or production data dumps.
 
+## Credential and Scope Handling
+
+- Every tenant API key carries a scope grant stored on its `api_keys` row. The
+  `X-MCP-Scope` and `X-MCP-Scopes` request headers narrow that grant for one
+  call; they never add a scope, and `admin` can come only from the stored
+  grant. A key with no usable stored grant is refused at authentication.
+- Each MCP operation declares the scope it needs in `app/mcp_scopes.py`. An
+  operation with no entry is refused, so a new tool cannot ship without an
+  authorization decision. A write to an explicitly requested agent, workspace,
+  or session scope also needs the matching `write:<destination>` scope.
+- The MCP adapter calls the backend with the credential of the caller it serves,
+  not with its own. Set `mcp.forwardCallerIdentity: false` only to restore the
+  previous behaviour during an incident.
+- Stored credential verifiers (API keys, OAuth client secrets, access and
+  refresh tokens, pairing keys) are peppered HMAC-SHA256 when
+  `CREDENTIAL_PEPPER` is set. Hashes carry an `hmac-sha256$` prefix, lookups
+  accept both formats, and a credential is re-hashed the next time it is used.
+  Setting the pepper on a running deployment is therefore safe; changing it
+  afterwards invalidates every credential already hashed with the old value.
+
 ## Cluster Hardening Defaults
 
 The Helm chart ships hardened defaults rather than leaving them to each
@@ -57,6 +77,7 @@ Use `.env.example` as a template and keep `.env` out of git. Generate strong loc
 
 - `API_KEY`
 - `PALACEOFTRUTH_ADMIN_SECRET`
+- `CREDENTIAL_PEPPER`
 - `DB_PASSWORD`
 - provider API keys and optional integration tokens
 

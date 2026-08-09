@@ -1,7 +1,9 @@
+import ast
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +15,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+import app.mcp_server
+from app.mcp_scopes import MCP_OPERATION_SCOPES
 from app.mcp_server import (
     McpHttpAuthMiddleware,
     McpHttpAuthResult,
@@ -23,9 +27,12 @@ from app.mcp_server import (
     SecondBrainMcpRuntime,
     SecondBrainMcpSettings,
     _build_scope,
+    _caller_credential_headers,
     _compact_startup_decision_claims,
     _normalize_created_at,
     _port_from_env,
+    _required_scopes_for_call,
+    _run_mcp_operation,
     _streamable_http_transport_security,
     backfill_deferred_relationships,
     capture_checkpoint,
@@ -4271,3 +4278,231 @@ def test_list_items_serializes_tag_filters_as_csv() -> None:
 
     asyncio.run(scenario())
     assert seen_tags == ["launch,founder-note"]
+
+
+def _dispatched_mcp_operations() -> set[str]:
+    """Every operation literal passed to _run_mcp_operation in mcp_server.py.
+
+    Read from the source with ast so a newly added tool is caught even when no
+    test calls it.
+    """
+    source_path = Path(app.mcp_server.__file__)
+    tree = ast.parse(source_path.read_text())
+    operations: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name != "_run_mcp_operation":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "operation" and isinstance(keyword.value, ast.Constant):
+                operations.add(keyword.value.value)
+    return operations
+
+
+def test_every_dispatched_mcp_operation_has_a_required_scope() -> None:
+    dispatched = _dispatched_mcp_operations()
+
+    # Guard the guard: an ast walk that finds nothing would pass silently.
+    assert len(dispatched) >= 20
+    unmapped = sorted(dispatched - set(MCP_OPERATION_SCOPES))
+    assert unmapped == [], f"MCP operations without a required scope: {unmapped}"
+
+
+def test_mcp_operation_scope_table_has_no_stale_entries() -> None:
+    dispatched = _dispatched_mcp_operations()
+
+    stale = sorted(set(MCP_OPERATION_SCOPES) - dispatched)
+    assert stale == [], f"MCP_OPERATION_SCOPES entries with no dispatch site: {stale}"
+
+
+def test_run_mcp_operation_denies_an_unmapped_operation() -> None:
+    audit_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/memory/mcp/audit"
+        audit_payloads.append(json.loads(request.content.decode()))
+        return httpx.Response(
+            201,
+            json={
+                "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                "tenant_id": "tenant-a",
+                "status": "recorded",
+            },
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+
+            async def call() -> None:
+                raise AssertionError("An unmapped operation must not reach its handler")
+
+            with pytest.raises(PermissionError, match="has no required scope"):
+                await _run_mcp_operation(
+                    ctx,
+                    operation="tool_shipped_without_a_scope",
+                    params={},
+                    call=call,
+                )
+
+    asyncio.run(scenario())
+    assert audit_payloads[0]["status"] == "denied"
+    assert audit_payloads[0]["error_class"] == "UnmappedMcpOperationError"
+    assert audit_payloads[0]["required_scope"] is None
+
+
+def test_required_scopes_for_call_adds_the_destination_scope() -> None:
+    assert _required_scopes_for_call("create_memory_entry", {"scope_type": "workspace"}) == (
+        "write",
+        "write:workspace",
+    )
+    assert _required_scopes_for_call("create_memory_entry", {"scope_type": "tenant_shared"}) == ("write",)
+    # An omitted scope_type falls back to the client's configured default, which
+    # the client holds by definition, so no extra scope is demanded.
+    assert _required_scopes_for_call("create_memory_entry", {}) == ("write",)
+    assert _required_scopes_for_call("list_memory_entries", {"scope_type": "workspace"}) == ("read",)
+
+
+def test_mcp_tool_denies_a_write_to_a_scope_the_client_does_not_hold() -> None:
+    audit_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/memory/mcp/audit"
+        audit_payloads.append(json.loads(request.content.decode()))
+        return httpx.Response(
+            201,
+            json={
+                "audit_event_id": "550e8400-e29b-41d4-a716-446655440001",
+                "client_id": "550e8400-e29b-41d4-a716-446655440002",
+                "tenant_id": "tenant-a",
+                "status": "recorded",
+            },
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="secret",
+                    # Plain "write" without write:workspace.
+                    client_scopes=("read", "write"),
+                ),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+            with pytest.raises(PermissionError, match="missing write:workspace scope"):
+                await create_memory_entry(
+                    title="Denied",
+                    body="secret",
+                    ctx=ctx,
+                    scope_type="workspace",
+                    scope_key="launch-pad",
+                )
+
+    asyncio.run(scenario())
+    assert audit_payloads[0]["status"] == "denied"
+    assert audit_payloads[0]["required_scope"] == "write:workspace"
+
+
+def _caller_identity_scenario(
+    *,
+    forward_caller_identity: bool,
+    credential_headers: tuple[tuple[str, str], ...],
+) -> list[dict[str, str | None]]:
+    seen: list[dict[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "path": request.url.path,
+                "x-api-key": request.headers.get("x-api-key"),
+                "authorization": request.headers.get("authorization"),
+                "x-mcp-scope": request.headers.get("x-mcp-scope"),
+            }
+        )
+        return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(
+                    api_base_url="https://api.palaceoftruth.test",
+                    api_key="adapter-key",
+                    forward_caller_identity=forward_caller_identity,
+                ),
+                client=client,
+            )
+            token = _caller_credential_headers.set(credential_headers or None)
+            try:
+                await api.whoami()
+            finally:
+                _caller_credential_headers.reset(token)
+
+    asyncio.run(scenario())
+    return seen
+
+
+def test_api_client_acts_as_the_http_caller_not_as_the_adapter() -> None:
+    seen = _caller_identity_scenario(
+        forward_caller_identity=True,
+        credential_headers=(("X-API-Key", "caller-key"),),
+    )
+
+    # The adapter must not substitute its own credential for the caller's.
+    assert seen[0]["x-api-key"] == "caller-key"
+    assert seen[0]["x-mcp-scope"] == "read"
+
+
+def test_api_client_forwards_a_caller_bearer_token_unchanged() -> None:
+    seen = _caller_identity_scenario(
+        forward_caller_identity=True,
+        credential_headers=(("Authorization", "Bearer caller-token"),),
+    )
+
+    assert seen[0]["authorization"] == "Bearer caller-token"
+    assert seen[0]["x-api-key"] is None
+
+
+def test_api_client_uses_its_own_credential_when_forwarding_is_disabled() -> None:
+    seen = _caller_identity_scenario(
+        forward_caller_identity=False,
+        credential_headers=(("X-API-Key", "caller-key"),),
+    )
+
+    assert seen[0]["x-api-key"] == "adapter-key"
+
+
+def test_api_client_uses_its_own_credential_on_the_stdio_transport() -> None:
+    # No HTTP middleware ran, so nothing was captured.
+    seen = _caller_identity_scenario(forward_caller_identity=True, credential_headers=())
+
+    assert seen[0]["x-api-key"] == "adapter-key"

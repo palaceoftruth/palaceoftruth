@@ -51,26 +51,32 @@ async def _seed_default_api_key() -> None:
 
     Idempotent — safe to run on every startup.
     """
-    import hashlib
+    import json
+
     from sqlalchemy import text as sa_text
+
+    from app.auth import secret_hash_candidates
+    from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 
     if not settings.api_key:
         return
 
-    key_hash = hashlib.sha256(settings.api_key.encode()).hexdigest()
+    # Look for both formats: the row may predate the credential pepper. Missing
+    # the legacy row would insert a duplicate and break the unique key_hash.
+    key_hash, legacy_key_hash = secret_hash_candidates(settings.api_key)
 
     async with async_session() as db:
         existing = await db.scalar(
-            sa_text("SELECT 1 FROM api_keys WHERE key_hash = :hash LIMIT 1"),
-            {"hash": key_hash},
+            sa_text("SELECT 1 FROM api_keys WHERE key_hash IN (:hash, :legacy_hash) LIMIT 1"),
+            {"hash": key_hash, "legacy_hash": legacy_key_hash},
         )
         if existing is None:
             await db.execute(
                 sa_text(
-                    "INSERT INTO api_keys (tenant_id, key_hash, description) "
-                    "VALUES ('default', :hash, 'seeded from API_KEY env var')"
+                    "INSERT INTO api_keys (tenant_id, key_hash, scopes, description) "
+                    "VALUES ('default', :hash, CAST(:scopes AS jsonb), 'seeded from API_KEY env var')"
                 ),
-                {"hash": key_hash},
+                {"hash": key_hash, "scopes": json.dumps(list(LEGACY_API_KEY_SCOPES))},
             )
             await db.commit()
     logger.info("Default API key seeded")

@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -12,6 +13,7 @@ from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy import text
 
+from app.config import settings
 from app.database import async_session
 from app.mcp_scopes import VALID_MCP_OPERATION_SCOPES
 
@@ -45,12 +47,57 @@ class AuthContext:
         return capability in self.capabilities or "admin" in self.capabilities
 
 
-def _hash_key(raw: str) -> str:
+# Stored credential verifiers carry their own format tag so peppered and
+# legacy rows can coexist during the rollout. Untagged values are the legacy
+# unsalted SHA-256 digests written before the pepper existed.
+PEPPERED_HASH_PREFIX = "hmac-sha256$"
+
+
+def _legacy_hash_secret(raw: str) -> str:
+    """Unsalted SHA-256 digest — read-only compatibility for pre-pepper rows."""
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _peppered_hash_secret(raw: str, pepper: str) -> str:
+    digest = hmac.new(pepper.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    return f"{PEPPERED_HASH_PREFIX}{digest}"
+
+
+def _credential_pepper() -> str:
+    return (getattr(settings, "credential_pepper", "") or "").strip()
+
+
 def hash_secret(raw: str) -> str:
-    return _hash_key(raw)
+    """Return the verifier to persist for ``raw``.
+
+    Peppered HMAC-SHA256 when a pepper is configured, otherwise the legacy
+    unsalted digest so deployments without a pepper keep working unchanged.
+    """
+    pepper = _credential_pepper()
+    if pepper:
+        return _peppered_hash_secret(raw, pepper)
+    return _legacy_hash_secret(raw)
+
+
+def secret_hash_candidates(raw: str) -> tuple[str, str]:
+    """Return (preferred, legacy) verifiers to match a stored row against.
+
+    Lookups must accept both while rows written before the pepper was
+    configured are still in the table. Both entries are equal when no pepper is
+    set, which keeps every ``IN (:hash, :legacy_hash)`` lookup index-friendly.
+    """
+    return hash_secret(raw), _legacy_hash_secret(raw)
+
+
+def is_legacy_secret_hash(stored: str | None) -> bool:
+    """True when ``stored`` still uses the pre-pepper format and can be upgraded."""
+    if not isinstance(stored, str) or not stored:
+        return False
+    return bool(_credential_pepper()) and not stored.startswith(PEPPERED_HASH_PREFIX)
+
+
+def _hash_key(raw: str) -> str:
+    return hash_secret(raw)
 
 
 def _parse_json_list(value: object) -> list[str]:
@@ -61,6 +108,28 @@ def _parse_json_list(value: object) -> list[str]:
     if invalid:
         raise HTTPException(status_code=403, detail=f"MCP client scopes include unsupported scope: {', '.join(invalid)}")
     return scopes
+
+
+def _parse_stored_api_key_scopes(value: object) -> tuple[str, ...]:
+    """Normalize the ``api_keys.scopes`` grant.
+
+    Fails closed: a NULL, malformed, or unrecognized entry contributes nothing,
+    so a key with no usable stored grant has no capabilities at all.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            logger.warning("api_keys.scopes held non-JSON text; treating the grant as empty")
+            return ()
+    if not isinstance(value, list):
+        return ()
+    scopes = [
+        item
+        for item in value
+        if isinstance(item, str) and item.strip() in VALID_MCP_OPERATION_SCOPES
+    ]
+    return tuple(dict.fromkeys(scope.strip() for scope in scopes))
 
 
 def _parse_scope_header(*values: str | None) -> list[str]:
@@ -293,16 +362,16 @@ async def verify_api_key(
     if not api_key:
         raise _auth_exception(request, 403, "Missing API key", error="invalid_token")
 
-    key_hash = _hash_key(api_key)
+    key_hash, legacy_key_hash = secret_hash_candidates(api_key)
 
     async with async_session() as db:
         row = await db.execute(
             text(
-                "SELECT id, tenant_id FROM api_keys "
-                "WHERE key_hash = :hash AND revoked_at IS NULL "
+                "SELECT id, tenant_id, scopes, key_hash FROM api_keys "
+                "WHERE key_hash IN (:hash, :legacy_hash) AND revoked_at IS NULL "
                 "LIMIT 1"
             ),
-            {"hash": key_hash},
+            {"hash": key_hash, "legacy_hash": legacy_key_hash},
         )
         result = row.mappings().one_or_none()
         if result is not None:
@@ -310,19 +379,42 @@ async def verify_api_key(
                 text("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = :id"),
                 {"id": result["id"]},
             )
+            if is_legacy_secret_hash(result.get("key_hash")):
+                # Upgrade-on-use: the raw key is only available here, so this is
+                # the one place a pre-pepper row can be re-hashed.
+                await db.execute(
+                    text("UPDATE api_keys SET key_hash = :hash WHERE id = :id"),
+                    {"hash": key_hash, "id": result["id"]},
+                )
             await db.commit()
 
     if result is None:
         raise _auth_exception(request, 403, "Invalid or revoked API key", error="invalid_token")
 
+    stored_scopes = _parse_stored_api_key_scopes(result.get("scopes"))
+    if not stored_scopes:
+        # A key with no usable stored grant can do nothing, and some routes
+        # depend on verify_api_key alone. Deny at authentication instead of
+        # letting an ungated route through.
+        logger.warning("API key %s has no usable stored scope grant", result["id"])
+        raise _auth_exception(
+            request,
+            403,
+            "API key has no stored scope grant",
+            error="insufficient_scope",
+        )
     _attach_auth_context(
         request,
-        AuthContext(
+        _context_from_scopes(
             tenant_id=result["tenant_id"],
             auth_mode="api_key",
             subject_id=str(result["id"]),
             token_hash_reference=key_hash,
-            audit_metadata=MappingProxyType({"api_key_id": str(result["id"])}),
+            scopes=stored_scopes,
+            audit_metadata={
+                "api_key_id": str(result["id"]),
+                "api_key_granted_scopes": list(stored_scopes),
+            },
         ),
     )
     return api_key
@@ -343,13 +435,14 @@ async def verify_memory_auth(
     if scheme.lower() != "bearer" or not token.strip():
         raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
-    token_hash = hash_secret(token.strip())
+    token_hash, legacy_token_hash = secret_hash_candidates(token.strip())
     async with async_session() as db:
         row = await db.execute(
             text(
                 """
                 SELECT
                     t.id AS token_id,
+                    t.token_hash AS stored_token_hash,
                     t.tenant_id,
                     t.scopes AS token_scopes,
                     t.resource AS token_resource,
@@ -370,11 +463,11 @@ async def verify_memory_auth(
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
                 LEFT JOIN mcp_oauth_delegated_grants g ON g.id = t.delegated_grant_id AND g.tenant_id = t.tenant_id
-                WHERE t.token_hash = :token_hash
+                WHERE t.token_hash IN (:token_hash, :legacy_token_hash)
                 LIMIT 1
                 """
             ),
-            {"token_hash": token_hash},
+            {"token_hash": token_hash, "legacy_token_hash": legacy_token_hash},
         )
         result = row.mappings().one_or_none()
         if result is not None:
@@ -454,6 +547,11 @@ async def verify_memory_auth(
                 ),
                 {"token_id": result["token_id"]},
             )
+            if is_legacy_secret_hash(result.get("stored_token_hash")):
+                await db.execute(
+                    text("UPDATE mcp_oauth_access_tokens SET token_hash = :hash WHERE id = :token_id"),
+                    {"hash": token_hash, "token_id": result["token_id"]},
+                )
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),
                 {"client_id": result["client_id"]},
@@ -510,13 +608,14 @@ async def _verify_scoped_bearer_token(
     if scheme.lower() != "bearer" or not token.strip():
         raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
-    token_hash = hash_secret(token.strip())
+    token_hash, legacy_token_hash = secret_hash_candidates(token.strip())
     async with async_session() as db:
         row = await db.execute(
             text(
                 """
                 SELECT
                     t.id AS token_id,
+                    t.token_hash AS stored_token_hash,
                     t.tenant_id,
                     t.scopes AS token_scopes,
                     t.resource AS token_resource,
@@ -537,11 +636,11 @@ async def _verify_scoped_bearer_token(
                 FROM mcp_oauth_access_tokens t
                 JOIN mcp_clients c ON c.id = t.client_id AND c.tenant_id = t.tenant_id
                 LEFT JOIN mcp_oauth_delegated_grants g ON g.id = t.delegated_grant_id AND g.tenant_id = t.tenant_id
-                WHERE t.token_hash = :token_hash
+                WHERE t.token_hash IN (:token_hash, :legacy_token_hash)
                 LIMIT 1
                 """
             ),
-            {"token_hash": token_hash},
+            {"token_hash": token_hash, "legacy_token_hash": legacy_token_hash},
         )
         result = row.mappings().one_or_none()
         if result is not None:
@@ -606,6 +705,11 @@ async def _verify_scoped_bearer_token(
                 ),
                 {"token_id": result["token_id"]},
             )
+            if is_legacy_secret_hash(result.get("stored_token_hash")):
+                await db.execute(
+                    text("UPDATE mcp_oauth_access_tokens SET token_hash = :hash WHERE id = :token_id"),
+                    {"hash": token_hash, "token_id": result["token_id"]},
+                )
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),
                 {"client_id": result["client_id"]},
@@ -722,6 +826,36 @@ async def record_oauth_client_audit_event(
         await db.commit()
 
 
+KNOWN_AUTH_MODES = frozenset({"api_key", "mcp_oauth", "browser_extension"})
+
+
+def _require_known_auth_mode(request: Request, auth_mode: object) -> str:
+    """Deny any principal whose auth mode is missing or unrecognized.
+
+    Both branches used to fall through to success, which made every capability
+    gate fail open for an unset or future auth mode.
+    """
+    if not isinstance(auth_mode, str) or auth_mode not in KNOWN_AUTH_MODES:
+        logger.warning(
+            "Refusing capability check for unknown auth mode %r on %s",
+            auth_mode,
+            _request_route(request),
+        )
+        raise _auth_exception(
+            request,
+            403,
+            "Authenticated principal is missing a recognized auth mode",
+            error="invalid_token",
+        )
+    return auth_mode
+
+
+def _insufficient_scope_detail(auth_mode: str, required_capability: str) -> str:
+    if auth_mode == "api_key":
+        return f"API key missing {required_capability} scope"
+    return f"MCP bearer token missing {required_capability} scope"
+
+
 def require_mcp_scope(required_scope: str):
     return require_capability(required_scope)
 
@@ -737,11 +871,8 @@ def require_capability(required_capability: str):
         if auth_mode == "api_key":
             _require_api_key_scope_header(request, required_capability, mcp_scope, mcp_scopes)
             return
-        if auth_mode is None:
-            return
+        _require_known_auth_mode(request, auth_mode)
         context = get_auth_context(request)
-        if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
-            return
         if not context.scopes:
             raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
@@ -773,14 +904,17 @@ def require_api_capability(required_capability: str):
         _: str = Depends(verify_memory_auth),
     ) -> None:
         context = get_auth_context(request)
-        # Tenant API keys are still the legacy broad REST API credential. Memory
-        # MCP routes keep their stricter X-MCP-Scope gate via require_capability.
-        if context.auth_mode == "api_key":
-            return
-        if context.auth_mode not in {"mcp_oauth", "browser_extension"}:
-            return
+        # Tenant API keys are checked against the scope grant persisted on the
+        # api_keys row. There is no request header in this path, so nothing the
+        # caller sends can influence the decision.
+        auth_mode = _require_known_auth_mode(request, context.auth_mode)
         if not context.scopes:
-            raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
+            raise _auth_exception(
+                request,
+                403,
+                "Authenticated principal has no granted scopes",
+                error="insufficient_scope",
+            )
         if not context.has_capability(required_capability):
             await record_oauth_client_audit_event(
                 request,
@@ -797,7 +931,7 @@ def require_api_capability(required_capability: str):
             raise _auth_exception(
                 request,
                 403,
-                f"MCP bearer token missing {required_capability} scope",
+                _insufficient_scope_detail(auth_mode, required_capability),
                 error="insufficient_scope",
             )
 
@@ -810,11 +944,36 @@ def _require_api_key_scope_header(
     mcp_scope: str | None,
     mcp_scopes: str | None,
 ) -> None:
-    api_key_scopes = _parse_scope_header(mcp_scope, mcp_scopes)
-    if required_scope not in api_key_scopes and "admin" not in api_key_scopes:
-        raise HTTPException(status_code=403, detail=f"API key missing {required_scope} MCP scope header")
-    request.state.mcp_allowed_scopes = api_key_scopes
+    # Validate the caller's header before anything else so a malformed scope
+    # keeps its own error rather than surfacing as a missing-context error.
+    requested_scopes = _parse_scope_header(mcp_scope, mcp_scopes)
+    header_present = mcp_scope is not None or mcp_scopes is not None
+    if not header_present:
+        # Unchanged from before this rewrite: an MCP-scoped route reached with
+        # an API key has always had to declare the scope it acts under.
+        raise HTTPException(
+            status_code=403,
+            detail=f"API key missing {required_scope} MCP scope header",
+        )
     context = get_auth_context(request)
+    # The grant is what migration 055 persisted on the api_keys row. The headers
+    # are a request from the caller, never a source of authority: they can only
+    # remove scopes from the grant, and an unknown or absent grant denies.
+    granted_scopes = list(dict.fromkeys(context.scopes or ()))
+    requested_set = set(requested_scopes)
+    effective_scopes = [scope for scope in granted_scopes if scope in requested_set]
+    if required_scope not in effective_scopes and "admin" not in effective_scopes:
+        raise HTTPException(
+            status_code=403,
+            detail=f"API key missing {required_scope} MCP scope",
+        )
+    # request.state.mcp_allowed_scopes is refreshed by _attach_auth_context below.
+    audit_metadata = dict(context.audit_metadata or {})
+    # Keep the stored grant and the caller's narrowing distinguishable in the
+    # audit trail; before this they were one undifferentiated scope list.
+    audit_metadata["api_key_granted_scopes"] = sorted(granted_scopes)
+    audit_metadata["mcp_requested_scopes"] = sorted(requested_scopes)
+    audit_metadata["mcp_effective_scopes"] = sorted(effective_scopes)
     _attach_auth_context(
         request,
         _context_from_scopes(
@@ -825,9 +984,9 @@ def _require_api_key_scope_header(
             client_id=context.client_id,
             client_key=context.client_key,
             client_name=context.client_name,
-            scopes=api_key_scopes,
+            scopes=effective_scopes,
             resource=context.resource,
-            audit_metadata=context.audit_metadata,
+            audit_metadata=audit_metadata,
         ),
     )
 
@@ -848,4 +1007,9 @@ def require_api_key_scope_header(required_scope: str):
 def compare_secret(raw: str, secret_hash: str | None) -> bool:
     if secret_hash is None:
         return False
-    return secrets.compare_digest(hash_secret(raw), secret_hash)
+    # Both candidates are always compared so the answer does not depend on
+    # which format the row happens to hold.
+    matched = False
+    for candidate in secret_hash_candidates(raw):
+        matched |= secrets.compare_digest(candidate, secret_hash)
+    return matched

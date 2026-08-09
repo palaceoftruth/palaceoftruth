@@ -9,10 +9,11 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, cast
+from typing import Any, Awaitable, Callable, Literal, NoReturn, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -29,7 +30,14 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, DEFAULT_MCP_CLIENT_SCOPES, McpOperationScope
+from app.mcp_scopes import (
+    ALL_MCP_OPERATION_SCOPES,
+    DEFAULT_MCP_CLIENT_SCOPES,
+    McpOperationScope,
+    UnmappedMcpOperationError,
+    destination_scope_for,
+    required_scope_for_operation,
+)
 from app.services.codex_memory_privacy import scan_codex_memory_privacy
 
 
@@ -76,6 +84,10 @@ PALACE_MCP_LEGACY_API_KEY_AUTH_ENABLED_ENVS = (
     "PALACEOFTRUTH_MCP_LEGACY_API_KEY_AUTH_ENABLED",
     "SECONDBRAIN_MCP_LEGACY_API_KEY_AUTH_ENABLED",
 )
+PALACE_MCP_FORWARD_CALLER_IDENTITY_ENVS = (
+    "PALACEOFTRUTH_MCP_FORWARD_CALLER_IDENTITY",
+    "SECONDBRAIN_MCP_FORWARD_CALLER_IDENTITY",
+)
 PALACE_DEFAULT_SCOPE_TYPE_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "SECONDBRAIN_DEFAULT_SCOPE_TYPE")
 PALACE_DEFAULT_SCOPE_KEY_ENVS = ("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "SECONDBRAIN_DEFAULT_SCOPE_KEY")
 PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
@@ -83,12 +95,6 @@ PALACE_MCP_CHECKPOINT_DISABLED_ENVS = (
     "SECONDBRAIN_MCP_CHECKPOINT_CAPTURE_DISABLED",
 )
 
-WRITE_OPERATIONS = {
-    "create_memory_entry",
-    "create_memory_entries_batch",
-    "capture_checkpoint",
-    "backfill_deferred_relationships",
-}
 SESSION_CONTEXT_ENTRY_FIELDS = (
     "id",
     "item_id",
@@ -475,6 +481,19 @@ class McpHttpAuthResult:
     tenant_id: str
     client_id: str
     scopes: tuple[McpOperationScope, ...]
+    # Verified credential of the HTTP caller. Backend calls made while serving
+    # that caller reuse it, so the backend evaluates the caller's own grants
+    # instead of the adapter's. Never logged and never put in an audit payload.
+    credential_headers: tuple[tuple[str, str], ...] = ()
+
+
+# Set for the duration of one streamable-HTTP MCP request by
+# McpHttpAuthMiddleware. Unset on the stdio transport, where the adapter is the
+# principal and there is no separate caller to impersonate.
+_caller_credential_headers: ContextVar[tuple[tuple[str, str], ...] | None] = ContextVar(
+    "palace_mcp_caller_credential_headers",
+    default=None,
+)
 
 
 def _incoming_mcp_auth_headers(
@@ -542,6 +561,7 @@ def _auth_result_from_whoami(payload: Any, *, credential_headers: dict[str, str]
             tenant_id=tenant_id,
             client_id="api-key",
             scopes=_api_key_scopes_from_headers(credential_headers),
+            credential_headers=tuple(credential_headers.items()),
         )
 
     if not isinstance(payload, dict):
@@ -557,7 +577,12 @@ def _auth_result_from_whoami(payload: Any, *, credential_headers: dict[str, str]
     client_id = payload.get("mcp_client_key")
     if not isinstance(client_id, str) or not client_id.strip():
         client_id = "mcp-oauth"
-    return McpHttpAuthResult(tenant_id=tenant_id, client_id=client_id.strip(), scopes=scopes)
+    return McpHttpAuthResult(
+        tenant_id=tenant_id,
+        client_id=client_id.strip(),
+        scopes=scopes,
+        credential_headers=tuple(credential_headers.items()),
+    )
 
 
 class McpHttpAuthVerifier:
@@ -664,9 +689,11 @@ class McpHttpAuthMiddleware:
             scopes=list(auth_result.scopes),
         )
         context_token = auth_context_var.set(AuthenticatedUser(access_token))
+        caller_token = _caller_credential_headers.set(auth_result.credential_headers or None)
         try:
             await self.app(scope, receive, send)
         finally:
+            _caller_credential_headers.reset(caller_token)
             auth_context_var.reset(context_token)
 
     async def _send_auth_error(
@@ -709,6 +736,10 @@ class SecondBrainMcpSettings:
     client_scopes: tuple[McpOperationScope, ...] = DEFAULT_MCP_CLIENT_SCOPES
     app_version: str | None = None
     legacy_api_key_auth_enabled: bool = True
+    # Forward the HTTP caller's own credential to the backend instead of the
+    # adapter's. Set the env var to false only to fall back to the historic
+    # adapter-as-principal behavior while diagnosing a rollout.
+    forward_caller_identity: bool = True
     default_scope_type: ScopeType | None = None
     default_scope_key: str | None = None
 
@@ -764,6 +795,18 @@ class SecondBrainMcpSettings:
                 "must be a boolean"
             )
         legacy_api_key_auth_enabled = normalized_legacy_api_key_auth in {"1", "true", "yes", "on"}
+        forward_caller_identity_raw, forward_caller_identity_env = _env_value(
+            PALACE_MCP_FORWARD_CALLER_IDENTITY_ENVS,
+            "true",
+        )
+        assert forward_caller_identity_raw is not None
+        normalized_forward_caller_identity = forward_caller_identity_raw.strip().lower()
+        if normalized_forward_caller_identity not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise RuntimeError(
+                f"{forward_caller_identity_env or PALACE_MCP_FORWARD_CALLER_IDENTITY_ENVS[0]} "
+                "must be a boolean"
+            )
+        forward_caller_identity = normalized_forward_caller_identity in {"1", "true", "yes", "on"}
         config_defaults = _load_palace_config_defaults()
         default_scope_type_raw, default_scope_type_env = _env_value(
             PALACE_DEFAULT_SCOPE_TYPE_ENVS,
@@ -805,6 +848,7 @@ class SecondBrainMcpSettings:
             client_scopes=client_scopes,  # type: ignore[arg-type]
             app_version=app_version or None,
             legacy_api_key_auth_enabled=legacy_api_key_auth_enabled,
+            forward_caller_identity=forward_caller_identity,
             default_scope_type=default_scope_type,
             default_scope_key=default_scope_key,
         )
@@ -896,7 +940,10 @@ class SecondBrainApiClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
-        required_scope: McpOperationScope | None = None,
+        # Mandatory: every backend call has to state the scope it acts under, so
+        # a new API method cannot silently send a request with no scope header.
+        required_scope: McpOperationScope,
+        use_caller_identity: bool = True,
     ) -> Any:
         try:
             response = await self._client.request(
@@ -904,7 +951,10 @@ class SecondBrainApiClient:
                 path,
                 params=params,
                 json=json_body,
-                headers=await self._auth_headers(required_scope=required_scope),
+                headers=await self._auth_headers(
+                    required_scope=required_scope,
+                    use_caller_identity=use_caller_identity,
+                ),
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -927,17 +977,46 @@ class SecondBrainApiClient:
                 f"Palace API returned a non-JSON response for {method} {path}"
             ) from exc
 
-    async def _auth_headers(self, *, required_scope: McpOperationScope | None = None) -> dict[str, str]:
+    async def _auth_headers(
+        self,
+        *,
+        required_scope: McpOperationScope,
+        use_caller_identity: bool = True,
+    ) -> dict[str, str]:
+        caller_headers = self._caller_identity_headers(required_scope) if use_caller_identity else None
+        if caller_headers is not None:
+            return caller_headers
         if self.settings.bearer_token or self.settings.oauth_client_secret:
             token = await self._active_bearer_token()
             return {"Authorization": f"Bearer {token}"}
         if self.settings.api_key:
-            headers = {"X-API-Key": self.settings.api_key}
-            if required_scope is not None:
-                headers["X-MCP-Scope"] = required_scope
-                headers["X-MCP-Scopes"] = ",".join(self.settings.client_scopes)
-            return headers
+            # Both headers are narrowing requests against the grant stored on
+            # the api_keys row; neither can add a scope the key does not hold.
+            return {
+                "X-API-Key": self.settings.api_key,
+                "X-MCP-Scope": required_scope,
+                "X-MCP-Scopes": ",".join(self.settings.client_scopes),
+            }
         raise RuntimeError("MCP API key, bearer token, or OAuth client secret is required")
+
+    def _caller_identity_headers(self, required_scope: McpOperationScope) -> dict[str, str] | None:
+        """Credential of the HTTP caller this request is being served for.
+
+        Returns None on the stdio transport, when forwarding is disabled, or
+        when no caller credential was captured — the adapter's own credential
+        is then used, as before.
+        """
+        if not self.settings.forward_caller_identity:
+            return None
+        captured = _caller_credential_headers.get()
+        if not captured:
+            return None
+        headers = dict(captured)
+        if "X-API-Key" in headers:
+            # Narrow the forwarded key to the scope this one call acts under.
+            headers["X-MCP-Scope"] = required_scope
+            headers.setdefault("X-MCP-Scopes", ",".join(self.settings.client_scopes))
+        return headers
 
     def _selected_auth_mode(self) -> str:
         if self.settings.bearer_token:
@@ -991,7 +1070,15 @@ class SecondBrainApiClient:
             "error_class": error_class,
             "app_version": self.settings.app_version,
         }
-        await self._request_json("POST", "/api/v1/memory/mcp/audit", json_body=payload, required_scope="write")
+        # Adapter telemetry, not a caller action: keep it on the adapter's own
+        # credential so a read-only caller still produces an audit row.
+        await self._request_json(
+            "POST",
+            "/api/v1/memory/mcp/audit",
+            json_body=payload,
+            required_scope="write",
+            use_caller_identity=False,
+        )
 
     async def whoami(self) -> dict[str, Any]:
         payload = await self._request_json("GET", "/api/v1/memory/whoami", required_scope="read")
@@ -1197,11 +1284,11 @@ class SecondBrainApiClient:
         }
         if item_id is not None:
             params["item_id"] = _validate_uuid_text("item_id", item_id)
-        return await self._request_json("GET", "/api/v1/graph", params=params)
+        return await self._request_json("GET", "/api/v1/graph", params=params, required_scope="read")
 
     async def get_item_relationships(self, *, item_id: str) -> dict[str, Any]:
         item_id = _validate_uuid_text("item_id", item_id)
-        return await self._request_json("GET", f"/api/v1/items/{item_id}/related")
+        return await self._request_json("GET", f"/api/v1/items/{item_id}/related", required_scope="read")
 
     async def list_temporal_facts(
         self,
@@ -1213,7 +1300,7 @@ class SecondBrainApiClient:
             "current_only": current_only,
             "limit": limit,
         }
-        return await self._request_json("GET", "/api/v1/palace/facts", params=params)
+        return await self._request_json("GET", "/api/v1/palace/facts", params=params, required_scope="read")
 
     async def get_claim_support(
         self,
@@ -1242,7 +1329,7 @@ class SecondBrainApiClient:
 
     async def get_palace_room(self, *, room_id: str) -> dict[str, Any]:
         room_id = _validate_uuid_text("room_id", room_id)
-        return await self._request_json("GET", f"/api/v1/palace/rooms/{room_id}")
+        return await self._request_json("GET", f"/api/v1/palace/rooms/{room_id}", required_scope="read")
 
     async def backfill_deferred_relationships(
         self,
@@ -1517,13 +1604,13 @@ class SecondBrainApiClient:
             "date_to": _normalize_optional_timestamp("date_to", date_to),
             "min_score": min_score,
         }
-        return await self._request_json("POST", "/api/v1/search", json_body=payload)
+        return await self._request_json("POST", "/api/v1/search", json_body=payload, required_scope="read")
 
     async def list_tags(self, *, prefix: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if prefix is not None:
             params["q"] = prefix
-        return await self._request_json("GET", "/api/v1/tags", params=params or None)
+        return await self._request_json("GET", "/api/v1/tags", params=params or None, required_scope="read")
 
     async def list_items(
         self,
@@ -1550,7 +1637,7 @@ class SecondBrainApiClient:
             params["date_from"] = normalized_date_from
         if normalized_date_to:
             params["date_to"] = normalized_date_to
-        return await self._request_json("GET", "/api/v1/items", params=params)
+        return await self._request_json("GET", "/api/v1/items", params=params, required_scope="read")
 
 
 @dataclass(slots=True)
@@ -1587,9 +1674,30 @@ def _resolve_default_agent_scope_key(
 
 
 def _operation_scope(operation: str) -> McpOperationScope:
-    if operation in WRITE_OPERATIONS:
-        return "write"
-    return "read"
+    """Required scope for one operation, from the table in app.mcp_scopes.
+
+    Unmapped operations raise. A tool that ships without an authorization
+    decision must fail, not silently collapse to "read".
+    """
+    return required_scope_for_operation(operation)
+
+
+def _required_scopes_for_call(operation: str, params: dict[str, Any]) -> tuple[McpOperationScope, ...]:
+    """Every scope this specific call needs, base operation plus destination.
+
+    A write to an explicitly requested agent, workspace, or session scope also
+    needs the matching write:<destination> scope. Only an explicit scope_type
+    counts: an omitted one falls back to the client's configured default, which
+    the client already holds by definition.
+    """
+    base_scope = _operation_scope(operation)
+    scopes: list[McpOperationScope] = [base_scope]
+    if base_scope.startswith("write"):
+        requested_type = params.get("scope_type")
+        destination_scope = destination_scope_for(requested_type if isinstance(requested_type, str) else None)
+        if destination_scope is not None and destination_scope not in scopes:
+            scopes.append(destination_scope)
+    return tuple(scopes)
 
 
 def _summarize_params(values: dict[str, Any]) -> dict[str, Any]:
@@ -2033,7 +2141,7 @@ async def _record_audit_safely(
     runtime: SecondBrainMcpRuntime,
     *,
     operation: str,
-    required_scope: McpOperationScope,
+    required_scope: McpOperationScope | None,
     params_summary: dict[str, Any],
     status: Literal["success", "error", "denied"],
     latency_ms: int | None,
@@ -2062,41 +2170,57 @@ async def _run_mcp_operation(
     call: Callable[[], Awaitable[Any]],
 ) -> Any:
     runtime = _runtime(ctx)
-    required_scope = _operation_scope(operation)
     params_summary = _summarize_params(params)
     params_summary["audit_request_id"] = str(uuid.uuid4())
     start = time.monotonic()
-    if required_scope not in runtime.settings.client_scopes:
-        latency_ms = int((time.monotonic() - start) * 1000)
+    try:
+        required_scopes = _required_scopes_for_call(operation, params)
+    except UnmappedMcpOperationError as exc:
+        # Fail closed: an operation with no entry in MCP_OPERATION_SCOPES has
+        # never had an authorization decision made for it.
         await _record_audit_safely(
             runtime,
             operation=operation,
-            required_scope=required_scope,
+            required_scope=None,
             params_summary=params_summary,
             status="denied",
-            latency_ms=latency_ms,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class="UnmappedMcpOperationError",
+        )
+        raise PermissionError(str(exc)) from exc
+    # The first entry is the operation scope; it is what the audit row records.
+    required_scope = required_scopes[0]
+    params_summary["required_scopes"] = list(required_scopes)
+
+    async def _deny(message: str, missing: McpOperationScope) -> NoReturn:
+        await _record_audit_safely(
+            runtime,
+            operation=operation,
+            required_scope=missing,
+            params_summary=params_summary,
+            status="denied",
+            latency_ms=int((time.monotonic() - start) * 1000),
             error_class="PermissionError",
         )
-        raise PermissionError(
-            f"MCP client is not allowed to call {operation}; missing {required_scope} scope"
-        )
+        raise PermissionError(message)
+
+    client_scopes = set(runtime.settings.client_scopes)
+    for scope in required_scopes:
+        if scope not in client_scopes:
+            await _deny(
+                f"MCP client is not allowed to call {operation}; missing {scope} scope",
+                scope,
+            )
     caller_token = get_access_token()
     if caller_token is not None:
         params_summary["http_client_id"] = caller_token.client_id
-        if required_scope not in caller_token.scopes:
-            latency_ms = int((time.monotonic() - start) * 1000)
-            await _record_audit_safely(
-                runtime,
-                operation=operation,
-                required_scope=required_scope,
-                params_summary=params_summary,
-                status="denied",
-                latency_ms=latency_ms,
-                error_class="PermissionError",
-            )
-            raise PermissionError(
-                f"MCP HTTP caller is not allowed to call {operation}; missing {required_scope} scope"
-            )
+        caller_scopes = set(caller_token.scopes)
+        for scope in required_scopes:
+            if scope not in caller_scopes:
+                await _deny(
+                    f"MCP HTTP caller is not allowed to call {operation}; missing {scope} scope",
+                    scope,
+                )
     try:
         result = await call()
     except Exception as exc:
