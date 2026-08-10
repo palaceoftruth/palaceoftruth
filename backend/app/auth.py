@@ -163,6 +163,29 @@ def _canonical_api_resource(request: Request) -> str:
     return urlunsplit(("https", parsed.netloc, "/api/v1", "", ""))
 
 
+def paired_service_resources(request: Request, path: str) -> set[str]:
+    """Return resources for Palace's bounded ``api.``/``mcp.`` host pair.
+
+    Both production hosts route to the same control plane, and older clients
+    can retain the API-host MCP audience while connecting through the dedicated
+    MCP host. Only those two prefixes on the exact same dotted parent domain
+    are aliases; local, ambiguous, and unrelated hosts remain host-bound.
+    """
+    parsed = urlsplit(str(request.base_url))
+    host = (parsed.hostname or "").lower()
+    service_prefix = next((prefix for prefix in ("api.", "mcp.") if host.startswith(prefix)), None)
+    if service_prefix is None:
+        return {urlunsplit(("https", parsed.netloc, path, "", ""))}
+    parent_domain = host.removeprefix(service_prefix)
+    if "." not in parent_domain:
+        return {urlunsplit(("https", parsed.netloc, path, "", ""))}
+    port_suffix = f":{parsed.port}" if parsed.port is not None else ""
+    return {
+        urlunsplit(("https", f"api.{parent_domain}{port_suffix}", path, "", "")),
+        urlunsplit(("https", f"mcp.{parent_domain}{port_suffix}", path, "", "")),
+    }
+
+
 def _resource_metadata_url(request: Request) -> str:
     parsed_base = urlsplit(str(request.base_url))
     path = "/.well-known/oauth-protected-resource"
@@ -193,12 +216,11 @@ def _is_mcp_resource_validation_request(request: Request) -> bool:
 
 
 def _expected_token_resources(request: Request, expected_resource: str | None = None) -> set[str]:
-    mcp_resource = _canonical_mcp_resource(request)
     if expected_resource == "mcp" and _is_mcp_resource_validation_request(request):
-        return {mcp_resource}
+        return paired_service_resources(request, "/mcp")
     if request.url.path.startswith("/api/v1"):
-        return {_canonical_api_resource(request)}
-    return {mcp_resource}
+        return paired_service_resources(request, "/api/v1")
+    return paired_service_resources(request, "/mcp")
 
 
 def _resource_matches_token(*, token_resource: object, expected_resources: set[str] | None) -> bool:

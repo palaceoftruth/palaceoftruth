@@ -61,14 +61,14 @@ class FakeSession:
         self.commits += 1
 
 
-def _request() -> Request:
+def _request(*, host: str = "testserver", path: str = "/api/v1/memory/whoami") -> Request:
     return Request(
         {
             "type": "http",
             "method": "GET",
             "scheme": "https",
-            "server": ("testserver", 443),
-            "path": "/api/v1/memory/whoami",
+            "server": (host, 443),
+            "path": path,
             "headers": [],
         }
     )
@@ -505,6 +505,48 @@ async def test_verify_memory_auth_allows_null_resource_only_for_mcp_validation(m
     assert result == "raw-token"
     assert request.state.auth_context.resource is None
     assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_memory_auth_accepts_paired_api_host_mcp_resource(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["read"],
+            "token_resource": "https://api.palace.sarvent.cloud/mcp",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "hermes-karen",
+            "display_name": "Hermes Karen",
+            "allowed_scopes": ["read"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    request = _request(host="mcp.palace.sarvent.cloud", path="/mcp")
+    result = await auth.verify_memory_auth(
+        request,
+        api_key=None,
+        authorization="Bearer raw-token",
+        expected_resource="mcp",
+    )
+
+    assert result == "raw-token"
+    assert request.state.auth_context.resource == "https://api.palace.sarvent.cloud/mcp"
+    assert session.audit_events[0]["status"] == "success"
+
+
+def test_paired_service_resources_never_crosses_parent_domain() -> None:
+    request = _request(host="mcp.palace.sarvent.cloud", path="/mcp")
+
+    assert auth.paired_service_resources(request, "/mcp") == {
+        "https://api.palace.sarvent.cloud/mcp",
+        "https://mcp.palace.sarvent.cloud/mcp",
+    }
+    assert "https://api.attacker.example/mcp" not in auth.paired_service_resources(request, "/mcp")
 
 
 @pytest.mark.asyncio
