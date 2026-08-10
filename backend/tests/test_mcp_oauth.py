@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api import mcp_oauth
+from app import auth
 from app.auth import hash_secret, secret_hash_candidates
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES
 from app.schemas.memory import McpOAuthAuthorizationServerMetadata
@@ -50,6 +51,7 @@ class FakeSession:
         self.authorization_interactions = []
         self.refresh_families = []
         self.refresh_tokens = []
+        self.client_secret_updates = []
         self.statements = []
         self.commits = 0
 
@@ -71,6 +73,17 @@ class FakeSession:
                 and (params.get("tenant_id") is None or row["tenant_id"] == params["tenant_id"])
             ]
             return _Result(rows[:2])
+        if "update mcp_clients" in sql and "oauth_client_secret_hash" in sql:
+            matching_rows = [
+                row
+                for row in self.rows
+                if row["id"] == params["client_id"]
+                and row["oauth_client_secret_hash"] == params["stored_hash"]
+            ]
+            if matching_rows:
+                matching_rows[0]["oauth_client_secret_hash"] = params["preferred_hash"]
+                self.client_secret_updates.append(params)
+            return _Result([])
         if "insert into mcp_oauth_access_tokens" in sql:
             self.tokens.append(params)
             return _Result([])
@@ -528,6 +541,51 @@ def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None
     assert '"resource_kind": "mcp"' in params_summary
     client_lookup_sql = next(sql for sql, _ in session.statements if "FROM mcp_clients" in sql)
     assert "CAST(:tenant_id AS text) IS NULL" in client_lookup_sql
+
+
+def test_mcp_oauth_token_endpoint_upgrades_legacy_client_secret_hash(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    stored_hash = auth._legacy_hash_secret("client-secret")
+    session = FakeSession(_client_row(oauth_client_secret_hash=stored_hash))
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 200
+    assert session.client_secret_updates == [
+        {
+            "preferred_hash": hash_secret("client-secret"),
+            "client_id": session.rows[0]["id"],
+            "stored_hash": stored_hash,
+        }
+    ]
+
+
+def test_mcp_oauth_token_endpoint_keeps_preferred_client_secret_hash(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    session = FakeSession(_client_row(oauth_client_secret_hash=hash_secret("client-secret")))
+    client = _client(session, monkeypatch)
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "resource": "https://testserver/mcp",
+        },
+    )
+
+    assert response.status_code == 200
+    assert session.client_secret_updates == []
 
 
 def test_mcp_oauth_token_endpoint_accepts_tenant_qualified_client_id(monkeypatch) -> None:

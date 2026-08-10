@@ -13,7 +13,7 @@ from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Que
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.auth import compare_secret, hash_secret, secret_hash_candidates, verify_api_key
+from app.auth import compare_secret, hash_secret, is_legacy_secret_hash, secret_hash_candidates, verify_api_key
 from app.database import async_session
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
@@ -232,8 +232,29 @@ async def _authenticate_oauth_client(
         return row
     if resolved_client_secret is None:
         raise HTTPException(status_code=401, detail="invalid_client")
-    if not compare_secret(resolved_client_secret, row["oauth_client_secret_hash"]):
+    stored_secret_hash = row["oauth_client_secret_hash"]
+    if not compare_secret(resolved_client_secret, stored_secret_hash):
         raise HTTPException(status_code=401, detail="invalid_client")
+    if is_legacy_secret_hash(stored_secret_hash):
+        # Upgrade only the verifier that was authenticated. The conditional
+        # update preserves a concurrent client-secret rotation.
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    """
+                    UPDATE mcp_clients
+                    SET oauth_client_secret_hash = :preferred_hash
+                    WHERE id = :client_id
+                      AND oauth_client_secret_hash = :stored_hash
+                    """
+                ),
+                {
+                    "preferred_hash": hash_secret(resolved_client_secret),
+                    "client_id": row["id"],
+                    "stored_hash": stored_secret_hash,
+                },
+            )
+            await db.commit()
     return row
 
 
