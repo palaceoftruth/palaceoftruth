@@ -10,6 +10,7 @@ data:
   REDIS_SENTINEL_STARTUP_INITIAL_BACKOFF_SECONDS: {{ .Values.config.redisSentinelStartupInitialBackoffSeconds | quote }}
   REDIS_SENTINEL_STARTUP_MAX_BACKOFF_SECONDS: {{ .Values.config.redisSentinelStartupMaxBackoffSeconds | quote }}
   AWS_EC2_METADATA_DISABLED: "true"
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   {{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
   REDIS_SENTINEL_HOSTS: {{ printf "%s:26379" (include "palaceoftruth.valkeySentinelName" .) | quote }}
   REDIS_SENTINEL_MASTER: {{ .Values.valkey.sentinel.masterName | quote }}

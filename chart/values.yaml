@@ -12,6 +12,9 @@ image:
 
 # ConfigMap environment variables
 config:
+  # Root Python log level for backend, worker, and MCP pods. Raise to DEBUG for
+  # incident triage; set SQLALCHEMY_LOG_LEVEL separately to see SQL statements.
+  logLevel: "INFO"
   # Derived automatically from Valkey service name when valkey.enabled=true.
   # Set explicitly when valkey.enabled=false.
   redisUrl: ""
