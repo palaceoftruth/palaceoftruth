@@ -19,6 +19,16 @@ _DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 _configured = False
 
 
+def is_configured() -> bool:
+    """True once configure_logging() has run in this process.
+
+    Alembic's env.py uses this to decide whether it owns logging. When the app
+    runs migrations in-process the answer is no, and env.py must leave the
+    already-configured root logger alone.
+    """
+    return _configured
+
+
 def _resolve_level(explicit: str | None) -> int:
     raw = (explicit or os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
     # getLevelName returns the string back unchanged for unknown names, which

@@ -10,6 +10,7 @@ from alembic import context
 # Import settings and models so Base.metadata is populated
 from app.config import settings
 from app.database import Base
+from app.logging_config import is_configured as logging_is_configured
 import app.models  # noqa: F401 — registers all ORM models
 
 config = context.config
@@ -17,7 +18,12 @@ config = context.config
 # Override sqlalchemy.url from app settings
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
-if config.config_file_name is not None:
+# Only take over logging when Alembic is the entrypoint (the `alembic` CLI and
+# the migration Job). The API runs migrations in-process during lifespan, and
+# fileConfig() would reset the root logger to alembic.ini's WARN and disable
+# every existing app.* logger, silencing all application logs from that point
+# on — including "Database migrations complete" on the very next line.
+if config.config_file_name is not None and not logging_is_configured():
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
