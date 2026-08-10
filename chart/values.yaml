@@ -674,9 +674,11 @@ backend:
   startupProbe:
     periodSeconds: 5
     timeoutSeconds: 5
-    # Leave room after the 300s writable-primary gate for Alembic, idempotent
-    # seed work, and ARQ pool initialization before liveness takes over.
-    failureThreshold: 90
+    # Budget: the 300s writable-primary gate plus the 180s Sentinel gate, then
+    # Alembic, idempotent seed work, and ARQ pool initialization, before
+    # liveness takes over. 5s x 150 = 750s, which stays inside the 15m Helm
+    # timeout so a slow start cannot fail the release.
+    failureThreshold: 150
   replicas: 1
   rollingUpdate:
     maxUnavailable: 0
