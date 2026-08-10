@@ -2042,3 +2042,80 @@ def test_update_room_preserves_stable_key_and_records_event(monkeypatch) -> None
         "new_name": "Investor Diligence",
         "stable_key": "product-growth:pricing-narrative",
     }
+
+
+def test_register_palace_mcp_client_contains_reserved_name_variants() -> None:
+    """A separator or casing change cannot escape Hermes containment."""
+    client_id = uuid.uuid4()
+    session = FakeSession(
+        execute_results=[
+            [
+                {
+                    "id": client_id,
+                    "tenant_id": "tenant-a",
+                    "client_key": "Hermes_Prod",
+                    "display_name": "Hermes prod",
+                    "allowed_scopes": ["read", "write"],
+                    "metadata": {},
+                    "containment_mode": "hermes_agent",
+                    "oauth_revoked_at": None,
+                    "oauth_token_ttl_seconds": 1800,
+                    "created_at": datetime.now(timezone.utc),
+                    "last_seen_at": None,
+                }
+            ]
+        ]
+    )
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "Hermes_Prod",
+            "display_name": "Hermes prod",
+            "allowed_scopes": ["read", "write"],
+            "containment_mode": "standard",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["client"]["containment_mode"] == "hermes_agent"
+    insert_params = session.executed_params[0]
+    assert insert_params["containment_mode"] == "hermes_agent"
+
+
+def test_register_palace_mcp_client_may_opt_into_containment() -> None:
+    client_id = uuid.uuid4()
+    session = FakeSession(
+        execute_results=[
+            [
+                {
+                    "id": client_id,
+                    "tenant_id": "tenant-a",
+                    "client_key": "iris-remote",
+                    "display_name": "Iris remote",
+                    "allowed_scopes": ["read"],
+                    "metadata": {},
+                    "containment_mode": "hermes_agent",
+                    "oauth_revoked_at": None,
+                    "oauth_token_ttl_seconds": 1800,
+                    "created_at": datetime.now(timezone.utc),
+                    "last_seen_at": None,
+                }
+            ]
+        ]
+    )
+    client = _build_app(session)
+
+    response = client.post(
+        "/api/v1/palace/mcp-clients/register",
+        json={
+            "client_key": "iris-remote",
+            "display_name": "Iris remote",
+            "allowed_scopes": ["read"],
+            "containment_mode": "hermes_agent",
+        },
+    )
+
+    assert response.status_code == 201
+    assert session.executed_params[0]["containment_mode"] == "hermes_agent"

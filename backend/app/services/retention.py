@@ -111,6 +111,8 @@ class RetentionService:
         auth_mode: str | None = None,
         allowed_scopes: list[str] | None = None,
         mcp_client_key: str | None = None,
+        mcp_agent_scope_key: str | None = None,
+        containment_mode: str | None = None,
     ) -> RetentionWriteResult:
         if body.tenant_id != self.tenant_id:
             raise HTTPException(status_code=403, detail="Memory entry tenant does not match authenticated tenant")
@@ -120,6 +122,8 @@ class RetentionService:
                 auth_mode=auth_mode,
                 allowed_scopes=list(allowed_scopes or []),
                 mcp_client_key=mcp_client_key,
+                mcp_agent_scope_key=mcp_agent_scope_key,
+                containment_mode=containment_mode,
             )
             if not admission.accepted:
                 raise HTTPException(status_code=admission.http_status_code, detail=admission.response_detail())
@@ -190,6 +194,8 @@ class RetentionService:
                 auth_mode=auth_mode,
                 allowed_scopes=list(allowed_scopes or []),
                 mcp_client_key=mcp_client_key,
+                mcp_agent_scope_key=mcp_agent_scope_key,
+                containment_mode=containment_mode,
             )
             if not admission.accepted:
                 rejected_count += 1

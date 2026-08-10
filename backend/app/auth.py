@@ -16,6 +16,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import async_session
 from app.mcp_scopes import VALID_MCP_OPERATION_SCOPES
+from app.services.mcp_containment import CONTAINMENT_STANDARD, normalize_containment_mode
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ class AuthContext:
     client_key: str | None = None
     client_name: str | None = None
     agent_scope_key: str | None = None
+    # Server-owned; never inferred from client_key. See services/mcp_containment.py.
+    containment_mode: str = CONTAINMENT_STANDARD
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
     delegated_agent_scope_keys: tuple[str, ...] = ()
@@ -290,6 +293,7 @@ def _context_from_scopes(
     client_key: str | None = None,
     client_name: str | None = None,
     agent_scope_key: str | None = None,
+    containment_mode: object | None = None,
     allow_all_agent_scope_reads: bool = False,
     allow_tenant_shared_reads: bool = False,
     delegated_agent_scope_keys: tuple[str, ...] = (),
@@ -309,6 +313,7 @@ def _context_from_scopes(
         client_key=client_key,
         client_name=client_name,
         agent_scope_key=agent_scope_key,
+        containment_mode=normalize_containment_mode(containment_mode),
         allow_all_agent_scope_reads=allow_all_agent_scope_reads,
         allow_tenant_shared_reads=allow_tenant_shared_reads,
         delegated_agent_scope_keys=delegated_agent_scope_keys,
@@ -332,6 +337,7 @@ def _attach_auth_context(request: Request, context: AuthContext) -> AuthContext:
     request.state.mcp_client_key = context.client_key
     request.state.mcp_client_name = context.client_name
     request.state.mcp_agent_scope_key = context.agent_scope_key
+    request.state.mcp_containment_mode = context.containment_mode
     request.state.mcp_allow_all_agent_scope_reads = context.allow_all_agent_scope_reads
     request.state.mcp_allow_tenant_shared_reads = context.allow_tenant_shared_reads
     request.state.mcp_allowed_scopes = list(context.scopes) if context.scopes else None
@@ -362,6 +368,7 @@ def get_auth_context(request: Request) -> AuthContext:
         client_key=getattr(request.state, "mcp_client_key", None),
         client_name=getattr(request.state, "mcp_client_name", None),
         agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
+        containment_mode=getattr(request.state, "mcp_containment_mode", None),
         allow_all_agent_scope_reads=bool(
             getattr(request.state, "mcp_allow_all_agent_scope_reads", False)
         ),
@@ -476,6 +483,7 @@ async def verify_memory_auth(
                     c.display_name,
                     c.allowed_scopes,
                     c.agent_scope_key,
+                    c.containment_mode,
                     c.allow_all_agent_scope_reads,
                     c.allow_tenant_shared_reads,
                     c.oauth_revoked_at AS client_revoked_at,
@@ -603,6 +611,7 @@ async def verify_memory_auth(
             client_key=result["client_key"],
             client_name=result.get("display_name") or result["client_key"],
             agent_scope_key=result.get("agent_scope_key"),
+            containment_mode=result.get("containment_mode"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
             allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
@@ -649,6 +658,7 @@ async def _verify_scoped_bearer_token(
                     c.display_name,
                     c.allowed_scopes,
                     c.agent_scope_key,
+                    c.containment_mode,
                     c.allow_all_agent_scope_reads,
                     c.allow_tenant_shared_reads,
                     c.oauth_revoked_at AS client_revoked_at,
@@ -760,6 +770,7 @@ async def _verify_scoped_bearer_token(
             client_key=result["client_key"],
             client_name=result.get("display_name") or result["client_key"],
             agent_scope_key=result.get("agent_scope_key"),
+            containment_mode=result.get("containment_mode"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
             allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),

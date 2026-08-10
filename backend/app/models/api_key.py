@@ -61,6 +61,9 @@ class McpClient(Base):
     oauth_revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_token_ttl_seconds: Mapped[int] = mapped_column(Integer, server_default="3600", nullable=False)
     client_type: Mapped[str] = mapped_column(Text, server_default="service", nullable=False)
+    # Server-owned containment decision. Never derived from client_key at read
+    # time: the registrant chooses that string. See app/services/mcp_containment.py.
+    containment_mode: Mapped[str] = mapped_column(Text, server_default="standard", nullable=False)
     redirect_uris: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     allowed_resources: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     authorization_code_enabled: Mapped[bool] = mapped_column(server_default="false", nullable=False)
