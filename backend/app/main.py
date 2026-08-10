@@ -38,6 +38,10 @@ from app.services.llm import LLMService
 from app.services.palace import create_sync_source
 from app.services.prometheus_metrics import HttpMetricsRecorder, monotonic_seconds
 from app.wait_for_database import wait_for_writable_database
+from app.wait_for_redis_sentinel import (
+    load_config_from_env as load_sentinel_startup_config,
+    wait_for_sentinel_master,
+)
 from app.workers.serialization import (
     job_deserializer as json_job_deserializer,
     job_serializer as json_job_serializer,
@@ -151,6 +155,24 @@ async def wait_for_database_startup() -> None:
     )
 
 
+async def wait_for_sentinel_startup() -> None:
+    """Keep Uvicorn alive while Sentinel elects a primary during rollout.
+
+    create_pool() below asks Sentinel for the master exactly once and raises
+    MasterNotFoundError if the quorum has not settled yet, which kills the whole
+    process. Sentinel pods restart alongside the API, so that race is routine.
+    The ARQ worker already gates on this (scripts/wait_for_worker_dependencies.py);
+    the API did not, and crash-looped through every rollout instead.
+    """
+    config = load_sentinel_startup_config()
+    if config is None:
+        # No REDIS_SENTINEL_HOSTS means a plain single-node Redis URL, which has
+        # no discovery step to wait on.
+        logger.info("REDIS_SENTINEL_HOSTS is unset; skipping Redis Sentinel startup dependency gate")
+        return
+    await wait_for_sentinel_master(config)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # CNPG can briefly fence its primary after a configuration rollout. Do not
@@ -168,6 +190,7 @@ async def lifespan(app: FastAPI):
     # ARQ Redis pool for enqueueing tasks
     # JSON serializers must match the workers'; ARQ's pickle default would turn
     # any queue write into remote code execution inside a worker.
+    await wait_for_sentinel_startup()
     app.state.arq_pool = await create_pool(
         make_redis_settings(),
         job_serializer=json_job_serializer,

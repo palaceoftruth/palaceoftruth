@@ -73,7 +73,18 @@ def test_migration_readiness_gate_can_be_disabled() -> None:
     assert "initContainers" not in job["spec"]["template"]["spec"]
 
 
-def test_backend_startup_probe_allows_database_retry_budget() -> None:
+def test_backend_startup_probe_allows_dependency_gate_budget() -> None:
+    """The probe must outlast both startup gates in app.main's lifespan.
+
+    The API waits up to 300s for a writable database primary and then up to 180s
+    for a Sentinel-elected Redis primary before it opens the ARQ pool. If the
+    probe budget is shorter than their sum, a pod that is legitimately waiting
+    gets killed mid-startup.
+    """
+    database_gate_seconds = 300
+    sentinel_gate_seconds = 180
+    helm_release_timeout_seconds = 900
+
     backend = _backend_deployment(_render_chart())
     container = backend["spec"]["template"]["spec"]["containers"][0]
 
@@ -81,8 +92,13 @@ def test_backend_startup_probe_allows_database_retry_budget() -> None:
     assert startup_probe["httpGet"] == {"path": "/api/v1/health", "port": 8000}
     assert startup_probe["periodSeconds"] == 5
     assert startup_probe["timeoutSeconds"] == 5
-    assert startup_probe["failureThreshold"] == 90
-    assert startup_probe["periodSeconds"] * startup_probe["failureThreshold"] > 300
+    assert startup_probe["failureThreshold"] == 150
+
+    budget_seconds = startup_probe["periodSeconds"] * startup_probe["failureThreshold"]
+    # Headroom on top of the gates covers Alembic and the idempotent seed work.
+    assert budget_seconds > database_gate_seconds + sentinel_gate_seconds
+    # Overrunning Helm's own timeout would fail the release instead of the pod.
+    assert budget_seconds < helm_release_timeout_seconds
 
 
 def test_readiness_timeout_must_leave_time_for_alembic() -> None:

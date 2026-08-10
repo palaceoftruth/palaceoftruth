@@ -13,12 +13,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.wait_for_database import wait_for_writable_database
-from scripts.wait_for_redis_sentinel import (
+from app.wait_for_redis_sentinel import (
     _positive_float_env,
-    _split_command,
     load_config_from_env,
     wait_for_sentinel_master,
 )
+from scripts.wait_for_redis_sentinel import _split_command
 
 
 logger = logging.getLogger("palaceoftruth.worker_startup")
