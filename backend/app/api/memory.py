@@ -71,7 +71,9 @@ from app.services.memory import (
     semantic_recall_memory,
     upsert_memory_scope_profile,
 )
+from app.services.mcp_containment import request_containment_mode, request_is_contained_agent_client
 from app.services.memory_admission import evaluate_memory_write_admission
+from app.services.memory_provenance import derive_created_by_role
 from app.services.memory_telemetry import record_retrieval
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.job_progress import record_job_progress_event
@@ -597,12 +599,19 @@ async def create_memory_entry(
     if delegated_denial is not None:
         raise HTTPException(status_code=403, detail=delegated_denial)
 
+    # Provenance is the server's to assign. A caller cannot claim it wrote as
+    # "system" and have retrieval trust the claim later.
+    body = body.model_copy(
+        update={"created_by_role": derive_created_by_role(request, requested_role=body.created_by_role)}
+    )
+
     admission = evaluate_memory_write_admission(
         body=body,
         auth_mode=getattr(request.state, "auth_mode", None),
         allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
         mcp_agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
+        containment_mode=request_containment_mode(request),
     )
     if not admission.accepted:
         raise HTTPException(status_code=admission.http_status_code, detail=admission.response_detail())
@@ -678,12 +687,17 @@ async def create_memory_entries_batch(
             )
             continue
 
+        entry = entry.model_copy(
+            update={"created_by_role": derive_created_by_role(request, requested_role=entry.created_by_role)}
+        )
+
         admission = evaluate_memory_write_admission(
             body=entry,
             auth_mode=getattr(request.state, "auth_mode", None),
             allowed_scopes=list(getattr(request.state, "mcp_allowed_scopes", None) or []),
             mcp_client_key=getattr(request.state, "mcp_client_key", None),
             mcp_agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
+            containment_mode=request_containment_mode(request),
         )
         if not admission.accepted:
             failed_count += 1
@@ -911,14 +925,14 @@ async def create_memory_artifact(
         raise HTTPException(status_code=403, detail=_tenant_mismatch_detail())
     # Legacy artifacts are normalized into tenant_shared memory. Hermes OAuth
     # clients are bound to an agent scope and must never use this bypass path.
-    if (
-        getattr(request.state, "auth_mode", None) == "mcp_oauth"
-        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
-    ):
+    if request_is_contained_agent_client(request):
         raise HTTPException(
             status_code=403,
             detail="Hermes OAuth clients must use canonical agent-scoped memory entries",
         )
+    body = body.model_copy(
+        update={"created_by_role": derive_created_by_role(request, requested_role=body.created_by_role)}
+    )
 
     result = await accept_memory_artifact(
         db,
@@ -1057,10 +1071,7 @@ async def retrieve_memory_artifacts(
         tenant_shared=body.scope.type == "tenant_shared",
         broad=False,
     )
-    is_hermes_client = (
-        getattr(request.state, "auth_mode", None) == "mcp_oauth"
-        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
-    )
+    is_hermes_client = request_is_contained_agent_client(request)
     if is_hermes_client:
         bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
         if not isinstance(bound_agent_scope_key, str) or not bound_agent_scope_key:
@@ -1163,10 +1174,7 @@ async def retrieve_agent_memory_artifacts(
         tenant_shared=body.include_tenant_shared,
         broad=body.include_broad_corpus or body.include_all_permitted_agent_scopes or bool(body.include_agent_scope_patterns) or body.session_scope_key is not None,
     )
-    is_hermes_client = (
-        getattr(request.state, "auth_mode", None) == "mcp_oauth"
-        and str(getattr(request.state, "mcp_client_key", "")).startswith("hermes-")
-    )
+    is_hermes_client = request_is_contained_agent_client(request)
     bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
     if is_hermes_client:
         if not isinstance(bound_agent_scope_key, str) or not bound_agent_scope_key:
