@@ -659,6 +659,26 @@ def test_mcp_oauth_token_endpoint_rejects_missing_or_wrong_resource(monkeypatch)
     assert "client-secret" not in session.audit_events[1]["params_summary"]
 
 
+def test_mcp_oauth_token_endpoint_accepts_paired_api_resource_on_mcp_host(monkeypatch) -> None:
+    session = FakeSession(_client_row())
+    client = _client(session, monkeypatch, base_url="https://mcp.palace.sarvent.cloud")
+
+    response = client.post(
+        "/api/v1/memory/mcp/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "codex-remote",
+            "client_secret": "client-secret",
+            "scope": "read",
+            "resource": "https://api.palace.sarvent.cloud/mcp",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == "https://api.palace.sarvent.cloud/mcp"
+    assert session.tokens[0]["resource"] == "https://api.palace.sarvent.cloud/mcp"
+
+
 def test_mcp_oauth_token_endpoint_rejects_invalid_secret(monkeypatch) -> None:
     session = FakeSession(_client_row())
     client = _client(session, monkeypatch)

@@ -13,7 +13,14 @@ from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Que
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
-from app.auth import compare_secret, hash_secret, is_legacy_secret_hash, secret_hash_candidates, verify_api_key
+from app.auth import (
+    compare_secret,
+    hash_secret,
+    is_legacy_secret_hash,
+    paired_service_resources,
+    secret_hash_candidates,
+    verify_api_key,
+)
 from app.database import async_session
 from app.mcp_scopes import ALL_MCP_OPERATION_SCOPES, serialize_mcp_scope_catalog
 from app.schemas.memory import (
@@ -91,7 +98,7 @@ def _authorization_response_uri(*, redirect_uri: str, state: str | None, code: s
 
 
 def _supported_resources(request: Request) -> set[str]:
-    return {_canonical_mcp_resource(request), _canonical_api_resource(request)}
+    return paired_service_resources(request, "/mcp") | paired_service_resources(request, "/api/v1")
 
 
 def _normalize_resource(value: str | None) -> str | None:
