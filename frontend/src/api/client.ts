@@ -304,6 +304,7 @@ export const api = {
     display_name?: string;
     auto_tags?: string[];
     poll_interval_seconds?: number;
+    capture_live_streams?: boolean;
     backfill_enabled?: boolean;
     backfill_limit?: number;
     backfill_published_after?: string;
@@ -319,6 +320,7 @@ export const api = {
     display_name?: string;
     auto_tags?: string[];
     poll_interval_seconds?: number;
+    capture_live_streams?: boolean;
     backfill_enabled?: boolean;
     backfill_limit?: number;
     backfill_published_after?: string;
@@ -331,7 +333,13 @@ export const api = {
 
   updateSourceSubscription: (
     id: string,
-    body: { display_name?: string; auto_tags?: string[]; poll_interval_seconds?: number; paused_reason?: string },
+    body: {
+      display_name?: string;
+      auto_tags?: string[];
+      poll_interval_seconds?: number;
+      capture_live_streams?: boolean;
+      paused_reason?: string;
+    },
   ) => req<SourceSubscription>(`/source-subscriptions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
 
   pauseSourceSubscription: (id: string) =>

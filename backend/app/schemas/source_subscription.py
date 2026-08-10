@@ -15,6 +15,7 @@ class SourceSubscriptionCreate(BaseModel):
     display_name: str | None = None
     auto_tags: list[str] = Field(default_factory=list)
     poll_interval_seconds: int = 3600
+    capture_live_streams: bool = False
     backfill_enabled: bool = False
     backfill_limit: int | None = Field(default=None, ge=1, le=500)
     backfill_published_after: datetime | None = None
@@ -30,6 +31,7 @@ class SourceSubscriptionUpdate(BaseModel):
     display_name: str | None = None
     auto_tags: list[str] | None = None
     poll_interval_seconds: int | None = None
+    capture_live_streams: bool | None = None
     paused_reason: str | None = None
 
 
@@ -44,6 +46,7 @@ class SourceSubscriptionOut(BaseModel):
     status: str
     auto_tags: list[str]
     poll_interval_seconds: int
+    capture_live_streams: bool
     cursor: dict[str, Any]
     provider_metadata: dict[str, Any]
     last_checked_at: datetime | None
@@ -64,6 +67,7 @@ class SourceSubscriptionPreview(BaseModel):
     external_url: str | None
     display_name: str | None
     provider_metadata: dict[str, Any]
+    capture_live_streams: bool = False
     no_backfill: bool = True
     backfill_enabled: bool = False
     backfill_limit: int | None = None

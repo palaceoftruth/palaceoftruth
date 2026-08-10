@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import ARRAY, Boolean, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,6 +33,9 @@ class SourceSubscription(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
     auto_tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     poll_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3600")
+    capture_live_streams: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     cursor: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     provider_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     last_checked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
