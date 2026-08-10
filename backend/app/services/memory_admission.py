@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from app.schemas.memory import MemoryEntryRequest, MemoryScope
 from app.services.codex_memory_privacy import CodexMemoryPrivacyScan, scan_codex_memory_privacy
+from app.services.mcp_containment import CONTAINMENT_STANDARD, is_contained_agent_client
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,15 @@ _SCOPED_WRITE_GRANTS = {
     "agent": "write:agent",
     "workspace": "write:workspace",
     "session": "write:session",
+    # Tenant-shared writes are the widest blast radius in the product, so they
+    # need a grant too. "write" is the catalog scope already documented as
+    # "Create tenant-shared memory entries".
+    "tenant_shared": "write",
 }
+
+# Auth modes whose callers hold an explicit, server-issued grant list. Anything
+# outside this set is an in-process trusted caller with no scope list to check.
+_GRANTED_AUTH_MODES = frozenset({"mcp_oauth", "api_key", "browser_extension"})
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,7 @@ def evaluate_memory_write_admission(
     allowed_scopes: list[str],
     mcp_client_key: str | None,
     mcp_agent_scope_key: str | None = None,
+    containment_mode: str | None = CONTAINMENT_STANDARD,
 ) -> MemoryWriteAdmissionDecision:
     """Gate durable memory writes before item/job storage."""
     audit = _base_audit(body, auth_mode=auth_mode, allowed_scopes=allowed_scopes, mcp_client_key=mcp_client_key)
@@ -60,6 +70,7 @@ def evaluate_memory_write_admission(
         allowed_scopes=allowed_scopes,
         mcp_client_key=mcp_client_key,
         mcp_agent_scope_key=mcp_agent_scope_key,
+        containment_mode=containment_mode,
     )
     if scope_decision is not None:
         decision = MemoryWriteAdmissionDecision(
@@ -68,7 +79,7 @@ def evaluate_memory_write_admission(
             message="Authenticated writer is not granted to write the requested memory scope",
             retryable=False,
             http_status_code=403,
-            audit={**audit, "scope_grant": _scope_grant_summary(body.scope, allowed_scopes)},
+            audit={**audit, "scope_grant": _scope_grant_summary(body.scope, allowed_scopes, contained=is_contained_agent_client(containment_mode))},
         )
         log_memory_write_admission(decision)
         return decision
@@ -104,7 +115,7 @@ def evaluate_memory_write_admission(
         message="Memory write admission accepted",
         retryable=False,
         http_status_code=202,
-        audit={**audit, "scope_grant": _scope_grant_summary(body.scope, allowed_scopes), "privacy_scan": {"finding_count": 0}},
+        audit={**audit, "scope_grant": _scope_grant_summary(body.scope, allowed_scopes, contained=is_contained_agent_client(containment_mode)), "privacy_scan": {"finding_count": 0}},
     )
     log_memory_write_admission(decision)
     return decision
@@ -133,40 +144,52 @@ def _scope_write_decision(
     allowed_scopes: list[str],
     mcp_client_key: str | None,
     mcp_agent_scope_key: str | None,
+    containment_mode: str | None,
 ) -> str | None:
-    if auth_mode not in {"mcp_oauth", "api_key"}:
+    if auth_mode not in _GRANTED_AUTH_MODES:
         return None
-    is_hermes_oauth_client = bool(mcp_client_key and mcp_client_key.startswith("hermes-"))
-    if is_hermes_oauth_client and scope.type == "tenant_shared":
+    # Containment is read from the server-owned mcp_clients column, never from
+    # the caller-chosen client_key. mcp_client_key stays audit-only here.
+    is_contained_agent = is_contained_agent_client(containment_mode)
+    if is_contained_agent and scope.type == "tenant_shared":
         return "hermes_agent_write_requires_agent_scope"
-    # The broad admin capability is never a bypass for a Hermes OAuth client:
-    # its server-owned canonical agent binding remains the write authority.
-    if "admin" in allowed_scopes and not is_hermes_oauth_client:
-        return None
-    if scope.type == "tenant_shared":
-        return None
+
     required_grant = _SCOPED_WRITE_GRANTS[scope.type]
-    if required_grant not in allowed_scopes and (is_hermes_oauth_client or "admin" not in allowed_scopes):
+    if not _grant_present(required_grant, allowed_scopes, contained=is_contained_agent):
         return f"missing_{required_grant.replace(':', '_')}"
-    if is_hermes_oauth_client:
+
+    if is_contained_agent:
         # OAuth client names are not authority. The server-owned binding must
-        # match the requested agent scope before a Hermes client can write.
+        # match the requested agent scope before a contained client can write.
         if not mcp_agent_scope_key:
             return "unbound_hermes_agent_client"
         if scope.type != "agent":
             return "hermes_agent_write_requires_agent_scope"
         if scope.key != mcp_agent_scope_key:
             return "hermes_agent_write_requires_canonical_scope"
+    elif scope.type == "agent" and mcp_agent_scope_key and scope.key != mcp_agent_scope_key:
+        # Any client bound to a canonical agent scope writes only into it, so a
+        # write:agent grant cannot be replayed against another agent's scope.
+        return "agent_write_outside_bound_scope"
     return None
 
 
-def _scope_grant_summary(scope: MemoryScope, allowed_scopes: list[str]) -> dict[str, Any]:
-    required = None if scope.type == "tenant_shared" else _SCOPED_WRITE_GRANTS[scope.type]
+def _grant_present(required_grant: str, allowed_scopes: list[str], *, contained: bool) -> bool:
+    if required_grant in allowed_scopes:
+        return True
+    # "admin" is itself a stored, server-issued grant, so it still authorizes a
+    # scoped write — but never for a contained agent client, whose canonical
+    # binding is the only write authority it has.
+    return not contained and "admin" in allowed_scopes
+
+
+def _scope_grant_summary(scope: MemoryScope, allowed_scopes: list[str], *, contained: bool = False) -> dict[str, Any]:
+    required = _SCOPED_WRITE_GRANTS[scope.type]
     return {
         "scope_type": scope.type,
         "scope_key_hash": _hash_text(scope.key) if scope.key else None,
         "required_scope": required,
-        "grant_present": required is None or required in allowed_scopes or "admin" in allowed_scopes,
+        "grant_present": _grant_present(required, allowed_scopes, contained=contained),
     }
 
 

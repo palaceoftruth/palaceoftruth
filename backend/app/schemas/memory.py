@@ -129,6 +129,9 @@ class McpOAuthClientRegisterRequest(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    # A caller may ask for containment. The server can raise the requested mode
+    # but never lowers it, so a reserved client key stays contained.
+    containment_mode: Literal["standard", "hermes_agent"] = "standard"
     client_type: Literal["service", "confidential_web", "public"] = "service"
     redirect_uris: list[str] = Field(default_factory=list)
     allowed_resources: list[str] = Field(default_factory=list)
@@ -190,6 +193,7 @@ class McpOAuthClientSummary(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    containment_mode: Literal["standard", "hermes_agent"] = "standard"
     client_type: Literal["service", "confidential_web", "public"] = "service"
     client_id: str | None = None
     token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post", "none"] = "client_secret_basic"
@@ -416,6 +420,9 @@ class MemoryEntryRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     scope: MemoryScope = Field(default_factory=MemoryScope)
     source_url: str | None = None
+    # Advisory only over HTTP: the API overwrites this with a role derived
+    # from the authenticated principal (app/services/memory_provenance.py),
+    # so a caller cannot forge "system" provenance.
     created_by_role: str | None = None
     metadata: dict[str, Any] | None = None
     idempotency_key: str | None = Field(default=None, max_length=MEMORY_IDEMPOTENCY_KEY_MAX_LENGTH)
@@ -459,6 +466,7 @@ class LegacyMemoryArtifactRequest(BaseModel):
     summary: str
     body: str
     tags: list[str] = Field(default_factory=list)
+    # Advisory only over HTTP; see MemoryEntryRequest.created_by_role.
     created_by_role: str
     source: str
     created_at: datetime

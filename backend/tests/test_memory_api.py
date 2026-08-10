@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.memory import _enforce_delegated_grant_retrieval, router
 from app.auth import AuthContext, verify_memory_auth
 from app.mcp_scopes import LEGACY_API_KEY_SCOPES
+from app.services.mcp_containment import derive_containment_mode
 from app.database import get_db
 from app.main import app as main_app
 from app.models.item import Item
@@ -264,6 +265,9 @@ def _build_app(
         request.state.key_hash = "key-hash"
         request.state.auth_mode = effective_auth_mode
         request.state.mcp_client_key = mcp_client_key
+        # Containment is stored server-side at registration; the fixture
+        # mirrors that stored value instead of re-deriving it per request.
+        request.state.mcp_containment_mode = derive_containment_mode(client_key=mcp_client_key or "")
         request.state.mcp_allowed_scopes = mcp_allowed_scopes
         request.state.auth_context = AuthContext(
             tenant_id=tenant_id,
@@ -490,6 +494,7 @@ def test_mcp_oauth_audit_uses_registered_client_identity_without_upserting_it() 
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_id = client_id
         request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_client_name = "Registered Hermes Iris"
         request.state.mcp_allowed_scopes = ["write"]
         return "token"
@@ -525,6 +530,7 @@ def test_hermes_oauth_direct_retrieval_rejects_noncanonical_scope(monkeypatch) -
         request.state.key_hash = "token-hash"
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_agent_scope_key = "iris"
         request.state.mcp_allowed_scopes = ["read"]
         return "token"
@@ -560,6 +566,7 @@ def _hermes_retrieve_agent_client(
         request.state.key_hash = "token-hash"
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_key = "hermes-mara"
+        request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_agent_scope_key = "mara"
         request.state.mcp_allow_all_agent_scope_reads = allow_all_agent_scope_reads
         request.state.mcp_allow_tenant_shared_reads = allow_tenant_shared_reads
@@ -1864,6 +1871,7 @@ def test_hermes_oauth_client_writes_only_its_bound_agent_scope(monkeypatch) -> N
         request.state.key_hash = "token-hash"
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_agent_scope_key = "iris"
         request.state.mcp_allowed_scopes = ["read", "write", "write:agent"]
         return "token"
@@ -2069,6 +2077,7 @@ def test_memory_artifacts_reject_hermes_oauth_client(monkeypatch) -> None:
         request.state.key_hash = "token-hash"
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_key = "hermes-iris"
+        request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_allowed_scopes = ["write"]
         return "token"
 
@@ -4291,3 +4300,56 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
     assert retrieve_response.status_code == 200
     assert retrieve_response.json()["trace"]["requested_scope_key"] == "launch-pad"
     assert retrieve_response.json()["results"][0]["title"] == "Shared launch brief"
+
+
+def test_memory_entries_overwrite_client_supplied_created_by_role(monkeypatch) -> None:
+    """A caller cannot forge "system" provenance on a memory write."""
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.arq_pool = FakeArqPool()
+    app.state.embedder = object()
+    seen: list[str | None] = []
+
+    async def override_get_db():
+        yield FakeSession()
+
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "token-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "codex-remote"
+        request.state.mcp_containment_mode = "standard"
+        request.state.mcp_allowed_scopes = ["read", "write", "write:workspace"]
+        return "token"
+
+    async def fake_accept_canonical_memory_entry(
+        db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
+    ):
+        seen.append(body.created_by_role)
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_memory_auth] = override_verify
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/memory/entries",
+        json={**_canonical_payload(), "created_by_role": "system"},
+    )
+
+    assert response.status_code == 202
+    assert seen == ["agent"]

@@ -545,9 +545,40 @@ def _metadata_value(candidate: _SearchCandidate, key: str) -> Any:
     return metadata.get(key) or memory_entry.get(key)
 
 
+# Trust and provenance assertions a writer could place in its own metadata.
+# Retrieval computes these from server-owned facts, so the stored copies are
+# dropped before any trust decision reads them.
+_CLIENT_ASSERTED_TRUST_KEYS = (
+    "retrieval_provenance",
+    "retrieval_trust",
+    "trust_class",
+    "source_support_level",
+    "source_support_state",
+)
+
+
+def _strip_client_asserted_trust(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Remove writer-supplied trust claims from every metadata layer."""
+    for key in _CLIENT_ASSERTED_TRUST_KEYS:
+        metadata.pop(key, None)
+    memory_entry = metadata.get("memory_entry")
+    if isinstance(memory_entry, dict):
+        memory_entry = dict(memory_entry)
+        for key in _CLIENT_ASSERTED_TRUST_KEYS:
+            memory_entry.pop(key, None)
+        client_metadata = memory_entry.get("metadata")
+        if isinstance(client_metadata, dict):
+            client_metadata = dict(client_metadata)
+            for key in _CLIENT_ASSERTED_TRUST_KEYS:
+                client_metadata.pop(key, None)
+            memory_entry["metadata"] = client_metadata
+        metadata["memory_entry"] = memory_entry
+    return metadata
+
+
 def _with_canonical_currentness(row: Any) -> dict[str, Any]:
     """Overlay DB-owned memory temporal fields without trusting item metadata."""
-    metadata = dict(row.item_metadata or {})
+    metadata = _strip_client_asserted_trust(dict(row.item_metadata or {}))
     memory_entry = dict(metadata.get("memory_entry") or {})
     for key in ("valid_until", "superseded_by_entry_id", "superseded", "source_status"):
         metadata.pop(key, None)
@@ -1347,6 +1378,27 @@ class SearchService:
             )
         ).fetchall()
 
+    async def _verified_source_item_ids(self, claimed: Any) -> set[uuid.UUID]:
+        """Keep only claimed source item ids that exist in this tenant."""
+        candidate_ids = {value for value in claimed if value is not None}
+        if not candidate_ids:
+            return set()
+        try:
+            rows = await self.db.execute(
+                text("SELECT id FROM items WHERE tenant_id = :tenant_id AND id = ANY(CAST(:verify_item_ids AS uuid[]))"),
+                {"tenant_id": self.tenant_id, "verify_item_ids": [str(value) for value in candidate_ids]},
+            )
+        except Exception:  # pragma: no cover - fail closed, never fail the search
+            logger.warning("source item verification failed; treating source references as unsupported", exc_info=True)
+            return set()
+        verified: set[uuid.UUID] = set()
+        for row in rows.fetchall():
+            try:
+                verified.add(uuid.UUID(str(row[0])))
+            except (ValueError, TypeError):
+                continue
+        return verified
+
     async def vector_search(
         self,
         query: str,
@@ -1797,13 +1849,26 @@ class SearchService:
 
         results: list[SearchResult] = []
         ranking_trace_rows: list[dict[str, Any]] = []
+        # A stored source reference only counts as support once the referenced
+        # item is confirmed to exist in this tenant. Writers control the claim;
+        # they do not control the row.
+        verified_source_item_ids = await self._verified_source_item_ids(
+            _conversation_fact_source_item_id(candidate.item_metadata)
+            for _, _, candidate in reranked
+        )
         for adjusted_score, adjustments, candidate in reranked:
             reranker_item_trace = second_stage_item_trace.get(candidate.item_id)
             retrieved_scope_type, retrieved_scope_key, retrieved_scope_label = (
                 _retrieved_scope_from_metadata(candidate.item_metadata)
             )
             source_item_id = _conversation_fact_source_item_id(candidate.item_metadata)
-            source_span = _conversation_fact_source_span(candidate.item_metadata)
+            if source_item_id is not None and source_item_id not in verified_source_item_ids:
+                source_item_id = None
+            source_span = (
+                _conversation_fact_source_span(candidate.item_metadata)
+                if source_item_id is not None
+                else None
+            )
             artifact_provenance_type, artifact_provenance_label = _artifact_provenance(candidate)
             derived_artifact_keys = list(_derived_artifact_keys(candidate))
             source_project = source_project_from_memory_metadata(candidate.item_metadata)
