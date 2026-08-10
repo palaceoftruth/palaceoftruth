@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -37,6 +38,7 @@ class FakeSession:
         self.jobs = {}
         self.statements = []
         self.commits = 0
+        self.refreshed = []
 
     def add(self, obj):
         if isinstance(obj, Item):
@@ -73,6 +75,11 @@ class FakeSession:
 
     async def commit(self):
         self.commits += 1
+
+    async def refresh(self, obj):
+        # A real AsyncSession must reload the columns an UPDATE expired before
+        # the response reads them; record the call so the tests can assert it.
+        self.refreshed.append(obj)
 
 
 class FakeArqPool:
@@ -408,6 +415,31 @@ def test_patch_source_subscription_toggles_live_stream_capture() -> None:
     assert response.status_code == 200
     assert response.json()["capture_live_streams"] is True
     assert sub.capture_live_streams is True
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda client, sub: client.patch(
+            f"/api/v1/source-subscriptions/{sub.id}", json={"capture_live_streams": True}
+        ),
+        lambda client, sub: client.post(f"/api/v1/source-subscriptions/{sub.id}/pause"),
+        lambda client, sub: client.post(f"/api/v1/source-subscriptions/{sub.id}/resume"),
+    ],
+    ids=["patch", "pause", "resume"],
+)
+def test_source_subscription_updates_reload_expired_columns(call) -> None:
+    # updated_at has a server-side onupdate, so SQLAlchemy expires it on every
+    # UPDATE. Without an explicit reload the response would lazy-load it on an
+    # async session and fail with MissingGreenlet after the write committed.
+    sub = _subscription(tenant_id="tenant-a")
+    session = FakeSession(subscriptions={sub.id: sub})
+    client = _client(session)
+
+    response = call(client, sub)
+
+    assert response.status_code == 200
+    assert session.refreshed == [sub]
 
 
 def _skipped_live_entry(sub: SourceSubscription) -> SourceSubscriptionEntry:

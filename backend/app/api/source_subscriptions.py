@@ -57,6 +57,17 @@ async def _get_subscription_or_404(
     return subscription
 
 
+async def _reload_after_update(db: AsyncSession, subscription: SourceSubscription) -> None:
+    """Load the columns an UPDATE left expired, before the response reads them.
+
+    ``updated_at`` carries a server-side ``onupdate``, so SQLAlchemy expires it
+    after every UPDATE. Reading it later would need an implicit lazy load, which
+    raises MissingGreenlet on an async session and turns the response into a 500
+    even though the write already committed.
+    """
+    await db.refresh(subscription)
+
+
 def _validate_youtube_channel_provider(provider_type: str) -> None:
     if provider_type != YOUTUBE_CHANNEL_PROVIDER_TYPE:
         raise HTTPException(status_code=422, detail="Only youtube_channel subscriptions are supported in v1")
@@ -245,6 +256,7 @@ async def patch_source_subscription(
     if body.paused_reason is not None and subscription.status == "paused":
         subscription.paused_reason = body.paused_reason
     await db.commit()
+    await _reload_after_update(db, subscription)
     return SourceSubscriptionOut.model_validate(subscription)
 
 
@@ -262,6 +274,7 @@ async def pause_source_subscription(
     subscription.status = "paused"
     subscription.paused_reason = "manual_pause"
     await db.commit()
+    await _reload_after_update(db, subscription)
     return SourceSubscriptionOut.model_validate(subscription)
 
 
@@ -280,6 +293,7 @@ async def resume_source_subscription(
     subscription.paused_reason = None
     subscription.consecutive_failures = 0
     await db.commit()
+    await _reload_after_update(db, subscription)
     return SourceSubscriptionOut.model_validate(subscription)
 
 
