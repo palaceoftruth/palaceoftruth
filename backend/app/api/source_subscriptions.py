@@ -29,6 +29,7 @@ from app.services.source_subscriptions import (
     SourceSubscriptionProviderError,
     SourceSubscriptionBackfillPolicy,
     YOUTUBE_CHANNEL_PROVIDER_TYPE,
+    YOUTUBE_LIVE_SKIP_REASON,
     create_source_subscription,
     enforce_source_subscription_manual_sync_cooldown,
     queue_source_subscription_entry,
@@ -101,6 +102,7 @@ async def preview_source_subscription(
         external_url=resolved.external_url,
         display_name=body.display_name or resolved.display_name,
         provider_metadata=resolved.metadata,
+        capture_live_streams=body.capture_live_streams,
         no_backfill=bool(resolved.cursor.get("no_backfill", True)),
         backfill_enabled=body.backfill_enabled,
         backfill_limit=body.backfill_limit,
@@ -124,6 +126,7 @@ async def post_source_subscription(
             display_name=body.display_name,
             auto_tags=body.auto_tags,
             poll_interval_seconds=body.poll_interval_seconds,
+            capture_live_streams=body.capture_live_streams,
             backfill_enabled=body.backfill_enabled,
             backfill_limit=body.backfill_limit,
             backfill_published_after=body.backfill_published_after,
@@ -165,7 +168,8 @@ async def retry_source_subscription_entry(
     entry = await db.get(SourceSubscriptionEntry, entry_id)
     if entry is None or entry.tenant_id != request.state.tenant_id:
         raise HTTPException(status_code=404, detail="Source subscription entry not found")
-    if entry.status != "failed":
+    live_skipped = entry.status == "skipped" and entry.skip_reason == YOUTUBE_LIVE_SKIP_REASON
+    if entry.status != "failed" and not live_skipped:
         raise HTTPException(status_code=409, detail=f"Entry is {entry.status}; only failed entries can be retried")
 
     subscription = await _get_subscription_or_404(
@@ -175,6 +179,20 @@ async def retry_source_subscription_entry(
     )
     if subscription.status != "active":
         raise HTTPException(status_code=409, detail="Only active source subscriptions can retry entries")
+
+    if live_skipped:
+        # An entry skipped before live capture was turned on is only retryable
+        # once the subscription actually captures live streams. Clear the skip
+        # so the queue helper treats it as a fresh discovery.
+        if not subscription.capture_live_streams:
+            raise HTTPException(
+                status_code=409,
+                detail="Turn on live stream capture for this source before retrying skipped live streams",
+            )
+        entry.status = "discovered"
+        entry.skip_reason = None
+        entry.skipped_at = None
+        await db.flush()
 
     queued = await queue_source_subscription_entry(db, request.app.state.arq_pool, subscription, entry)
     if not queued:
@@ -222,6 +240,8 @@ async def patch_source_subscription(
             body.poll_interval_seconds,
             settings.source_subscription_poll_min_interval,
         )
+    if body.capture_live_streams is not None:
+        subscription.capture_live_streams = body.capture_live_streams
     if body.paused_reason is not None and subscription.status == "paused":
         subscription.paused_reason = body.paused_reason
     await db.commit()

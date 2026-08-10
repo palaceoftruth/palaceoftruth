@@ -1158,3 +1158,105 @@ def test_source_subscription_tenant_validation_rejects_cross_tenant_entries() ->
 
     with pytest.raises(ValueError, match="tenant mismatch"):
         validate_source_subscription_tenant(subscription, entry)
+
+
+@pytest.mark.asyncio
+async def test_youtube_poll_captures_finished_live_streams_when_enabled_and_defers_running_ones() -> None:
+    provider = YoutubeChannelSourceSubscriptionProvider(
+        youtube_dl_factory=_yt_dlp_factory(
+            {
+                "https://www.youtube.com/channel/UC123/videos": {
+                    "id": "UC123",
+                    "entries": [
+                        {
+                            "id": "finished-live",
+                            "url": "https://www.youtube.com/watch?v=finished-live",
+                            "title": "Finished live stream",
+                            "upload_date": "20260516",
+                            "live_status": "was_live",
+                        },
+                        {
+                            "id": "running-live",
+                            "url": "https://www.youtube.com/watch?v=running-live",
+                            "title": "Streaming now",
+                            "upload_date": "20260516",
+                            "live_status": "is_live",
+                        },
+                        {
+                            "id": "scheduled-live",
+                            "url": "https://www.youtube.com/watch?v=scheduled-live",
+                            "title": "Scheduled premiere",
+                            "upload_date": "20260516",
+                            "live_status": "is_upcoming",
+                        },
+                        {
+                            "id": "live-short",
+                            "url": "https://www.youtube.com/shorts/live-short",
+                            "title": "Short",
+                            "upload_date": "20260516",
+                            "live_status": "was_live",
+                        },
+                    ],
+                }
+            },
+            [],
+        ),
+        now=_fixed_now,
+    )
+    registry = SourceSubscriptionProviderRegistry()
+    registry.register(provider)
+    subscription = SourceSubscription(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        provider_type="youtube_channel",
+        source_url="https://www.youtube.com/@example",
+        external_id="UC123",
+        external_url="https://www.youtube.com/channel/UC123",
+        display_name="Example Channel",
+        status="active",
+        capture_live_streams=True,
+        cursor={"created_at": "2026-05-15T01:00:00+00:00", "no_backfill": True},
+    )
+    db = _FakeDb()
+
+    entries = await poll_source_subscription(db, subscription, registry=registry, checked_at=_fixed_now())
+
+    assert [entry.provider_entry_id for entry in entries] == ["finished-live", "live-short"]
+    assert entries[0].status == "discovered"
+    assert entries[0].metadata_["youtube_live_status"] == "was_live"
+    assert entries[1].skip_reason == "youtube_shorts_unsupported"
+    # A stream without a finished recording stays unseen so a later poll retries it.
+    assert "running-live" not in subscription.cursor["seen_provider_entry_ids"]
+    assert "scheduled-live" not in subscription.cursor["seen_provider_entry_ids"]
+
+
+@pytest.mark.asyncio
+async def test_create_source_subscription_stores_live_capture_flag() -> None:
+    registry = SourceSubscriptionProviderRegistry()
+    registry.register(
+        YoutubeChannelSourceSubscriptionProvider(
+            youtube_dl_factory=_yt_dlp_factory(
+                {
+                    "https://www.youtube.com/@example/videos": {
+                        "id": "UC123",
+                        "channel": "Example Channel",
+                        "entries": [],
+                    }
+                },
+                [],
+            ),
+            now=_fixed_now,
+        )
+    )
+    db = _FakeDb()
+
+    subscription = await create_source_subscription(
+        db,
+        tenant_id="tenant-a",
+        provider_type="youtube_channel",
+        source_url="@example",
+        capture_live_streams=True,
+        registry=registry,
+    )
+
+    assert subscription.capture_live_streams is True

@@ -246,6 +246,7 @@ export interface SourceSubscription {
   status: SourceSubscriptionStatus;
   auto_tags: string[];
   poll_interval_seconds: number;
+  capture_live_streams: boolean;
   cursor: Record<string, unknown>;
   provider_metadata: Record<string, unknown>;
   last_checked_at: string | null;
@@ -265,6 +266,7 @@ export interface SourceSubscriptionPreview {
   external_url: string | null;
   display_name: string | null;
   provider_metadata: Record<string, unknown>;
+  capture_live_streams: boolean;
   no_backfill: boolean;
   backfill_enabled: boolean;
   backfill_limit: number | null;

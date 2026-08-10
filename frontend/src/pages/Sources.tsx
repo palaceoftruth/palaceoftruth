@@ -60,6 +60,12 @@ function backfillSummary(source: SourceSubscription): string {
   return "On";
 }
 
+const YOUTUBE_LIVE_SKIP_REASON = "youtube_live_unsupported";
+
+function isSkippedLive(entry: SourceSubscriptionEntry): boolean {
+  return entry.status === "skipped" && entry.skip_reason === YOUTUBE_LIVE_SKIP_REASON;
+}
+
 function apiErrorMessage(err: unknown): string {
   return err instanceof ApiError ? err.message : String(err);
 }
@@ -88,6 +94,7 @@ function AddSourceForm({ onCancel, onSuccess }: { onCancel: () => void; onSucces
   const [displayName, setDisplayName] = useState("");
   const [tags, setTags] = useState("");
   const [pollInterval, setPollInterval] = useState(3600);
+  const [captureLiveStreams, setCaptureLiveStreams] = useState(false);
   const [backfillEnabled, setBackfillEnabled] = useState(false);
   const [backfillLimit, setBackfillLimit] = useState("25");
   const [backfillSince, setBackfillSince] = useState("");
@@ -101,6 +108,7 @@ function AddSourceForm({ onCancel, onSuccess }: { onCancel: () => void; onSucces
     display_name: displayName.trim() || undefined,
     auto_tags: parseTags(tags),
     poll_interval_seconds: pollInterval,
+    capture_live_streams: captureLiveStreams,
     backfill_enabled: backfillEnabled,
     backfill_limit: backfillEnabled ? parsedBackfillLimit : undefined,
     backfill_published_after: backfillEnabled && backfillSince ? new Date(`${backfillSince}T00:00:00`).toISOString() : undefined,
@@ -190,6 +198,24 @@ function AddSourceForm({ onCancel, onSuccess }: { onCancel: () => void; onSucces
           <label className="flex items-center gap-2 text-sm text-zinc-200">
             <input
               type="checkbox"
+              checked={captureLiveStreams}
+              onChange={(event) => {
+                setCaptureLiveStreams(event.target.checked);
+                setPreview(null);
+              }}
+              className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 text-sky-500 focus:ring-sky-500"
+            />
+            Capture live streams
+          </label>
+          <p className="mt-2 text-xs text-zinc-500">
+            Channels that publish as live streams are skipped by default. Turn this on to capture a stream after it
+            ends. A stream that is live or scheduled waits for the next poll.
+          </p>
+        </div>
+        <div className="sm:col-span-2">
+          <label className="flex items-center gap-2 text-sm text-zinc-200">
+            <input
+              type="checkbox"
               checked={backfillEnabled}
               onChange={(event) => {
                 setBackfillEnabled(event.target.checked);
@@ -241,6 +267,11 @@ function AddSourceForm({ onCancel, onSuccess }: { onCancel: () => void; onSucces
               <p className="mt-3 text-xs text-zinc-400">Resolved channel ID {preview.external_id}</p>
               <p className="mt-1 text-xs text-zinc-400">
                 {preview.backfill_enabled ? "Backfill will run with the selected bounds." : "Backfill is off for this source."}
+              </p>
+              <p className="mt-1 text-xs text-zinc-400">
+                {preview.capture_live_streams
+                  ? "Finished live streams will be captured."
+                  : "Live streams will be skipped."}
               </p>
             </div>
           </div>
@@ -330,6 +361,18 @@ export default function Sources() {
         toast.success("Source removed");
       }
       if (action === "sync") await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const setCaptureLiveStreams = async (source: SourceSubscription, enabled: boolean) => {
+    setBusyId(source.id);
+    try {
+      replaceSource(await api.updateSourceSubscription(source.id, { capture_live_streams: enabled }));
+      toast.success(enabled ? "Live stream capture on" : "Live stream capture off");
     } catch (err) {
       toast.error(apiErrorMessage(err));
     } finally {
@@ -490,6 +533,23 @@ export default function Sources() {
                   </div>
                 </div>
 
+                <div className="sb-panel-muted p-4">
+                  <label className="flex items-center gap-2 text-sm text-zinc-200">
+                    <input
+                      type="checkbox"
+                      checked={selected.capture_live_streams}
+                      disabled={busyId === selected.id}
+                      onChange={(event) => void setCaptureLiveStreams(selected, event.target.checked)}
+                      className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 text-sky-500 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    Capture live streams
+                  </label>
+                  <p className="mt-2 text-xs text-zinc-500">
+                    Captures a live stream after it ends. New entries only — use Retry on a skipped live stream below to
+                    capture one that was already skipped.
+                  </p>
+                </div>
+
                 {selected.last_error ? (
                   <div role="alert" className="rounded-2xl border border-amber-700/40 bg-amber-950/20 p-4 text-sm text-amber-100">
                     {selected.last_error}
@@ -518,7 +578,7 @@ export default function Sources() {
                               {entry.skip_reason ? <p className="mt-2 text-xs text-zinc-500">{entry.skip_reason}</p> : null}
                             </div>
                             <div className="flex shrink-0 items-center gap-2">
-                              {entry.status === "failed" ? (
+                              {entry.status === "failed" || (selected.capture_live_streams && isSkippedLive(entry)) ? (
                                 <button
                                   type="button"
                                   disabled={retryingEntryId === entry.id || selected.status !== "active"}

@@ -145,7 +145,9 @@ def _oauth_token_row(*, scopes: list[str], resource: str | None = "https://tests
     }
 
 
-def _subscription(*, tenant_id: str, status: str = "active") -> SourceSubscription:
+def _subscription(
+    *, tenant_id: str, status: str = "active", capture_live_streams: bool = False
+) -> SourceSubscription:
     now = datetime.now(timezone.utc)
     return SourceSubscription(
         id=uuid.uuid4(),
@@ -158,6 +160,7 @@ def _subscription(*, tenant_id: str, status: str = "active") -> SourceSubscripti
         status=status,
         auto_tags=[],
         poll_interval_seconds=3600,
+        capture_live_streams=capture_live_streams,
         cursor={"no_backfill": True},
         provider_metadata={"youtube_channel_id": "UC123"},
         consecutive_failures=0,
@@ -390,3 +393,61 @@ def test_retry_source_subscription_entry_rejects_non_failed_entry() -> None:
     response = client.post(f"/api/v1/source-subscriptions/entries/{entry.id}/retry")
 
     assert response.status_code == 409
+
+
+def test_patch_source_subscription_toggles_live_stream_capture() -> None:
+    sub = _subscription(tenant_id="tenant-a")
+    session = FakeSession(subscriptions={sub.id: sub})
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/source-subscriptions/{sub.id}",
+        json={"capture_live_streams": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["capture_live_streams"] is True
+    assert sub.capture_live_streams is True
+
+
+def _skipped_live_entry(sub: SourceSubscription) -> SourceSubscriptionEntry:
+    now = datetime.now(timezone.utc)
+    return SourceSubscriptionEntry(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        subscription_id=sub.id,
+        provider_entry_id="live-123",
+        source_url="https://www.youtube.com/watch?v=live-123",
+        title="Live replay",
+        discovered_at=now,
+        status="skipped",
+        skip_reason="youtube_live_unsupported",
+        skipped_at=now,
+        metadata_={"youtube_video_id": "live-123"},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_retry_queues_skipped_live_entry_when_live_capture_is_on() -> None:
+    sub = _subscription(tenant_id="tenant-a", capture_live_streams=True)
+    entry = _skipped_live_entry(sub)
+    client = _client(FakeSession(subscriptions={sub.id: sub}, entries=[entry]))
+
+    response = client.post(f"/api/v1/source-subscriptions/entries/{entry.id}/retry")
+
+    assert response.status_code == 202
+    assert entry.status == "queued"
+    assert entry.skip_reason is None
+    assert entry.skipped_at is None
+
+
+def test_retry_rejects_skipped_live_entry_when_live_capture_is_off() -> None:
+    sub = _subscription(tenant_id="tenant-a")
+    entry = _skipped_live_entry(sub)
+    client = _client(FakeSession(subscriptions={sub.id: sub}, entries=[entry]))
+
+    response = client.post(f"/api/v1/source-subscriptions/entries/{entry.id}/retry")
+
+    assert response.status_code == 409
+    assert entry.status == "skipped"

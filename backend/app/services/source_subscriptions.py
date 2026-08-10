@@ -27,6 +27,14 @@ YOUTUBE_DISCOVERY_BACKEND_YTDLP = "yt-dlp"
 SOURCE_SUBSCRIPTION_MANUAL_SYNC_CURSOR_KEY = "last_manual_sync_at"
 SOURCE_SUBSCRIPTION_BACKFILL_CURSOR_KEY = "backfill"
 YOUTUBE_WATCH_DISCOVERY_WINDOW = 50
+# yt-dlp live_status values for a stream that already has a finished recording.
+YOUTUBE_LIVE_FINISHED_STATUSES = frozenset({"was_live", "post_live"})
+# ... and for one that does not have a recording yet.
+YOUTUBE_LIVE_IN_PROGRESS_STATUSES = frozenset({"is_live", "is_upcoming"})
+# Internal marker: drop the entry from this discovery pass without recording it,
+# so the next poll can look at it again.
+DEFER_SOURCE_ENTRY = "__defer_source_entry__"
+YOUTUBE_LIVE_SKIP_REASON = "youtube_live_unsupported"
 
 logger = logging.getLogger(__name__)
 
@@ -260,10 +268,21 @@ def sanitize_source_subscription_error(exc: BaseException | str) -> str:
     return message.replace(settings.openai_api_key, "[redacted]") if settings.openai_api_key else message
 
 
-def _youtube_entry_skip_reason(info: dict[str, Any], source_url: str | None) -> str | None:
+def _youtube_entry_skip_reason(
+    info: dict[str, Any],
+    source_url: str | None,
+    *,
+    capture_live_streams: bool = False,
+) -> str | None:
     live_status = str(info.get("live_status") or "").lower()
-    if live_status in {"is_live", "is_upcoming", "was_live", "post_live"}:
-        return "youtube_live_unsupported"
+    if live_status in YOUTUBE_LIVE_IN_PROGRESS_STATUSES:
+        # A stream that has not finished has no downloadable recording yet. With
+        # live capture on we defer the entry instead of skipping it, so a later
+        # poll can pick up the finished recording; with live capture off the
+        # historic permanent skip stays.
+        return DEFER_SOURCE_ENTRY if capture_live_streams else YOUTUBE_LIVE_SKIP_REASON
+    if live_status in YOUTUBE_LIVE_FINISHED_STATUSES and not capture_live_streams:
+        return YOUTUBE_LIVE_SKIP_REASON
 
     url_values = [
         str(info.get("url") or ""),
@@ -376,6 +395,7 @@ class YoutubeChannelSourceSubscriptionProvider:
                 subscription=subscription,
                 created_at=created_at,
                 seen_ids=seen_ids,
+                capture_live_streams=bool(getattr(subscription, "capture_live_streams", False)),
                 backfill_enabled=bool(backfill_cursor.get("enabled")),
                 backfill_published_after=backfill_published_after,
             )
@@ -416,6 +436,7 @@ class YoutubeChannelSourceSubscriptionProvider:
         subscription: SourceSubscription,
         created_at: datetime | None,
         seen_ids: set[str],
+        capture_live_streams: bool,
         backfill_enabled: bool,
         backfill_published_after: datetime | None,
     ) -> DiscoveredSourceEntry | None:
@@ -441,13 +462,19 @@ class YoutubeChannelSourceSubscriptionProvider:
         elif published_at is not None and created_at is not None and published_at <= created_at:
             return None
 
-        skip_reason = _youtube_entry_skip_reason(info, source_url)
+        skip_reason = _youtube_entry_skip_reason(info, source_url, capture_live_streams=capture_live_streams)
+        if skip_reason == DEFER_SOURCE_ENTRY:
+            # Leave the entry unseen so the next poll re-evaluates it once the
+            # stream has finished and a recording exists.
+            return None
+        live_status = str(info.get("live_status") or "").lower()
         metadata = {
             "discovery_backend": self._discovery_backend.name,
             "youtube_channel_id": subscription.external_id,
             "youtube_channel_name": subscription.display_name,
             "youtube_video_id": video_id or None,
             "youtube_entry_kind": info.get("_type") or info.get("ie_key"),
+            "youtube_live_status": live_status or None,
         }
         return DiscoveredSourceEntry(
             provider_entry_id=video_id or None,
@@ -740,6 +767,7 @@ async def create_source_subscription(
     display_name: str | None = None,
     auto_tags: list[str] | None = None,
     poll_interval_seconds: int = 3600,
+    capture_live_streams: bool = False,
     backfill_enabled: bool = False,
     backfill_limit: int | None = None,
     backfill_published_after: datetime | None = None,
@@ -767,6 +795,7 @@ async def create_source_subscription(
         display_name=display_name or resolved.display_name,
         auto_tags=auto_tags or [],
         poll_interval_seconds=poll_interval_seconds,
+        capture_live_streams=capture_live_streams,
         cursor=resolved.cursor,
         provider_metadata=resolved.metadata,
         status="active",
