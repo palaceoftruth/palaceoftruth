@@ -5,7 +5,11 @@ FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142
 
 WORKDIR /app
 
+# PYTHONUNBUFFERED is required, not cosmetic: stdout is block-buffered when it
+# is a pipe, so `kubectl logs` shows nothing until a 8KB block fills. Startup
+# lines and tracebacks were invisible during incidents without it.
 ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv

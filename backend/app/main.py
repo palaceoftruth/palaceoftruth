@@ -30,6 +30,7 @@ from app.api import (
 )
 from app.config import settings, make_redis_settings
 from app.database import async_session
+from app.logging_config import configure_logging
 from app.models.palace import SyncSource
 from app.schemas.palace import SyncSourceCreate
 from app.services.embedder import EmbeddingService
@@ -41,6 +42,11 @@ from app.workers.serialization import (
     job_deserializer as json_job_deserializer,
     job_serializer as json_job_serializer,
 )
+
+# Must run at import time, before the first logger.info() below. Uvicorn
+# configures only its own "uvicorn.*" loggers, so without this the root logger
+# stays at WARNING with no handler and every app log record is discarded.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 _HTTP_METRICS = HttpMetricsRecorder()
