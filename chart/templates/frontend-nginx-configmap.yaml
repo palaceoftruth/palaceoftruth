@@ -43,5 +43,18 @@ data:
 
         location / {
             try_files $uri $uri/ /index.html;
+
+            # Mirrors the `location /` block in frontend/nginx.conf. This
+            # ConfigMap replaces that file in the pod, so the headers have to be
+            # repeated here or the deployed SPA ships without them. The proxied
+            # locations above deliberately carry none: the backend sets its own,
+            # and an `add_header` here would emit each one twice.
+            add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https:" always;
+            add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            add_header Permissions-Policy "accelerometer=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), interest-cohort=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
         }
     }
