@@ -209,6 +209,10 @@ By default the chart deploys backend and frontend images tagged with the chart `
 
 The frontend does not support a build-time browser API key for cluster installs. The browser talks to `/api` through the same-origin proxy, but the proxy must not inject the deployment-specific `API_KEY`; agent and service integrations should authenticate through MCP OAuth or server-side credentials.
 
+Operators sign in to the UI from **Settings**: paste a tenant API key once, and the backend exchanges it for a short-lived session. The key is never stored in the browser. The session lives in an `HttpOnly` `palace_session` cookie that page scripts cannot read, plus a readable `palace_session_csrf` companion the SPA echoes in the `X-Palace-CSRF` header on every unsafe request. Sessions expire after `BROWSER_SESSION_TTL_SECONDS` (12 hours by default), can be revoked from the UI, and stop working as soon as the API key behind them is revoked.
+
+A session is always narrower than its key. By default it excludes the `admin` scope, so ordinary browsing cannot register MCP clients or mint extension pairing keys. Select **Enable administration tools for this session** at sign-in when you need those, and sign out afterwards.
+
 ### Optional S3 Credentials for Palace Sync
 
 If you want Palace to sync from MinIO, R2, or another S3-compatible object store, provide AWS-style credentials to the backend and worker:

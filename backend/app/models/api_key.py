@@ -36,6 +36,32 @@ class ApiKeyAuditEvent(Base):
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
 
+class BrowserSession(Base):
+    """A short-lived SPA session minted from an API key (H-20).
+
+    The API key itself never reaches the browser's persistent storage. The
+    session token lives only in an HttpOnly cookie, so no script can read it,
+    and its scope grant is narrower than the key's by default.
+    """
+
+    __tablename__ = "browser_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    session_token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Double-submit companion. Readable by JS on purpose: the check is that the
+    # attacker's origin cannot read it back to echo it in the header.
+    csrf_token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class BrowserExtensionPairingKey(Base):
     __tablename__ = "browser_extension_pairing_keys"
 

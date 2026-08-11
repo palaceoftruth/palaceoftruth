@@ -12,6 +12,9 @@ type ChromeTab = {
 
 declare const chrome: {
   storage: {
+    /** Device-local. Credentials live here - see shared/credentials.ts. */
+    local: ChromeStorageArea;
+    /** Replicated to Google's servers. Never store credentials here. */
     sync: ChromeStorageArea;
   };
   tabs: {

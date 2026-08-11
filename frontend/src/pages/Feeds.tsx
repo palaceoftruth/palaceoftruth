@@ -4,6 +4,7 @@ import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, Clock3, Link2, Refre
 import { api, ApiError } from "../api/client";
 import type { Feed, Item } from "../api/types";
 import PageHeader from "../components/PageHeader";
+import SafeExternalLink from "../components/SafeExternalLink";
 import StatsCard from "../components/StatsCard";
 import StatePanel from "../components/StatePanel";
 import { useToast } from "../context/ToastContext";
@@ -308,10 +309,10 @@ function FeedDetail({ feed, onBack, onPoll }: FeedDetailProps) {
               Keep the polling cadence, source link, and article volume visible before you act on this feed.
             </p>
           </div>
-          <a href={feed.url} target="_blank" rel="noopener noreferrer" className="sb-button-secondary">
+          <SafeExternalLink href={feed.url} className="sb-button-secondary">
             <Link2 className="h-4 w-4" />
             Open feed source
-          </a>
+          </SafeExternalLink>
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

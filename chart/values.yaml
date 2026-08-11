@@ -31,6 +31,10 @@ config:
   relationshipClassificationSeed: "1083"
   relationshipExtractionMinConfidence: "0.7"
   corsAllowedOrigins: "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
+  # SPA sign-in session (H-20). 12 hours, and the cookie is Secure because the
+  # deployment terminates TLS at the ingress.
+  browserSessionTtlSeconds: "43200"
+  browserSessionCookieSecure: "true"
   embeddingProvider: openai
   embeddingModel: text-embedding-3-small
   embeddingDimensions: "1536"

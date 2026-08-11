@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.api import (
     admin,
+    browser_session,
     capture,
     chat,
     conversations,
@@ -33,6 +34,7 @@ from app.database import async_session
 from app.logging_config import configure_logging
 from app.models.palace import SyncSource
 from app.schemas.palace import SyncSourceCreate
+from app.security_headers import SecurityHeadersMiddleware
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
 from app.services.palace import create_sync_source
@@ -229,6 +231,10 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-MCP-Scope", "X-MCP-Scopes"],
 )
 
+# Added last so it runs outermost and stamps every response, including the ones
+# CORS and the error handlers produce.
+app.add_middleware(SecurityHeadersMiddleware)
+
 
 @app.middleware("http")
 async def record_http_metrics(request, call_next):
@@ -252,6 +258,7 @@ async def record_http_metrics(request, call_next):
 app.state.prometheus_http_metrics = _HTTP_METRICS
 
 app.include_router(system.router, prefix="/api/v1")
+app.include_router(browser_session.router, prefix="/api/v1")
 app.include_router(ingest.router, prefix="/api/v1")
 app.include_router(capture.router, prefix="/api/v1")
 app.include_router(web_saves.router, prefix="/api/v1")

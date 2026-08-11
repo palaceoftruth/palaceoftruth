@@ -7,6 +7,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embedding_profile import resolve_embedding_profile
+from app.ingest_sanitize import sanitize_summary, sanitize_title
 from app.models.feed import Feed
 from app.models.embedding import Embedding
 from app.models.item import Item
@@ -41,6 +42,13 @@ class FeedPipeline(BasePipeline):
         tenant_id: str = "default",
     ) -> uuid.UUID | None:
         """Process a single feed entry. Returns item.id on success, None if skipped/failed."""
+
+        # Feed publishers control these strings. Normalise once here, before the
+        # values reach the item, the content hash or the enrichment prompt, so no
+        # later consumer has to (L-15).
+        entry_title = sanitize_title(entry_title)
+        entry_summary = sanitize_summary(entry_summary)
+        entry_author = sanitize_title(entry_author) or None
 
         try:
             # Extract before deciding whether an existing identity changed.  A

@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+from app.ingest_sanitize import sanitize_summary, sanitize_title
 from app.models.feed import Feed
 from app.models.item import Item
 from app.models.job import Job
@@ -329,10 +330,16 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None
         if parsed.get("modified"):
             feed.last_modified = parsed.modified
 
+        # The feed document is publisher-controlled. Flatten the display strings
+        # before they are persisted (L-15); the link is stored as-is because it
+        # is only ever used as a URL, never as markup.
         feed.feed_metadata = {
-            "feed_title": parsed.feed.get("title"),
+            "feed_title": sanitize_title(parsed.feed.get("title")) or None,
             "site_url": parsed.feed.get("link"),
-            "description": parsed.feed.get("description") or parsed.feed.get("subtitle"),
+            "description": sanitize_summary(
+                parsed.feed.get("description") or parsed.feed.get("subtitle")
+            )
+            or None,
         }
         feed.consecutive_failures = 0
         feed.last_error = None

@@ -98,14 +98,20 @@ test.describe("Route smoke", () => {
   test("tenant admin can review a consent request on desktop and mobile", async ({ page }, testInfo) => {
     const interactionId = "11111111-1111-1111-1111-111111111111";
     const decisions: Array<{ headers: Record<string, string>; body: string }> = [];
-    await page.addInitScript(() => {
-      localStorage.setItem("sb:browser_api_key", "tenant-browser-key");
-    });
-    await page.context().addCookies([{
-      name: "palace_oauth_consent_csrf",
-      value: "csrf-test-token",
-      url: testInfo.project.use.baseURL,
-    }]);
+    await page.context().addCookies([
+      {
+        name: "palace_oauth_consent_csrf",
+        value: "csrf-test-token",
+        url: testInfo.project.use.baseURL,
+      },
+      {
+        // The session cookie itself is HttpOnly and server-set; the page only
+        // sees this companion token, which is what gates the consent view.
+        name: "palace_session_csrf",
+        value: "session-csrf-test-token",
+        url: testInfo.project.use.baseURL,
+      },
+    ]);
     await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}`, async (route) => {
       await route.fulfill({
         json: {
@@ -139,7 +145,10 @@ test.describe("Route smoke", () => {
 
     await page.getByRole("button", { name: "Approve access" }).click();
     await expect.poll(() => decisions).toHaveLength(1);
-    expect(decisions[0]?.headers["x-api-key"]).toBe("tenant-browser-key");
+    // H-20: no key header. The session cookie authenticates and the companion
+    // token is echoed so an ambient cookie alone cannot approve a grant.
+    expect(decisions[0]?.headers["x-api-key"]).toBeUndefined();
+    expect(decisions[0]?.headers["x-palace-csrf"]).toBe("session-csrf-test-token");
     expect(decisions[0]?.body).toContain('name="decision"');
     expect(decisions[0]?.body).toContain("approved");
     expect(decisions[0]?.body).toContain('name="csrf_token"');
@@ -160,11 +169,10 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("Indexed Items")).toBeVisible();
   });
 
-  test("home route sends the browser API key from local storage", async ({ page }) => {
+  test("home route never sends an API key header", async ({ page }) => {
+    // H-20: the browser holds no key at all now. Authentication rides on the
+    // HttpOnly session cookie, which Playwright cannot read either.
     const seenKeys: Array<{ endpoint: string; key: string }> = [];
-    await page.addInitScript(() => {
-      localStorage.setItem("sb:browser_api_key", "browser-test-key");
-    });
     await page.route("**/api/v1/stats", async (route) => {
       seenKeys.push({ endpoint: "stats", key: route.request().headers()["x-api-key"] ?? "" });
       await route.fulfill({
@@ -197,7 +205,7 @@ test.describe("Route smoke", () => {
     await page.getByRole("button", { name: "Export JSON" }).click();
     await expect.poll(() => seenKeys.some(({ endpoint }) => endpoint === "export")).toBe(true);
     expect(seenKeys.length).toBeGreaterThanOrEqual(3);
-    expect(seenKeys.every(({ key }) => key === "browser-test-key")).toBe(true);
+    expect(seenKeys.every(({ key }) => key === "")).toBe(true);
   });
 
   test("api docs route requests and renders the OpenAPI document", async ({ page }) => {
@@ -297,32 +305,78 @@ test.describe("Route smoke", () => {
         },
       });
     });
+    // H-20: the SPA exchanges the key for a session and keeps no copy of it.
+    const sessionRequests: Array<{ method: string; body: string | null }> = [];
+    let signedIn = false;
+    await page.route("**/api/v1/browser/session", async (route) => {
+      const method = route.request().method();
+      sessionRequests.push({ method, body: route.request().postData() });
+      if (method === "POST") {
+        signedIn = true;
+        await route.fulfill({
+          status: 201,
+          json: {
+            tenant_id: "tenant-a",
+            scopes: ["read", "write", "admin"],
+            expires_at: "2099-08-07T12:10:00Z",
+          },
+          headers: { "set-cookie": "palace_session_csrf=session-csrf-token; Path=/" },
+        });
+        return;
+      }
+      if (method === "DELETE") {
+        signedIn = false;
+        await route.fulfill({
+          status: 204,
+          body: "",
+          headers: { "set-cookie": "palace_session_csrf=; Path=/; Max-Age=0" },
+        });
+        return;
+      }
+      if (!signedIn) {
+        await route.fulfill({ status: 401, json: { detail: "No browser session" } });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          tenant_id: "tenant-a",
+          scopes: ["read", "write", "admin"],
+          expires_at: "2099-08-07T12:10:00Z",
+        },
+      });
+    });
     await page.goto(`/settings?e2e=${Date.now()}`);
 
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
     await expect(page.getByText("Browser-local preferences")).toBeVisible();
-    await expect(page.getByText("Browser API key needed")).toBeVisible();
+    await expect(page.getByText("Sign in needed")).toBeVisible();
 
-    await page.getByLabel("Browser API key").fill("tenant-browser-key");
-    await page.getByRole("button", { name: "Save API key" }).click();
-    await expect(page.getByText("Browser API key saved")).toBeVisible();
-    await expect(page.getByText("API key saved for this browser.")).toBeVisible();
-    await expect.poll(() => page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBe("tenant-browser-key");
+    await page.getByLabel("Tenant API key").fill("tenant-browser-key");
+    await page.getByLabel(/Enable administration tools/).check();
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page.getByText("Signed in", { exact: true })).toBeVisible();
+    await expect(page.getByText("Signed in as tenant-a", { exact: false })).toBeVisible();
+    // The key itself must never be written anywhere the page can read it back.
+    expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("tenant-browser-key");
+    expect(await page.evaluate(() => document.cookie)).not.toContain("tenant-browser-key");
+    expect(sessionRequests.some(({ method }) => method === "POST")).toBe(true);
 
     await page.getByRole("button", { name: "Generate pairing key" }).click();
     await expect(page.getByTestId("pairing-key-reveal")).toBeVisible();
     await expect(page.getByLabel("One-time pairing key")).toHaveValue("palpair_one-time-secret-not-persisted");
     await expect(page.getByText("Tenant tenant-a")).toBeVisible();
     expect(pairingRequests).toHaveLength(1);
-    expect(pairingRequests[0].headers["x-api-key"]).toBe("tenant-browser-key");
+    // No key header at all; the unsafe request carries the CSRF echo instead.
+    expect(pairingRequests[0].headers["x-api-key"]).toBeUndefined();
+    expect(pairingRequests[0].headers["x-palace-csrf"]).toBe("session-csrf-token");
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("palpair_one-time-secret-not-persisted");
 
     await page.getByRole("button", { name: "Dismiss pairing key" }).click();
     await expect(page.getByLabel("One-time pairing key")).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Clear" }).click();
-    await expect(page.getByText("Browser API key needed")).toBeVisible();
-    await expect.poll(() => page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBeNull();
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect(page.getByText("Sign in needed")).toBeVisible();
+    expect(sessionRequests.some(({ method }) => method === "DELETE")).toBe(true);
 
     await page.getByLabel("Items per page (Library)").selectOption("50");
     await page.getByLabel("Default sort order").selectOption("title|asc");

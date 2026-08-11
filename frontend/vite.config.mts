@@ -41,11 +41,32 @@ async function resolveApiProxyTarget(explicitTarget?: string) {
   return "https://api.palaceoftruth.test";
 }
 
+// Vite's `secure` option means "verify the target's TLS certificate". Verify by
+// default so a dev proxy pointed at staging or production cannot be silently
+// intercepted. The local stack terminates TLS with a certificate Node does not
+// trust, so the opt-out stays available - but it must be requested explicitly.
+function shouldVerifyProxyTls(target: string, allowInsecure: string | undefined): boolean {
+  if (!target.startsWith("https://")) {
+    // `secure` is meaningless for plain HTTP targets.
+    return false;
+  }
+  const optedOut = ["1", "true", "yes"].includes((allowInsecure ?? "").trim().toLowerCase());
+  if (optedOut) {
+    console.warn(
+      `[vite] TLS certificate verification is DISABLED for ${target} ` +
+        "(VITE_DEV_PROXY_ALLOW_INSECURE_TLS). Never use this against a real environment.",
+    );
+    return false;
+  }
+  return true;
+}
+
 export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, "..", "");
   const apiProxyTarget = command === "serve"
     ? await resolveApiProxyTarget(env.VITE_API_PROXY_TARGET)
     : env.VITE_API_PROXY_TARGET || "https://api.palaceoftruth.test";
+  const verifyTls = shouldVerifyProxyTls(apiProxyTarget, env.VITE_DEV_PROXY_ALLOW_INSECURE_TLS);
 
   console.log(`[vite] API proxy target: ${apiProxyTarget}`);
 
@@ -58,17 +79,17 @@ export default defineConfig(async ({ command, mode }) => {
         "/docs": {
           target: apiProxyTarget,
           changeOrigin: true,
-          secure: !apiProxyTarget.startsWith("https://"),
+          secure: verifyTls,
         },
         "/redoc": {
           target: apiProxyTarget,
           changeOrigin: true,
-          secure: !apiProxyTarget.startsWith("https://"),
+          secure: verifyTls,
         },
         "/api/": {
           target: apiProxyTarget,
           changeOrigin: true,
-          secure: !apiProxyTarget.startsWith("https://"),
+          secure: verifyTls,
         },
       },
     },

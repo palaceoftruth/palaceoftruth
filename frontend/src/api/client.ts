@@ -50,13 +50,41 @@ import type {
 } from "./types";
 
 const BASE = "/api/v1";
-export const BROWSER_API_KEY_STORAGE_KEY = "sb:browser_api_key";
 
-export function readBrowserApiKey(): string {
+// The key used to live here in localStorage, readable by any script on the
+// origin and valid until an operator revoked it by hand (H-20). It is now
+// exchanged once for an HttpOnly `palace_session` cookie the page cannot read.
+// This constant remains only so a returning browser can clear the old value.
+export const LEGACY_BROWSER_API_KEY_STORAGE_KEY = "sb:browser_api_key";
+
+const CSRF_COOKIE_NAME = "palace_session_csrf";
+const CSRF_HEADER_NAME = "X-Palace-CSRF";
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/** Read the companion CSRF cookie. Deliberately not HttpOnly - see H-20. */
+export function readSessionCsrfToken(): string {
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${CSRF_COOKIE_NAME}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/** Whether a session looks present. Not authoritative - the server decides. */
+export function hasBrowserSession(): boolean {
+  return Boolean(readSessionCsrfToken());
+}
+
+export function readLegacyBrowserApiKey(): string {
   try {
-    return localStorage.getItem(BROWSER_API_KEY_STORAGE_KEY)?.trim() ?? "";
+    return localStorage.getItem(LEGACY_BROWSER_API_KEY_STORAGE_KEY)?.trim() ?? "";
   } catch {
     return "";
+  }
+}
+
+export function clearLegacyBrowserApiKey(): void {
+  try {
+    localStorage.removeItem(LEGACY_BROWSER_API_KEY_STORAGE_KEY);
+  } catch {
+    // A blocked localStorage is not an error worth surfacing here.
   }
 }
 
@@ -72,8 +100,12 @@ function parseErrorMessage(status: number, text: string): string {
   } catch {
     // Keep the raw response text when the API returns a non-JSON error body.
   }
-  if (status === 403 && message.toLowerCase().includes("missing api key") && !readBrowserApiKey()) {
-    return "API key required. Add a browser API key in Settings.";
+  const lowered = message.toLowerCase();
+  if ((status === 403 || status === 401) && lowered.includes("missing api key") && !hasBrowserSession()) {
+    return "Sign in required. Open Settings and sign in with your API key.";
+  }
+  if (status === 401 && lowered.includes("browser session")) {
+    return "Your session expired. Open Settings and sign in again.";
   }
   return message;
 }
@@ -82,9 +114,15 @@ function buildHeaders(init?: RequestInit): Record<string, string> {
   const headers: Record<string, string> = {
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
-  const apiKey = readBrowserApiKey();
-  if (apiKey && !headers["X-API-Key"]) {
-    headers["X-API-Key"] = apiKey;
+  // No API key is attached any more: the browser authenticates with the
+  // HttpOnly session cookie, and echoes the companion CSRF token so an
+  // ambient cookie alone cannot drive a state change from another origin.
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (!SAFE_METHODS.has(method) && !headers[CSRF_HEADER_NAME]) {
+    const csrfToken = readSessionCsrfToken();
+    if (csrfToken) {
+      headers[CSRF_HEADER_NAME] = csrfToken;
+    }
   }
   if (!(init?.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
@@ -104,7 +142,10 @@ export class ApiError extends Error {
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = buildHeaders(init);
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  // `same-origin` would be enough for the SPA today, but be explicit: the
+  // session cookie is the only credential now, so a request that silently
+  // dropped it would fail in a confusing way.
+  const res = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "same-origin" });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new ApiError(res.status, parseErrorMessage(res.status, text));
@@ -119,7 +160,26 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface BrowserSession {
+  tenant_id: string;
+  scopes: string[];
+  expires_at: string;
+}
+
 export const api = {
+  /** Exchange an API key for a session cookie. The key is never stored. */
+  createBrowserSession: (apiKey: string, elevated: boolean) =>
+    req<BrowserSession>("/browser/session", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey, elevated }),
+    }),
+
+  getBrowserSession: () => req<BrowserSession>("/browser/session"),
+
+  refreshBrowserSession: () => req<BrowserSession>("/browser/session/refresh", { method: "POST" }),
+
+  deleteBrowserSession: () => req<void>("/browser/session", { method: "DELETE" }),
+
   getStats: () => req<StatsResponse>("/stats"),
 
   getMcpAuthorizationInteraction: (interactionId: string) =>

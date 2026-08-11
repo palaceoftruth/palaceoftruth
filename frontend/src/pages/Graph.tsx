@@ -26,6 +26,21 @@ const SELECTED_NODE_COLOR = "#7dd3fc";
 const SOURCE_TYPE_CHIPS = ["youtube", "webpage", "doc", "image", "note", "media", "feed_article"];
 const GRAPH_QUERY_LIMITS = { node_limit: 200, edge_limit: 500, include_orphans: true };
 
+/**
+ * Build the node tooltip as a DOM node instead of a string.
+ *
+ * ForceGraph3D hands the label to `float-tooltip`, which assigns string content
+ * through `innerHTML`. Node titles come from ingested pages, feeds and uploaded
+ * documents, so a string label is a stored-XSS sink. An `HTMLElement` takes the
+ * library's append path instead, and `textContent` never parses markup.
+ */
+function buildNodeTooltip(title: string): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "max-w-xs break-words";
+  el.textContent = title;
+  return el;
+}
+
 interface GraphData {
   nodes: (GraphNode & { val?: number })[];
   links: GraphLink[];
@@ -393,7 +408,13 @@ export default function Graph() {
                       }
                       return NODE_COLORS[graphNode.source_type] ?? DEFAULT_NODE_COLOR;
                     }}
-                    nodeLabel={(node) => (node as GraphNode).title}
+                    // The typing only admits string/React content, but the library's
+                    // runtime checks `instanceof HTMLElement` first and appends it.
+                    nodeLabel={
+                      ((node: object) => buildNodeTooltip((node as GraphNode).title)) as unknown as (
+                        node: object,
+                      ) => string
+                    }
                     nodeVal={(node) => (selectedNodeId === (node as GraphNode).id ? 2.4 : 1)}
                     nodeOpacity={0.82}
                     nodeResolution={4}

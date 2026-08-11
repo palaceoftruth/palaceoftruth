@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { CheckCircle2, ClipboardCopy, Key, Loader2, ShieldCheck, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CheckCircle2, ClipboardCopy, Key, Loader2, LogOut, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 
-import { api, BROWSER_API_KEY_STORAGE_KEY, readBrowserApiKey } from "../api/client";
+import { api, clearLegacyBrowserApiKey, readLegacyBrowserApiKey } from "../api/client";
+import type { BrowserSession } from "../api/client";
 import type { BrowserExtensionPairingKey } from "../api/types";
 import PageHeader from "../components/PageHeader";
 
@@ -29,7 +30,9 @@ export default function Settings() {
   const [perPage, setPerPage] = useState(() => readLocalStorage(STORAGE_KEY_PER_PAGE, "20"));
   const [defaultSort, setDefaultSort] = useState(() => readLocalStorage(STORAGE_KEY_SORT, "created_at|desc"));
   const [browserApiKey, setBrowserApiKey] = useState("");
-  const [hasBrowserApiKey, setHasBrowserApiKey] = useState(() => Boolean(readBrowserApiKey()));
+  const [elevated, setElevated] = useState(false);
+  const [session, setSession] = useState<BrowserSession | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
@@ -39,33 +42,85 @@ export default function Settings() {
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [pairingCopied, setPairingCopied] = useState(false);
 
-  const handleSaveApiKey = () => {
+  // Pairing keys need the `admin` scope, which a session only holds when the
+  // operator asked for it at sign-in.
+  const sessionIsElevated = Boolean(session?.scopes.includes("admin"));
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restore = async () => {
+      try {
+        const current = await api.getBrowserSession();
+        if (!cancelled) setSession(current);
+        // A live session makes any leftover key redundant. Drop it either way.
+        clearLegacyBrowserApiKey();
+        return;
+      } catch {
+        // No live session. Fall through to the one-time migration below.
+      }
+
+      // One-time migration off the old localStorage key (H-20): exchange it for
+      // a session, then delete it so no copy of the key is left in the browser.
+      const legacyKey = readLegacyBrowserApiKey();
+      if (legacyKey) {
+        try {
+          const migrated = await api.createBrowserSession(legacyKey, false);
+          if (!cancelled) setSession(migrated);
+        } catch {
+          if (!cancelled) {
+            setApiKeyError("The stored API key is no longer valid. Sign in again with a current key.");
+          }
+        } finally {
+          clearLegacyBrowserApiKey();
+        }
+      }
+      if (!cancelled) setSessionLoading(false);
+    };
+
+    void restore().finally(() => {
+      if (!cancelled) setSessionLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSignIn = async () => {
     const trimmed = browserApiKey.trim();
     if (!trimmed) {
-      setApiKeyError("Enter an API key before saving.");
+      setApiKeyError("Enter an API key before signing in.");
       setApiKeySaved(false);
       return;
     }
-    const savedApiKey = writeLocalStorage(BROWSER_API_KEY_STORAGE_KEY, trimmed);
-    setApiKeyError(savedApiKey ? null : "This browser blocked local storage, so the API key could not be saved.");
-    setApiKeySaved(savedApiKey);
-    setHasBrowserApiKey(savedApiKey);
-    if (savedApiKey) {
+    setApiKeyError(null);
+    try {
+      const created = await api.createBrowserSession(trimmed, elevated);
+      setSession(created);
+      setApiKeySaved(true);
+      // The key itself is never kept: the session cookie replaces it.
       setBrowserApiKey("");
+      clearLegacyBrowserApiKey();
       setTimeout(() => setApiKeySaved(false), 2000);
+    } catch (error) {
+      setSession(null);
+      setApiKeySaved(false);
+      setApiKeyError(error instanceof Error ? error.message : "Unable to sign in with that API key.");
     }
   };
 
-  const handleClearApiKey = () => {
+  const handleSignOut = async () => {
     try {
-      localStorage.removeItem(BROWSER_API_KEY_STORAGE_KEY);
+      await api.deleteBrowserSession();
+      setSession(null);
       setBrowserApiKey("");
-      setHasBrowserApiKey(false);
       setApiKeySaved(false);
       setApiKeyError(null);
       setStorageError(false);
-    } catch {
-      setApiKeyError("This browser blocked local storage, so the API key could not be cleared.");
+      clearLegacyBrowserApiKey();
+    } catch (error) {
+      setApiKeyError(error instanceof Error ? error.message : "Unable to sign out.");
     }
   };
 
@@ -116,8 +171,8 @@ export default function Settings() {
           <>
             <span className="sb-chip sb-chip-inactive">Tenant-scoped access</span>
             <span className="sb-chip sb-chip-inactive">Browser-local preferences</span>
-            <span className={hasBrowserApiKey ? "sb-chip sb-chip-active" : "sb-chip sb-chip-inactive"}>
-              {hasBrowserApiKey ? "Browser API key saved" : "Browser API key needed"}
+            <span className={session ? "sb-chip sb-chip-active" : "sb-chip sb-chip-inactive"}>
+              {session ? "Signed in" : "Sign in needed"}
             </span>
           </>
         }
@@ -131,71 +186,95 @@ export default function Settings() {
           <div>
             <p className="sb-section-title">API access</p>
             <p className="mt-2 text-sm leading-7 text-zinc-300">
-              Store a tenant API key in this browser so hosted UI requests can authenticate with the backend.
+              Sign in with a tenant API key to start a session for this browser.
             </p>
             <p className="mt-2 text-sm text-zinc-500">
-              The key stays in local storage on this device. Agent and service integrations should use MCP OAuth or server-side credentials.
+              The key is sent once and is never stored in the browser. The session it returns is held in a cookie that
+              page scripts cannot read, and it expires on its own. Agent and service integrations should use MCP OAuth
+              or server-side credentials.
             </p>
           </div>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sb-panel-muted p-4">
             <p className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-500">Credential source</p>
-            <p className="mt-2 text-sm text-zinc-200">Browser-local tenant API key</p>
+            <p className="mt-2 text-sm text-zinc-200">Server-side browser session</p>
           </div>
           <div className="sb-panel-muted p-4">
-            <p className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-500">Browser key state</p>
-            <p className={`mt-2 text-sm ${hasBrowserApiKey ? "text-emerald-200" : "text-amber-200"}`}>
-              {hasBrowserApiKey ? "Saved on this device" : "Not configured"}
+            <p className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-500">Session state</p>
+            <p className={`mt-2 text-sm ${session ? "text-emerald-200" : "text-amber-200"}`}>
+              {sessionLoading
+                ? "Checking..."
+                : session
+                  ? `Signed in as ${session.tenant_id}, until ${new Date(session.expires_at).toLocaleString()}`
+                  : "Not signed in"}
             </p>
           </div>
         </div>
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-          <div>
-            <label htmlFor="settings-api-key" className="mb-1 block text-sm text-zinc-400">
-              Browser API key
+        {session ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-zinc-400">
+              Session scopes: {session.scopes.join(", ")}
+              {session.scopes.includes("admin") ? "" : ". Administration tools are off for this session."}
+            </p>
+            <button type="button" onClick={handleSignOut} className="sb-button-secondary">
+              <LogOut className="h-4 w-4" />
+              Sign out
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+              <div>
+                <label htmlFor="settings-api-key" className="mb-1 block text-sm text-zinc-400">
+                  Tenant API key
+                </label>
+                <input
+                  id="settings-api-key"
+                  type="password"
+                  value={browserApiKey}
+                  onChange={(e) => setBrowserApiKey(e.target.value)}
+                  placeholder="Paste tenant API key"
+                  autoComplete="off"
+                  className="sb-input"
+                />
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row md:justify-end">
+                <button type="button" onClick={() => void handleSignIn()} className="sb-button-primary">
+                  {apiKeySaved ? (
+                    <>
+                      <CheckCircle2 className="h-4 w-4" />
+                      Signed in
+                    </>
+                  ) : (
+                    <>
+                      <Key className="h-4 w-4" />
+                      Sign in
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+            <label className="flex items-start gap-2 text-sm text-zinc-400">
+              <input
+                type="checkbox"
+                checked={elevated}
+                onChange={(e) => setElevated(e.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                Enable administration tools for this session. Leave this off for ordinary browsing: without it the
+                session cannot register MCP clients or mint extension pairing keys, even though the key can.
+              </span>
             </label>
-            <input
-              id="settings-api-key"
-              type="password"
-              value={browserApiKey}
-              onChange={(e) => setBrowserApiKey(e.target.value)}
-              placeholder={hasBrowserApiKey ? "Stored API key unchanged" : "Paste tenant API key"}
-              autoComplete="off"
-              className="sb-input"
-            />
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row md:justify-end">
-            <button type="button" onClick={handleSaveApiKey} className="sb-button-primary">
-              {apiKeySaved ? (
-                <>
-                  <CheckCircle2 className="h-4 w-4" />
-                  Saved
-                </>
-              ) : (
-                <>
-                  <Key className="h-4 w-4" />
-                  Save API key
-                </>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={handleClearApiKey}
-              disabled={!hasBrowserApiKey && !browserApiKey}
-              className="sb-button-secondary"
-            >
-              <Trash2 className="h-4 w-4" />
-              Clear
-            </button>
-          </div>
-        </div>
+          </>
+        )}
         <p className={`text-sm ${apiKeyError ? "text-amber-200" : "text-zinc-500"}`}>
           {apiKeyError
             ? apiKeyError
-            : apiKeySaved
-              ? "API key saved for this browser."
-              : "Use Clear on shared machines after finishing a browser session."}
+            : session
+              ? "Sign out on shared machines when you finish."
+              : "The key is exchanged for a session and is not kept in this browser."}
         </p>
       </section>
 
@@ -220,14 +299,17 @@ export default function Settings() {
             <button
               type="button"
               onClick={() => void handleGeneratePairingKey()}
-              disabled={pairingLoading || !hasBrowserApiKey}
+              disabled={pairingLoading || !sessionIsElevated}
               className="sb-button-primary"
             >
               {pairingLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Key className="h-4 w-4" />}
               {pairingLoading ? "Generating…" : "Generate pairing key"}
             </button>
             <p className={`text-sm ${pairingError ? "text-amber-200" : "text-zinc-500"}`}>
-              {pairingError ?? (hasBrowserApiKey ? "Requires tenant admin access." : "Save an admin tenant API key above first.")}
+              {pairingError ??
+                (sessionIsElevated
+                  ? "Requires tenant admin access."
+                  : "Sign in above with administration tools enabled first.")}
             </p>
           </div>
         ) : (

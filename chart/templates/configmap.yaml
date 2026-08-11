@@ -22,6 +22,8 @@ data:
   RELATIONSHIP_CLASSIFICATION_SEED: {{ .Values.config.relationshipClassificationSeed | quote }}
   RELATIONSHIP_EXTRACTION_MIN_CONFIDENCE: {{ .Values.config.relationshipExtractionMinConfidence | quote }}
   CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
+  BROWSER_SESSION_TTL_SECONDS: {{ .Values.config.browserSessionTtlSeconds | quote }}
+  BROWSER_SESSION_COOKIE_SECURE: {{ .Values.config.browserSessionCookieSecure | quote }}
   EMBEDDING_PROVIDER: {{ include "palaceoftruth.embeddingProvider" . | quote }}
   EMBEDDING_MODEL: {{ include "palaceoftruth.embeddingModel" . | quote }}
   EMBEDDING_DIMENSIONS: {{ include "palaceoftruth.embeddingDimensions" . | quote }}

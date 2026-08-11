@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import type { ArtifactCitation, RelatedItem } from "../api/types";
 import ArtifactCitationView from "./ArtifactCitation";
 import RelationshipBadge from "./RelationshipBadge";
+import SafeExternalLink from "./SafeExternalLink";
 import SourceIcon from "./SourceIcon";
 
 export type ProvenanceKind = "raw_source" | "canonical_memory" | "derived_artifact" | "room" | "retrieval_trace";
@@ -218,10 +219,10 @@ export default function ProvenanceDrawer({ provenance, triggerLabel = "Inspect e
                     </Link>
                   ) : null}
                   {provenance.sourceUrl ? (
-                    <a href={provenance.sourceUrl} target="_blank" rel="noopener noreferrer" className="sb-chip sb-chip-inactive">
+                    <SafeExternalLink href={provenance.sourceUrl} className="sb-chip sb-chip-inactive">
                       <ExternalLink className="h-3.5 w-3.5" />
                       {provenance.sourceLabel ?? sourceHost ?? "Open source"}
-                    </a>
+                    </SafeExternalLink>
                   ) : null}
                   {!provenance.itemId && !provenance.sourceUrl ? (
                     <p className="text-sm text-zinc-500">No direct source link is available for this evidence.</p>
