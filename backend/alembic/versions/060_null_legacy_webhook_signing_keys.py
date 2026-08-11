@@ -13,14 +13,14 @@ in-flight webhook subscription loses its signature verification until the
 job is re-created, which is the intended outcome: a forgeable key is worse
 than no key.
 
-Revision ID: 060_null_legacy_webhook_signing_keys
+Revision ID: 060_null_webhook_keys
 Revises: 059_scope_authority_lifecycle
 """
 
 from alembic import op
 
 
-revision = "060_null_legacy_webhook_signing_keys"
+revision = "060_null_webhook_keys"
 down_revision = "059_scope_authority_lifecycle"
 branch_labels = None
 depends_on = None
