@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     credential_pepper: str = ""
     cors_allowed_origins: str ="https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
 
+    # Browser (SPA) sessions. The web app exchanges an API key for one of these
+    # once and never stores the key; see app/browser_session.py. Keep the TTL
+    # short - the SPA refreshes silently while the tab is in use, so a long TTL
+    # buys nothing and only widens the window on a stolen cookie.
+    browser_session_ttl_seconds: int = 43200  # 12 hours
+    # Force the Secure cookie attribute on. Leave True in every deployment; it
+    # is only relaxed automatically for a plain-HTTP localhost dev origin, which
+    # would otherwise discard the cookie without an error.
+    browser_session_cookie_secure: bool = True
+
     # Chunking
     chunk_size: int = 500
     chunk_overlap: int = 50

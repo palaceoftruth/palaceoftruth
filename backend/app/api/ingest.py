@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import record_oauth_client_audit_event, require_api_capability, verify_capture_write_auth
 from app.database import get_db
+from app.ingest_sanitize import sanitize_filename
 from app.models.item import Item
 from app.models.job import Job
 from app.services.bundle import persist_upload_artifact
@@ -439,7 +440,9 @@ async def ingest_doc(
     model: str | None = Form(None),
 ):
     """Upload a document (.pdf, .docx, .xlsx, .md, .txt) for text extraction and ingestion."""
-    filename = file.filename or ""
+    # The client picks this name and it is stored, displayed and exported. Take
+    # the basename and strip control characters before it is used at all (L-15).
+    filename = sanitize_filename(file.filename)
     ext = os.path.splitext(filename.lower())[1]
     if ext not in _ALLOWED_DOC_EXTS:
         raise HTTPException(
@@ -578,7 +581,8 @@ async def ingest_image(
     webhook_url: str | None = Form(None),
 ):
     """Upload an image (.jpg, .jpeg, .png, .gif, .webp) for vision analysis and ingestion."""
-    filename = file.filename or ""
+    # See ingest_doc: the client-supplied name is normalised before any use.
+    filename = sanitize_filename(file.filename)
     ext = os.path.splitext(filename.lower())[1]
     if ext not in _ALLOWED_IMAGE_EXTS:
         raise HTTPException(

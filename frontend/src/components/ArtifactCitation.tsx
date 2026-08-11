@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ExternalLink, FileSearch, Image as ImageIcon } from "lucide-react";
 
 import type { ArtifactCitation as ArtifactCitationType, Item } from "../api/types";
+import SafeExternalLink from "./SafeExternalLink";
 
 interface ArtifactCitationProps {
   citation: ArtifactCitationType | null | undefined;
@@ -144,26 +145,16 @@ export default function ArtifactCitation({ citation, compact = false }: Artifact
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             {citation.source_url ? (
-              <a
-                href={citation.source_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="sb-chip sb-chip-inactive px-2.5 py-1"
-              >
+              <SafeExternalLink href={citation.source_url} className="sb-chip sb-chip-inactive px-2.5 py-1">
                 {citation.source_label ?? "Open source"}
                 <ExternalLink className="h-3 w-3" />
-              </a>
+              </SafeExternalLink>
             ) : null}
             {citation.original_artifact_url ? (
-              <a
-                href={citation.original_artifact_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="sb-chip sb-chip-inactive px-2.5 py-1"
-              >
+              <SafeExternalLink href={citation.original_artifact_url} className="sb-chip sb-chip-inactive px-2.5 py-1">
                 Inspect original
                 <ExternalLink className="h-3 w-3" />
-              </a>
+              </SafeExternalLink>
             ) : citation.original_artifact_label ? (
               <span className="max-w-full truncate rounded-full border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-500">
                 {citation.original_artifact_label}

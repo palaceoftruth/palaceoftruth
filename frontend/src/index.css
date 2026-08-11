@@ -2,8 +2,12 @@
 
 :root {
   color-scheme: dark;
+  /* No "Inter" here on purpose. The app ships no Inter font file, so the name
+     only ever matched a locally installed copy - but on /api-docs the Scalar
+     stylesheet declares @font-face Inter pointing at fonts.scalar.com, and that
+     declaration would then capture the whole document and pull a third-party
+     webfont that the CSP font-src blocks. */
   font-family:
-    Inter,
     ui-sans-serif,
     system-ui,
     -apple-system,
@@ -154,6 +158,21 @@ body {
   .sb-tool-panel-body {
     @apply min-h-[70vh];
   }
+}
+
+/* Scalar's stylesheet defines --scalar-font/--scalar-font-code on :root as
+   "Inter"/"JetBrains Mono" and ships @font-face rules for both that load from
+   fonts.scalar.com. Those requests are third-party and the CSP blocks them, so
+   point the variables at fonts the viewer already has. Setting them here beats
+   the :root definition for every Scalar node. */
+.api-docs-shell,
+.api-docs-shell :where(.scalar-app) {
+  --scalar-font:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  --scalar-font-code:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
 }
 
 .api-docs-shell {

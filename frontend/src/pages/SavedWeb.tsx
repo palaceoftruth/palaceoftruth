@@ -17,6 +17,7 @@ import {
 import { api, ApiError } from "../api/client";
 import type { RelatedItem, WebSave, WebSaveCaptureKind } from "../api/types";
 import PageHeader from "../components/PageHeader";
+import SafeExternalLink from "../components/SafeExternalLink";
 import SourceIcon from "../components/SourceIcon";
 import StatePanel from "../components/StatePanel";
 import { useToast } from "../context/ToastContext";
@@ -157,10 +158,14 @@ function DetailDrawer({
         <div>
           <dt className="text-zinc-500">Original URL</dt>
           <dd className="mt-1 break-all text-zinc-200">
-            <a href={save.original_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sky-200 hover:text-sky-100">
+            <SafeExternalLink
+              href={save.original_url}
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sky-200 hover:text-sky-100"
+            >
               {save.original_url}
               <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
-            </a>
+            </SafeExternalLink>
           </dd>
         </div>
         <div className="grid grid-cols-2 gap-3">

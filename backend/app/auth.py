@@ -380,6 +380,66 @@ def get_auth_context(request: Request) -> AuthContext:
     )
 
 
+async def _verify_browser_session(request: Request) -> str:
+    """Authenticate the SPA from its HttpOnly session cookie (H-20).
+
+    Imported lazily because app.browser_session imports this module for the
+    credential hashing helpers; a module-level import here would be circular.
+    """
+    from app.browser_session import (
+        CSRF_HEADER_NAME,
+        SAFE_METHODS,
+        SESSION_COOKIE_NAME,
+        load_session,
+        touch_session,
+        verify_session_csrf,
+    )
+
+    session_token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if not session_token:
+        raise _auth_exception(request, 403, "Missing API key", error="invalid_token")
+
+    async with async_session() as db:
+        session = await load_session(db, session_token)
+        if session is None:
+            raise _auth_exception(
+                request, 403, "Browser session is invalid or expired", error="invalid_token"
+            )
+        # Cookie authentication is ambient, so a state-changing request must
+        # also echo the readable companion token. A cross-site page can send the
+        # cookie but cannot read it back to build this header.
+        if request.method.upper() not in SAFE_METHODS:
+            presented = request.headers.get(CSRF_HEADER_NAME)
+            if not await verify_session_csrf(db, session_id=session.id, presented_token=presented):
+                raise _auth_exception(
+                    request, 403, "Missing or invalid CSRF token", error="invalid_token"
+                )
+        await touch_session(db, session.id)
+        await db.commit()
+
+    if not session.scopes:
+        raise _auth_exception(
+            request, 403, "Browser session has no scope grant", error="insufficient_scope"
+        )
+    _attach_auth_context(
+        request,
+        _context_from_scopes(
+            tenant_id=session.tenant_id,
+            auth_mode="browser_session",
+            subject_id=str(session.id),
+            token_hash_reference=session.session_token_hash,
+            scopes=list(session.scopes),
+            audit_metadata={
+                "browser_session_id": str(session.id),
+                "api_key_id": str(session.api_key_id),
+                "browser_session_granted_scopes": list(session.scopes),
+            },
+        ),
+    )
+    # Callers use the return value only as an opaque "authenticated" marker.
+    return ""
+
+
 async def verify_api_key(
     request: Request,
     api_key: str | None = Security(api_key_header),
@@ -387,9 +447,13 @@ async def verify_api_key(
     """Validate X-API-Key against api_keys table.
 
     Sets request.state.tenant_id on success. Raises HTTP 403 on failure.
+
+    With no ``X-API-Key`` header this falls back to the SPA's session cookie, so
+    every route that already depends on this function accepts a browser session
+    without holding a tenant key in the browser (H-20).
     """
     if not api_key:
-        raise _auth_exception(request, 403, "Missing API key", error="invalid_token")
+        return await _verify_browser_session(request)
 
     key_hash, legacy_key_hash = secret_hash_candidates(api_key)
 
@@ -859,7 +923,9 @@ async def record_oauth_client_audit_event(
         await db.commit()
 
 
-KNOWN_AUTH_MODES = frozenset({"api_key", "mcp_oauth", "browser_extension"})
+KNOWN_AUTH_MODES = frozenset(
+    {"api_key", "mcp_oauth", "browser_extension", "browser_session"}
+)
 
 
 def _require_known_auth_mode(request: Request, auth_mode: object) -> str:
@@ -886,6 +952,11 @@ def _require_known_auth_mode(request: Request, auth_mode: object) -> str:
 def _insufficient_scope_detail(auth_mode: str, required_capability: str) -> str:
     if auth_mode == "api_key":
         return f"API key missing {required_capability} scope"
+    if auth_mode == "browser_session":
+        # A browser session is narrower than its key on purpose, so name the
+        # session rather than the key: re-authenticating with elevation is the
+        # fix, not editing the key's grant.
+        return f"Browser session missing {required_capability} scope"
     return f"MCP bearer token missing {required_capability} scope"
 
 

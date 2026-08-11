@@ -8,6 +8,7 @@ import ArtifactCitation, { artifactCitationFromItem } from "../components/Artifa
 import PageHeader from "../components/PageHeader";
 import ProvenanceDrawer, { relatedItemsToProvenanceRelationships } from "../components/ProvenanceDrawer";
 import RelationshipBadge from "../components/RelationshipBadge";
+import SafeExternalLink from "../components/SafeExternalLink";
 import SourceIcon from "../components/SourceIcon";
 import StatePanel from "../components/StatePanel";
 import { useToast } from "../context/ToastContext";
@@ -240,15 +241,10 @@ export default function ItemDetail() {
             {createdAt ? <span className="sb-chip sb-chip-inactive">Captured {createdAt}</span> : null}
             <span className="sb-chip sb-chip-inactive">{item.tags.length} tag{item.tags.length === 1 ? "" : "s"}</span>
             {item.source_url ? (
-              <a
-                href={item.source_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="sb-chip sb-chip-active"
-              >
+              <SafeExternalLink href={item.source_url} className="sb-chip sb-chip-active">
                 Open source
                 <ExternalLink className="h-3 w-3" />
-              </a>
+              </SafeExternalLink>
             ) : null}
           </>
         }
@@ -282,15 +278,13 @@ export default function ItemDetail() {
                 label="Source URL"
                 value={
                   item.source_url ? (
-                    <a
+                    <SafeExternalLink
                       href={item.source_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
                       className="inline-flex min-w-0 max-w-full items-center gap-2 text-sky-200 transition hover:text-white"
                     >
                       <span className="truncate">{item.source_url}</span>
                       <ExternalLink className="h-4 w-4 shrink-0" />
-                    </a>
+                    </SafeExternalLink>
                   ) : undefined
                 }
               />
@@ -442,15 +436,13 @@ export default function ItemDetail() {
                   label="Feed URL"
                   value={
                     feedUrl ? (
-                      <a
+                      <SafeExternalLink
                         href={feedUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
                         className="inline-flex min-w-0 max-w-full items-center gap-2 text-amber-200 transition hover:text-white"
                       >
                         <span className="truncate">{feedUrl}</span>
                         <ExternalLink className="h-4 w-4 shrink-0" />
-                      </a>
+                      </SafeExternalLink>
                     ) : undefined
                   }
                 />

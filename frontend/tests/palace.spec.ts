@@ -886,7 +886,8 @@ test.describe("Palace smoke", () => {
     await mockPalaceControlTower(page, tower);
     // This mirrors the real browser's authenticated read path without relying
     // on a developer's local API key or a production-reachable environment.
-    await page.addInitScript(() => localStorage.setItem("sb:browser_api_key", "sar-1255-read-only-test-key"));
+    // The browser no longer holds a key at all (H-20): it authenticates with
+    // the HttpOnly session cookie, so no key header is expected on the wire.
     await page.unroute("**/api/v1/palace/room-clusters");
     await page.route("**/api/v1/palace/room-clusters**", async (route) => {
       const request = route.request();
@@ -941,7 +942,7 @@ test.describe("Palace smoke", () => {
     await expect(page.getByRole("button", { name: /merge|redirect|delete|apply/i })).toHaveCount(0);
     await expect.poll(() => clusterRequests.length).toBeGreaterThanOrEqual(2);
     expect(clusterRequests.every(({ method }) => method === "GET")).toBe(true);
-    expect(clusterRequests.every(({ apiKey }) => apiKey === "sar-1255-read-only-test-key")).toBe(true);
+    expect(clusterRequests.every(({ apiKey }) => apiKey === undefined)).toBe(true);
     expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${firstRoomId}`);
     expect(clusterRequests.at(-1)?.url).toContain(`selected_room_ids=${secondRoomId}`);
 
@@ -1122,7 +1123,6 @@ test.describe("Palace smoke", () => {
     await page.route("**/api/v1/palace/source-resources", async (route) => {
       await route.fulfill({ json: { resources: [resource], total: 1 } });
     });
-    await page.addInitScript(() => localStorage.setItem("sb:browser_api_key", "test-key"));
     await page.goto(`/palace/control-tower?e2e=${Date.now()}`);
     const card = page.getByRole("article", { name: /Watched source https:\/\/docs.example.test\/guide/ });
     await expect(card).toContainText("Verified");

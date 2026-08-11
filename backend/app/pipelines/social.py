@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import settings
+from app.ingest_sanitize import sanitize_embed_html
 from app.utils.outbound_http import OutboundUrlError, fetch_public_http_bytes
 
 logger = logging.getLogger(__name__)
@@ -326,6 +327,7 @@ def _capture_x_oembed(
         return None
 
     embed_html = str(data.get("html") or "")
+    safe_html = sanitize_embed_html(embed_html)
     text = _html_to_text(embed_html)
     body_text = _first_paragraph_text(embed_html)
     if _is_link_only_text(body_text):
@@ -344,9 +346,10 @@ def _capture_x_oembed(
         "author": data.get("author_name"),
         "author_url": data.get("author_url"),
         "oembed_cache_age": data.get("cache_age"),
-        "oembed_html": embed_html,
+        # Never persist provider markup verbatim: see app/ingest_sanitize.py.
+        "oembed_html": safe_html,
     }
-    return SocialPostCapture(text=text, html=embed_html, metadata=_drop_empty(metadata))
+    return SocialPostCapture(text=text, html=safe_html, metadata=_drop_empty(metadata))
 
 
 def _capture_facebook_oembed(
@@ -380,6 +383,7 @@ def _capture_facebook_oembed(
         return None
 
     embed_html = str(data.get("html") or "")
+    safe_html = sanitize_embed_html(embed_html)
     text = _html_to_text(embed_html)
     if _is_low_value_text(text):
         errors.append("Facebook oEmbed returned embed markup without readable post text")
@@ -391,11 +395,12 @@ def _capture_facebook_oembed(
         "captured_without_javascript": True,
         "provider_name": data.get("provider_name") or "Facebook",
         "provider_url": data.get("provider_url"),
-        "oembed_html": embed_html,
+        # Never persist provider markup verbatim: see app/ingest_sanitize.py.
+        "oembed_html": safe_html,
         "oembed_width": data.get("width"),
         "oembed_height": data.get("height"),
     }
-    return SocialPostCapture(text=text, html=embed_html, metadata=_drop_empty(metadata))
+    return SocialPostCapture(text=text, html=safe_html, metadata=_drop_empty(metadata))
 
 
 def _capture_static_metadata(

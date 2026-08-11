@@ -1,7 +1,7 @@
 import { CheckCircle2, CircleAlert, KeyRound, LoaderCircle, ShieldCheck, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError, api, readBrowserApiKey } from "../api/client";
+import { ApiError, api, hasBrowserSession } from "../api/client";
 import type { McpOAuthAuthorizationInteraction } from "../api/types";
 
 function csrfTokenFromCookie(): string {
@@ -36,8 +36,8 @@ export default function OAuthConsent() {
       setError("This consent request is missing its interaction identifier.");
       return;
     }
-    if (!readBrowserApiKey()) {
-      setError("A browser API key is required to review this request. Save the tenant key in Palace Settings, then reopen this consent request.");
+    if (!hasBrowserSession()) {
+      setError("Sign in to review this request. Open Palace Settings, sign in with the tenant key, then reopen this consent request.");
       return;
     }
     api.getMcpAuthorizationInteraction(interactionId).then(setInteraction).catch((reason: unknown) => {

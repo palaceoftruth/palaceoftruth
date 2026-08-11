@@ -83,13 +83,12 @@ test.describe("Settings route", () => {
     await expect(page.getByText("Browser-local preferences")).toBeVisible();
     await expect(page.getByText("API access")).toBeVisible();
     await expect(page.getByText("Credential source")).toBeVisible();
-    await expect(page.getByLabel("Browser API key")).toBeVisible();
+    // The key is exchanged for a cookie session, so the form takes a key but
+    // never stores one in the browser.
+    await expect(page.getByLabel("Tenant API key")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
     await expect(page.getByLabel("Items per page (Library)")).toBeVisible();
     await expect(page.getByLabel("Default sort order")).toBeVisible();
-
-    await page.getByLabel("Browser API key").fill("tenant-browser-key");
-    await page.getByRole("button", { name: "Save API key" }).click();
-    await expect(page.getByText("Browser API key saved")).toBeVisible();
 
     await page.getByLabel("Items per page (Library)").selectOption("50");
     await page.getByRole("button", { name: "Save preferences" }).click();

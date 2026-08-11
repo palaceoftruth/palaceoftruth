@@ -117,6 +117,10 @@ export default function ApiDocs() {
               hideDarkModeToggle: true,
               hideTestRequestButton: true,
               telemetry: false,
+              // Scalar otherwise fetches webfonts from fonts.scalar.com. That
+              // is a third-party request from every viewer's browser and it
+              // needs a hole in the CSP font-src, so use the app's own fonts.
+              withDefaultFonts: false,
               defaultHttpClient: { targetKey: "shell", clientKey: "curl" },
               metaData: { title: "Palace of Truth API" },
             }}

@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Clock3, Eye, Pause, Play, Plus, RefreshCw, R
 import { api, ApiError } from "../api/client";
 import type { SourceSubscription, SourceSubscriptionEntry, SourceSubscriptionPreview } from "../api/types";
 import PageHeader from "../components/PageHeader";
+import SafeExternalLink from "../components/SafeExternalLink";
 import StatePanel from "../components/StatePanel";
 import StatsCard from "../components/StatsCard";
 import { useToast } from "../context/ToastContext";
@@ -571,7 +572,7 @@ export default function Sources() {
                               <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-500">
                                 <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" /> {formatRelative(entry.discovered_at)}</span>
                                 {entry.source_url ? (
-                                  <a className="text-sky-300 hover:text-sky-100" href={entry.source_url} target="_blank" rel="noreferrer">Open item link</a>
+                                  <SafeExternalLink className="text-sky-300 hover:text-sky-100" href={entry.source_url} rel="noreferrer">Open item link</SafeExternalLink>
                                 ) : null}
                               </div>
                               {entry.error_message ? <p className="mt-2 text-xs text-rose-200">{entry.error_message}</p> : null}
