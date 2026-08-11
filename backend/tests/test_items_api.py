@@ -14,6 +14,11 @@ from app.database import get_db
 from app.models.item import Item
 
 
+# A minimal but genuine PNG signature plus header, so the artifact route can
+# confirm the stored bytes really are the type the file name claims.
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 16
+
+
 class _FakeResult:
     def __init__(self, rows) -> None:
         self._rows = rows
@@ -280,7 +285,7 @@ def test_get_item_artifact_serves_image_analysis_upload(tmp_path: Path, monkeypa
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     artifact_path = upload_dir / "roadmap.png"
-    artifact_path.write_bytes(b"image-bytes")
+    artifact_path.write_bytes(_PNG_BYTES)
     monkeypatch.setattr("app.api.items.settings.upload_artifact_dir", str(upload_dir))
     session = FakeSession(
         Item(
@@ -307,8 +312,49 @@ def test_get_item_artifact_serves_image_analysis_upload(tmp_path: Path, monkeypa
     response = client.get(f"/api/v1/items/{item_id}/artifact")
 
     assert response.status_code == 200
-    assert response.content == b"image-bytes"
+    assert response.content == _PNG_BYTES
     assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_get_item_artifact_refuses_a_media_type_the_bytes_do_not_support(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Recorded upload metadata must never decide how a browser renders bytes."""
+
+    item_id = uuid.uuid4()
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    artifact_path = upload_dir / "roadmap.png"
+    artifact_path.write_bytes(b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>")
+    monkeypatch.setattr("app.api.items.settings.upload_artifact_dir", str(upload_dir))
+    session = FakeSession(
+        Item(
+            id=item_id,
+            source_type="image",
+            title="Roadmap",
+            tenant_id="tenant-a",
+            status="ready",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata_={
+                "image_analysis": {
+                    "artifact": {
+                        "filename": "roadmap.png",
+                        "media_type": "image/svg+xml",
+                        "storage_path": str(artifact_path),
+                    }
+                }
+            },
+        )
+    )
+    client = _client(session)
+
+    response = client.get(f"/api/v1/items/{item_id}/artifact")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_item_artifact_rejects_paths_outside_upload_root(tmp_path: Path, monkeypatch) -> None:

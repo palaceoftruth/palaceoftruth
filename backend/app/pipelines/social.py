@@ -19,10 +19,15 @@ import httpx
 
 from app.config import settings
 from app.ingest_sanitize import sanitize_embed_html
+from app.utils.outbound_http import OutboundUrlError, fetch_public_http_bytes
 
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT_SECONDS = 12.0
+# The post page itself is attacker-influenced, so its body is capped. Social
+# post pages are HTML shells; nothing legitimate approaches this size.
+_MAX_PAGE_BYTES = 4 * 1024 * 1024
+_MAX_PAGE_REDIRECTS = 5
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -44,6 +49,9 @@ _FACEBOOK_POST_PATH_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# fb.watch is Facebook's own short link. It still needs a path shape, otherwise
+# it is a general-purpose redirector that skips post-path validation entirely.
+_FB_WATCH_PATH_RE = re.compile(r"^/[A-Za-z0-9_-]{1,64}/?$")
 
 _LOW_VALUE_TEXT_MARKERS = (
     "log in to facebook",
@@ -148,8 +156,15 @@ def detect_social_post_platform(url: str) -> str | None:
     if host in {"x.com", "twitter.com"} and _X_STATUS_RE.match(parsed.path):
         return "x"
 
-    if host == "facebook.com" or host.endswith(".facebook.com") or host == "fb.watch":
-        if host == "fb.watch" or _FACEBOOK_POST_PATH_RE.search(parsed.path):
+    if host == "fb.watch":
+        # A real short link is a bare opaque id with no query. Anything else is
+        # a redirector shape, which would skip the post-path validation below.
+        if parsed.query or parsed.params or not _FB_WATCH_PATH_RE.match(parsed.path):
+            return None
+        return "facebook"
+
+    if host == "facebook.com" or host.endswith(".facebook.com"):
+        if _FACEBOOK_POST_PATH_RE.search(parsed.path):
             return "facebook"
 
     return None
@@ -165,11 +180,16 @@ def capture_social_post(url: str, client: httpx.Client | None = None) -> SocialP
     if client is None:
         client = httpx.Client(
             timeout=_HTTP_TIMEOUT_SECONDS,
-            follow_redirects=True,
+            # Redirects are never followed blindly: the page fetch re-validates
+            # every hop through outbound_http, and the provider endpoints below
+            # are fixed hosts that have no reason to redirect off-site.
+            follow_redirects=False,
             headers={
                 "User-Agent": _USER_AGENT,
                 "Accept-Language": "en-US,en;q=0.9",
             },
+            # Pinned-IP origins must not pool a TLS connection across hostnames.
+            limits=httpx.Limits(max_keepalive_connections=0),
         )
 
     errors: list[str] = []
@@ -389,17 +409,31 @@ def _capture_static_metadata(
     platform: str,
     errors: list[str],
 ) -> SocialPostCapture | None:
-    response = client.get(
-        url,
-        headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-    )
+    # This is the one attacker-supplied URL in the module. Fetch it through the
+    # centralized guard so every redirect hop is re-validated against the
+    # non-public address policy and the body cannot grow without bound.
+    try:
+        body, response = fetch_public_http_bytes(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout_seconds=_HTTP_TIMEOUT_SECONDS,
+            max_redirects=_MAX_PAGE_REDIRECTS,
+            max_bytes=_MAX_PAGE_BYTES,
+            raise_for_status=False,
+            client=client,
+        )
+    except OutboundUrlError as exc:
+        errors.append(f"static metadata fetch was refused: {exc}")
+        return None
+
     if response.status_code >= 400:
         errors.append(f"static metadata fetch returned HTTP {response.status_code}: {_response_detail(response)}")
         return None
 
-    page_metadata = _html_metadata(response.text)
+    page_text = _decode_page(body, response)
+    page_metadata = _html_metadata(page_text)
     title = _first_value(
         page_metadata,
         "og:title",
@@ -430,7 +464,17 @@ def _capture_static_metadata(
     }
     if errors:
         metadata["social_capture_warnings"] = errors.copy()
-    return SocialPostCapture(text=text, html=response.text, metadata=_drop_empty(metadata))
+    return SocialPostCapture(text=text, html=page_text, metadata=_drop_empty(metadata))
+
+
+def _decode_page(body: bytes, response: httpx.Response) -> str:
+    """Decode a capped body using the response encoding, never trusting it."""
+
+    encoding = response.charset_encoding or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 def _html_to_text(raw_html: str) -> str:

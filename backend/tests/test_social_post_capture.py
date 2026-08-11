@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 
 import httpx
 import pytest
 
 from app.config import settings
+from app.pipelines import social as social_module
 from app.pipelines import webpage as webpage_module
 from app.pipelines.social import (
     SocialCaptureError,
@@ -22,6 +24,16 @@ class FakeClient:
 
     def get(self, url: str, **kwargs):
         self.calls.append({"url": url, **kwargs})
+        return self._next(url)
+
+    @contextlib.contextmanager
+    def stream(self, method: str, url: str, **kwargs):
+        """The attacker-supplied page is fetched through the streaming guard."""
+
+        self.calls.append({"url": url, "method": method, **kwargs})
+        yield self._next(url)
+
+    def _next(self, url: str) -> httpx.Response:
         if not self.responses:
             raise AssertionError(f"unexpected request to {url}")
         return self.responses.pop(0)
@@ -443,14 +455,16 @@ def test_capture_facebook_post_falls_back_to_static_metadata_without_token(monke
     assert capture.metadata["social_capture_warnings"] == [
         "FACEBOOK_OEMBED_ACCESS_TOKEN is not configured"
     ]
-    assert client.calls == [
-        {
-            "url": "https://www.facebook.com/example/posts/pfbid123",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            },
-        }
-    ]
+    # The page fetch goes through the guarded streaming path: one hop, no
+    # blind redirect following.
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["url"] == "https://www.facebook.com/example/posts/pfbid123"
+    assert call["method"] == "GET"
+    assert call["follow_redirects"] is False
+    assert call["headers"]["Accept"] == (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    )
 
 
 def test_capture_facebook_uses_static_metadata_when_oembed_has_no_text(monkeypatch) -> None:
@@ -585,3 +599,40 @@ def test_webpage_extract_does_not_use_browser_for_failed_social_capture(monkeypa
     pipeline = WebpagePipeline(db=None, embedder=None, llm=None)
     with pytest.raises(ValueError, match="without JavaScript: oEmbed unavailable"):
         asyncio.run(pipeline.extract("https://x.com/Interior/status/463440424141459456"))
+
+
+def test_fb_watch_short_link_still_requires_a_post_shaped_path() -> None:
+    """fb.watch must not act as a general redirector that skips validation."""
+
+    assert detect_social_post_platform("https://fb.watch/abc123/") == "facebook"
+    assert detect_social_post_platform("https://fb.watch/redirect?to=http://10.0.0.1/") is None
+    assert detect_social_post_platform("https://fb.watch/a/b/c") is None
+    assert detect_social_post_platform("https://fb.watch/") is None
+
+
+def test_static_metadata_fetch_refuses_a_redirect_to_an_internal_address(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "facebook_oembed_access_token", "")
+    client = FakeClient(
+        [
+            httpx.Response(
+                302,
+                headers={"Location": "http://169.254.169.254/latest/meta-data/"},
+                request=httpx.Request("GET", "https://www.facebook.com/example/posts/pfbid123"),
+            )
+        ]
+    )
+
+    with pytest.raises(SocialCaptureError, match="refused"):
+        capture_social_post("https://www.facebook.com/example/posts/pfbid123", client=client)
+
+    # Only the first hop was issued; the redirect target was never fetched.
+    assert len(client.calls) == 1
+
+
+def test_static_metadata_fetch_stops_reading_an_oversized_body(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "facebook_oembed_access_token", "")
+    monkeypatch.setattr(social_module, "_MAX_PAGE_BYTES", 1024)
+    client = FakeClient([httpx.Response(200, text="<html>" + "a" * 20_000 + "</html>")])
+
+    with pytest.raises(SocialCaptureError, match="refused"):
+        capture_social_post("https://www.facebook.com/example/posts/pfbid123", client=client)

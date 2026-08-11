@@ -31,6 +31,7 @@ dependencies = [
     "cryptography>=50.0.0",
     "mcp>=1.28.1,<2",
     "nh3>=0.2.18",
+    "defusedxml>=0.7.1",
 ]
 
 [build-system]

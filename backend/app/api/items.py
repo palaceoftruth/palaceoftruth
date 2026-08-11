@@ -19,6 +19,7 @@ from app.models.item import Item
 from app.schemas.item import ItemResponse, ItemListResponse, ItemUpdate, ItemCreate, ItemCreateResponse, BatchActionRequest, BatchActionResponse, ItemDeleteResponse, ItemRestoreResponse
 from app.schemas.relationship import RelatedItemResponse, RelatedItemsResponse
 from app.services.item_dates import apply_effective_date
+from app.utils.file_type import SNIFF_BYTES, matches_extension, safe_media_type
 from app.workers.queues import enqueue_palace_job
 
 router = APIRouter(prefix="/items", tags=["items"])
@@ -335,13 +336,34 @@ async def get_item_artifact(
     image_analysis = row.metadata_.get("image_analysis") if isinstance(row.metadata_, dict) else {}
     artifact = image_analysis.get("artifact") if isinstance(image_analysis, dict) else {}
     filename = artifact.get("filename") if isinstance(artifact, dict) else None
-    media_type = artifact.get("media_type") if isinstance(artifact, dict) else None
+
+    # The artifact is served inline, so the media type decides what a browser
+    # executes. Derive it from the stored bytes and an allowlist instead of the
+    # recorded upload metadata, and forbid sniffing past that decision.
+    media_type = _artifact_media_type(storage_path)
     return FileResponse(
         storage_path,
-        media_type=media_type if isinstance(media_type, str) else None,
+        media_type=media_type,
         filename=filename if isinstance(filename, str) else storage_path.name,
         content_disposition_type="inline",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
+
+
+def _artifact_media_type(storage_path: Path) -> str:
+    """Return an allowlisted media type that the file's own bytes support."""
+
+    extension = storage_path.suffix.lower()
+    try:
+        with open(storage_path, "rb") as handle:
+            head = handle.read(SNIFF_BYTES)
+    except OSError:
+        return "application/octet-stream"
+
+    if not matches_extension(head, extension):
+        # Stored bytes and stored name disagree: serve something inert.
+        return "application/octet-stream"
+    return safe_media_type(extension)
 
 
 @router.patch("/{item_id}", response_model=ItemResponse, dependencies=[Depends(require_api_capability("write"))])

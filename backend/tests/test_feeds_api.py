@@ -9,6 +9,7 @@ from app.api.feeds import router
 from app.auth import AuthContext, verify_memory_auth
 from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
+from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES
 
 
 class _FakeMappingsResult:
@@ -354,3 +355,55 @@ def test_delete_feed_soft_deletes_and_disables_polling() -> None:
     assert params["tenant_id"] == "tenant-a"
     assert params["deleted_at"] is not None
     assert session.commits == 1
+
+
+def test_import_opml_rejects_entity_expansion_payload() -> None:
+    """A billion-laughs OPML must be refused before any parser expands it."""
+
+    client = _client(ImportOpmlSession(uuid.uuid4()))
+    billion_laughs = (
+        b'<?xml version="1.0"?>\n'
+        b'<!DOCTYPE opml [\n'
+        b'  <!ENTITY a "aaaaaaaaaa">\n'
+        b'  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">\n'
+        b'  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">\n'
+        b']>\n'
+        b'<opml><body><outline type="rss" xmlUrl="https://example.com/&c;" /></body></opml>'
+    )
+
+    response = client.post(
+        "/api/v1/feeds/import_opml",
+        files={"file": ("feeds.opml", billion_laughs, "text/xml")},
+    )
+
+    assert response.status_code == 400
+    assert "doctype" in response.json()["detail"].lower()
+
+
+def test_import_opml_rejects_external_entity_declaration() -> None:
+    client = _client(ImportOpmlSession(uuid.uuid4()))
+    xxe = (
+        b'<?xml version="1.0"?>\n'
+        b'<!DOCTYPE opml [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+        b'<opml><body><outline type="rss" xmlUrl="https://example.com/&xxe;" /></body></opml>'
+    )
+
+    response = client.post(
+        "/api/v1/feeds/import_opml",
+        files={"file": ("feeds.opml", xxe, "text/xml")},
+    )
+
+    assert response.status_code == 400
+
+
+def test_import_opml_rejects_oversized_document_without_buffering_it() -> None:
+    client = _client(ImportOpmlSession(uuid.uuid4()))
+    oversized = b'<?xml version="1.0"?><opml><body>' + b"<!-- pad -->" * 200_000 + b"</body></opml>"
+    assert len(oversized) > MAX_XML_DOCUMENT_BYTES
+
+    response = client.post(
+        "/api/v1/feeds/import_opml",
+        files={"file": ("feeds.opml", oversized, "text/xml")},
+    )
+
+    assert response.status_code == 413
