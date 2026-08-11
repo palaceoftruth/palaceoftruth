@@ -4254,7 +4254,26 @@ def _repo_git_environment(source: SyncSource):
     # inheriting the deployment's full secret surface.
     env = {
         name: os.environ[name]
-        for name in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+        for name in (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TMPDIR",
+            # Review follow-up on L-12: an allowlist this narrow silently broke
+            # any deployment that reaches GitHub through an egress proxy or a
+            # custom CA bundle. These are still inert (no secret material) but
+            # are load-bearing for network reachability in some clusters.
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "GIT_SSL_CAINFO",
+            "SSL_CERT_FILE",
+            "CURL_CA_BUNDLE",
+        )
         if name in os.environ
     }
     env["GIT_TERMINAL_PROMPT"] = "0"

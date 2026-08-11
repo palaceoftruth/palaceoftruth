@@ -709,6 +709,81 @@ async def test_sync_source_has_local_file_changes_ignores_unchanged_skipped_file
     assert await sync_source_has_local_file_changes(db, source) is False
 
 
+def test_run_git_command_injects_hardening_args_into_git_invocations(monkeypatch) -> None:
+    # L-12 review follow-up: no prior coverage existed for the hooksPath/
+    # credential.helper hardening args actually reaching the subprocess call.
+    captured: dict[str, object] = {}
+
+    def _fake_run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("app.services.palace.subprocess.run", _fake_run)
+
+    result = palace_service._run_git_command(
+        ["git", "clone", "https://example.invalid/repo.git", "dest"], env={}
+    )
+
+    assert captured["args"] == [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "clone",
+        "https://example.invalid/repo.git",
+        "dest",
+    ]
+    assert result == "ok"
+
+
+def test_run_git_command_leaves_non_git_argv_untouched(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.palace.subprocess.run", _fake_run)
+
+    palace_service._run_git_command(["not-git", "--version"], env={})
+
+    assert captured["args"] == ["not-git", "--version"]
+
+
+def test_repo_git_environment_allowlists_inert_vars_and_drops_secrets(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # L-12 review follow-up: the trimmed environment must still carry proxy/CA
+    # material a clone may legitimately need, while never leaking backend
+    # secrets (CREDENTIAL_PEPPER, DATABASE_URL, ...) into the git subprocess.
+    monkeypatch.setattr("app.services.palace.settings.palace_repo_checkout_root", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/palace")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+    monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca.pem")
+    monkeypatch.setenv("CREDENTIAL_PEPPER", "super-secret-pepper")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pw@host/db")
+
+    source = SyncSource(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        name="Repo",
+        root_path="https://github.com/octocat/example",
+        source_kind="repo",
+        status="active",
+        scan_interval_seconds=900,
+        credential_type="none",
+    )
+
+    with palace_service._repo_git_environment(source) as (env, _clone_url):
+        assert env["HTTPS_PROXY"] == "http://proxy.internal:3128"
+        assert env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca.pem"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert "CREDENTIAL_PEPPER" not in env
+        assert "DATABASE_URL" not in env
+
+
 def test_infer_wing_and_room_prefers_sync_path() -> None:
     item = _fake_item(
         path="product/pricing/launch-note.md",
