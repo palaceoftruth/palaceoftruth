@@ -4,13 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, api, hasBrowserSession } from "../api/client";
 import type { McpOAuthAuthorizationInteraction } from "../api/types";
 
-function csrfTokenFromCookie(): string {
-  return document.cookie
-    .split("; ")
-    .find((entry) => entry.startsWith("palace_oauth_consent_csrf="))
-    ?.split("=")[1] ?? "";
-}
-
 function ScopeList({ label, values, empty }: { label: string; values: string[]; empty: string }) {
   return (
     <div className="sb-panel-muted p-4">
@@ -26,11 +19,26 @@ function ScopeList({ label, values, empty }: { label: string; values: string[]; 
 
 export default function OAuthConsent() {
   const interactionId = useMemo(() => new URLSearchParams(window.location.search).get("interaction_id")?.trim() ?? "", []);
+  const consentBinding = useMemo(() => {
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    return {
+      session: fragment.get("consent_session")?.trim() ?? "",
+      csrfToken: fragment.get("csrf_token")?.trim() ?? "",
+    };
+  }, []);
   const [interaction, setInteraction] = useState<McpOAuthAuthorizationInteraction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<"approved" | "denied" | null>(null);
   const [needsApiKey, setNeedsApiKey] = useState(false);
   const [apiKey, setApiKey] = useState("");
+
+  useEffect(() => {
+    // Remove one-use bindings after React has captured them. Doing this during
+    // render loses the binding on Strict Mode's development-only second render.
+    if (window.location.hash) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+  }, []);
 
   const loadInteraction = useCallback(async (sessionReady = false) => {
     if (!interactionId) {
@@ -45,7 +53,8 @@ export default function OAuthConsent() {
     setNeedsApiKey(false);
     setError(null);
     try {
-      setInteraction(await api.getMcpAuthorizationInteraction(interactionId));
+      if (!consentBinding.session) throw new Error("missing consent binding");
+      setInteraction(await api.getMcpAuthorizationInteraction(interactionId, consentBinding.session));
     } catch (reason) {
       if (reason instanceof ApiError && (reason.status === 401 || reason.status === 403)) {
         setNeedsApiKey(true);
@@ -54,7 +63,7 @@ export default function OAuthConsent() {
       }
       setError(reason instanceof ApiError ? reason.message : "This consent request is unavailable or has expired.");
     }
-  }, [interactionId]);
+  }, [consentBinding.session, interactionId]);
 
   useEffect(() => {
     document.title = "Approve access · Palace of Truth";
@@ -68,7 +77,7 @@ export default function OAuthConsent() {
       return;
     }
     try {
-      await api.createBrowserSession(trimmed, false);
+      await api.createBrowserSession(trimmed, true);
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.message : "The Palace tenant API key could not start a browser session.");
       return;
@@ -78,7 +87,7 @@ export default function OAuthConsent() {
   };
 
   const decide = async (decision: "approved" | "denied") => {
-    const csrfToken = csrfTokenFromCookie();
+    const csrfToken = consentBinding.csrfToken;
     if (!csrfToken) {
       setError("This browser session is missing its CSRF binding. Restart the authorization request from the client.");
       return;
@@ -86,7 +95,7 @@ export default function OAuthConsent() {
     setSubmitting(decision);
     setError(null);
     try {
-      const result = await api.decideMcpAuthorizationInteraction(interactionId, decision, csrfToken);
+      const result = await api.decideMcpAuthorizationInteraction(interactionId, decision, csrfToken, consentBinding.session);
       // Only the validated server response determines the external callback location.
       window.location.assign(result.redirect_uri);
     } catch (reason) {

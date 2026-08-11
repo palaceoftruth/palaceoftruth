@@ -113,6 +113,7 @@ test.describe("Route smoke", () => {
     await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}`, async (route) => {
       interactionRequests += 1;
       expect(route.request().headers()["x-api-key"]).toBeUndefined();
+      expect(route.request().headers()["x-palace-consent-session"]).toBe("consent-session-inline");
       await route.fulfill({
         json: {
           client_name: "QuietFirm Staging",
@@ -127,7 +128,8 @@ test.describe("Route smoke", () => {
     });
 
     await page.setViewportSize({ width: 1440, height: 960 });
-    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}`);
+    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}#consent_session=consent-session-inline&csrf_token=csrf-inline`);
+    await expect(page).not.toHaveURL(/consent_session|csrf_token/);
     await expect(page.getByText("Authenticate this browser to the Palace tenant")).toBeVisible();
     await expect(page.getByText("Public PKCE client: no client secret is created or stored.")).toBeVisible();
     await page.getByLabel("Palace tenant API key").fill("tenant-browser-key");
@@ -136,7 +138,7 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("QuietFirm Staging", { exact: true })).toBeVisible();
     await expect(page.getByText("default", { exact: true })).toBeVisible();
     await expect(page.getByText("destructive_prohibited", { exact: true })).toBeVisible();
-    expect(sessionRequests).toEqual([{ method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: false }) }]);
+    expect(sessionRequests).toEqual([{ method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: true }) }]);
     expect(interactionRequests).toBe(1);
 
     const screenshotDir = process.env.SAR1321_SCREENSHOT_DIR;
@@ -154,11 +156,6 @@ test.describe("Route smoke", () => {
     const decisions: Array<{ headers: Record<string, string>; body: string }> = [];
     await page.context().addCookies([
       {
-        name: "palace_oauth_consent_csrf",
-        value: "csrf-test-token",
-        url: testInfo.project.use.baseURL,
-      },
-      {
         // The session cookie itself is HttpOnly and server-set; the page only
         // sees this companion token, which is what gates the consent view.
         name: "palace_session_csrf",
@@ -167,6 +164,7 @@ test.describe("Route smoke", () => {
       },
     ]);
     await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}`, async (route) => {
+      expect(route.request().headers()["x-palace-consent-session"]).toBe("consent-session-test");
       await route.fulfill({
         json: {
           client_name: "NebulaiOS",
@@ -185,17 +183,24 @@ test.describe("Route smoke", () => {
     });
 
     await page.setViewportSize({ width: 1440, height: 960 });
-    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}`);
+    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}#consent_session=consent-session-test&csrf_token=csrf-test-token`);
+    await expect(page).not.toHaveURL(/consent_session|csrf_token/);
     await expect(page.getByRole("heading", { name: "Review access request" })).toBeVisible();
     await expect(page.getByText("NebulaiOS", { exact: true })).toBeVisible();
     await expect(page.getByText("tenant-demo", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Approve access" })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("oauth-consent-desktop.png"), fullPage: true });
+    if (process.env.SAR1324_SCREENSHOT_DIR) {
+      await page.screenshot({ path: `${process.env.SAR1324_SCREENSHOT_DIR}/sar-1324-consent-desktop.png`, fullPage: true });
+    }
 
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByRole("heading", { name: "Review access request" })).toBeVisible();
     await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
     await page.screenshot({ path: testInfo.outputPath("oauth-consent-mobile.png"), fullPage: true });
+    if (process.env.SAR1324_SCREENSHOT_DIR) {
+      await page.screenshot({ path: `${process.env.SAR1324_SCREENSHOT_DIR}/sar-1324-consent-mobile.png`, fullPage: true });
+    }
 
     await page.getByRole("button", { name: "Approve access" }).click();
     await expect.poll(() => decisions).toHaveLength(1);
@@ -203,6 +208,7 @@ test.describe("Route smoke", () => {
     // token is echoed so an ambient cookie alone cannot approve a grant.
     expect(decisions[0]?.headers["x-api-key"]).toBeUndefined();
     expect(decisions[0]?.headers["x-palace-csrf"]).toBe("session-csrf-test-token");
+    expect(decisions[0]?.headers["x-palace-consent-session"]).toBe("consent-session-test");
     expect(decisions[0]?.body).toContain('name="decision"');
     expect(decisions[0]?.body).toContain("approved");
     expect(decisions[0]?.body).toContain('name="csrf_token"');

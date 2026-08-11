@@ -174,6 +174,46 @@ async def assert_pgvector_and_tenant_foreign_key_probes(database_url: str) -> No
         await connection.close()
 
 
+async def seed_pre_scope_api_key(database_url: str) -> None:
+    """Create the legacy row that migration 055 must backfill safely."""
+    connection = await asyncpg.connect(database_url.replace("postgresql+asyncpg", "postgresql", 1))
+    try:
+        await connection.execute(
+            """
+            INSERT INTO api_keys (tenant_id, key_hash, description)
+            VALUES ('migration-scope-probe', 'migration-scope-probe-hash', 'migration scope probe')
+            ON CONFLICT (key_hash) DO NOTHING
+            """
+        )
+    finally:
+        await connection.close()
+
+
+async def assert_api_key_grants_exclude_admin(database_url: str) -> None:
+    connection = await asyncpg.connect(database_url.replace("postgresql+asyncpg", "postgresql", 1))
+    try:
+        unsafe_count = await connection.fetchval(
+            "SELECT COUNT(*) FROM api_keys WHERE scopes ? 'admin'"
+        )
+        if unsafe_count:
+            raise RuntimeError(f"migration restored admin on {unsafe_count} API key grant(s)")
+        missing_lifecycle_count = await connection.fetchval(
+            "SELECT COUNT(*) FROM api_keys WHERE expires_at IS NULL OR created_by IS NULL"
+        )
+        if missing_lifecycle_count:
+            raise RuntimeError(
+                f"migration left {missing_lifecycle_count} API key(s) without lifecycle metadata"
+            )
+        probe_scopes = await connection.fetchval(
+            "SELECT scopes FROM api_keys WHERE key_hash = 'migration-scope-probe-hash'"
+        )
+        if not probe_scopes:
+            raise RuntimeError("migration 055 did not backfill the legacy API key scope probe")
+        print("api_key_admin_grants=0 legacy_scope_probe=backfilled")
+    finally:
+        await connection.close()
+
+
 async def main() -> int:
     try:
         args = parse_args()
@@ -184,10 +224,29 @@ async def main() -> int:
         print(error, file=sys.stderr)
         return 2
 
+    run_alembic(database_url, "upgrade", "054_capture_pairing_keys")
+    await seed_pre_scope_api_key(database_url)
+    run_alembic(database_url, "upgrade", "058_browser_sessions")
+    # Reproduce the deployed original-055 state before migration 059 repairs it.
+    connection = await asyncpg.connect(database_url.replace("postgresql+asyncpg", "postgresql", 1))
+    try:
+        await connection.execute(
+            "UPDATE api_keys SET scopes = scopes || '[\"admin\"]'::jsonb "
+            "WHERE key_hash = 'migration-scope-probe-hash'"
+        )
+    finally:
+        await connection.close()
     run_alembic(database_url, "upgrade", "head")
+    await assert_api_key_grants_exclude_admin(database_url)
     await assert_pgvector_and_tenant_foreign_key_probes(database_url)
+    # Exercise migration 055 itself around a persisted legacy key. Its upgrade
+    # must restore only the routine grant after the downgrade removes scopes.
+    run_alembic(database_url, "downgrade", "054_capture_pairing_keys")
+    run_alembic(database_url, "upgrade", "head")
+    await assert_api_key_grants_exclude_admin(database_url)
     run_alembic(database_url, "downgrade", ROUNDTRIP_DOWNGRADE_TARGET)
     run_alembic(database_url, "upgrade", "head")
+    await assert_api_key_grants_exclude_admin(database_url)
     await assert_pgvector_and_tenant_foreign_key_probes(database_url)
     print(
         "migration round-trip passed: "

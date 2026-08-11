@@ -38,11 +38,12 @@ class _Result:
 
 
 class FakeSession:
-    def __init__(self, api_keys=None, audit_events=None, mcp_clients=None, mcp_events=None) -> None:
+    def __init__(self, api_keys=None, audit_events=None, mcp_clients=None, mcp_events=None, browser_sessions=None) -> None:
         self.api_keys = list(api_keys or [])
         self.audit_events = list(audit_events or [])
         self.mcp_clients = list(mcp_clients or [])
         self.mcp_events = list(mcp_events or [])
+        self.browser_sessions = list(browser_sessions or [])
         self.revoked_tokens = []
         self.commit_count = 0
 
@@ -69,13 +70,28 @@ class FakeSession:
                 "id": uuid.uuid4(),
                 "tenant_id": params["tenant_id"],
                 "description": params["description"],
+                "scopes": json.loads(params["scopes"]),
+                "created_by": params["created_by"],
                 "created_at": datetime.now(timezone.utc),
+                "expires_at": params["expires_at"],
                 "revoked_at": None,
                 "last_used_at": None,
                 "key_hash": params["key_hash"],
             }
             self.api_keys.append(row)
             return _Result([row])
+
+        if "from browser_sessions" in sql:
+            rows = [row for row in self.browser_sessions if row["tenant_id"] == params["tenant_id"]]
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+            return _Result(rows[:250])
+
+        if "update browser_sessions" in sql:
+            for row in self.browser_sessions:
+                if row["tenant_id"] == params["tenant_id"] and row["id"] == params["session_id"]:
+                    row["revoked_at"] = row["revoked_at"] or datetime.now(timezone.utc)
+                    return _Result([row])
+            return _Result([])
 
         if "insert into api_key_audit_events" in sql:
             details = params.get("details") or "{}"
@@ -264,7 +280,10 @@ def _api_key_row(*, tenant_id: str, description: str | None, revoked: bool = Fal
         "id": uuid.uuid4(),
         "tenant_id": tenant_id,
         "description": description,
+        "scopes": ["read", "write"],
+        "created_by": "test-admin",
         "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc).replace(year=2099),
         "revoked_at": datetime.now(timezone.utc) if revoked else None,
         "last_used_at": None,
         "key_hash": "existing-hash",
@@ -1094,3 +1113,29 @@ def test_revoke_tenant_api_key_404s_for_tenant_mismatch() -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_admin_can_list_and_revoke_tenant_browser_sessions() -> None:
+    session_row = {
+        "id": uuid.uuid4(),
+        "tenant_id": "tenant-a",
+        "api_key_id": uuid.uuid4(),
+        "scopes": ["read"],
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc).replace(year=2099),
+        "last_used_at": None,
+        "revoked_at": None,
+    }
+    client = _client(FakeSession(browser_sessions=[session_row]))
+    headers = {"X-Admin-Secret": "test-admin-secret"}
+
+    listed = client.get("/api/v1/admin/tenants/tenant-a/browser-sessions", headers=headers)
+    revoked = client.post(
+        f"/api/v1/admin/tenants/tenant-a/browser-sessions/{session_row['id']}/revoke",
+        headers=headers,
+    )
+
+    assert listed.status_code == 200
+    assert listed.json()["sessions"][0]["id"] == str(session_row["id"])
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked_at"] is not None

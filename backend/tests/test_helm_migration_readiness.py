@@ -89,7 +89,13 @@ def test_backend_startup_probe_allows_dependency_gate_budget() -> None:
     container = backend["spec"]["template"]["spec"]["containers"][0]
 
     startup_probe = container["startupProbe"]
-    assert startup_probe["httpGet"] == {"path": "/api/v1/health", "port": 8000}
+    assert startup_probe["httpGet"] == {
+        "path": "/api/v1/health",
+        "port": 8000,
+        "httpHeaders": [
+            {"name": "Host", "value": "api.palaceoftruth.example.com"},
+        ],
+    }
     assert startup_probe["periodSeconds"] == 5
     assert startup_probe["timeoutSeconds"] == 5
     assert startup_probe["failureThreshold"] == 150

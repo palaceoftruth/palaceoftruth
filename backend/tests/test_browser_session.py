@@ -40,6 +40,7 @@ class FakeSession:
         self.key_row = key_row
         self.sessions: dict[uuid.UUID, dict] = {}
         self.commits = 0
+        self.advisory_locks = 0
 
     def _live(self, row: dict) -> bool:
         if row["revoked_at"] is not None or row["expires_at"] <= datetime.now(timezone.utc):
@@ -51,7 +52,12 @@ class FakeSession:
         params = params or {}
 
         if sql.startswith("select id, tenant_id, scopes from api_keys"):
-            if self.key_row is None or self.key_row.get("revoked_at") is not None:
+            if (
+                self.key_row is None
+                or self.key_row.get("revoked_at") is not None
+                or self.key_row.get("expires_at", datetime.max.replace(tzinfo=timezone.utc))
+                <= datetime.now(timezone.utc)
+            ):
                 return _Result(None)
             candidates = {params["hash"], params["legacy_hash"]}
             return _Result(self.key_row if self.key_row["key_hash"] in candidates else None)
@@ -65,9 +71,24 @@ class FakeSession:
                 "session_token_hash": params["session_token_hash"],
                 "csrf_token_hash": params["csrf_token_hash"],
                 "scopes": params["scopes"],
+                "created_at": datetime.now(timezone.utc),
                 "expires_at": params["expires_at"],
                 "revoked_at": None,
             }
+            return _Result(None)
+
+        if sql.startswith("with excess as"):
+            live = sorted(
+                (row for row in self.sessions.values() if self._live(row)),
+                key=lambda row: row["created_at"],
+                reverse=True,
+            )
+            for row in live[params["keep_count"]:]:
+                row["revoked_at"] = datetime.now(timezone.utc)
+            return _Result(None)
+
+        if sql.startswith("select pg_advisory_xact_lock"):
+            self.advisory_locks += 1
             return _Result(None)
 
         if sql.startswith("select id, tenant_id, api_key_id, scopes, expires_at"):
@@ -109,6 +130,7 @@ def _key_row(**overrides) -> dict:
         "tenant_id": "tenant-a",
         "scopes": ["read", "write", "capture:write"],
         "key_hash": auth.hash_secret("raw-key-value"),
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=30),
         "revoked_at": None,
     }
     row.update(overrides)
@@ -203,6 +225,40 @@ def test_sign_in_rejects_a_revoked_key() -> None:
     client = _client(FakeSession(_key_row(revoked_at=datetime.now(timezone.utc))))
     response = client.post("/api/v1/browser/session", json={"api_key": "raw-key-value"})
     assert response.status_code == 401
+
+
+def test_sign_in_rejects_an_expired_key() -> None:
+    client = _client(FakeSession(_key_row(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))))
+    response = client.post("/api/v1/browser/session", json={"api_key": "raw-key-value"})
+    assert response.status_code == 401
+
+
+def test_session_cap_is_serialized_and_enforced(monkeypatch) -> None:
+    monkeypatch.setattr(browser_session.settings, "browser_session_max_per_tenant", 3)
+    db = FakeSession(_key_row())
+
+    async def issue_many() -> None:
+        for _ in range(6):
+            assert await browser_session.issue_session(db, api_key="raw-key-value", elevated=False)
+
+    import asyncio
+    asyncio.run(issue_many())
+    assert sum(1 for row in db.sessions.values() if db._live(row)) == 3
+    assert db.advisory_locks == 6
+
+
+def test_elevated_cookie_max_age_matches_short_server_expiry() -> None:
+    client = _client(FakeSession(_key_row(scopes=["read", "write", "admin"])))
+    response = client.post(
+        "/api/v1/browser/session",
+        json={"api_key": "raw-key-value", "elevated": True},
+    )
+    assert response.status_code == 201
+    cookies = response.headers.get_list("set-cookie")
+    assert cookies
+    for cookie in cookies:
+        max_age = int(next(part.split("=", 1)[1] for part in cookie.split("; ") if part.startswith("Max-Age=")))
+        assert 0 < max_age <= 300
 
 
 def test_sign_in_rejects_a_key_with_no_stored_scopes() -> None:

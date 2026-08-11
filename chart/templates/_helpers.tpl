@@ -620,14 +620,16 @@ Prefer an explicit override, otherwise derive it from ingress.baseDomain.
 
 {{/*
 Ingress admin hostname.
-Prefer an explicit admin host, otherwise share the API host so path-specific
-Ingress annotations can constrain /api/v1/admin without moving runtime APIs.
+Prefer an explicit admin host, otherwise derive a separate control-plane host
+from ingress.baseDomain. The application refuses admin routes on other hosts.
 */}}
 {{- define "palaceoftruth.adminHost" -}}
 {{- if .Values.ingress.admin.host }}
 {{- .Values.ingress.admin.host }}
+{{- else if .Values.ingress.baseDomain }}
+{{- printf "admin.%s" .Values.ingress.baseDomain }}
 {{- else }}
-{{- include "palaceoftruth.apiHost" . }}
+{{- fail "ingress.baseDomain or ingress.admin.host must be set when ingress.admin.enabled=true" }}
 {{- end }}
 {{- end }}
 

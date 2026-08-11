@@ -8,10 +8,9 @@ Two related changes land together because they both reshape ``api_keys``:
 1. ``api_keys.scopes`` becomes the authoritative grant for a tenant API key.
    Before this, an API key had no stored scope at all: every REST capability
    gate passed unconditionally, and the MCP gate trusted the caller's
-   ``X-MCP-Scope`` header. Existing rows are backfilled with the full legacy
-   scope set so no current client loses access. That backfill grandfathers
-   today's privilege; it is not an endorsement of it. Operators should rotate
-   long-lived keys down to the scopes they actually need.
+   ``X-MCP-Scope`` header. Existing rows are backfilled with the routine
+   non-admin grant. Administrative authority must always be added by an
+   explicit operator action.
 
 2. Credential verifier columns move from unsalted SHA-256 to peppered
    HMAC-SHA256. The raw credential is not recoverable from the database, so
@@ -36,16 +35,15 @@ branch_labels = None
 depends_on = None
 
 
-# Duplicated from app.mcp_scopes.LEGACY_API_KEY_SCOPES on purpose: a migration
-# must keep reproducing the historic grant even if the application constant
-# later changes.
-LEGACY_API_KEY_SCOPES = [
+# Duplicated from app.mcp_scopes.DEFAULT_API_KEY_SCOPES on purpose: migrations
+# must remain stable when application defaults change later.
+DEFAULT_API_KEY_SCOPES = [
     "read",
     "write",
     "write:agent",
     "write:workspace",
     "write:session",
-    "admin",
+    "audit:write",
     "capture:write",
     "capture:job:read",
 ]
@@ -54,12 +52,19 @@ LEGACY_API_KEY_SCOPES = [
 def upgrade() -> None:
     op.add_column(
         "api_keys",
-        sa.Column("scopes", postgresql.JSONB(), server_default="[]", nullable=False),
+        sa.Column("scopes", postgresql.JSONB(), nullable=True),
     )
     op.execute(
-        sa.text("UPDATE api_keys SET scopes = CAST(:scopes AS jsonb)").bindparams(
-            scopes=json.dumps(LEGACY_API_KEY_SCOPES)
+        sa.text("UPDATE api_keys SET scopes = CAST(:scopes AS jsonb) WHERE scopes IS NULL").bindparams(
+            scopes=json.dumps(DEFAULT_API_KEY_SCOPES)
         )
+    )
+    op.alter_column(
+        "api_keys",
+        "scopes",
+        existing_type=postgresql.JSONB(),
+        nullable=False,
+        server_default=sa.text("'[]'::jsonb"),
     )
 
 

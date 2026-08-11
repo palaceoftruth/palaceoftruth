@@ -1222,7 +1222,7 @@ def test_issue_browser_extension_pairing_key_requires_operator_authorization() -
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing API key or bearer token"
+    assert response.json()["detail"] == "Missing API key"
     assert session.executed_params == []
 
 

@@ -50,6 +50,10 @@ spec:
             {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             - name: PALACEOFTRUTH_API_BASE_URL
               value: {{ include "palaceoftruth.mcpApiBaseUrl" . | quote }}
+            - name: PALACEOFTRUTH_MCP_ALLOWED_HOSTS
+              value: {{ printf "%s,%s:*" (include "palaceoftruth.mcpHost" .) (include "palaceoftruth.mcpHost" .) | quote }}
+            - name: PALACEOFTRUTH_MCP_ALLOWED_ORIGINS
+              value: {{ printf "https://%s,https://%s:*" (include "palaceoftruth.mcpHost" .) (include "palaceoftruth.mcpHost" .) | quote }}
             {{- if .Values.mcp.legacyApiKeyAuthEnabled }}
             - name: PALACEOFTRUTH_API_KEY
               valueFrom:

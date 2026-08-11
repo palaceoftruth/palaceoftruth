@@ -26,7 +26,7 @@ _SCOPED_WRITE_GRANTS = {
 
 # Auth modes whose callers hold an explicit, server-issued grant list. Anything
 # outside this set is an in-process trusted caller with no scope list to check.
-_GRANTED_AUTH_MODES = frozenset({"mcp_oauth", "api_key", "browser_extension"})
+_GRANTED_AUTH_MODES = frozenset({"mcp_oauth", "api_key", "browser_extension", "browser_session"})
 
 
 @dataclass(frozen=True)

@@ -688,6 +688,7 @@ async def issue_browser_extension_pairing_key(
 
 @router.post("/browser-extension-tokens", response_model=BrowserExtensionTokenIssueResponse, status_code=201)
 async def issue_browser_extension_token(
+    request: Request,
     body: BrowserExtensionTokenIssueRequest,
     pairing_key: str | None = Header(None, alias="X-Palace-Pairing-Key"),
     db: AsyncSession = Depends(get_db),
@@ -795,9 +796,9 @@ async def issue_browser_extension_token(
         text(
             """
             INSERT INTO mcp_oauth_access_tokens
-                (tenant_id, client_id, token_hash, scopes, expires_at)
+                (tenant_id, client_id, token_hash, scopes, resource, expires_at)
             VALUES
-                (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :expires_at)
+                (:tenant_id, :client_id, :token_hash, CAST(:scopes AS jsonb), :resource, :expires_at)
             """
         ),
         {
@@ -805,6 +806,9 @@ async def issue_browser_extension_token(
             "client_id": client_id,
             "token_hash": hash_secret(access_token),
             "scopes": json.dumps(scopes),
+            "resource": urlunsplit(
+                ("https", urlsplit(str(request.base_url)).netloc, "/api/v1", "", "")
+            ),
             "expires_at": expires_at,
         },
     )

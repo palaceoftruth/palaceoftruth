@@ -57,6 +57,20 @@ _TAXONOMY_BACKFILL_SOURCE_TYPES = ("media", "webpage", "pdf", "doc", "image", "n
 _ACTIVE_ARQ_STATUSES = {JobStatus.queued, JobStatus.deferred, JobStatus.in_progress}
 
 
+async def reap_browser_sessions(_ctx: dict | None = None) -> int:
+    """Delete expired or long-revoked browser sessions."""
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                "DELETE FROM browser_sessions "
+                "WHERE expires_at <= CURRENT_TIMESTAMP "
+                "OR revoked_at < CURRENT_TIMESTAMP - INTERVAL '7 days'"
+            )
+        )
+        await db.commit()
+        return max(result.rowcount or 0, 0)
+
+
 async def _memory_job_is_requeueable(redis, job_id: str) -> bool:
     """Fail closed while an active/result-bearing deterministic ARQ job exists."""
     try:

@@ -18,7 +18,9 @@ class ApiKey(Base):
     # narrow it; they can never add a scope that is not stored here.
     scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(Text, server_default="legacy-import", nullable=False)
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_used_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 

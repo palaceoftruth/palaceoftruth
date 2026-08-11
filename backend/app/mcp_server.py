@@ -494,6 +494,13 @@ _caller_credential_headers: ContextVar[tuple[tuple[str, str], ...] | None] = Con
     "palace_mcp_caller_credential_headers",
     default=None,
 )
+# Set only while a mapped MCP tool calls its backend method. This lets a
+# forwarded API key declare the exact operation and destination scopes without
+# inheriting the adapter's broader configured scope list.
+_operation_required_scopes: ContextVar[tuple[McpOperationScope, ...] | None] = ContextVar(
+    "palace_mcp_operation_required_scopes",
+    default=None,
+)
 
 
 def _incoming_mcp_auth_headers(
@@ -1015,7 +1022,8 @@ class SecondBrainApiClient:
         if "X-API-Key" in headers:
             # Narrow the forwarded key to the scope this one call acts under.
             headers["X-MCP-Scope"] = required_scope
-            headers.setdefault("X-MCP-Scopes", ",".join(self.settings.client_scopes))
+            operation_scopes = _operation_required_scopes.get() or (required_scope,)
+            headers.setdefault("X-MCP-Scopes", ",".join(operation_scopes))
         return headers
 
     def _selected_auth_mode(self) -> str:
@@ -1076,7 +1084,7 @@ class SecondBrainApiClient:
             "POST",
             "/api/v1/memory/mcp/audit",
             json_body=payload,
-            required_scope="write",
+            required_scope="audit:write",
             use_caller_identity=False,
         )
 
@@ -1693,10 +1701,17 @@ def _required_scopes_for_call(operation: str, params: dict[str, Any]) -> tuple[M
     base_scope = _operation_scope(operation)
     scopes: list[McpOperationScope] = [base_scope]
     if base_scope.startswith("write"):
+        requested_types: list[str] = []
         requested_type = params.get("scope_type")
-        destination_scope = destination_scope_for(requested_type if isinstance(requested_type, str) else None)
-        if destination_scope is not None and destination_scope not in scopes:
-            scopes.append(destination_scope)
+        if isinstance(requested_type, str):
+            requested_types.append(requested_type)
+        raw_types = params.get("scope_types")
+        if isinstance(raw_types, (list, tuple, set, frozenset)):
+            requested_types.extend(item for item in raw_types if isinstance(item, str))
+        for scope_type in dict.fromkeys(requested_types):
+            destination_scope = destination_scope_for(scope_type)
+            if destination_scope is not None and destination_scope not in scopes:
+                scopes.append(destination_scope)
     return tuple(scopes)
 
 
@@ -2221,6 +2236,7 @@ async def _run_mcp_operation(
                     f"MCP HTTP caller is not allowed to call {operation}; missing {scope} scope",
                     scope,
                 )
+    operation_scope_token = _operation_required_scopes.set(required_scopes)
     try:
         result = await call()
     except Exception as exc:
@@ -2235,6 +2251,8 @@ async def _run_mcp_operation(
             error_class=type(exc).__name__,
         )
         raise
+    finally:
+        _operation_required_scopes.reset(operation_scope_token)
     latency_ms = int((time.monotonic() - start) * 1000)
     if operation == "retrieve_agent_memory":
         result_summary = _summarize_result_for_audit(result)
@@ -3192,13 +3210,23 @@ async def palace_remember_bulk(
     if isinstance(resolved_scope, dict):
         return resolved_scope
     resolved_scope_type, resolved_scope_key = resolved_scope
+    explicit_scope_types = {
+        scope_type
+        for entry in entries
+        if isinstance(entry, dict)
+        for scope in [entry.get("scope")]
+        if isinstance(scope, dict)
+        for scope_type in [scope.get("type")]
+        if isinstance(scope_type, str)
+    }
     return await _run_mcp_operation(
         ctx,
         operation="create_memory_entries_batch",
         params={
             "entries": entries,
             "default_source": default_source,
-            "default_scope_type": resolved_scope_type,
+            "scope_type": resolved_scope_type,
+            "scope_types": sorted(explicit_scope_types | {resolved_scope_type}),
             "default_scope_key": resolved_scope_key,
             "default_relationship_policy": default_relationship_policy,
         },
@@ -3549,9 +3577,11 @@ def _streamable_http_transport_security(host: str) -> TransportSecuritySettings:
             allowed_origins=loopback_origins,
         )
 
-    # External-facing deployments need a broader host policy unless the caller
-    # explicitly configures an allowlist. The API key remains the trust boundary.
-    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[*loopback_hosts, f"{host}:*"],
+        allowed_origins=[*loopback_origins, f"https://{host}:*", f"http://{host}:*"],
+    )
 
 
 def _streamable_http_app_with_auth() -> ASGIApp:

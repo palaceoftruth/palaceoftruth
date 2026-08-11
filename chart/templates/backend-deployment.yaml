@@ -84,6 +84,9 @@ spec:
             httpGet:
               path: /api/v1/health
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: {{ include "palaceoftruth.apiHost" . | quote }}
             periodSeconds: {{ .Values.backend.startupProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.backend.startupProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.backend.startupProbe.failureThreshold }}
@@ -91,12 +94,18 @@ spec:
             httpGet:
               path: /api/v1/health
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: {{ include "palaceoftruth.apiHost" . | quote }}
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /api/v1/health
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: {{ include "palaceoftruth.apiHost" . | quote }}
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
