@@ -78,6 +78,20 @@ def test_unserializable_values_degrade_to_repr_instead_of_raising() -> None:
     assert decoded["r"] == "Opaque: <opaque>"
 
 
+def test_unserializable_value_message_scrubs_embedded_dsn_credentials() -> None:
+    # B-08: a failed job's result is the raised exception, and connection
+    # failures routinely quote the DSN they tried to reach -- credentials
+    # included -- verbatim in the message. That must not reach Valkey intact.
+    class ConnectionFailure:
+        def __str__(self) -> str:
+            return "could not connect to postgresql://palaceoftruth:s3cret-pw@postgres:5432/palaceoftruth"
+
+    decoded = _round_trip({"r": ConnectionFailure()})
+
+    assert "s3cret-pw" not in decoded["r"]
+    assert "postgresql://palaceoftruth:***@postgres:5432/palaceoftruth" in decoded["r"]
+
+
 def test_pickle_payloads_are_rejected() -> None:
     # The exact attack shape from the finding: a crafted pickle LPUSHed onto the
     # queue. It must fail to decode, not execute.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from pydantic import model_validator
 from urllib.parse import urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,6 +13,26 @@ from app.embedding_profile import (
     EMBEDDING_DIMENSIONS,
     resolve_embedding_profile,
 )
+
+# B-03 / M-05: exact values published in .env.example. A blank secret already
+# fails required-field validation; these are the placeholders someone would
+# have if they copied .env.example and forgot to replace it. Compared with
+# strip()+equality, never substring, so a real secret that happens to contain
+# one of these words is never rejected.
+_PLACEHOLDER_CREDENTIAL_VALUES = frozenset(
+    {
+        "change_me_api_key",
+        "change_me_secure_password",
+        "change_me_admin_secret",
+        "change_me_redis_password",
+        "sk-...",
+        "sk-or-...",
+    }
+)
+
+
+def _is_placeholder_credential(value: str) -> bool:
+    return value.strip() in _PLACEHOLDER_CREDENTIAL_VALUES
 
 
 class Settings(BaseSettings):
@@ -105,6 +127,13 @@ class Settings(BaseSettings):
     # pepper invalidates every stored credential, so treat it as a secret with
     # the same lifetime as the database.
     credential_pepper: str = ""
+    # D-08: once the pepper has been live long enough for every active
+    # credential to upgrade on use (see auth.is_legacy_secret_hash), set this
+    # to an ISO-8601 timestamp. From that moment, a verifier still stored in
+    # the legacy unpeppered format is rejected outright instead of accepted
+    # and upgraded, closing the indefinite dual-accept window. Leave blank to
+    # keep today's behavior (accept and upgrade forever).
+    credential_legacy_hash_cutoff_at: str = ""
     cors_allowed_origins: str ="https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
     trusted_hosts: str = "palace.sarvent.cloud,api.palace.sarvent.cloud,mcp.palace.sarvent.cloud,palaceoftruth.test,api.palaceoftruth.test,mcp.palaceoftruth.test,localhost,127.0.0.1,testserver"
     admin_allowed_hosts: str = "admin.palace.sarvent.cloud,admin.palaceoftruth.test,localhost,127.0.0.1,testserver"
@@ -279,6 +308,47 @@ class Settings(BaseSettings):
                 raise ValueError("FIRECRAWL_TIMEOUT_SECONDS must be greater than 0")
             if webpage_scraper_provider == "firecrawl-cloud" and not self.firecrawl_api_key.strip():
                 raise ValueError("FIRECRAWL_API_KEY is required when WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud")
+
+        # B-03 / M-05: refuse to boot on a known-placeholder credential rather
+        # than silently seeding it as a live secret. Checked after every other
+        # field is resolved so a placeholder is reported the same way any
+        # other misconfiguration is.
+        if _is_placeholder_credential(self.api_key):
+            raise ValueError(
+                "API_KEY is still the .env.example placeholder value; set a real, unique secret"
+            )
+        if _is_placeholder_credential(self.openai_api_key):
+            raise ValueError("OPENAI_API_KEY is still the .env.example placeholder value")
+        if _is_placeholder_credential(self.openrouter_api_key):
+            raise ValueError("OPENROUTER_API_KEY is still the .env.example placeholder value")
+        if _is_placeholder_credential(self.credential_pepper):
+            raise ValueError("CREDENTIAL_PEPPER is still a known placeholder value")
+        # F-06: only checked when set — redis_password defaults to "" for an
+        # unauthenticated local Redis, which is not itself a placeholder.
+        if self.redis_password and _is_placeholder_credential(self.redis_password):
+            raise ValueError("REDIS_PASSWORD is still the .env.example placeholder value")
+        # DATABASE_URL embeds DB_PASSWORD directly rather than as its own
+        # field, so this checks the whole DSN for the shipped placeholder.
+        if "change_me_secure_password" in self.database_url:
+            raise ValueError("DATABASE_URL still contains the .env.example placeholder password")
+        # PALACEOFTRUTH_ADMIN_SECRET is read directly from the environment by
+        # app.api.admin rather than modeled on Settings; check it here too so
+        # every placeholder in .env.example is covered by one gate.
+        if _is_placeholder_credential(os.environ.get("PALACEOFTRUTH_ADMIN_SECRET", "")):
+            raise ValueError("PALACEOFTRUTH_ADMIN_SECRET is still the .env.example placeholder value")
+
+        # A-05: the pepper is opt-in by construction — rows written before it
+        # was configured keep authenticating against the legacy unsalted
+        # digest (see auth.hash_secret) — so a deployment that never sets it
+        # silently stores every credential verifier as plain SHA-256 forever.
+        # Chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
+        # dev and the test suite never do, so this gate only applies to real
+        # clusters and never breaks `docker compose up` or `pytest`.
+        if self.deployment_cluster and not self.credential_pepper.strip():
+            raise ValueError(
+                "CREDENTIAL_PEPPER must be set when DEPLOYMENT_CLUSTER is configured; "
+                "generate one and provide it as a real secret before deploying"
+            )
         return self
 
 

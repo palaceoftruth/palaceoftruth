@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_api_key_scope_header, require_mcp_scope
+from app.auth import generate_webhook_signing_key, require_api_key_scope_header, require_mcp_scope
 from app.config import settings
 from app.database import get_db
 from app.models.job import Job
@@ -618,7 +618,7 @@ async def create_memory_entry(
     result = await accept_canonical_memory_entry(
         db,
         body=body,
-        signing_key=request.state.key_hash,
+        signing_key=generate_webhook_signing_key(),
         admission_audit=admission.audit,
     )
     queue = await _memory_queue_contract_hint(request)
@@ -716,7 +716,7 @@ async def create_memory_entries_batch(
             result = await accept_canonical_memory_entry(
                 db,
                 body=entry,
-                signing_key=request.state.key_hash,
+                signing_key=generate_webhook_signing_key(),
                 admission_audit=admission.audit,
             )
         except HTTPException as exc:
@@ -936,7 +936,7 @@ async def create_memory_artifact(
     result = await accept_memory_artifact(
         db,
         body=body,
-        signing_key=request.state.key_hash,
+        signing_key=generate_webhook_signing_key(),
     )
     queue = await _memory_queue_contract_hint(request)
     if result.enqueue_requested:

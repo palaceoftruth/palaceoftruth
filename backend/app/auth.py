@@ -99,6 +99,46 @@ def is_legacy_secret_hash(stored: str | None) -> bool:
     return bool(_credential_pepper()) and not stored.startswith(PEPPERED_HASH_PREFIX)
 
 
+def _legacy_hash_cutoff() -> datetime | None:
+    """Parse ``CREDENTIAL_LEGACY_HASH_CUTOFF_AT`` (D-08), if configured."""
+    raw = (getattr(settings, "credential_legacy_hash_cutoff_at", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        cutoff = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("CREDENTIAL_LEGACY_HASH_CUTOFF_AT is not a valid ISO-8601 timestamp; ignoring")
+        return None
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    return cutoff
+
+
+def legacy_hash_rejected(stored: str | None) -> bool:
+    """True when ``stored`` is a legacy verifier and the D-08 cutoff has passed.
+
+    Before the cutoff, a legacy row is accepted and upgraded on use (the
+    existing behavior). After it, the same row must fail authentication
+    outright so the legacy format cannot be accepted indefinitely.
+    """
+    if not is_legacy_secret_hash(stored):
+        return False
+    cutoff = _legacy_hash_cutoff()
+    return cutoff is not None and datetime.now(timezone.utc) >= cutoff
+
+
+def generate_webhook_signing_key() -> str:
+    """Return a fresh random key for signing one job's outbound webhooks (H-09).
+
+    Never derive this from a stored credential verifier (``request.state.key_hash``
+    or similar) — that value is also what authenticates the caller, so reusing
+    it here means anyone who reads the signing key can also authenticate as the
+    caller. This key is independent and only ever used for HMAC-signing webhook
+    deliveries for the one job it is generated for.
+    """
+    return secrets.token_hex(32)
+
+
 def _hash_key(raw: str) -> str:
     return hash_secret(raw)
 
@@ -466,6 +506,12 @@ async def verify_api_key(
             {"hash": key_hash, "legacy_hash": legacy_key_hash},
         )
         result = row.mappings().one_or_none()
+        if result is not None and legacy_hash_rejected(result.get("key_hash")):
+            # D-08: the legacy-format cutoff has passed. Deliberately do not
+            # touch last_used_at or upgrade the row — this credential must be
+            # reissued, not silently kept alive.
+            logger.warning("Rejected API key id=%s: legacy hash past the configured cutoff", result["id"])
+            result = None
         if result is not None:
             await db.execute(
                 text("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = :id"),
@@ -473,10 +519,13 @@ async def verify_api_key(
             )
             if is_legacy_secret_hash(result.get("key_hash")):
                 # Upgrade-on-use: the raw key is only available here, so this is
-                # the one place a pre-pepper row can be re-hashed.
+                # the one place a pre-pepper row can be re-hashed. The extra
+                # `AND key_hash = :legacy_hash` (D-10) makes this a no-op once a
+                # concurrent request already applied the same, deterministic
+                # target value, instead of an unconditional blind write.
                 await db.execute(
-                    text("UPDATE api_keys SET key_hash = :hash WHERE id = :id"),
-                    {"hash": key_hash, "id": result["id"]},
+                    text("UPDATE api_keys SET key_hash = :hash WHERE id = :id AND key_hash = :legacy_hash"),
+                    {"hash": key_hash, "id": result["id"], "legacy_hash": legacy_key_hash},
                 )
             await db.commit()
 
@@ -565,6 +614,19 @@ async def verify_memory_auth(
             {"token_hash": token_hash, "legacy_token_hash": legacy_token_hash},
         )
         result = row.mappings().one_or_none()
+        if result is not None and legacy_hash_rejected(result.get("stored_token_hash")):
+            # D-08: legacy-format cutoff passed; reject rather than upgrade.
+            await _record_token_validation_audit_event(
+                db,
+                request=request,
+                token_row=result,
+                operation="oauth.token_use",
+                required_scope=None,
+                status="denied",
+                error_class="legacy_credential_hash_rejected",
+            )
+            await db.commit()
+            raise _auth_exception(request, 403, "MCP bearer token uses a retired credential format", error="invalid_token")
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime):
@@ -643,9 +705,15 @@ async def verify_memory_auth(
                 {"token_id": result["token_id"]},
             )
             if is_legacy_secret_hash(result.get("stored_token_hash")):
+                # D-10: guard the upgrade write so a concurrent request that
+                # already applied the same deterministic target hash makes
+                # this a no-op instead of a second unconditional write.
                 await db.execute(
-                    text("UPDATE mcp_oauth_access_tokens SET token_hash = :hash WHERE id = :token_id"),
-                    {"hash": token_hash, "token_id": result["token_id"]},
+                    text(
+                        "UPDATE mcp_oauth_access_tokens SET token_hash = :hash "
+                        "WHERE id = :token_id AND token_hash = :legacy_token_hash"
+                    ),
+                    {"hash": token_hash, "token_id": result["token_id"], "legacy_token_hash": legacy_token_hash},
                 )
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),
@@ -740,6 +808,19 @@ async def _verify_scoped_bearer_token(
             {"token_hash": token_hash, "legacy_token_hash": legacy_token_hash},
         )
         result = row.mappings().one_or_none()
+        if result is not None and legacy_hash_rejected(result.get("stored_token_hash")):
+            # D-08: legacy-format cutoff passed; reject rather than upgrade.
+            await _record_token_validation_audit_event(
+                db,
+                request=request,
+                token_row=result,
+                operation="oauth.token_use",
+                required_scope=required_scope,
+                status="denied",
+                error_class="legacy_credential_hash_rejected",
+            )
+            await db.commit()
+            raise _auth_exception(request, 403, f"{detail_prefix} bearer token uses a retired credential format", error="invalid_token")
         if result is not None:
             expires_at = result["expires_at"]
             if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
@@ -825,9 +906,15 @@ async def _verify_scoped_bearer_token(
                 {"token_id": result["token_id"]},
             )
             if is_legacy_secret_hash(result.get("stored_token_hash")):
+                # D-10: guard the upgrade write so a concurrent request that
+                # already applied the same deterministic target hash makes
+                # this a no-op instead of a second unconditional write.
                 await db.execute(
-                    text("UPDATE mcp_oauth_access_tokens SET token_hash = :hash WHERE id = :token_id"),
-                    {"hash": token_hash, "token_id": result["token_id"]},
+                    text(
+                        "UPDATE mcp_oauth_access_tokens SET token_hash = :hash "
+                        "WHERE id = :token_id AND token_hash = :legacy_token_hash"
+                    ),
+                    {"hash": token_hash, "token_id": result["token_id"], "legacy_token_hash": legacy_token_hash},
                 )
             await db.execute(
                 text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :client_id"),

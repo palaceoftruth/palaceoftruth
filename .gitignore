@@ -24,10 +24,22 @@ frontend/dist/
 frontend/.vite/
 frontend/build/
 
-# Environment
+# Environment (L-11: cover every real .env shape and key material a
+# developer's tooling might drop into the tree; .env.example is the one
+# checked-in exception and is explicitly un-ignored below)
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+kubeconfig*
+*credentials*
 
 # Docker / devinfra (generated)
 docker-compose.devinfra.yaml

@@ -148,7 +148,101 @@ async def test_verify_api_key_upgrades_legacy_hash_when_pepper_set(monkeypatch) 
     assert peppered.startswith(auth.PEPPERED_HASH_PREFIX)
     assert peppered != legacy_hash
     # The legacy row authenticated, then was rewritten in the new format.
-    assert session.updates == [key_id, {"hash": peppered, "id": key_id}]
+    # D-10: the upgrade write is guarded by the legacy value it expects to
+    # replace, so two concurrent upgrades of the same row can't race past
+    # each other onto a stale WHERE id = :id.
+    assert session.updates == [
+        key_id,
+        {"hash": peppered, "id": key_id, "legacy_hash": legacy_hash},
+    ]
+
+
+def test_legacy_hash_rejected_is_false_without_a_configured_cutoff(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(auth.settings, "credential_legacy_hash_cutoff_at", "")
+    legacy_hash = auth._legacy_hash_secret("raw-key")
+
+    # D-08: with no cutoff configured, a legacy row is still accepted and
+    # upgraded on use rather than rejected outright.
+    assert auth.legacy_hash_rejected(legacy_hash) is False
+
+
+def test_legacy_hash_rejected_is_false_before_the_configured_cutoff(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(
+        auth.settings,
+        "credential_legacy_hash_cutoff_at",
+        (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+    )
+    legacy_hash = auth._legacy_hash_secret("raw-key")
+
+    assert auth.legacy_hash_rejected(legacy_hash) is False
+
+
+def test_legacy_hash_rejected_is_true_after_the_configured_cutoff(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(
+        auth.settings,
+        "credential_legacy_hash_cutoff_at",
+        (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+    legacy_hash = auth._legacy_hash_secret("raw-key")
+
+    assert auth.legacy_hash_rejected(legacy_hash) is True
+
+
+def test_legacy_hash_rejected_ignores_an_already_peppered_hash(monkeypatch) -> None:
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(
+        auth.settings,
+        "credential_legacy_hash_cutoff_at",
+        (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+    peppered_hash = auth.hash_secret("raw-key")
+
+    # Not a legacy hash at all, so the cutoff never applies to it.
+    assert auth.legacy_hash_rejected(peppered_hash) is False
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_rejects_legacy_hash_past_cutoff(monkeypatch) -> None:
+    key_id = uuid.uuid4()
+    legacy_hash = auth._legacy_hash_secret("raw-key")
+    session = FakeSession(
+        {
+            "id": key_id,
+            "tenant_id": "tenant-a",
+            "scopes": ["read"],
+            "key_hash": legacy_hash,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(
+        auth.settings,
+        "credential_legacy_hash_cutoff_at",
+        (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_api_key(_request(), api_key="raw-key")
+
+    assert exc_info.value.status_code == 403
+    # Rejected outright, not upgraded — the legacy format is retired past cutoff.
+    assert session.updates == []
+
+
+def test_generate_webhook_signing_key_is_independent_random_material() -> None:
+    # H-09: must not be derivable from any stored credential verifier, and
+    # must differ between calls (per-job, not reused across jobs).
+    first = auth.generate_webhook_signing_key()
+    second = auth.generate_webhook_signing_key()
+
+    assert first != second
+    assert len(first) == 64  # secrets.token_hex(32)
+    bytes.fromhex(first)  # raises if it isn't hex
+    assert first != auth.hash_secret("raw-key")
+    assert first != auth._legacy_hash_secret("raw-key")
 
 
 @pytest.mark.asyncio
@@ -677,6 +771,37 @@ async def test_verify_memory_auth_rejects_expired_mcp_bearer_token(monkeypatch) 
 
     assert exc_info.value.status_code == 403
     assert "expired" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_verify_memory_auth_rejects_legacy_hash_past_cutoff(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["read"],
+            "stored_token_hash": auth._legacy_hash_secret("raw-token"),
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "codex-remote",
+            "allowed_scopes": ["read"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+    monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
+    monkeypatch.setattr(
+        auth.settings,
+        "credential_legacy_hash_cutoff_at",
+        (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_memory_auth(_request(), api_key=None, authorization="Bearer raw-token")
+
+    assert exc_info.value.status_code == 403
+    assert "retired credential format" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

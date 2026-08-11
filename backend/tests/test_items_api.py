@@ -215,6 +215,9 @@ def _client(session: FakeSession, *, arq_pool: FakeArqPool | None = None) -> Tes
         request.state.auth_context = AuthContext(
             tenant_id="tenant-a",
             auth_mode="api_key",
+            # M-10: deleted_by now reads the stable non-secret actor id
+            # (subject_id), not the credential verifier (key_hash below).
+            subject_id="key-hash",
             token_hash_reference="key-hash",
             scopes=LEGACY_API_KEY_SCOPES,
             capabilities=frozenset(LEGACY_API_KEY_SCOPES),

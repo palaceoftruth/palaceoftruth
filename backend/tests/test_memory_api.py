@@ -855,7 +855,11 @@ def test_memory_entries_accepts_canonical_payload(monkeypatch) -> None:
     async def fake_accept_canonical_memory_entry(
         db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
     ):
-        assert signing_key == "key-hash"
+        # H-09: signing_key is now generated fresh per job (secrets.token_hex(32)),
+        # never the caller's credential verifier (request.state.key_hash).
+        assert signing_key != "key-hash"
+        assert len(signing_key) == 64
+        bytes.fromhex(signing_key)
         assert body.scope.type == "workspace"
         assert body.scope.key == "launch-pad"
         assert body.relationship_policy == "deferred"
@@ -1156,7 +1160,11 @@ def test_memory_entries_batch_reports_mixed_item_results(monkeypatch) -> None:
     async def fake_accept_canonical_memory_entry(
         db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
     ):
-        assert signing_key == "key-hash"
+        # H-09: signing_key is now generated fresh per job (secrets.token_hex(32)),
+        # never the caller's credential verifier (request.state.key_hash).
+        assert signing_key != "key-hash"
+        assert len(signing_key) == 64
+        bytes.fromhex(signing_key)
         assert admission_audit is not None
         calls.append(body.title)
         job_id = accepted_job_id if body.title == "Shared launch brief" else duplicate_job_id
@@ -1829,7 +1837,11 @@ def test_memory_api_key_scope_specific_grant_allows_workspace_write(monkeypatch)
     async def fake_accept_canonical_memory_entry(
         db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
     ):
-        assert signing_key == "key-hash"
+        # H-09: signing_key is now generated fresh per job (secrets.token_hex(32)),
+        # never the caller's credential verifier (request.state.key_hash).
+        assert signing_key != "key-hash"
+        assert len(signing_key) == 64
+        bytes.fromhex(signing_key)
         assert admission_audit is not None
         assert admission_audit["scope_grant"]["required_scope"] == "write:workspace"
         assert admission_audit["scope_grant"]["grant_present"] is True
@@ -2123,7 +2135,11 @@ def test_memory_artifacts_accepts_legacy_payloads(monkeypatch) -> None:
     client = _build_app(FakeSession())
 
     async def fake_accept_memory_artifact(db, *, body: LegacyMemoryArtifactRequest, signing_key: str):
-        assert signing_key == "key-hash"
+        # H-09: signing_key is now generated fresh per job (secrets.token_hex(32)),
+        # never the caller's credential verifier (request.state.key_hash).
+        assert signing_key != "key-hash"
+        assert len(signing_key) == 64
+        bytes.fromhex(signing_key)
         return MemoryArtifactAcceptanceResult(
             job=Job(
                 id=uuid.uuid4(),
@@ -4291,7 +4307,11 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         db, *, body: MemoryEntryRequest, signing_key: str, admission_audit: dict | None = None
     ):
         assert db is session
-        assert signing_key == "key-hash"
+        # H-09: signing_key is now generated fresh per job (secrets.token_hex(32)),
+        # never the caller's credential verifier (request.state.key_hash).
+        assert signing_key != "key-hash"
+        assert len(signing_key) == 64
+        bytes.fromhex(signing_key)
         assert body.tenant_id == "tenant-a"
         assert body.scope.type == "workspace"
         assert admission_audit is not None

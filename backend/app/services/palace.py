@@ -4188,7 +4188,24 @@ def _read_sync_text(path: Path) -> str:
     return _decode_sync_text(path.read_bytes())
 
 
+# L-12: every git-sync invocation gets these regardless of caller. hooksPath
+# points at a directory with nothing in it, so a checked-out repo cannot run
+# a hook the sync ever triggers (clone/fetch/checkout/clean never fire hooks
+# normally, but this removes the possibility outright rather than relying on
+# that). credential.helper is cleared so git can't fall back to whatever
+# credential store happens to be configured on the host if the explicit
+# GIT_ASKPASS/GIT_SSH_COMMAND path above doesn't apply. Deliberately does NOT
+# set `-c protocol.allow=never`: that requires enumerating and re-allowlisting
+# every protocol this sync legitimately uses (https, ssh, file for the
+# TemporaryDirectory case), and getting that allowlist wrong silently breaks
+# real clones rather than failing loudly — not something to guess at without
+# live testing.
+_GIT_HARDENING_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="]
+
+
 def _run_git_command(args: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
+    if args and args[0] == "git":
+        args = [args[0], *_GIT_HARDENING_ARGS, *args[1:]]
     try:
         result = subprocess.run(
             args,
@@ -4229,7 +4246,17 @@ def _repo_credential_value(source: SyncSource) -> str:
 def _repo_git_environment(source: SyncSource):
     repo_root = _repo_checkout_dir(source).parent
     repo_root.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
+    # L-12: os.environ.copy() used to hand the git subprocess (and anything
+    # its GIT_ASKPASS/GIT_SSH_COMMAND scripts spawn) every variable the
+    # backend process holds — API_KEY, CREDENTIAL_PEPPER, DATABASE_URL,
+    # every provider key, all of it. git itself needs only a small, inert
+    # subset of the environment to run; build that explicitly instead of
+    # inheriting the deployment's full secret surface.
+    env = {
+        name: os.environ[name]
+        for name in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+        if name in os.environ
+    }
     env["GIT_TERMINAL_PROMPT"] = "0"
     clone_url = _github_https_repo_url(source.root_path)
 
