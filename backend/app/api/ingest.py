@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,8 +15,17 @@ from app.database import get_db
 from app.models.item import Item
 from app.models.job import Job
 from app.services.bundle import persist_upload_artifact
+from app.services.doc_extraction import (
+    DocumentExtractionError,
+    DocumentExtractionTimeout,
+    DocumentTooComplexError,
+    concurrency_limiter,
+    default_max_concurrent_extractions,
+    extract_document_bounded,
+)
 from app.services.image_analysis import build_image_analysis_metadata, image_bytes_hash
 from app.services.item_dates import apply_effective_date
+from app.utils.file_type import FileTypeError, safe_media_type, verify_file_type
 from app.utils.hash import compute_content_hash
 from app.utils.job_payloads import build_retry_payload
 from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
@@ -34,6 +44,12 @@ from app.schemas.ingest import (
 )
 
 _DOC_EXTRACTION_TIMEOUT = 110.0  # seconds — just under the 120s proxy timeout
+# Bound how many extraction children can run at once, and how long a request is
+# willing to queue for one. Without this, concurrent uploads still exhaust the
+# pod even though each individual extraction is limited.
+_DOC_EXTRACTION_QUEUE_TIMEOUT = 15.0
+_doc_extraction_semaphore: asyncio.Semaphore | None = None
+_doc_extraction_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +60,6 @@ _DOC_SIZE_LIMIT = 50 * 1024 * 1024  # 50 MB
 
 _ALLOWED_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
 _IMAGE_SIZE_LIMIT = 20 * 1024 * 1024  # 20 MB
-
-_IMAGE_MEDIA_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
 
 _BATCH_TYPE_MAP = {
     "youtube": ("media", "process_media"),
@@ -145,6 +153,32 @@ def _build_upload_provenance(
     }
 
 
+@asynccontextmanager
+async def _doc_extraction_slot():
+    """Hold one of a bounded number of concurrent extraction slots."""
+
+    global _doc_extraction_semaphore, _doc_extraction_semaphore_loop
+    loop = asyncio.get_running_loop()
+    # Test clients create a fresh loop per case, so rebind rather than reuse a
+    # semaphore that belongs to a loop that is already closed.
+    if _doc_extraction_semaphore is None or _doc_extraction_semaphore_loop is not loop:
+        _doc_extraction_semaphore = concurrency_limiter(default_max_concurrent_extractions())
+        _doc_extraction_semaphore_loop = loop
+
+    semaphore = _doc_extraction_semaphore
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=_DOC_EXTRACTION_QUEUE_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Document extraction is busy. Retry shortly.",
+        ) from None
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
 async def _stream_to_tmp(file: UploadFile, suffix: str, size_limit: int) -> str:
     """Stream an UploadFile to /tmp/palaceoftruth in 1 MB chunks.
 
@@ -166,6 +200,20 @@ async def _stream_to_tmp(file: UploadFile, suffix: str, size_limit: int) -> str:
                 )
             tmp.write(chunk)
     return tmp_path
+
+
+def _verify_uploaded_content(tmp_path: str, ext: str) -> None:
+    """Reject an upload whose bytes contradict its declared extension.
+
+    The extension decides which parser the file reaches and, later, the media
+    type the artifact is served with. Both are attacker controlled, so the
+    content is checked before either decision is made.
+    """
+
+    try:
+        verify_file_type(tmp_path, ext)
+    except FileTypeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def _mark_enqueue_failed(
@@ -380,47 +428,6 @@ async def ingest_webpage(
     return IngestResponse(job_id=job.id, status="queued")
 
 
-def _extract_doc_from_path(path: str, filename: str) -> tuple[str, dict[str, Any]]:
-    """Extract text and metadata from a document file synchronously.
-
-    Uses pypdf for PDFs (fast), and dedicated extractors for other formats.
-    Returns (extracted_text, metadata_dict).
-    """
-    ext = os.path.splitext(filename.lower())[1]
-
-    if ext == ".pdf":
-        import fitz  # pymupdf
-        doc = fitz.open(path)
-        meta: dict[str, Any] = {
-            "page_count": len(doc),
-            "file_size_bytes": os.path.getsize(path),
-        }
-        info = doc.metadata or {}
-        if info.get("title"):
-            meta["doc_title"] = info["title"]
-        if info.get("author"):
-            meta["doc_author"] = info["author"]
-            meta["author"] = info["author"]
-        pages = [doc[i].get_text() for i in range(len(doc))]
-        doc.close()
-        extracted = "\n\n".join(p for p in pages if p.strip())
-        meta["word_count"] = len(extracted.split())
-        return extracted, meta
-
-    elif ext == ".docx":
-        from app.utils.doc_extract import extract_docx
-        return extract_docx(path)
-
-    elif ext == ".xlsx":
-        from app.utils.doc_extract import extract_xlsx
-        return extract_xlsx(path)
-
-    elif ext in (".md", ".txt"):
-        from app.utils.doc_extract import extract_text_file
-        return extract_text_file(path)
-
-    raise ValueError(f"Unsupported file extension: {ext}")
-
 
 
 @router.post("/doc", response_model=IngestResponse, status_code=202, dependencies=[Depends(require_api_capability("write"))])
@@ -444,20 +451,37 @@ async def ingest_doc(
     tmp_path = await _stream_to_tmp(file, suffix=ext, size_limit=_DOC_SIZE_LIMIT)
 
     try:
+        _verify_uploaded_content(tmp_path, ext)
+
         # Extract text inline (before creating the job) so there are no orphaned jobs
-        # if extraction fails or times out.
-        loop = asyncio.get_event_loop()
-        try:
-            extracted_text, doc_metadata = await asyncio.wait_for(
-                loop.run_in_executor(None, _extract_doc_from_path, tmp_path, filename),
-                timeout=_DOC_EXTRACTION_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail=f"Document extraction timed out after {int(_DOC_EXTRACTION_TIMEOUT)}s. "
-                       "Try a smaller or less complex file.",
-            )
+        # if extraction fails or times out. The work runs in a killable child
+        # process with its own memory and CPU limits, and the number of children
+        # is bounded, so one tenant's malicious upload cannot exhaust the pod.
+        async with _doc_extraction_slot():
+            try:
+                extracted_text, doc_metadata = await extract_document_bounded(
+                    tmp_path,
+                    filename,
+                    timeout_seconds=_DOC_EXTRACTION_TIMEOUT,
+                )
+            except DocumentExtractionTimeout:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Document extraction timed out after {int(_DOC_EXTRACTION_TIMEOUT)}s. "
+                           "Try a smaller or less complex file.",
+                )
+            except DocumentTooComplexError:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Document extraction exceeded the resource limit for a single file. "
+                           "Try a smaller or less complex file.",
+                )
+            except DocumentExtractionError as exc:
+                logger.warning("document extraction failed for %s: %s", filename, exc)
+                raise HTTPException(
+                    status_code=422,
+                    detail="The document could not be parsed.",
+                )
 
         if not extracted_text.strip():
             raise HTTPException(status_code=422, detail="No text could be extracted from the document")
@@ -497,7 +521,7 @@ async def ingest_doc(
             payload=retry_payload,
             metadata=_build_upload_provenance(
                 filename=filename,
-                media_type=file.content_type,
+                media_type=safe_media_type(ext),
                 extension=ext or None,
             ),
         )
@@ -508,7 +532,7 @@ async def ingest_doc(
             tmp_path=tmp_path,
             tenant_id=request.state.tenant_id,
             filename=filename,
-            media_type=file.content_type,
+            media_type=safe_media_type(ext),
             extension=ext or None,
         )
 
@@ -563,10 +587,13 @@ async def ingest_image(
         )
 
     validated_webhook_url = validate_webhook_url(webhook_url) if webhook_url else None
-    media_type = _IMAGE_MEDIA_TYPES.get(ext, "image/jpeg")
+    # Derived from the verified extension, never from the client header.
+    media_type = safe_media_type(ext)
     tmp_path = await _stream_to_tmp(file, suffix=ext, size_limit=_IMAGE_SIZE_LIMIT)
 
     try:
+        _verify_uploaded_content(tmp_path, ext)
+
         with open(tmp_path, "rb") as f:
             image_bytes = f.read()
 

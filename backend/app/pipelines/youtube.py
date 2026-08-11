@@ -118,6 +118,57 @@ def _build_media_metadata(info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _reject_unbounded_media(info: dict[str, Any]) -> None:
+    """Refuse sources with no natural end before anything is written to disk."""
+
+    if not settings.media_allow_live_streams and (info.get("is_live") or info.get("live_status") == "is_live"):
+        raise MediaTranscriptionLimitError(
+            "Live streams are not accepted: the download has no natural end."
+        )
+
+    duration = info.get("duration")
+    maximum = int(settings.media_max_duration_seconds)
+    if isinstance(duration, (int, float)) and duration > maximum:
+        raise MediaTranscriptionLimitError(
+            f"Media duration {_format_duration_seconds(duration)} exceeds the "
+            f"{maximum}s limit for a single download."
+        )
+    # A missing duration is normal for some providers and is probed with ffprobe
+    # after download, so it is not rejected here. The byte ceiling below and
+    # yt-dlp's own max_filesize are what bound an unknown-length source.
+
+    filesize = info.get("filesize") or info.get("filesize_approx")
+    max_bytes = int(settings.media_max_download_bytes)
+    if isinstance(filesize, (int, float)) and filesize > max_bytes:
+        raise MediaTranscriptionLimitError(
+            f"Media size {int(filesize)} bytes exceeds the {max_bytes}-byte download limit."
+        )
+
+
+def _enforce_downloaded_size(audio_path: str, job_id: str) -> None:
+    """Delete and reject a file that got past yt-dlp's own byte ceiling.
+
+    yt-dlp applies max_filesize from the provider's declared size, which some
+    fragmented or live-adjacent formats do not supply. The file is on a shared
+    RWX volume, so it is removed before the error propagates rather than at the
+    end of the job.
+    """
+
+    try:
+        size_bytes = os.path.getsize(audio_path)
+    except OSError:
+        return
+
+    max_bytes = int(settings.media_max_download_bytes)
+    if size_bytes <= max_bytes:
+        return
+
+    _cleanup_media_temp_files(job_id=job_id, audio_path=audio_path, chunks=[])
+    raise MediaTranscriptionLimitError(
+        f"Downloaded media is {size_bytes} bytes, over the {max_bytes}-byte download limit."
+    )
+
+
 def _format_duration_seconds(raw_duration: Any) -> str:
     if isinstance(raw_duration, int):
         return f"{raw_duration}s"
@@ -888,7 +939,16 @@ class MediaPipeline(BasePipeline):
             "retries": 3,
             "fragment_retries": 3,
             "extractor_retries": 3,
+            # The destination is a shared volume. Without these, one very long
+            # or high-bitrate source consumes capacity for every tenant, and a
+            # live stream never stops on its own at all.
+            "max_filesize": int(settings.media_max_download_bytes),
+            "max_downloads": 1,
+            "noplaylist": True,
         }
+        if not settings.media_allow_live_streams:
+            ydl_opts["live_from_start"] = False
+            ydl_opts["match_filter"] = yt_dlp.utils.match_filter_func("!is_live & !live")
 
         meta: dict[str, Any] = {}
         try:
@@ -896,7 +956,10 @@ class MediaPipeline(BasePipeline):
                 info = ydl.extract_info(url, download=False)
                 if info:
                     meta = _build_media_metadata(info)
+                    _reject_unbounded_media(info)
                 ydl.download([url])
+        except MediaTranscriptionLimitError:
+            raise
         except Exception as exc:
             pending_error = _pending_youtube_availability_error(exc)
             if pending_error is not None:
@@ -910,6 +973,11 @@ class MediaPipeline(BasePipeline):
                 if os.path.exists(candidate):
                     audio_path = candidate
                     break
+
+        # Backstop for sources whose size yt-dlp could not know in advance, such
+        # as fragmented streams. Reclaim the shared volume before doing any more
+        # work with the file.
+        _enforce_downloaded_size(audio_path, job_id)
 
         duration = meta.get("duration_seconds")
         if not isinstance(duration, (int, float)) or duration <= 0:

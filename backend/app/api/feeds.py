@@ -1,7 +1,6 @@
 """Feed CRUD + action endpoints."""
 import asyncio
 import uuid
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +14,7 @@ from app.config import settings
 from app.database import get_db
 from app.schemas.feed import FeedCreate, FeedUpdate, FeedOut, FeedListResponse, OPMLImportResponse
 from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
+from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, UnsafeXmlError, parse_safe_xml
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -291,10 +291,17 @@ async def import_opml(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
-    content = await file.read()
+    # Read one byte past the cap so an oversized upload is rejected without
+    # ever buffering the whole body in this shared multi-tenant process.
+    content = await file.read(MAX_XML_DOCUMENT_BYTES + 1)
+    if len(content) > MAX_XML_DOCUMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"OPML document too large (limit: {MAX_XML_DOCUMENT_BYTES // 1024} KB)",
+        )
     try:
-        tree = ET.fromstring(content)
-    except ET.ParseError as exc:
+        tree = parse_safe_xml(content)
+    except UnsafeXmlError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid OPML: {exc}")
 
     outlines = tree.findall(".//outline[@type='rss']")
