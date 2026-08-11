@@ -15,9 +15,14 @@ import httpx
 
 from app.utils.outbound_http import (
     OutboundUrlError,
-    request_public_http_async,
+    stream_public_http_async,
     validate_public_http_url,
 )
+from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES
+
+# One shared ceiling for every document this service fetches or parses, so a
+# legitimate-looking external host cannot return an unbounded body.
+MAX_RESOURCE_BODY_BYTES = MAX_XML_DOCUMENT_BYTES
 
 
 @dataclass(frozen=True)
@@ -61,11 +66,14 @@ async def fetch_http_resource(
     timeout_seconds: float = 30.0,
     client: httpx.AsyncClient | None = None,
     trusted_exact_hosts: tuple[str, ...] = (),
+    max_body_bytes: int = MAX_RESOURCE_BODY_BYTES,
 ) -> HttpRefreshResult:
     """GET a resource with validators; never fall back to a HEAD request."""
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if max_body_bytes <= 0:
+        raise ValueError("max_body_bytes must be positive")
 
     headers = {"User-Agent": "PalaceOfTruthSourceRefresh/1.0 (+https://palace.sarvent.cloud)"}
     if etag:
@@ -78,8 +86,11 @@ async def fetch_http_resource(
     # receives its own robots and source-identity check before it is fetched.
     request_client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False)
     try:
+        # Stream rather than buffer: the body is read one chunk at a time and
+        # abandoned past the ceiling, so a host that returns an endless or
+        # multi-gigabyte response cannot exhaust the worker's memory.
         if owns_client:
-            response = await request_public_http_async(
+            stream = stream_public_http_async(
                 request_client,
                 "GET",
                 url,
@@ -93,7 +104,24 @@ async def fetch_http_resource(
                 resolve=False,
                 trusted_exact_hosts=trusted_exact_hosts,
             )
-            response = await request_client.get(safe_url, headers=headers, follow_redirects=False)
+            stream = request_client.stream(
+                "GET", safe_url, headers=headers, follow_redirects=False
+            )
+
+        async with stream as response:
+            status_code = response.status_code
+            response_headers = response.headers
+            declared_length = _declared_content_length(response_headers)
+            if declared_length is not None and declared_length > max_body_bytes:
+                # Reject before reading a single byte when the host tells us.
+                return HttpRefreshResult(
+                    "failure",
+                    status_code,
+                    failure_reason="body_too_large",
+                )
+            body = await _read_capped_body(response, max_body_bytes) if _wants_body(status_code) else None
+            if body is _TOO_LARGE:
+                return HttpRefreshResult("failure", status_code, failure_reason="body_too_large")
     except OutboundUrlError as exc:
         return HttpRefreshResult("failure", None, failure_reason=f"unsafe_url:{exc}")
     except httpx.TimeoutException:
@@ -111,15 +139,14 @@ async def fetch_http_resource(
         resolve=False,
         trusted_exact_hosts=trusted_exact_hosts,
     )
-    response_headers = response.headers
-    if 300 <= response.status_code < 400 and response_headers.get("Location"):
+    if 300 <= status_code < 400 and response_headers.get("Location"):
         return HttpRefreshResult(
             "redirect",
-            response.status_code,
+            status_code,
             final_url=final_url,
             redirect_url=str(httpx.URL(final_url).join(response_headers["Location"])),
         )
-    if response.status_code == 304:
+    if status_code == 304:
         return HttpRefreshResult(
             "not_modified",
             304,
@@ -127,25 +154,53 @@ async def fetch_http_resource(
             etag=response_headers.get("ETag") or etag,
             last_modified=response_headers.get("Last-Modified") or last_modified,
         )
-    if response.status_code == 404:
+    if status_code == 404:
         # The worker requires a repeated observation before tombstoning a
         # resource; one transient 404 only enters bounded retry/backoff.
         return HttpRefreshResult("not_found", 404, final_url=final_url, failure_reason="http_404")
-    if response.status_code == 410:
-        return HttpRefreshResult("gone", response.status_code, final_url=final_url, failure_reason=f"http_{response.status_code}")
-    if response.status_code < 200 or response.status_code >= 300:
+    if status_code == 410:
+        return HttpRefreshResult("gone", status_code, final_url=final_url, failure_reason=f"http_{status_code}")
+    if status_code < 200 or status_code >= 300:
         return HttpRefreshResult(
             "failure",
-            response.status_code,
+            status_code,
             final_url=final_url,
-            failure_reason=f"http_{response.status_code}",
+            failure_reason=f"http_{status_code}",
             retry_after_seconds=parse_retry_after(response_headers.get("Retry-After")),
         )
     return HttpRefreshResult(
         "success",
-        response.status_code,
+        status_code,
         final_url=final_url,
-        body=response.content,
+        body=body,
         etag=response_headers.get("ETag"),
         last_modified=response_headers.get("Last-Modified"),
     )
+
+
+# Sentinel distinguishing "read stopped at the cap" from "no body was wanted".
+_TOO_LARGE = object()
+
+
+def _wants_body(status_code: int) -> bool:
+    """Only a successful response contributes content to a source version."""
+
+    return 200 <= status_code < 300 and status_code != 204
+
+
+def _declared_content_length(headers: httpx.Headers) -> int | None:
+    try:
+        return int(headers["Content-Length"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def _read_capped_body(response: httpx.Response, max_body_bytes: int):
+    """Read the body, abandoning it as soon as it crosses the ceiling."""
+
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        content.extend(chunk)
+        if len(content) > max_body_bytes:
+            return _TOO_LARGE
+    return bytes(content)

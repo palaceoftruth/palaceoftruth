@@ -18,6 +18,7 @@ from xml.etree import ElementTree
 import feedparser
 
 from app.services.source_resources import normalize_http_url
+from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, checked_xml_bytes
 
 
 SourceClass = Literal["webpage", "feed", "sitemap"]
@@ -40,7 +41,8 @@ SOURCE_CLASS_POLICIES: dict[SourceClass, SourceClassPolicy] = {
 
 # Parsing is a canary boundary as much as outbound fetching is. Keep a single
 # document below a small, auditable limit before handing it to either parser.
-MAX_DISCOVERY_DOCUMENT_BYTES = 1_048_576
+# The value is shared with every other XML and fetch path in the service.
+MAX_DISCOVERY_DOCUMENT_BYTES = MAX_XML_DOCUMENT_BYTES
 
 
 @dataclass(frozen=True)
@@ -67,14 +69,9 @@ def _allowed_hosts(hosts: Iterable[str]) -> set[str]:
 
 
 def _checked_body(body: bytes | str) -> bytes:
-    encoded = body.encode("utf-8") if isinstance(body, str) else body
-    if len(encoded) > MAX_DISCOVERY_DOCUMENT_BYTES:
-        raise ValueError("discovery document exceeds the maximum size")
-    # The standard library parser does not fetch external entities, but reject
-    # declarations outright so this safety property is explicit and testable.
-    if b"<!DOCTYPE" in encoded.upper() or b"<!ENTITY" in encoded.upper():
-        raise ValueError("discovery XML declarations are not allowed")
-    return encoded
+    # The size cap and declaration rejection live in one shared helper so every
+    # XML entry point in the service inherits the same guard.
+    return checked_xml_bytes(body, max_bytes=MAX_DISCOVERY_DOCUMENT_BYTES)
 
 
 def _allowed_url(raw_url: str, *, base_url: str, allowed_hosts: set[str]) -> str | None:

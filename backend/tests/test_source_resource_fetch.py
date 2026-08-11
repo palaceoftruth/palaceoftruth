@@ -102,3 +102,66 @@ async def test_private_literal_requires_an_exact_trusted_host() -> None:
     assert blocked.failure_reason and blocked.failure_reason.startswith("unsafe_url:")
     assert allowed.outcome == "success"
     assert allowed.body == b"internal fixture"
+
+
+@pytest.mark.asyncio
+async def test_oversized_body_is_rejected_from_the_content_length_alone() -> None:
+    """An honest Content-Length lets the fetch fail before reading anything."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"x" * 4096,
+            headers={"Content-Length": "4096"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_http_resource(
+            "https://example.test/document",
+            client=client,
+            max_body_bytes=1024,
+        )
+
+    assert result.outcome == "failure"
+    assert result.failure_reason == "body_too_large"
+    assert result.body is None
+
+
+@pytest.mark.asyncio
+async def test_body_is_abandoned_once_it_crosses_the_ceiling_while_streaming() -> None:
+    """A host that lies about (or omits) its length is still bounded."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        async def chunks():
+            for _ in range(64):
+                yield b"y" * 1024
+
+        return httpx.Response(200, content=chunks())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_http_resource(
+            "https://example.test/document",
+            client=client,
+            max_body_bytes=2048,
+        )
+
+    assert result.outcome == "failure"
+    assert result.failure_reason == "body_too_large"
+    assert result.body is None
+
+
+@pytest.mark.asyncio
+async def test_body_within_the_ceiling_is_returned_intact() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"z" * 512, headers={"ETag": '"v9"'})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_http_resource(
+            "https://example.test/document",
+            client=client,
+            max_body_bytes=1024,
+        )
+
+    assert result.outcome == "success"
+    assert result.body == b"z" * 512
+    assert result.etag == '"v9"'

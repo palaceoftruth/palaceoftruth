@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from app.config import settings
 from app.embedding_profile import resolve_embedding_profile
 from app.models.embedding import Embedding
 from app.models.item import Item
@@ -51,8 +52,10 @@ class FakeYoutubeDL:
 class FakeYoutubeDLFactory:
     def __init__(self, info: dict) -> None:
         self.instance = FakeYoutubeDL(info)
+        self.opts: dict = {}
 
     def __call__(self, _opts):
+        self.opts = _opts
         return self.instance
 
 
@@ -379,6 +382,107 @@ def test_download_audio_probes_duration_when_provider_metadata_omits_it(monkeypa
     assert metadata["duration"] == 901.5
     assert metadata["duration_source"] == "ffprobe"
     assert factory.instance.download_calls == [["https://example.com/watch?v=too-long"]]
+
+
+def test_download_audio_applies_byte_and_playlist_ceilings(monkeypatch, tmp_path: Path) -> None:
+    factory = FakeYoutubeDLFactory(
+        {"id": "video-1", "title": "Short", "duration": 30.0, "uploader": "Hermes", "description": ""}
+    )
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    audio_path = tmp_path / "job-123.m4a"
+
+    def fake_download(urls: list[str]) -> None:
+        factory.instance.download_calls.append(urls)
+        audio_path.write_bytes(b"audio")
+
+    factory.instance.download = fake_download
+
+    MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert factory.opts["max_filesize"] == int(settings.media_max_download_bytes)
+    assert factory.opts["max_downloads"] == 1
+    assert factory.opts["noplaylist"] is True
+    # The live-stream guard is on by default and must be expressed to yt-dlp
+    # itself, not only in the pre-download metadata check.
+    assert factory.opts["live_from_start"] is False
+    assert "match_filter" in factory.opts
+
+
+def test_download_audio_rejects_a_live_stream_before_downloading(monkeypatch, tmp_path: Path) -> None:
+    factory = FakeYoutubeDLFactory(
+        {"id": "video-1", "title": "Live", "duration": None, "uploader": "Hermes", "description": "", "is_live": True}
+    )
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    with pytest.raises(MediaTranscriptionLimitError, match="Live streams"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert factory.instance.download_calls == []
+
+
+def test_download_audio_rejects_media_over_the_duration_ceiling(monkeypatch, tmp_path: Path) -> None:
+    factory = FakeYoutubeDLFactory(
+        {
+            "id": "video-1",
+            "title": "Very long",
+            "duration": float(settings.media_max_duration_seconds) + 1.0,
+            "uploader": "Hermes",
+            "description": "",
+        }
+    )
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    with pytest.raises(MediaTranscriptionLimitError, match="exceeds"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert factory.instance.download_calls == []
+
+
+def test_download_audio_rejects_a_declared_size_over_the_byte_ceiling(monkeypatch, tmp_path: Path) -> None:
+    factory = FakeYoutubeDLFactory(
+        {
+            "id": "video-1",
+            "title": "Huge",
+            "duration": 60.0,
+            "uploader": "Hermes",
+            "description": "",
+            "filesize_approx": int(settings.media_max_download_bytes) + 1,
+        }
+    )
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    with pytest.raises(MediaTranscriptionLimitError, match="download limit"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert factory.instance.download_calls == []
+
+
+def test_download_audio_deletes_a_file_that_got_past_the_byte_ceiling(monkeypatch, tmp_path: Path) -> None:
+    factory = FakeYoutubeDLFactory(
+        {"id": "video-1", "title": "Fragmented", "duration": 60.0, "uploader": "Hermes", "description": ""}
+    )
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "media_max_download_bytes", 16)
+
+    audio_path = tmp_path / "job-123.m4a"
+
+    def fake_download(urls: list[str]) -> None:
+        # The provider declared no size, so yt-dlp's own ceiling never fired.
+        factory.instance.download_calls.append(urls)
+        audio_path.write_bytes(b"a" * 64)
+
+    factory.instance.download = fake_download
+
+    with pytest.raises(MediaTranscriptionLimitError, match="download limit"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert not audio_path.exists()
 
 
 def test_download_audio_maps_youtube_premiere_error_to_pending_availability(monkeypatch, tmp_path: Path) -> None:

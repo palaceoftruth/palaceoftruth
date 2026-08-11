@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.utils.outbound_http import OutboundUrlError, Resolver, validate_public_http_url
+
 
 class FirecrawlScrapeError(RuntimeError):
     """Raised when Firecrawl cannot return usable scrape content."""
@@ -42,9 +44,23 @@ def firecrawl_config_from_settings(settings: Any) -> FirecrawlConfig:
     )
 
 
-def scrape_with_firecrawl(url: str, config: FirecrawlConfig) -> tuple[str | None, str, dict[str, Any]]:
+def scrape_with_firecrawl(
+    url: str,
+    config: FirecrawlConfig,
+    *,
+    resolver: Resolver | None = None,
+) -> tuple[str | None, str, dict[str, Any]]:
     if not config.enabled:
         raise FirecrawlScrapeError("Firecrawl scraping is not enabled")
+
+    # Firecrawl fetches this URL itself, so the caller's earlier validation is
+    # not enough: re-resolve immediately before handing the URL over and fail
+    # closed on any non-public address. Firecrawl still resolves independently,
+    # which is why the workload egress policy remains load-bearing here.
+    try:
+        url = validate_public_http_url(url, resolver=resolver)
+    except OutboundUrlError as exc:
+        raise FirecrawlScrapeError(f"Firecrawl scrape target is not a permitted URL: {exc}") from exc
 
     headers = {"Content-Type": "application/json"}
     if config.auth_enabled:

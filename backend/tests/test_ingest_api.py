@@ -1348,19 +1348,19 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
     arq_pool = FakeArqPool()
     client = _client(session, arq_pool=arq_pool)
     doc_path = tmp_path / "brief.pdf"
-    doc_path.write_text("placeholder", encoding="utf-8")
+    doc_path.write_bytes(b"%PDF-1.7\n%placeholder\n")
     upload_dir = tmp_path / "upload-artifacts"
 
     async def fake_stream_to_tmp(*_args, **_kwargs) -> str:
         return str(doc_path)
 
-    def fake_extract_doc_from_path(path: str, filename: str) -> tuple[str, dict]:
+    async def fake_extract_document_bounded(path: str, filename: str, **_kwargs) -> tuple[str, dict]:
         assert path == str(doc_path)
         assert filename == "brief.pdf"
         return "Recovered text", {"doc_title": "Recovered brief", "pages": 2}
 
     monkeypatch.setattr(ingest_api, "_stream_to_tmp", fake_stream_to_tmp)
-    monkeypatch.setattr(ingest_api, "_extract_doc_from_path", fake_extract_doc_from_path)
+    monkeypatch.setattr(ingest_api, "extract_document_bounded", fake_extract_document_bounded)
     monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(upload_dir))
 
     response = client.post(
@@ -1389,7 +1389,7 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
             "storage_path": str(storage_path),
         }
     }
-    assert storage_path.read_text(encoding="utf-8") == "placeholder"
+    assert storage_path.read_bytes() == b"%PDF-1.7\n%placeholder\n"
     assert job.payload == {
         "retry_task": {
             "name": "process_doc",
@@ -1412,6 +1412,83 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
             },
         )
     ]
+
+
+def test_ingest_doc_rejects_content_that_contradicts_the_extension(tmp_path: Path, monkeypatch) -> None:
+    """An extension-only check would send a renamed binary into the parsers."""
+
+    session = FakeSession()
+    client = _client(session, arq_pool=FakeArqPool())
+    doc_path = tmp_path / "invoice.pdf"
+    doc_path.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
+
+    async def fake_stream_to_tmp(*_args, **_kwargs) -> str:
+        return str(doc_path)
+
+    def unexpected_extraction(*_args, **_kwargs):
+        raise AssertionError("extraction must not run on unverified content")
+
+    monkeypatch.setattr(ingest_api, "_stream_to_tmp", fake_stream_to_tmp)
+    monkeypatch.setattr(ingest_api, "extract_document_bounded", unexpected_extraction)
+
+    response = client.post(
+        "/api/v1/ingest/doc",
+        files={"file": ("invoice.pdf", b"%PDF-1.7", "application/pdf")},
+    )
+
+    assert response.status_code == 422
+    assert "does not match" in response.json()["detail"]
+    assert session.added_items == []
+    assert not doc_path.exists()
+
+
+def test_ingest_image_rejects_html_disguised_as_an_image(tmp_path: Path, monkeypatch) -> None:
+    session = FakeSession()
+    client = _client(session, arq_pool=FakeArqPool())
+    image_path = tmp_path / "board.png"
+    image_path.write_bytes(b"<html><script>alert(1)</script></html>")
+
+    async def fake_stream_to_tmp(*_args, **_kwargs) -> str:
+        return str(image_path)
+
+    monkeypatch.setattr(ingest_api, "_stream_to_tmp", fake_stream_to_tmp)
+
+    response = client.post(
+        "/api/v1/ingest/image",
+        files={"file": ("board.png", b"png-bytes", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert "does not match" in response.json()["detail"]
+    assert session.added_items == []
+
+
+def test_ingest_doc_ignores_the_client_supplied_content_type(tmp_path: Path, monkeypatch) -> None:
+    """Provenance and later serving use the verified extension, not the header."""
+
+    session = FakeSession()
+    client = _client(session, arq_pool=FakeArqPool())
+    doc_path = tmp_path / "brief.pdf"
+    doc_path.write_bytes(b"%PDF-1.7\n%placeholder\n")
+    upload_dir = tmp_path / "upload-artifacts"
+
+    async def fake_stream_to_tmp(*_args, **_kwargs) -> str:
+        return str(doc_path)
+
+    async def fake_extract_document_bounded(path: str, filename: str, **_kwargs) -> tuple[str, dict]:
+        return "Recovered text", {}
+
+    monkeypatch.setattr(ingest_api, "_stream_to_tmp", fake_stream_to_tmp)
+    monkeypatch.setattr(ingest_api, "extract_document_bounded", fake_extract_document_bounded)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(upload_dir))
+
+    response = client.post(
+        "/api/v1/ingest/doc",
+        files={"file": ("brief.pdf", b"%PDF-1.7", "text/html")},
+    )
+
+    assert response.status_code == 202
+    assert session.added_items[0].metadata_["upload_artifact"]["media_type"] == "application/pdf"
 
 
 def test_ingest_image_stores_upload_provenance_metadata(tmp_path: Path, monkeypatch) -> None:

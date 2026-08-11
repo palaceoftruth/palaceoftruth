@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     transcription_max_chunk_seconds: int = 600
     transcription_max_upload_bytes: int = 25 * 1024 * 1024
     media_download_timeout_seconds: int = 1500
+    # The download target is a shared volume, so one tenant's media must not be
+    # able to consume every tenant's capacity. A live stream never ends on its
+    # own, and only the duration ceiling stops one.
+    media_max_download_bytes: int = 2 * 1024 * 1024 * 1024
+    media_max_duration_seconds: int = 6 * 60 * 60
+    media_allow_live_streams: bool = False
     media_ffmpeg_timeout_seconds: int = 300
     media_tenant_fair_per_tenant_inflight_limit: int = 1
     media_tenant_fair_dispatch_batch_size: int = 2

@@ -1,4 +1,5 @@
 import asyncio
+import socket
 
 import httpx
 import pytest
@@ -10,6 +11,19 @@ from app.services.firecrawl import (
     FirecrawlScrapeError,
     scrape_with_firecrawl,
 )
+
+
+def _resolver(*addresses: str):
+    """Resolve every host to fixed addresses so tests never touch real DNS."""
+
+    def resolve(_host: str, _port, *, type: int):
+        assert type == socket.SOCK_STREAM
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0)) for address in addresses]
+
+    return resolve
+
+
+_PUBLIC_RESOLVER = _resolver("93.184.216.34")
 
 
 def test_firecrawl_self_hosted_uses_configured_base_url_and_optional_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,6 +58,7 @@ def test_firecrawl_self_hosted_uses_configured_base_url_and_optional_auth(monkey
             base_url="https://firecrawl.internal.example/v2/",
             timeout_seconds=12,
         ),
+        resolver=_PUBLIC_RESOLVER,
     )
 
     assert seen["url"] == "https://firecrawl.internal.example/v2/scrape"
@@ -79,6 +94,7 @@ def test_firecrawl_cloud_adds_bearer_auth(monkeypatch: pytest.MonkeyPatch) -> No
             base_url="https://api.firecrawl.dev/v2",
             api_key="fc-secret",
         ),
+        resolver=_PUBLIC_RESOLVER,
     )
 
     assert seen_headers["Authorization"] == "Bearer fc-secret"
@@ -95,6 +111,7 @@ def test_firecrawl_surfaces_http_error_detail(monkeypatch: pytest.MonkeyPatch) -
         scrape_with_firecrawl(
             "https://example.test/article",
             FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
+            resolver=_PUBLIC_RESOLVER,
         )
 
 
@@ -129,3 +146,45 @@ def test_webpage_pipeline_uses_firecrawl_before_local_article_scraper(monkeypatc
     assert metadata["title"] == "Article"
     assert metadata["domain"] == "example.test"
     assert metadata["estimated_read_time_minutes"] == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.43.0.1/api/v1/namespaces",
+        "http://kubernetes.default.svc/",
+        "http://127.0.0.1:6379/",
+        "file:///etc/passwd",
+    ],
+)
+def test_firecrawl_refuses_to_forward_internal_targets(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    """Firecrawl re-fetches the URL itself, so the target is validated here too."""
+
+    def fail_post(*_args, **_kwargs):
+        raise AssertionError("an unvalidated URL must never reach Firecrawl")
+
+    monkeypatch.setattr("app.services.firecrawl.httpx.post", fail_post)
+
+    with pytest.raises(FirecrawlScrapeError, match="not a permitted URL"):
+        scrape_with_firecrawl(
+            url,
+            FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
+            resolver=_resolver("10.43.0.1"),
+        )
+
+
+def test_firecrawl_fails_closed_on_mixed_public_and_private_dns_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_post(*_args, **_kwargs):
+        raise AssertionError("a rebinding answer must never reach Firecrawl")
+
+    monkeypatch.setattr("app.services.firecrawl.httpx.post", fail_post)
+
+    with pytest.raises(FirecrawlScrapeError, match="not a permitted URL"):
+        scrape_with_firecrawl(
+            "https://rebind.test/article",
+            FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
+            resolver=_resolver("93.184.216.34", "10.0.0.8"),
+        )
