@@ -638,6 +638,16 @@ def test_paired_service_resources_never_crosses_parent_domain() -> None:
     assert "https://api.attacker.example/mcp" not in auth.paired_service_resources(request, "/mcp")
 
 
+def test_whoami_uses_rest_api_resource_boundary() -> None:
+    request = _request(host="api.palace.sarvent.cloud", path="/api/v1/memory/whoami")
+
+    assert auth._expected_token_resources(request) == {
+        "https://api.palace.sarvent.cloud/api/v1",
+        "https://mcp.palace.sarvent.cloud/api/v1",
+    }
+    assert not auth._is_mcp_resource_validation_request(request)
+
+
 @pytest.mark.asyncio
 async def test_verify_memory_auth_rejects_wrong_mcp_resource(monkeypatch) -> None:
     session = FakeSession(
@@ -688,7 +698,7 @@ async def test_verify_memory_auth_rejects_api_resource_when_mcp_expected(monkeyp
 
     with pytest.raises(HTTPException) as exc_info:
         await auth.verify_memory_auth(
-            _request(),
+            _request(path="/mcp"),
             api_key=None,
             authorization="Bearer raw-token",
         )

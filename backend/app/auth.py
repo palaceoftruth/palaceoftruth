@@ -255,7 +255,9 @@ def _auth_exception(request: Request, status_code: int, detail: str, *, error: s
 
 
 def _is_mcp_resource_validation_request(request: Request) -> bool:
-    return request.url.path == "/api/v1/memory/whoami" or request.url.path.startswith("/mcp")
+    # `/api/v1/memory/whoami` validates the REST memory token used to call it.
+    # It is not part of the distinct MCP transport resource at `/mcp`.
+    return request.url.path.startswith("/mcp")
 
 
 def _expected_token_resources(request: Request) -> set[str]:
