@@ -267,7 +267,9 @@ test.describe("Route smoke", () => {
 
     await page.goto(`/api-docs?e2e=${Date.now()}`);
 
-    await expect.poll(docs.wasRequested).toBe(true);
+    // Scalar loads a large lazy bundle before it requests the schema. Give
+    // that bundle time to initialize when the full suite runs in parallel.
+    await expect.poll(docs.wasRequested, { timeout: 15_000 }).toBe(true);
     await expect(page.getByRole("heading", { name: "API Docs" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Open raw spec" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Reference surface" })).toContainText("/api/openapi.json");

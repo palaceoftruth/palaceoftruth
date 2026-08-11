@@ -21,7 +21,8 @@ _CLIENT_COLUMNS = """
 id, tenant_id, client_key, display_name, allowed_scopes, metadata,
 agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
 client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
-token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds, created_at, last_seen_at
+token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at,
+oauth_token_ttl_seconds, created_at, last_seen_at
 """
 
 
@@ -44,7 +45,9 @@ def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, .
         "redirect_uris": sorted(body.redirect_uris),
         "allowed_resources": sorted(body.allowed_resources),
         "authorization_code_enabled": True,
+        "oauth_client_id": True,
         "token_endpoint_auth_method": "none",
+        "oauth_client_secret_hash": None,
         "oauth_token_ttl_seconds": body.token_ttl_seconds,
         "oauth_revoked_at": None,
     }
@@ -60,7 +63,9 @@ def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, .
         "redirect_uris": sorted(_json_value(row.get("redirect_uris"), [])),
         "allowed_resources": sorted(_json_value(row.get("allowed_resources"), [])),
         "authorization_code_enabled": bool(row.get("authorization_code_enabled")),
+        "oauth_client_id": bool(str(row.get("oauth_client_id") or "").strip()),
         "token_endpoint_auth_method": row.get("token_endpoint_auth_method") or "client_secret_basic",
+        "oauth_client_secret_hash": row.get("oauth_client_secret_hash"),
         "oauth_token_ttl_seconds": row["oauth_token_ttl_seconds"],
         "oauth_revoked_at": row["oauth_revoked_at"],
     }

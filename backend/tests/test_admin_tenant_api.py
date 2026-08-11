@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 import json
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -924,6 +925,58 @@ def test_ensure_public_client_is_idempotent_and_rejects_drift() -> None:
     assert len(session.mcp_clients) == 1
     assert drifted.status_code == 409
     assert "allowed_resources" in drifted.json()["detail"]["drift_fields"]
+
+
+@pytest.mark.parametrize(
+    ("oauth_client_id", "oauth_client_secret_hash", "expected_field"),
+    [
+        ("public-id", "legacy-secret-hash", "oauth_client_secret_hash"),
+        ("", None, "oauth_client_id"),
+    ],
+)
+def test_ensure_public_client_rejects_secret_or_missing_public_id(
+    oauth_client_id: str,
+    oauth_client_secret_hash: str | None,
+    expected_field: str,
+) -> None:
+    row = _mcp_client_row(
+        tenant_id="tenant-a",
+        client_key="quietfirm-staging",
+        oauth_client_secret_hash=oauth_client_secret_hash,
+    )
+    row.update({
+        "display_name": "QuietFirm Staging",
+        "allowed_scopes": ["read", "write", "destructive_prohibited"],
+        "metadata": {},
+        "agent_scope_key": None,
+        "allow_all_agent_scope_reads": False,
+        "allow_tenant_shared_reads": False,
+        "containment_mode": "standard",
+        "client_type": "public",
+        "redirect_uris": ["https://app.quietfirm.sarvent.cloud/api/v1/palace-oauth/callback"],
+        "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+        "authorization_code_enabled": True,
+        "oauth_client_id": oauth_client_id,
+        "token_endpoint_auth_method": "none",
+    })
+    client = _client(FakeSession(mcp_clients=[row]))
+
+    response = client.put(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/ensure",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={
+            "client_key": "quietfirm-staging",
+            "display_name": "QuietFirm Staging",
+            "allowed_scopes": ["read", "write", "destructive_prohibited"],
+            "client_type": "public",
+            "redirect_uris": ["https://app.quietfirm.sarvent.cloud/api/v1/palace-oauth/callback"],
+            "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+            "authorization_code_enabled": True,
+        },
+    )
+
+    assert response.status_code == 409
+    assert expected_field in response.json()["detail"]["drift_fields"]
 
 
 def test_revoke_mcp_oauth_client_revokes_tokens_for_tenant_client() -> None:
