@@ -1099,6 +1099,39 @@ def test_register_palace_mcp_client_rejects_duplicate_without_rotating_secret() 
     assert "create-only and did not rotate its secret" in response.json()["detail"]
 
 
+def test_tenant_admin_can_ensure_exact_public_client_without_a_secret() -> None:
+    row = {
+        "id": uuid.uuid4(), "tenant_id": "tenant-a", "client_key": "quietfirm-staging",
+        "display_name": "QuietFirm Staging", "allowed_scopes": ["read", "write"],
+        "metadata": {}, "agent_scope_key": None, "allow_all_agent_scope_reads": False,
+        "allow_tenant_shared_reads": False, "containment_mode": "standard",
+        "client_type": "public", "oauth_client_id": "public-id",
+        "token_endpoint_auth_method": "none",
+        "redirect_uris": ["https://app.quietfirm.sarvent.cloud/api/v1/palace-oauth/callback"],
+        "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+        "authorization_code_enabled": True, "oauth_revoked_at": None,
+        "oauth_token_ttl_seconds": 3600, "created_at": datetime.now(timezone.utc),
+        "last_seen_at": None,
+    }
+    client = _build_app(FakeSession(execute_results=[[row]]))
+
+    response = client.put(
+        "/api/v1/palace/mcp-clients/ensure",
+        json={
+            "client_key": "quietfirm-staging", "display_name": "QuietFirm Staging",
+            "allowed_scopes": ["read", "write"], "client_type": "public",
+            "redirect_uris": ["https://app.quietfirm.sarvent.cloud/api/v1/palace-oauth/callback"],
+            "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+            "authorization_code_enabled": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["condition"] == "ready"
+    assert response.json()["message"] == "Public PKCE client: no client secret is created or stored."
+    assert "client_secret" not in response.json()
+
+
 def test_register_palace_mcp_client_accepts_full_scope_catalog() -> None:
     client_id = uuid.uuid4()
     session = FakeSession(

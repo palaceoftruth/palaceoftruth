@@ -1,5 +1,5 @@
 import { CheckCircle2, CircleAlert, KeyRound, LoaderCircle, ShieldCheck, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, api, hasBrowserSession } from "../api/client";
 import type { McpOAuthAuthorizationInteraction } from "../api/types";
@@ -29,21 +29,53 @@ export default function OAuthConsent() {
   const [interaction, setInteraction] = useState<McpOAuthAuthorizationInteraction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<"approved" | "denied" | null>(null);
+  const [needsApiKey, setNeedsApiKey] = useState(false);
+  const [apiKey, setApiKey] = useState("");
 
-  useEffect(() => {
-    document.title = "Approve access · Palace of Truth";
+  const loadInteraction = useCallback(async (sessionReady = false) => {
     if (!interactionId) {
       setError("This consent request is missing its interaction identifier.");
       return;
     }
-    if (!hasBrowserSession()) {
-      setError("Sign in to review this request. Open Palace Settings, sign in with the tenant key, then reopen this consent request.");
+    if (!sessionReady && !hasBrowserSession()) {
+      setNeedsApiKey(true);
+      setError(null);
       return;
     }
-    api.getMcpAuthorizationInteraction(interactionId).then(setInteraction).catch((reason: unknown) => {
+    setNeedsApiKey(false);
+    setError(null);
+    try {
+      setInteraction(await api.getMcpAuthorizationInteraction(interactionId));
+    } catch (reason) {
+      if (reason instanceof ApiError && (reason.status === 401 || reason.status === 403)) {
+        setNeedsApiKey(true);
+        setError("The browser session was not accepted. Enter an active Palace tenant API key.");
+        return;
+      }
       setError(reason instanceof ApiError ? reason.message : "This consent request is unavailable or has expired.");
-    });
+    }
   }, [interactionId]);
+
+  useEffect(() => {
+    document.title = "Approve access · Palace of Truth";
+    void loadInteraction();
+  }, [loadInteraction]);
+
+  const saveApiKey = async () => {
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      setError("Enter the Palace tenant API key.");
+      return;
+    }
+    try {
+      await api.createBrowserSession(trimmed, false);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "The Palace tenant API key could not start a browser session.");
+      return;
+    }
+    setApiKey("");
+    await loadInteraction(true);
+  };
 
   const decide = async (decision: "approved" | "denied") => {
     const csrfToken = csrfTokenFromCookie();
@@ -76,7 +108,20 @@ export default function OAuthConsent() {
         </div>
 
         {error ? <div role="alert" className="flex gap-3 rounded-2xl border border-amber-700/40 bg-amber-950/30 p-4 text-sm leading-6 text-amber-100"><CircleAlert className="mt-0.5 h-5 w-5 shrink-0" />{error}</div> : null}
-        {!interaction && !error ? <div className="flex items-center gap-3 py-8 text-sm text-zinc-400"><LoaderCircle className="h-5 w-5 animate-spin" />Loading the tenant-bound request…</div> : null}
+        {needsApiKey ? <div className="space-y-4 rounded-2xl border border-sky-800/40 bg-sky-950/20 p-5">
+          <div>
+            <p className="text-sm font-medium text-zinc-100">Authenticate this browser to the Palace tenant</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-400">Enter the tenant API key once to review this consent request. Palace exchanges it for a browser session and does not store the key in the browser.</p>
+          </div>
+          <label className="block text-sm text-zinc-300">Palace tenant API key
+            <input className="sb-input mt-2 w-full" type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveApiKey(); }} />
+          </label>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs leading-5 text-emerald-200">Public PKCE client: no client secret is created or stored.</p>
+            <button type="button" className="sb-button-primary" onClick={() => void saveApiKey()}><KeyRound className="h-4 w-4" />Save and review request</button>
+          </div>
+        </div> : null}
+        {!interaction && !error && !needsApiKey ? <div className="flex items-center gap-3 py-8 text-sm text-zinc-400"><LoaderCircle className="h-5 w-5 animate-spin" />Loading the tenant-bound request…</div> : null}
 
         {interaction ? <>
           <div className="grid gap-3 sm:grid-cols-2">

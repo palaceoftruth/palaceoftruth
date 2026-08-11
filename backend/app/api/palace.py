@@ -23,6 +23,7 @@ from app.schemas.memory import (
     BrowserExtensionPairingKeyIssueResponse,
     McpClientConfigSnippets,
     McpOAuthClientAgentScopeBindingRequest,
+    McpOAuthClientEnsureResponse,
     McpOAuthClientListResponse,
     McpOAuthClientRegisterRequest,
     McpOAuthClientRegisterResponse,
@@ -63,6 +64,7 @@ from app.schemas.palace import (
 )
 from app.services.fact_registry import list_temporal_facts
 from app.services.mcp_containment import derive_containment_mode, normalize_containment_mode
+from app.services.mcp_client_registration import PublicClientDriftError, ensure_public_mcp_client
 from app.services.palace import (
     build_control_tower,
     build_room_cluster_review,
@@ -452,6 +454,40 @@ async def register_palace_mcp_client(
         client=client,
         client_secret=raw_secret,
         config_snippets=(None if body.client_type == "public" else _config_snippets(request, client_key=client.client_key, scopes=client.allowed_scopes)),
+    )
+
+
+@router.put(
+    "/mcp-clients/ensure",
+    response_model=McpOAuthClientEnsureResponse,
+    dependencies=[Depends(require_api_capability("admin"))],
+)
+async def ensure_palace_public_client(
+    body: McpOAuthClientRegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientEnsureResponse:
+    try:
+        row, created = await ensure_public_mcp_client(
+            db, tenant_id=request.state.tenant_id, body=body
+        )
+    except PublicClientDriftError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "public_client_drift",
+                "client_key": body.client_key,
+                "drift_fields": list(exc.fields),
+                "message": "The existing public client does not match the requested declarative contract.",
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return McpOAuthClientEnsureResponse(
+        tenant_id=request.state.tenant_id,
+        client=_serialize_mcp_client(row),
+        created=created,
+        condition="created" if created else "ready",
     )
 
 

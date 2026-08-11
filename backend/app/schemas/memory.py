@@ -228,6 +228,14 @@ class McpOAuthClientRegisterResponse(BaseModel):
     config_snippets: McpClientConfigSnippets | None = None
 
 
+class McpOAuthClientEnsureResponse(BaseModel):
+    tenant_id: str
+    client: McpOAuthClientSummary
+    created: bool
+    condition: Literal["created", "ready"]
+    message: str = "Public PKCE client: no client secret is created or stored."
+
+
 class McpOAuthClientRevokeResponse(BaseModel):
     tenant_id: str
     client: McpOAuthClientSummary

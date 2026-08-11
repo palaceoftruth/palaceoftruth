@@ -18,6 +18,7 @@ from app.auth import hash_secret
 from app.mcp_scopes import DEFAULT_API_KEY_SCOPES, VALID_MCP_OPERATION_SCOPES
 from app.schemas.memory import (
     McpOAuthClientAgentScopeBindingRequest,
+    McpOAuthClientEnsureResponse,
     McpOAuthClientRegisterRequest,
     McpOAuthClientRegisterResponse,
     McpOAuthClientRevokeResponse,
@@ -33,6 +34,7 @@ from app.services.bundle import (
     serialize_admin_job,
     tenant_has_state,
 )
+from app.services.mcp_client_registration import PublicClientDriftError, ensure_public_mcp_client
 from app.services.relationship_canary import (
     FIXTURE_SHA256,
     RelationshipCanaryContractError,
@@ -918,6 +920,39 @@ async def register_mcp_oauth_client(
         tenant_id=tenant_id,
         client=_serialize_mcp_oauth_client(row),
         client_secret=raw_secret,
+    )
+
+
+@router.put(
+    "/tenants/{tenant_id}/mcp-clients/ensure",
+    response_model=McpOAuthClientEnsureResponse,
+    dependencies=[Depends(_verify_admin)],
+)
+async def ensure_tenant_public_client(
+    tenant_id: str,
+    body: McpOAuthClientRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientEnsureResponse:
+    tenant_id = _tenant_id_from_path(tenant_id)
+    try:
+        row, created = await ensure_public_mcp_client(db, tenant_id=tenant_id, body=body)
+    except PublicClientDriftError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "public_client_drift",
+                "client_key": body.client_key,
+                "drift_fields": list(exc.fields),
+                "message": "The existing public client does not match the requested declarative contract.",
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return McpOAuthClientEnsureResponse(
+        tenant_id=tenant_id,
+        client=_serialize_mcp_oauth_client(row),
+        created=created,
+        condition="created" if created else "ready",
     )
 
 

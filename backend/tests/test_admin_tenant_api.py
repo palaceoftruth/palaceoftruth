@@ -103,6 +103,15 @@ class FakeSession:
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return _Result(rows)
 
+        if "from mcp_clients" in sql and "client_key = :client_key" in sql:
+            rows = [
+                row
+                for row in self.mcp_clients
+                if row["tenant_id"] == params["tenant_id"]
+                and row["client_key"] == params["client_key"]
+            ]
+            return _Result(rows[:1])
+
         if "retirement_runtime_oauth_token" in sql:
             rows = [row for row in self.mcp_events if row["tenant_id"] == params["tenant_id"]]
             rows = [
@@ -163,6 +172,7 @@ class FakeSession:
                     "agent_scope_key": params["agent_scope_key"],
                     "allow_all_agent_scope_reads": params["allow_all_agent_scope_reads"],
                     "allow_tenant_shared_reads": params["allow_tenant_shared_reads"],
+                    "containment_mode": params.get("containment_mode", "standard"),
                     "client_type": params["client_type"],
                     "redirect_uris": json.loads(params["redirect_uris"]),
                     "allowed_resources": json.loads(params["allowed_resources"]),
@@ -874,6 +884,46 @@ def test_register_mcp_oauth_client_rejects_duplicate_without_rotating_secret() -
     assert response.status_code == 409
     assert existing["oauth_client_secret_hash"] == "existing-hash"
     assert "create-only and did not rotate its secret" in response.json()["detail"]
+
+
+def test_ensure_public_client_is_idempotent_and_rejects_drift() -> None:
+    session = FakeSession()
+    client = _client(session)
+    payload = {
+        "client_key": "quietfirm-staging",
+        "display_name": "QuietFirm Staging",
+        "allowed_scopes": ["read", "write", "destructive_prohibited"],
+        "client_type": "public",
+        "redirect_uris": ["https://app.quietfirm.sarvent.cloud/api/v1/palace-oauth/callback"],
+        "allowed_resources": ["https://api.palace.sarvent.cloud/api/v1"],
+        "authorization_code_enabled": True,
+    }
+
+    created = client.put(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/ensure",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json=payload,
+    )
+    repeated = client.put(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/ensure",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json=payload,
+    )
+    drifted = client.put(
+        "/api/v1/admin/tenants/tenant-a/mcp-clients/ensure",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={**payload, "allowed_resources": ["https://wrong.example/api/v1"]},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["created"] is True
+    assert created.json()["client"]["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in created.json()
+    assert repeated.status_code == 200
+    assert repeated.json()["condition"] == "ready"
+    assert len(session.mcp_clients) == 1
+    assert drifted.status_code == 409
+    assert "allowed_resources" in drifted.json()["detail"]["drift_fields"]
 
 
 def test_revoke_mcp_oauth_client_revokes_tokens_for_tenant_client() -> None:

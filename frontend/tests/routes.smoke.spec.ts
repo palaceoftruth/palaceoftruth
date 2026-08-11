@@ -95,6 +95,60 @@ async function mockGraph(
 }
 
 test.describe("Route smoke", () => {
+  test("consent accepts tenant authentication inline without a client secret", async ({ page }) => {
+    const interactionId = "22222222-2222-2222-2222-222222222222";
+    let interactionRequests = 0;
+    const sessionRequests: Array<{ method: string; body: string | null }> = [];
+    await page.route("**/api/v1/browser/session", async (route) => {
+      sessionRequests.push({ method: route.request().method(), body: route.request().postData() });
+      await route.fulfill({
+        status: 201,
+        json: {
+          tenant_id: "default",
+          scopes: ["read", "write"],
+          expires_at: "2099-08-07T12:10:00Z",
+        },
+      });
+    });
+    await page.route(`**/api/v1/memory/mcp/oauth/authorize/${interactionId}`, async (route) => {
+      interactionRequests += 1;
+      expect(route.request().headers()["x-api-key"]).toBeUndefined();
+      await route.fulfill({
+        json: {
+          client_name: "QuietFirm Staging",
+          tenant_id: "default",
+          resource: "https://api.palace.sarvent.cloud/api/v1",
+          scopes: ["read", "write", "write:agent", "write:workspace", "write:session", "destructive_prohibited"],
+          agent_scope_keys: [],
+          workspace_scope_keys: [],
+          all_memory_scopes: true,
+        },
+      });
+    });
+
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`/oauth/consent?interaction_id=${interactionId}&e2e=${Date.now()}`);
+    await expect(page.getByText("Authenticate this browser to the Palace tenant")).toBeVisible();
+    await expect(page.getByText("Public PKCE client: no client secret is created or stored.")).toBeVisible();
+    await page.getByLabel("Palace tenant API key").fill("tenant-browser-key");
+    await page.getByRole("button", { name: "Save and review request" }).click();
+    await expect(page.getByRole("heading", { name: "Review access request" })).toBeVisible();
+    await expect(page.getByText("QuietFirm Staging", { exact: true })).toBeVisible();
+    await expect(page.getByText("default", { exact: true })).toBeVisible();
+    await expect(page.getByText("destructive_prohibited", { exact: true })).toBeVisible();
+    expect(sessionRequests).toEqual([{ method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: false }) }]);
+    expect(interactionRequests).toBe(1);
+
+    const screenshotDir = process.env.SAR1321_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      await page.screenshot({ path: `${screenshotDir}/sar-1321-palace-consent-desktop.png`, fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(page.getByRole("button", { name: "Approve access" })).toBeVisible();
+      await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+      await page.screenshot({ path: `${screenshotDir}/sar-1321-palace-consent-mobile.png`, fullPage: true });
+    }
+  });
+
   test("tenant admin can review a consent request on desktop and mobile", async ({ page }, testInfo) => {
     const interactionId = "11111111-1111-1111-1111-111111111111";
     const decisions: Array<{ headers: Record<string, string>; body: string }> = [];
