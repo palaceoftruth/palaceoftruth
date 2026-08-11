@@ -497,7 +497,7 @@ async def whoami(request: Request) -> MemoryWhoAmIResponse:
     "/mcp/audit",
     response_model=McpRequestAuditResponse,
     status_code=201,
-    dependencies=[Depends(require_api_key_scope_header("write"))],
+    dependencies=[Depends(require_api_key_scope_header("audit:write"))],
 )
 async def record_mcp_request_audit(
     body: McpRequestAuditRequest,
@@ -505,8 +505,8 @@ async def record_mcp_request_audit(
     db: AsyncSession = Depends(get_db),
 ) -> McpRequestAuditResponse:
     tenant_id = request.state.tenant_id
-    is_oauth = getattr(request.state, "auth_mode", None) == "mcp_oauth"
-    if is_oauth:
+    auth_mode = getattr(request.state, "auth_mode", None)
+    if auth_mode == "mcp_oauth":
         # A bearer token already identifies a registered confidential client.
         # Audit payload fields are client-supplied observability data, not an
         # authority to alter that client's server-owned grants or metadata.
@@ -518,34 +518,33 @@ async def record_mcp_request_audit(
             raise HTTPException(status_code=403, detail="MCP audit client does not match bearer token")
         client_name = getattr(request.state, "mcp_client_name", None) or body.client.display_name
     else:
-        client_metadata = {
-            **body.client.metadata,
-            "allowed_scopes": body.client.allowed_scopes,
-        }
+        # Audit payloads are caller-controlled telemetry. They may identify an
+        # existing tenant client, but they must never create one or replace its
+        # server-owned allowed_scopes grant.
         client_result = await db.execute(
             text(
                 """
-            INSERT INTO mcp_clients (tenant_id, client_key, display_name, allowed_scopes, metadata, last_seen_at)
-            VALUES (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb), CAST(:metadata AS jsonb), CURRENT_TIMESTAMP)
-            ON CONFLICT (tenant_id, client_key) DO UPDATE
-            SET display_name = EXCLUDED.display_name,
-                allowed_scopes = EXCLUDED.allowed_scopes,
-                metadata = EXCLUDED.metadata,
-                last_seen_at = CURRENT_TIMESTAMP
-            RETURNING id
+            SELECT id, client_key, display_name
+            FROM mcp_clients
+            WHERE tenant_id = :tenant_id AND client_key = :client_key
+            LIMIT 1
             """
             ),
             {
                 "tenant_id": tenant_id,
                 "client_key": body.client.client_key,
-                "display_name": body.client.display_name,
-                "allowed_scopes": json.dumps(body.client.allowed_scopes),
-                "metadata": json.dumps(client_metadata),
             },
         )
-        client_id = client_result.mappings().one()["id"]
-        client_key = body.client.client_key
-        client_name = body.client.display_name
+        registered_client = client_result.mappings().one_or_none()
+        if registered_client is None:
+            raise HTTPException(status_code=403, detail="MCP audit client is not registered")
+        client_id = registered_client["id"]
+        client_key = registered_client["client_key"]
+        client_name = registered_client["display_name"]
+        await db.execute(
+            text("UPDATE mcp_clients SET last_seen_at = CURRENT_TIMESTAMP WHERE id = :id"),
+            {"id": client_id},
+        )
     audit_result = await db.execute(
         text(
             """

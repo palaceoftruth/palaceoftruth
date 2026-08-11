@@ -15,6 +15,7 @@ config:
   # Root Python log level for backend, worker, and MCP pods. Raise to DEBUG for
   # incident triage; set SQLALCHEMY_LOG_LEVEL separately to see SQL statements.
   logLevel: "INFO"
+  apiKeyTtlDays: "90"
   # Derived automatically from Valkey service name when valkey.enabled=true.
   # Set explicitly when valkey.enabled=false.
   redisUrl: ""
@@ -31,9 +32,12 @@ config:
   relationshipClassificationSeed: "1083"
   relationshipExtractionMinConfidence: "0.7"
   corsAllowedOrigins: "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
+  trustedHosts: "palace.sarvent.cloud,api.palace.sarvent.cloud,mcp.palace.sarvent.cloud"
   # SPA sign-in session (H-20). 12 hours, and the cookie is Secure because the
   # deployment terminates TLS at the ingress.
   browserSessionTtlSeconds: "43200"
+  elevatedBrowserSessionTtlSeconds: "300"
+  browserSessionMaxPerTenant: "20"
   browserSessionCookieSecure: "true"
   embeddingProvider: openai
   embeddingModel: text-embedding-3-small
@@ -883,15 +887,17 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
   admin:
     # Optional split Ingress for control-plane endpoints under /api/v1/admin.
-    # Keep disabled to preserve the default API host behavior. Enable it when
-    # operators need path-specific controls such as source allowlists.
+    # Control-plane routes use a separate host and are refused on the public
+    # API host by the application.
     enabled: false
     path: /api/v1/admin
     pathType: Prefix
-    # Defaults to the normal API host when empty.
+    # Leave blank to derive admin.<ingress.baseDomain>.
     host: ""
     # Defaults to ingress.className when empty.
     className: ""
+    # Required when enabled. Use operator VPN or management-network CIDRs.
+    allowedSourceRanges: []
     # Added only to the admin Ingress, so runtime /api/v1/memory, /api/v1/search,
     # and other API traffic keeps the standard ingress annotations.
     annotations: {}

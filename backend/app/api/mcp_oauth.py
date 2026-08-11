@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
@@ -18,6 +18,7 @@ from app.auth import (
     hash_secret,
     is_legacy_secret_hash,
     paired_service_resources,
+    require_api_capability,
     secret_hash_candidates,
     verify_api_key,
 )
@@ -56,7 +57,7 @@ def _authorization_server_issuer(request: Request) -> str:
     return _metadata_url(request, "issue_mcp_access_token").rsplit("/token", 1)[0]
 
 
-def _browser_consent_url(request: Request, interaction_id: str) -> str:
+def _browser_consent_url(request: Request, interaction_id: str, browser_session: str, csrf_token: str) -> str:
     """Return the same-site SPA route without trusting a caller-supplied URI."""
     parsed = urlsplit(str(request.base_url))
     host = parsed.hostname or ""
@@ -65,23 +66,8 @@ def _browser_consent_url(request: Request, interaction_id: str) -> str:
             host = host.removeprefix(service_prefix)
             break
     netloc = host if parsed.port is None else f"{host}:{parsed.port}"
-    return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", ""))
-
-
-def _browser_consent_cookie_domain(request: Request) -> str | None:
-    """Share a consent session only with Palace's paired frontend host.
-
-    The API uses ``api.<base-domain>`` while the consent SPA uses
-    ``<base-domain>``. A host-only API cookie cannot reach the SPA's
-    same-origin API proxy calls, so the known paired-host topology needs their
-    shared parent domain. Ambiguous/local hostnames remain host-only.
-    """
-    host = (urlsplit(str(request.base_url)).hostname or "").lower()
-    service_prefix = next((prefix for prefix in ("api.", "mcp.") if host.startswith(prefix)), None)
-    if service_prefix is None:
-        return None
-    parent_domain = host.removeprefix(service_prefix)
-    return f".{parent_domain}" if "." in parent_domain else None
+    fragment = urlencode({"consent_session": browser_session, "csrf_token": csrf_token})
+    return urlunsplit(("https", netloc, "/oauth/consent", f"interaction_id={interaction_id}", fragment))
 
 
 def _authorization_response_uri(*, redirect_uri: str, state: str | None, code: str | None, error: str | None) -> str:
@@ -626,12 +612,13 @@ async def begin_mcp_authorization(
         )
         await db.commit()
 
-    redirect = RedirectResponse(_browser_consent_url(request, interaction_id), status_code=303)
-    # The API-key remains only in the browser's existing local-storage path;
-    # these short-lived cookies are merely possession and CSRF bindings.
-    cookie_domain = _browser_consent_cookie_domain(request)
-    redirect.set_cookie("palace_oauth_consent_session", browser_session, max_age=600, secure=True, httponly=True, samesite="lax", path="/api/v1/memory/mcp/oauth", domain=cookie_domain)
-    redirect.set_cookie("palace_oauth_consent_csrf", csrf_token, max_age=600, secure=True, httponly=False, samesite="lax", path="/", domain=cookie_domain)
+    # URL fragments are not sent to the frontend server or in HTTP referrers.
+    # The SPA keeps these short-lived bindings in memory and submits them only
+    # to the Palace API.
+    redirect = RedirectResponse(
+        _browser_consent_url(request, interaction_id, browser_session, csrf_token),
+        status_code=303,
+    )
     redirect.headers["Referrer-Policy"] = "no-referrer"
     return redirect
 
@@ -640,7 +627,7 @@ async def begin_mcp_authorization(
 async def get_mcp_authorization_interaction(
     request: Request,
     interaction_id: str,
-    browser_session: Annotated[str | None, Cookie(alias="palace_oauth_consent_session")] = None,
+    browser_session: str | None = Header(None, alias="X-Palace-Consent-Session"),
     _: str = Depends(verify_api_key),
 ) -> dict[str, object]:
     """Return a non-secret summary for the tenant-bound consent browser session."""
@@ -699,14 +686,14 @@ async def decide_mcp_authorization(
     interaction_id: str,
     decision: Annotated[str, Form()],
     csrf_token: Annotated[str, Form()],
-    browser_session: Annotated[str | None, Cookie(alias="palace_oauth_consent_session")] = None,
-    _: str = Depends(verify_api_key),
+    browser_session: str | None = Header(None, alias="X-Palace-Consent-Session"),
+    _: None = Depends(require_api_capability("admin")),
 ) -> dict[str, str]:
     """Approve or deny a single interaction using the tenant's browser API key.
 
     The API key authenticates the tenant but is never inserted into the grant,
-    code, interaction, audit payload, or redirect. Cookie possession and a
-    double-submit CSRF token bind the browser decision to its GET request.
+    code, interaction, audit payload, or redirect. The one-time consent and
+    CSRF bindings tie the decision to the authorization redirect.
     """
     if decision not in {"approved", "denied"} or not browser_session or not csrf_token:
         raise HTTPException(status_code=400, detail="invalid_request")

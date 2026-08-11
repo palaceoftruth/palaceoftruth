@@ -30,6 +30,7 @@ from app.mcp_server import (
     _caller_credential_headers,
     _compact_startup_decision_claims,
     _normalize_created_at,
+    _operation_required_scopes,
     _port_from_env,
     _required_scopes_for_call,
     _run_mcp_operation,
@@ -811,7 +812,7 @@ def test_port_from_env_prefers_palace_alias(monkeypatch: pytest.MonkeyPatch) -> 
     assert _port_from_env(("PALACEOFTRUTH_MCP_PORT", "SECONDBRAIN_MCP_PORT"), 7000) == 9876
 
 
-def test_streamable_http_transport_security_disables_host_checks_for_non_loopback(
+def test_streamable_http_transport_security_binds_non_loopback_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PALACEOFTRUTH_MCP_ALLOWED_HOSTS", raising=False)
@@ -821,7 +822,8 @@ def test_streamable_http_transport_security_disables_host_checks_for_non_loopbac
 
     security = _streamable_http_transport_security("0.0.0.0")
 
-    assert security.enable_dns_rebinding_protection is False
+    assert security.enable_dns_rebinding_protection is True
+    assert "0.0.0.0:*" in security.allowed_hosts
 
 
 def test_streamable_http_transport_security_respects_explicit_allowlists(
@@ -935,7 +937,7 @@ def test_create_memory_entry_uses_authenticated_tenant() -> None:
 
     asyncio.run(scenario())
     assert seen_paths == ["/api/v1/memory/whoami", "/api/v1/memory/entries"]
-    default_scopes = "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
+    default_scopes = "read,write,write:agent,write:workspace,write:session,audit:write,admin,local_only,destructive_prohibited"
     assert seen_scope_headers[0] == ("read", default_scopes)
     assert seen_scope_headers[1] == ("write", default_scopes)
 
@@ -1598,8 +1600,8 @@ def test_mcp_tool_records_redacted_audit_after_success() -> None:
     assert payload["params_summary"]["metadata"] == {"redacted": True, "present": True}
     assert "result_summary" not in payload["params_summary"]
     assert "raw memory body" not in json.dumps(payload)
-    default_scopes = "read,write,write:agent,write:workspace,write:session,admin,local_only,destructive_prohibited"
-    assert seen_audit_scope_headers == [("write", default_scopes)]
+    default_scopes = "read,write,write:agent,write:workspace,write:session,audit:write,admin,local_only,destructive_prohibited"
+    assert seen_audit_scope_headers == [("audit:write", default_scopes)]
 
 
 def test_mcp_tool_denies_missing_write_scope_and_records_audit() -> None:
@@ -4378,6 +4380,10 @@ def test_required_scopes_for_call_adds_the_destination_scope() -> None:
     # An omitted scope_type falls back to the client's configured default, which
     # the client holds by definition, so no extra scope is demanded.
     assert _required_scopes_for_call("create_memory_entry", {}) == ("write",)
+    assert _required_scopes_for_call(
+        "create_memory_entries_batch",
+        {"scope_type": "tenant_shared", "scope_types": ["tenant_shared", "agent", "workspace"]},
+    ) == ("write", "write:agent", "write:workspace")
     assert _required_scopes_for_call("list_memory_entries", {"scope_type": "workspace"}) == ("read",)
 
 
@@ -4434,6 +4440,8 @@ def _caller_identity_scenario(
     *,
     forward_caller_identity: bool,
     credential_headers: tuple[tuple[str, str], ...],
+    operation_scopes: tuple[str, ...] | None = None,
+    required_scope: str = "read",
 ) -> list[dict[str, str | None]]:
     seen: list[dict[str, str | None]] = []
 
@@ -4444,6 +4452,7 @@ def _caller_identity_scenario(
                 "x-api-key": request.headers.get("x-api-key"),
                 "authorization": request.headers.get("authorization"),
                 "x-mcp-scope": request.headers.get("x-mcp-scope"),
+                "x-mcp-scopes": request.headers.get("x-mcp-scopes"),
             }
         )
         return httpx.Response(200, json={"status": "ok", "tenant_id": "tenant-a"})
@@ -4462,9 +4471,11 @@ def _caller_identity_scenario(
                 client=client,
             )
             token = _caller_credential_headers.set(credential_headers or None)
+            scope_token = _operation_required_scopes.set(operation_scopes)
             try:
-                await api.whoami()
+                await api._request_json("GET", "/api/v1/memory/whoami", required_scope=required_scope)
             finally:
+                _operation_required_scopes.reset(scope_token)
                 _caller_credential_headers.reset(token)
 
     asyncio.run(scenario())
@@ -4480,6 +4491,18 @@ def test_api_client_acts_as_the_http_caller_not_as_the_adapter() -> None:
     # The adapter must not substitute its own credential for the caller's.
     assert seen[0]["x-api-key"] == "caller-key"
     assert seen[0]["x-mcp-scope"] == "read"
+
+
+def test_forwarded_api_key_without_scope_header_uses_exact_operation_scopes() -> None:
+    seen = _caller_identity_scenario(
+        forward_caller_identity=True,
+        credential_headers=(("X-API-Key", "caller-key"),),
+        operation_scopes=("write", "write:workspace"),
+        required_scope="write",
+    )
+
+    assert seen[0]["x-mcp-scope"] == "write"
+    assert seen[0]["x-mcp-scopes"] == "write,write:workspace"
 
 
 def test_api_client_forwards_a_caller_bearer_token_unchanged() -> None:

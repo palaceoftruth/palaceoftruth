@@ -76,6 +76,9 @@ spec:
     {{- end }}
 {{- end }}
 {{- if and .Values.ingress.enabled .Values.ingress.admin.enabled }}
+{{- if not .Values.ingress.admin.allowedSourceRanges }}
+{{- fail "ingress.admin.allowedSourceRanges must be non-empty when the admin ingress is enabled" }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -84,13 +87,14 @@ metadata:
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
     app.kubernetes.io/component: admin-ingress
-  {{- if or .Values.ingress.externalDnsTarget .Values.ingress.admin.annotations }}
   annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: {{ join "," .Values.ingress.admin.allowedSourceRanges | quote }}
     {{- if .Values.ingress.externalDnsTarget }}
     external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
     {{- end }}
-    {{- toYaml .Values.ingress.admin.annotations | nindent 4 }}
-  {{- end }}
+    {{- with .Values.ingress.admin.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   ingressClassName: {{ default .Values.ingress.className .Values.ingress.admin.className }}
   tls:

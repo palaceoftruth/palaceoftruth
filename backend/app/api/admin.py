@@ -74,6 +74,7 @@ class RegisterTenantRequest(BaseModel):
     # Omit to receive DEFAULT_API_KEY_SCOPES. Any value here is the whole grant
     # for the new key; the MCP scope headers can only narrow it later.
     scopes: list[str] | None = None
+    expires_in_days: int = 90
 
     @field_validator("tenant_id")
     @classmethod
@@ -90,13 +91,22 @@ class RegisterTenantRequest(BaseModel):
             raise ValueError("description must not be blank")
         return description
 
+    @field_validator("expires_in_days")
+    @classmethod
+    def expires_in_days_is_bounded(cls, value: int) -> int:
+        if value < 1 or value > 365:
+            raise ValueError("expires_in_days must be between 1 and 365")
+        return value
+
 
 class TenantApiKeySummary(BaseModel):
     id: uuid.UUID
     tenant_id: str
     scopes: list[str] = []
     description: str | None = None
+    created_by: str
     created_at: datetime
+    expires_at: datetime | None = None
     revoked_at: datetime | None = None
     last_used_at: datetime | None = None
     status: Literal["active", "revoked"]
@@ -120,6 +130,7 @@ class RotateTenantApiKeyRequest(BaseModel):
     description: str | None = None
     revoke_existing: bool = True
     scopes: list[str] | None = None
+    expires_in_days: int = 90
 
     @field_validator("description")
     @classmethod
@@ -130,6 +141,13 @@ class RotateTenantApiKeyRequest(BaseModel):
         if not description:
             raise ValueError("description must not be blank")
         return description
+
+    @field_validator("expires_in_days")
+    @classmethod
+    def expires_in_days_is_bounded(cls, value: int) -> int:
+        if value < 1 or value > 365:
+            raise ValueError("expires_in_days must be between 1 and 365")
+        return value
 
 
 class RotateTenantApiKeyResponse(BaseModel):
@@ -143,6 +161,22 @@ class RevokeTenantApiKeyResponse(BaseModel):
     tenant_id: str
     revoked: bool
     key: TenantApiKeySummary
+
+
+class BrowserSessionSummary(BaseModel):
+    id: uuid.UUID
+    tenant_id: str
+    api_key_id: uuid.UUID
+    scopes: list[str]
+    created_at: datetime
+    expires_at: datetime
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class BrowserSessionListResponse(BaseModel):
+    tenant_id: str
+    sessions: list[BrowserSessionSummary]
 
 
 class Sar1083RelationshipCanaryRequest(BaseModel):
@@ -264,16 +298,27 @@ def _serialize_mcp_oauth_client(row) -> McpOAuthClientSummary:
 
 def _serialize_api_key(row) -> TenantApiKeySummary:
     revoked_at = row["revoked_at"]
+    expires_at = row.get("expires_at")
+    expired = isinstance(expires_at, datetime) and expires_at <= datetime.now(timezone.utc)
     return TenantApiKeySummary(
         id=row["id"],
         tenant_id=row["tenant_id"],
         scopes=list(row.get("scopes") or []),
         description=row["description"],
+        created_by=row.get("created_by") or "legacy-import",
         created_at=row["created_at"],
+        expires_at=expires_at,
         revoked_at=revoked_at,
         last_used_at=row["last_used_at"],
-        status="revoked" if revoked_at else "active",
+        status="revoked" if revoked_at or expired else "active",
     )
+
+
+def _api_key_is_active(row) -> bool:
+    if row["revoked_at"] is not None:
+        return False
+    expires_at = _as_aware_datetime(row.get("expires_at"))
+    return expires_at is None or expires_at > datetime.now(timezone.utc)
 
 
 def _serialize_audit_event(row) -> TenantApiKeyAuditEventSummary:
@@ -322,7 +367,7 @@ def _within_lookback(value: datetime | None, *, since: datetime) -> bool:
 async def _list_api_key_rows(db: AsyncSession, *, tenant_id: str) -> list[dict]:
     result = await db.execute(
         text(
-            "SELECT id, tenant_id, scopes, description, created_at, revoked_at "
+            "SELECT id, tenant_id, scopes, description, created_by, created_at, expires_at, revoked_at "
             ", last_used_at "
             "FROM api_keys "
             "WHERE tenant_id = :tenant_id "
@@ -336,10 +381,11 @@ async def _list_api_key_rows(db: AsyncSession, *, tenant_id: str) -> list[dict]:
 async def _active_api_key_row(db: AsyncSession, *, tenant_id: str) -> dict | None:
     result = await db.execute(
         text(
-            "SELECT id, tenant_id, scopes, description, created_at, revoked_at "
+            "SELECT id, tenant_id, scopes, description, created_by, created_at, expires_at, revoked_at "
             ", last_used_at "
             "FROM api_keys "
             "WHERE tenant_id = :tenant_id AND revoked_at IS NULL "
+            "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) "
             "ORDER BY created_at DESC "
             "LIMIT 1"
         ),
@@ -478,21 +524,25 @@ async def _insert_api_key(
     tenant_id: str,
     description: str | None,
     scopes: list[str] | None = None,
+    expires_in_days: int = 90,
+    created_by: str = "admin-secret",
 ) -> tuple[str, dict]:
     raw_key = secrets.token_hex(32)
     key_hash = hash_secret(raw_key)
     granted_scopes = _normalize_api_key_scopes(scopes)
     result = await db.execute(
         text(
-            "INSERT INTO api_keys (tenant_id, key_hash, scopes, description) "
-            "VALUES (:tenant_id, :key_hash, CAST(:scopes AS jsonb), :description) "
-            "RETURNING id, tenant_id, scopes, description, created_at, revoked_at, last_used_at"
+            "INSERT INTO api_keys (tenant_id, key_hash, scopes, description, created_by, expires_at) "
+            "VALUES (:tenant_id, :key_hash, CAST(:scopes AS jsonb), :description, :created_by, :expires_at) "
+            "RETURNING id, tenant_id, scopes, description, created_by, created_at, expires_at, revoked_at, last_used_at"
         ),
         {
             "tenant_id": tenant_id,
             "key_hash": key_hash,
             "scopes": json.dumps(granted_scopes),
             "description": description,
+            "created_by": created_by,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=expires_in_days),
         },
     )
     return raw_key, result.mappings().one()
@@ -550,7 +600,7 @@ async def register_tenant(
             api_key_id=existing["id"],
             event_type="register_replay",
             decision="reused_existing_active_key",
-            details={"active_key_count": sum(1 for row in rows if row["revoked_at"] is None)},
+            details={"active_key_count": sum(1 for row in rows if _api_key_is_active(row))},
         )
         await db.commit()
         return RegisterTenantResponse(
@@ -558,7 +608,7 @@ async def register_tenant(
             created=False,
             api_key=None,
             active_key=_serialize_api_key(existing),
-            active_key_count=sum(1 for row in rows if row["revoked_at"] is None),
+            active_key_count=sum(1 for row in rows if _api_key_is_active(row)),
         )
 
     raw_key, row = await _insert_api_key(
@@ -566,6 +616,7 @@ async def register_tenant(
         tenant_id=body.tenant_id,
         description=body.description,
         scopes=body.scopes,
+        expires_in_days=body.expires_in_days,
     )
     await _record_api_key_audit_event(
         db,
@@ -599,7 +650,7 @@ async def list_tenant_api_keys(
     rows = await _list_api_key_rows(db, tenant_id=tenant_id)
     return TenantApiKeyListResponse(
         tenant_id=tenant_id,
-        active_key_count=sum(1 for row in rows if row["revoked_at"] is None),
+        active_key_count=sum(1 for row in rows if _api_key_is_active(row)),
         keys=[_serialize_api_key(row) for row in rows],
     )
 
@@ -667,7 +718,7 @@ async def get_tenant_api_key_retirement_readiness(
     api_key_rows = await _list_api_key_rows(db, tenant_id=tenant_id)
     mcp_client_rows = await _list_mcp_oauth_client_rows(db, tenant_id=tenant_id)
 
-    active_key_rows = [row for row in api_key_rows if row["revoked_at"] is None]
+    active_key_rows = [row for row in api_key_rows if _api_key_is_active(row)]
     active_oauth_client_rows = [
         row
         for row in mcp_client_rows
@@ -1065,6 +1116,7 @@ async def rotate_tenant_api_key(
         tenant_id=tenant_id,
         description=body.description,
         scopes=body.scopes,
+        expires_in_days=body.expires_in_days,
     )
     await _record_api_key_audit_event(
         db,
@@ -1103,7 +1155,7 @@ async def revoke_tenant_api_key(
             "UPDATE api_keys "
             "SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) "
             "WHERE tenant_id = :tenant_id AND id = :key_id "
-            "RETURNING id, tenant_id, description, created_at, revoked_at, last_used_at"
+            "RETURNING id, tenant_id, scopes, description, created_by, created_at, expires_at, revoked_at, last_used_at"
         ),
         {
             "tenant_id": tenant_id,
@@ -1127,6 +1179,55 @@ async def revoke_tenant_api_key(
         revoked=True,
         key=_serialize_api_key(row),
     )
+
+
+@router.get(
+    "/tenants/{tenant_id}/browser-sessions",
+    response_model=BrowserSessionListResponse,
+    dependencies=[Depends(_verify_admin)],
+)
+async def list_browser_sessions(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> BrowserSessionListResponse:
+    tenant_id = _tenant_id_from_path(tenant_id)
+    result = await db.execute(
+        text(
+            "SELECT id, tenant_id, api_key_id, scopes, created_at, expires_at, last_used_at, revoked_at "
+            "FROM browser_sessions WHERE tenant_id = :tenant_id ORDER BY created_at DESC LIMIT 250"
+        ),
+        {"tenant_id": tenant_id},
+    )
+    return BrowserSessionListResponse(
+        tenant_id=tenant_id,
+        sessions=[BrowserSessionSummary(**row) for row in result.mappings().all()],
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/browser-sessions/{session_id}/revoke",
+    response_model=BrowserSessionSummary,
+    dependencies=[Depends(_verify_admin)],
+)
+async def revoke_browser_session(
+    tenant_id: str,
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> BrowserSessionSummary:
+    tenant_id = _tenant_id_from_path(tenant_id)
+    result = await db.execute(
+        text(
+            "UPDATE browser_sessions SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP) "
+            "WHERE tenant_id = :tenant_id AND id = :session_id "
+            "RETURNING id, tenant_id, api_key_id, scopes, created_at, expires_at, last_used_at, revoked_at"
+        ),
+        {"tenant_id": tenant_id, "session_id": session_id},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Browser session not found")
+    await db.commit()
+    return BrowserSessionSummary(**row)
 
 
 @router.post(

@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app.schemas.memory import MemoryEntryRequest
 from app.services.memory_admission import evaluate_memory_write_admission
 
@@ -120,3 +122,43 @@ def test_browser_extension_writes_are_scope_checked() -> None:
     )
 
     assert decision.reason_code == "missing_write"
+
+
+def test_browser_session_writes_are_scope_checked() -> None:
+    denied = evaluate_memory_write_admission(
+        body=_entry("agent", "vera"),
+        auth_mode="browser_session",
+        allowed_scopes=["write"],
+        mcp_client_key=None,
+    )
+    granted = evaluate_memory_write_admission(
+        body=_entry("agent", "vera"),
+        auth_mode="browser_session",
+        allowed_scopes=["write", "write:agent"],
+        mcp_client_key=None,
+    )
+
+    assert denied.reason_code == "missing_write_agent"
+    assert granted.accepted is True
+
+
+@pytest.mark.parametrize(
+    "auth_mode",
+    ["api_key", "browser_session", "browser_extension", "mcp_oauth"],
+)
+def test_every_auth_mode_refuses_foreign_agent_destination_without_scope(auth_mode: str) -> None:
+    denied = evaluate_memory_write_admission(
+        body=_entry("agent", "vera"),
+        auth_mode=auth_mode,
+        allowed_scopes=["write"],
+        mcp_client_key=None,
+    )
+    granted = evaluate_memory_write_admission(
+        body=_entry("agent", "vera"),
+        auth_mode=auth_mode,
+        allowed_scopes=["write", "write:agent"],
+        mcp_client_key=None,
+    )
+
+    assert denied.reason_code == "missing_write_agent"
+    assert granted.accepted is True

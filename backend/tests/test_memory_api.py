@@ -114,6 +114,18 @@ class FakeSession:
                 row["display_name"] = params["display_name"]
             return _MappingRows([{"id": row["id"]}])
 
+        if "from mcp_clients" in raw_sql and "client_key = :client_key" in raw_sql:
+            rows = [
+                client
+                for client in self.mcp_clients
+                if client["tenant_id"] == params["tenant_id"]
+                and client["client_key"] == params["client_key"]
+            ]
+            return _MappingRows(rows)
+
+        if "update mcp_clients set last_seen_at" in raw_sql:
+            return _MappingRows([])
+
         if "insert into mcp_request_audit_events" in raw_sql:
             row = {
                 "id": uuid.uuid4(),
@@ -221,6 +233,11 @@ class _MappingRows:
         if len(self.rows) != 1:
             raise AssertionError(f"Expected exactly one row, got {len(self.rows)}")
         return self.rows[0]
+
+    def one_or_none(self):
+        if len(self.rows) > 1:
+            raise AssertionError(f"Expected at most one row, got {len(self.rows)}")
+        return self.rows[0] if self.rows else None
 
     def all(self):
         return self.rows
@@ -386,8 +403,17 @@ def _agent_memory_result(
     )
 
 
-def test_record_mcp_request_audit_upserts_client_and_redacted_event() -> None:
+def test_record_mcp_request_audit_uses_registered_client_without_changing_grant() -> None:
     session = FakeSession()
+    session.mcp_clients.append(
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "client_key": "codex-local",
+            "display_name": "Registered Codex",
+            "allowed_scopes": ["read"],
+        }
+    )
     client = _build_app(session)
 
     response = client.post(
@@ -416,8 +442,7 @@ def test_record_mcp_request_audit_upserts_client_and_redacted_event() -> None:
     body = response.json()
     assert body["tenant_id"] == "tenant-a"
     assert body["status"] == "recorded"
-    assert len(session.mcp_clients) == 1
-    assert session.mcp_clients[0]["client_key"] == "codex-local"
+    assert session.mcp_clients[0]["allowed_scopes"] == ["read"]
     assert len(session.mcp_audit_events) == 1
     event = session.mcp_audit_events[0]
     assert event["tenant_id"] == "tenant-a"
@@ -451,18 +476,27 @@ def test_record_mcp_request_audit_rejects_api_key_without_scope_header() -> None
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "API key missing write MCP scope header"
+    assert response.json()["detail"] == "API key missing audit:write MCP scope header"
     assert session.mcp_clients == []
     assert session.mcp_audit_events == []
 
 
 def test_record_mcp_request_audit_accepts_api_key_with_scope_header() -> None:
     session = FakeSession()
+    session.mcp_clients.append(
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "client_key": "codex-local",
+            "display_name": "Registered Codex",
+            "allowed_scopes": ["read", "write"],
+        }
+    )
     client = _build_app(session, auth_mode="api_key")
 
     response = client.post(
         "/api/v1/memory/mcp/audit",
-        headers={"X-MCP-Scope": "write"},
+        headers={"X-MCP-Scope": "audit:write"},
         json={
             "client": {
                 "client_key": "codex-local",
@@ -483,9 +517,37 @@ def test_record_mcp_request_audit_accepts_api_key_with_scope_header() -> None:
     assert len(session.mcp_audit_events) == 1
 
 
+def test_record_mcp_request_audit_rejects_unknown_client_instead_of_creating_grant() -> None:
+    session = FakeSession()
+    client = _build_app(session, auth_mode="api_key")
+
+    response = client.post(
+        "/api/v1/memory/mcp/audit",
+        headers={"X-MCP-Scope": "audit:write"},
+        json={
+            "client": {
+                "client_key": "attacker-client",
+                "display_name": "Attacker",
+                "allowed_scopes": ["admin"],
+                "metadata": {},
+            },
+            "operation": "create_memory_entry",
+            "required_scope": "write",
+            "params_summary": {},
+            "status": "success",
+            "latency_ms": 1,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "MCP audit client is not registered"
+    assert session.mcp_clients == []
+    assert session.mcp_audit_events == []
+
+
 def test_mcp_oauth_audit_uses_registered_client_identity_without_upserting_it() -> None:
     session = FakeSession()
-    client = _build_app(session, auth_mode="mcp_oauth", mcp_client_key="hermes-iris", mcp_allowed_scopes=["write"])
+    client = _build_app(session, auth_mode="mcp_oauth", mcp_client_key="hermes-iris", mcp_allowed_scopes=["audit:write"])
     client_id = uuid.uuid4()
 
     async def override_verify(request: Request):
@@ -496,7 +558,7 @@ def test_mcp_oauth_audit_uses_registered_client_identity_without_upserting_it() 
         request.state.mcp_client_key = "hermes-iris"
         request.state.mcp_containment_mode = "hermes_agent"
         request.state.mcp_client_name = "Registered Hermes Iris"
-        request.state.mcp_allowed_scopes = ["write"]
+        request.state.mcp_allowed_scopes = ["audit:write"]
         return "token"
 
     client.app.dependency_overrides[verify_memory_auth] = override_verify
@@ -520,6 +582,34 @@ def test_mcp_oauth_audit_uses_registered_client_identity_without_upserting_it() 
     assert session.mcp_clients == []
     assert session.mcp_audit_events[0]["client_id"] == client_id
     assert session.mcp_audit_events[0]["client_name"] == "Registered Hermes Iris"
+
+
+@pytest.mark.parametrize("auth_mode", ["api_key", "mcp_oauth", "browser_extension", "browser_session"])
+def test_mcp_audit_refuses_write_only_principal_in_every_auth_mode(auth_mode: str) -> None:
+    session = FakeSession()
+    client = _build_app(session, auth_mode=auth_mode, mcp_allowed_scopes=["write"])
+    headers = {"X-MCP-Scope": "audit:write"} if auth_mode == "api_key" else {}
+
+    response = client.post(
+        "/api/v1/memory/mcp/audit",
+        headers=headers,
+        json={
+            "client": {
+                "client_key": "codex-local",
+                "display_name": "Codex local MCP",
+                "allowed_scopes": ["admin"],
+                "metadata": {},
+            },
+            "operation": "create_memory_entry",
+            "required_scope": "write",
+            "params_summary": {},
+            "status": "success",
+        },
+    )
+
+    assert response.status_code == 403
+    assert session.mcp_clients == []
+    assert session.mcp_audit_events == []
 
 
 def test_hermes_oauth_direct_retrieval_rejects_noncanonical_scope(monkeypatch) -> None:
@@ -1945,7 +2035,13 @@ def test_delegated_grant_write_allowlists_apply_to_single_and_batch_entries(monk
         request.state.auth_mode = "mcp_oauth"
         request.state.mcp_client_key = "delegated-writer"
         request.state.mcp_allowed_scopes = ["read", "write", "write:agent", "write:workspace"]
-        request.state.auth_context = SimpleNamespace(
+        request.state.auth_context = AuthContext(
+            tenant_id="tenant-a",
+            auth_mode="mcp_oauth",
+            token_hash_reference="token-hash",
+            client_key="delegated-writer",
+            scopes=("read", "write", "write:agent", "write:workspace"),
+            capabilities=frozenset({"read", "write", "write:agent", "write:workspace"}),
             delegated_grant_id=uuid.uuid4(),
             delegated_agent_scope_keys=tuple(delegated_agents),
             delegated_workspace_scope_keys=tuple(delegated_workspaces),

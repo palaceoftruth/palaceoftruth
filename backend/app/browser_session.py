@@ -79,8 +79,9 @@ class BrowserSessionRecord:
     session_token_hash: str
 
 
-def session_ttl() -> timedelta:
-    return timedelta(seconds=settings.browser_session_ttl_seconds)
+def session_ttl(*, elevated: bool = False) -> timedelta:
+    seconds = settings.elevated_browser_session_ttl_seconds if elevated else settings.browser_session_ttl_seconds
+    return timedelta(seconds=seconds)
 
 
 def resolve_session_scopes(key_scopes: Iterable[str], *, elevated: bool) -> tuple[str, ...]:
@@ -113,7 +114,7 @@ def _cookie_is_secure(request: Request) -> bool:
 
 
 def attach_session_cookies(response: Response, request: Request, issued: IssuedBrowserSession) -> None:
-    max_age = int(settings.browser_session_ttl_seconds)
+    max_age = max(int((issued.expires_at - datetime.now(timezone.utc)).total_seconds()), 0)
     secure = _cookie_is_secure(request)
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -161,7 +162,8 @@ async def issue_session(
     row = await db.execute(
         text(
             "SELECT id, tenant_id, scopes FROM api_keys "
-            "WHERE key_hash IN (:hash, :legacy_hash) AND revoked_at IS NULL LIMIT 1"
+            "WHERE key_hash IN (:hash, :legacy_hash) AND revoked_at IS NULL "
+            "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) LIMIT 1"
         ),
         {"hash": key_hash, "legacy_hash": legacy_key_hash},
     )
@@ -176,9 +178,39 @@ async def issue_session(
     if not scopes:
         return None
 
+    # Serialize this tenant's prune+insert pair so concurrent exchanges cannot
+    # exceed the configured live-session cap.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:tenant_id, 1324))"),
+        {"tenant_id": key["tenant_id"]},
+    )
+
+    # Bound retained authority before creating another session. Revoke the
+    # oldest live rows so concurrent browsers cannot grow without limit.
+    await db.execute(
+        text(
+            """
+            WITH excess AS (
+                SELECT id FROM browser_sessions
+                WHERE tenant_id = :tenant_id AND revoked_at IS NULL
+                  AND expires_at > CURRENT_TIMESTAMP
+                ORDER BY created_at DESC
+                OFFSET :keep_count
+            )
+            UPDATE browser_sessions
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE id IN (SELECT id FROM excess) AND revoked_at IS NULL
+            """
+        ),
+        {
+            "tenant_id": key["tenant_id"],
+            "keep_count": max(settings.browser_session_max_per_tenant - 1, 0),
+        },
+    )
+
     session_token = f"palses_{secrets.token_urlsafe(40)}"
     csrf_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + session_ttl()
+    expires_at = datetime.now(timezone.utc) + session_ttl(elevated=elevated)
     await db.execute(
         text(
             "INSERT INTO browser_sessions "
@@ -213,7 +245,7 @@ async def rotate_session(db, session: "BrowserSessionRecord") -> IssuedBrowserSe
     """
     session_token = f"palses_{secrets.token_urlsafe(40)}"
     csrf_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + session_ttl()
+    expires_at = datetime.now(timezone.utc) + session_ttl(elevated="admin" in session.scopes)
     await db.execute(
         text(
             "UPDATE browser_sessions SET session_token_hash = :session_token_hash, "
@@ -250,7 +282,8 @@ async def load_session(db, session_token: str) -> BrowserSessionRecord | None:
             "  AND expires_at > CURRENT_TIMESTAMP "
             # A revoked key must not keep working through an outstanding session.
             "  AND EXISTS (SELECT 1 FROM api_keys k "
-            "              WHERE k.id = browser_sessions.api_key_id AND k.revoked_at IS NULL) "
+            "              WHERE k.id = browser_sessions.api_key_id AND k.revoked_at IS NULL "
+            "                AND (k.expires_at IS NULL OR k.expires_at > CURRENT_TIMESTAMP)) "
             "LIMIT 1"
         ),
         {"hash": token_hash},

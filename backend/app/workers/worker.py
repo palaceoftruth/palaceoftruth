@@ -8,7 +8,7 @@ from arq import cron
 from app.config import make_redis_settings, settings
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
-from app.workers.tasks import process_media, process_youtube, process_webpage, process_pdf, process_doc, process_image, process_note, extract_relationships, backfill_deferred_relationships, backfill_missing_taxonomy, embed_item, memory_artifact, recover_stale_memory_jobs, restore_bundle
+from app.workers.tasks import process_media, process_youtube, process_webpage, process_pdf, process_doc, process_image, process_note, extract_relationships, backfill_deferred_relationships, backfill_missing_taxonomy, embed_item, memory_artifact, recover_stale_memory_jobs, restore_bundle, reap_browser_sessions
 from app.workers.feed_tasks import poll_all_feeds, poll_feed, process_feed_item, requeue_stale_jobs
 from app.workers.media_fairness import dispatch_tenant_fair_media_jobs
 from app.workers.source_subscription_tasks import poll_all_source_subscriptions, poll_source_subscription_task, queue_discovered_source_subscription_entries, diagnose_stale_queued_source_subscription_entries_task
@@ -92,6 +92,7 @@ class WorkerSettings:
         embed_item,
         memory_artifact,
         recover_stale_memory_jobs,
+        reap_browser_sessions,
         restore_bundle,
         poll_feed, process_feed_item,
         poll_source_subscription_task, queue_discovered_source_subscription_entries, diagnose_stale_queued_source_subscription_entries_task,
@@ -109,6 +110,7 @@ class WorkerSettings:
         cron(dispatch_tenant_fair_media_jobs),
         cron(requeue_stale_jobs, minute={5, 20, 35, 50}),  # offset from feed polls
         cron(recover_stale_memory_jobs, minute={7, 22, 37, 52}),  # offset from feed + sync recovery
+        cron(reap_browser_sessions, hour={0, 6, 12, 18}, minute=2),
     ]
     on_startup = startup
     on_shutdown = shutdown

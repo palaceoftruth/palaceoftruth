@@ -392,8 +392,9 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("https://palace.sarvent.cloud/oauth/consent?interaction_id=")
-    assert "palace_oauth_consent_session" in response.headers["set-cookie"]
-    assert "Domain=.palace.sarvent.cloud" in response.headers["set-cookie"]
+    assert "#consent_session=" in response.headers["location"]
+    assert "csrf_token=" in response.headers["location"]
+    assert "set-cookie" not in response.headers
     assert str(uuid.UUID(session.authorization_interactions[0]["id"])) == session.authorization_interactions[0]["id"]
     assert session.authorization_interactions[0]["tenant_id"] == "tenant-a"
     assert session.authorization_interactions[0]["state"] == "opaque-client-state"
@@ -403,7 +404,7 @@ def test_mcp_oauth_authorize_creates_browser_and_csrf_bound_interaction(monkeypa
     assert json.loads(session.authorization_interactions[0]["workspace_scope_keys"]) == ["*"]
 
 
-def test_mcp_host_authorization_uses_the_frontend_consent_host_and_shared_cookie_domain(monkeypatch) -> None:
+def test_mcp_host_authorization_uses_frontend_host_without_parent_domain_cookie(monkeypatch) -> None:
     client_row = _client_row(
         client_type="confidential_web",
         authorization_code_enabled=True,
@@ -427,7 +428,8 @@ def test_mcp_host_authorization_uses_the_frontend_consent_host_and_shared_cookie
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("https://palace.sarvent.cloud/oauth/consent?interaction_id=")
-    assert "Domain=.palace.sarvent.cloud" in response.headers["set-cookie"]
+    assert "#consent_session=" in response.headers["location"]
+    assert "set-cookie" not in response.headers
 
 
 def test_mcp_oauth_authorize_rejects_unregistered_redirect_uri(monkeypatch) -> None:
@@ -484,8 +486,7 @@ def test_mcp_oauth_consent_summary_requires_the_tenant_bound_browser_session(mon
     client.app.dependency_overrides[mcp_oauth.verify_api_key] = browser_api_key
     response = client.get(
         "/api/v1/memory/mcp/oauth/authorize/interaction-id",
-        headers={"X-API-Key": "browser-key"},
-        cookies={"palace_oauth_consent_session": browser_session},
+        headers={"X-API-Key": "browser-key", "X-Palace-Consent-Session": browser_session},
     )
     assert response.status_code == 200
     assert response.json() == {
@@ -499,12 +500,138 @@ def test_mcp_oauth_consent_summary_requires_the_tenant_bound_browser_session(mon
         "expires_at": interaction["expires_at"].isoformat(),
     }
 
-    missing_cookie = client.get(
+    missing_binding = client.get(
         "/api/v1/memory/mcp/oauth/authorize/interaction-id",
         headers={"X-API-Key": "browser-key"},
     )
-    assert missing_cookie.status_code == 400
-    assert missing_cookie.json()["detail"] == "invalid_request"
+    assert missing_binding.status_code == 400
+    assert missing_binding.json()["detail"] == "invalid_request"
+
+
+def test_mcp_oauth_consent_decision_requires_elevated_bound_one_time_session(monkeypatch) -> None:
+    interaction_id = str(uuid.uuid4())
+    browser_binding = "browser-session"
+    csrf_binding = "csrf-binding"
+    interaction = {
+        "id": uuid.UUID(interaction_id),
+        "tenant_id": "tenant-a",
+        "client_id": uuid.uuid4(),
+        "resource": "https://testserver/api/v1",
+        "scopes": ["read"],
+        "agent_scope_keys": ["codex"],
+        "workspace_scope_keys": ["palaceoftruth"],
+        "redirect_uri": "https://client.example/callback",
+        "state": "opaque-state",
+        "pkce_challenge": "A" * 43,
+        "browser_session_hash": hash_secret(browser_binding),
+        "csrf_token_hash": hash_secret(csrf_binding),
+        "decision": None,
+        "consumed_at": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "client_key": "codex-remote",
+        "display_name": "Codex Remote",
+    }
+
+    class DecisionSession(FakeSession):
+        async def execute(self, statement, params=None):
+            sql = str(statement).lower()
+            params = params or {}
+            self.statements.append((str(statement), params))
+            if "from mcp_oauth_authorization_interactions" in sql:
+                return _Result([] if interaction["decision"] is not None else [interaction])
+            if "insert into mcp_oauth_delegated_grants" in sql:
+                return _Result([{"id": uuid.uuid4()}])
+            if "insert into mcp_oauth_authorization_codes" in sql:
+                return _Result([])
+            if "update mcp_oauth_authorization_interactions" in sql:
+                interaction["decision"] = params["decision"]
+                interaction["consumed_at"] = params["consumed_at"]
+                return _Result([])
+            return await super().execute(statement, params)
+
+    session = DecisionSession(_client_row())
+    client = _client(session, monkeypatch)
+
+    async def elevated_browser(request: Request):
+        auth._attach_auth_context(
+            request,
+            auth._context_from_scopes(
+                tenant_id="tenant-a",
+                auth_mode="browser_session",
+                token_hash_reference="session-hash",
+                scopes=("admin",),
+            ),
+        )
+        return "browser-session"
+
+    client.app.dependency_overrides[auth.verify_memory_auth] = elevated_browser
+    response = client.post(
+        f"/api/v1/memory/mcp/oauth/authorize/{interaction_id}/decision",
+        headers={"X-Palace-Consent-Session": browser_binding},
+        data={"decision": "approved", "csrf_token": csrf_binding},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["redirect_uri"].startswith("https://client.example/callback?")
+    assert "code=" in response.json()["redirect_uri"]
+    assert "state=opaque-state" in response.json()["redirect_uri"]
+    replay = client.post(
+        f"/api/v1/memory/mcp/oauth/authorize/{interaction_id}/decision",
+        headers={"X-Palace-Consent-Session": browser_binding},
+        data={"decision": "approved", "csrf_token": csrf_binding},
+    )
+    assert replay.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("scopes", "tenant_id", "session_binding", "csrf_binding", "expected_status"),
+    [
+        (("write",), "tenant-a", "browser-session", "csrf-binding", 403),
+        (("admin",), "tenant-b", "browser-session", "csrf-binding", 400),
+        (("admin",), "tenant-a", "wrong-session", "csrf-binding", 400),
+        (("admin",), "tenant-a", "browser-session", "wrong-csrf", 400),
+    ],
+)
+def test_mcp_oauth_consent_decision_fails_closed(
+    monkeypatch, scopes, tenant_id, session_binding, csrf_binding, expected_status
+) -> None:
+    interaction_id = str(uuid.uuid4())
+    interaction = {
+        "id": uuid.UUID(interaction_id), "tenant_id": "tenant-a", "client_id": uuid.uuid4(),
+        "resource": "https://testserver/api/v1", "scopes": ["read"],
+        "agent_scope_keys": [], "workspace_scope_keys": [],
+        "redirect_uri": "https://client.example/callback", "state": None,
+        "pkce_challenge": "A" * 43, "browser_session_hash": hash_secret("browser-session"),
+        "csrf_token_hash": hash_secret("csrf-binding"), "decision": None, "consumed_at": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "client_key": "codex-remote", "display_name": "Codex Remote",
+    }
+
+    class DecisionSession(FakeSession):
+        async def execute(self, statement, params=None):
+            if "from mcp_oauth_authorization_interactions" in str(statement).lower():
+                return _Result([interaction])
+            return await super().execute(statement, params)
+
+    client = _client(DecisionSession(_client_row()), monkeypatch)
+
+    async def browser_principal(request: Request):
+        auth._attach_auth_context(
+            request,
+            auth._context_from_scopes(
+                tenant_id=tenant_id, auth_mode="browser_session",
+                token_hash_reference="session-hash", scopes=scopes,
+            ),
+        )
+        return "browser-session"
+
+    client.app.dependency_overrides[auth.verify_memory_auth] = browser_principal
+    response = client.post(
+        f"/api/v1/memory/mcp/oauth/authorize/{interaction_id}/decision",
+        headers={"X-Palace-Consent-Session": session_binding},
+        data={"decision": "approved", "csrf_token": csrf_binding},
+    )
+    assert response.status_code == expected_status
 
 
 def test_mcp_oauth_token_endpoint_mints_scoped_bearer_token(monkeypatch) -> None:

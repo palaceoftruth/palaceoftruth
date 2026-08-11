@@ -1,7 +1,6 @@
 import importlib.util
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "verify_migration_roundtrip.py"
 SPEC = importlib.util.spec_from_file_location("verify_migration_roundtrip", SCRIPT)
 assert SPEC and SPEC.loader
@@ -49,3 +48,18 @@ def test_migration_harness_requires_all_source_resource_tenant_foreign_keys() ->
         "fk_source_resource_aliases_resource_tenant",
         "fk_source_resource_audit_resource_tenant",
     }
+
+
+def test_scope_migration_backfill_never_includes_admin() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "055_api_key_scopes_and_peppered_credentials.py"
+    )
+    spec = importlib.util.spec_from_file_location("scope_migration", migration_path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert "admin" not in migration.DEFAULT_API_KEY_SCOPES

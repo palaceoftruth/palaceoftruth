@@ -182,15 +182,18 @@ export const api = {
 
   getStats: () => req<StatsResponse>("/stats"),
 
-  getMcpAuthorizationInteraction: (interactionId: string) =>
-    req<McpOAuthAuthorizationInteraction>(`/memory/mcp/oauth/authorize/${encodeURIComponent(interactionId)}`),
+  getMcpAuthorizationInteraction: (interactionId: string, consentSession: string) =>
+    req<McpOAuthAuthorizationInteraction>(`/memory/mcp/oauth/authorize/${encodeURIComponent(interactionId)}`, {
+      headers: { "X-Palace-Consent-Session": consentSession },
+    }),
 
-  decideMcpAuthorizationInteraction: async (interactionId: string, decision: "approved" | "denied", csrfToken: string) => {
+  decideMcpAuthorizationInteraction: async (interactionId: string, decision: "approved" | "denied", csrfToken: string, consentSession: string) => {
     const form = new FormData();
     form.set("decision", decision);
     form.set("csrf_token", csrfToken);
     return req<{ redirect_uri: string }>(`/memory/mcp/oauth/authorize/${encodeURIComponent(interactionId)}/decision`, {
       method: "POST",
+      headers: { "X-Palace-Consent-Session": consentSession },
       body: form,
     });
   },

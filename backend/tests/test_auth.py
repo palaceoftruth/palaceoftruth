@@ -87,7 +87,7 @@ async def test_verify_api_key_sets_tenant_and_updates_last_used(monkeypatch) -> 
     )
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
-    request = _request()
+    request = _request(path="/api/v1/items")
     result = await auth.verify_api_key(request, api_key="raw-key")
 
     assert result == "raw-key"
@@ -141,7 +141,7 @@ async def test_verify_api_key_upgrades_legacy_hash_when_pepper_set(monkeypatch) 
     monkeypatch.setattr(auth, "async_session", lambda: session)
     monkeypatch.setattr(auth.settings, "credential_pepper", "test-pepper")
 
-    request = _request()
+    request = _request(path="/api/v1/capture")
     await auth.verify_api_key(request, api_key="raw-key")
 
     peppered = auth.hash_secret("raw-key")
@@ -412,7 +412,7 @@ async def test_verify_memory_auth_accepts_valid_mcp_bearer_token(monkeypatch) ->
             "client_revoked_at": None,
         }
     )
-    request = _request()
+    request = _request(path="/api/v1/items")
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
     result = await auth.verify_memory_auth(request, api_key=None, authorization="Bearer raw-token")
@@ -476,7 +476,7 @@ async def test_verify_memory_auth_rejects_null_resource_for_rest_api(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_verify_memory_auth_allows_null_resource_only_for_mcp_validation(monkeypatch) -> None:
+async def test_verify_memory_auth_rejects_null_resource_for_mcp_validation(monkeypatch) -> None:
     session = FakeSession(
         {
             "token_id": uuid.uuid4(),
@@ -495,15 +495,11 @@ async def test_verify_memory_auth_allows_null_resource_only_for_mcp_validation(m
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
     request = _request()
-    result = await auth.verify_memory_auth(
-        request,
-        api_key=None,
-        authorization="Bearer raw-token",
-        expected_resource="mcp",
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_memory_auth(request, api_key=None, authorization="Bearer raw-token")
 
-    assert result == "raw-token"
-    assert request.state.auth_context.resource is None
+    assert exc_info.value.status_code == 403
+    assert "resource" in exc_info.value.detail
     assert session.commits == 1
 
 
@@ -531,7 +527,6 @@ async def test_verify_memory_auth_accepts_paired_api_host_mcp_resource(monkeypat
         request,
         api_key=None,
         authorization="Bearer raw-token",
-        expected_resource="mcp",
     )
 
     assert result == "raw-token"
@@ -602,7 +597,6 @@ async def test_verify_memory_auth_rejects_api_resource_when_mcp_expected(monkeyp
             _request(),
             api_key=None,
             authorization="Bearer raw-token",
-            expected_resource="mcp",
         )
 
     assert exc_info.value.status_code == 403
@@ -724,10 +718,11 @@ async def test_verify_capture_write_auth_accepts_scoped_extension_token(monkeypa
             "client_key": "browser-extension:abc",
             "display_name": "Palace Capture Extension",
             "allowed_scopes": ["capture:write", "capture:job:read"],
+            "token_resource": "https://testserver/api/v1",
             "client_revoked_at": None,
         }
     )
-    request = _request()
+    request = _request(path="/api/v1/capture")
     monkeypatch.setattr(auth, "async_session", lambda: session)
 
     result = await auth.verify_capture_write_auth(
@@ -765,6 +760,7 @@ async def test_verify_capture_write_auth_rejects_job_read_only_extension_token(m
             "client_key": "browser-extension:abc",
             "display_name": "Palace Capture Extension",
             "allowed_scopes": ["capture:job:read"],
+            "token_resource": "https://testserver/api/v1",
             "client_revoked_at": None,
         }
     )
@@ -772,7 +768,7 @@ async def test_verify_capture_write_auth_rejects_job_read_only_extension_token(m
 
     with pytest.raises(HTTPException) as exc_info:
         await auth.verify_capture_write_auth(
-            _request(),
+            _request(path="/api/v1/capture"),
             api_key=None,
             authorization="Bearer capture-token",
         )
@@ -783,3 +779,160 @@ async def test_verify_capture_write_auth_rejects_job_read_only_extension_token(m
     assert session.audit_events[0]["required_scope"] == "capture:write"
     assert session.audit_events[0]["status"] == "denied"
     assert session.audit_events[0]["error_class"] == "insufficient_scope"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_mode", ["api_key", "browser_session"])
+async def test_capture_helpers_use_stored_api_or_browser_grant(monkeypatch, auth_mode: str) -> None:
+    async def fake_verify_api_key(request, api_key):
+        auth._attach_auth_context(
+            request,
+            auth._context_from_scopes(
+                tenant_id="tenant-a",
+                auth_mode=auth_mode,
+                token_hash_reference="stored-grant",
+                scopes=("capture:write", "capture:job:read"),
+            ),
+        )
+        return "stored-credential"
+
+    monkeypatch.setattr(auth, "verify_api_key", fake_verify_api_key)
+
+    write_request = _request()
+    read_request = _request()
+    assert await auth.verify_capture_write_auth(write_request, api_key=None, authorization=None) == "stored-credential"
+    assert await auth.verify_capture_job_read_auth(read_request, api_key=None, authorization=None) == "stored-credential"
+    assert write_request.state.auth_mode == auth_mode
+    assert read_request.state.auth_mode == auth_mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_mode", ["api_key", "browser_session"])
+@pytest.mark.parametrize(
+    ("helper", "stored_scopes", "required_scope"),
+    [
+        (auth.verify_capture_write_auth, ("write",), "capture:write"),
+        (auth.verify_capture_job_read_auth, ("read",), "capture:job:read"),
+    ],
+)
+async def test_capture_helpers_refuse_missing_stored_grants(
+    monkeypatch, auth_mode: str, helper, stored_scopes: tuple[str, ...], required_scope: str
+) -> None:
+    async def fake_verify_api_key(request, api_key):
+        auth._attach_auth_context(
+            request,
+            auth._context_from_scopes(
+                tenant_id="tenant-a",
+                auth_mode=auth_mode,
+                token_hash_reference="stored-grant",
+                scopes=stored_scopes,
+            ),
+        )
+        return "stored-credential"
+
+    monkeypatch.setattr(auth, "verify_api_key", fake_verify_api_key)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await helper(_request(), api_key=None, authorization=None)
+
+    assert exc_info.value.status_code == 403
+    assert required_scope in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_capture_helper_preserves_non_extension_oauth_mode(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["capture:write"],
+            "token_resource": "https://testserver/api/v1",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "codex-remote",
+            "display_name": "Codex Remote",
+            "allowed_scopes": ["capture:write"],
+            "client_revoked_at": None,
+        }
+    )
+    request = _request(path="/api/v1/capture")
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    assert await auth.verify_capture_write_auth(
+        request, api_key=None, authorization="Bearer capture-token"
+    ) == "capture-token"
+    assert request.state.auth_mode == "mcp_oauth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("helper", "stored_scope", "required_scope", "path"),
+    [
+        (auth.verify_capture_write_auth, "capture:job:read", "capture:write", "/api/v1/capture"),
+        (
+            auth.verify_capture_job_read_auth,
+            "capture:write",
+            "capture:job:read",
+            "/api/v1/capture/jobs/job-a",
+        ),
+    ],
+)
+@pytest.mark.parametrize("client_key", ["codex-remote", "browser-extension:abc"])
+async def test_oauth_capture_helpers_refuse_missing_stored_grants(
+    monkeypatch, helper, stored_scope: str, required_scope: str, path: str, client_key: str
+) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": [stored_scope],
+            "token_resource": "https://testserver/api/v1",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": client_key,
+            "display_name": "Capture client",
+            "allowed_scopes": [stored_scope],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await helper(_request(path=path), api_key=None, authorization="Bearer capture-token")
+
+    assert exc_info.value.status_code == 403
+    assert required_scope in exc_info.value.detail
+    assert session.audit_events[0]["required_scope"] == required_scope
+    assert session.audit_events[0]["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_capture_helper_rejects_bearer_token_for_another_resource(monkeypatch) -> None:
+    session = FakeSession(
+        {
+            "token_id": uuid.uuid4(),
+            "tenant_id": "tenant-a",
+            "token_scopes": ["capture:write"],
+            "token_resource": "https://elsewhere.test/api/v1",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "token_revoked_at": None,
+            "client_id": uuid.uuid4(),
+            "client_key": "browser-extension:abc",
+            "display_name": "Palace Capture Extension",
+            "allowed_scopes": ["capture:write"],
+            "client_revoked_at": None,
+        }
+    )
+    monkeypatch.setattr(auth, "async_session", lambda: session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_capture_write_auth(
+            _request(path="/api/v1/capture"),
+            api_key=None,
+            authorization="Bearer capture-token",
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "resource is invalid" in exc_info.value.detail

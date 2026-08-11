@@ -1,10 +1,12 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from arq import create_pool
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import select
 
 from app.api import (
@@ -29,12 +31,14 @@ from app.api import (
     tags,
     web_saves,
 )
+from app.admin_host import AdminHostMiddleware
 from app.config import settings, make_redis_settings
 from app.database import async_session
 from app.logging_config import configure_logging
 from app.models.palace import SyncSource
 from app.schemas.palace import SyncSourceCreate
 from app.security_headers import SecurityHeadersMiddleware
+from app.security_rate_limit import SecurityRateLimitMiddleware
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
 from app.services.palace import create_sync_source
@@ -68,7 +72,7 @@ async def _seed_default_api_key() -> None:
     from sqlalchemy import text as sa_text
 
     from app.auth import secret_hash_candidates
-    from app.mcp_scopes import LEGACY_API_KEY_SCOPES
+    from app.mcp_scopes import DEFAULT_API_KEY_SCOPES
 
     if not settings.api_key:
         return
@@ -85,10 +89,15 @@ async def _seed_default_api_key() -> None:
         if existing is None:
             await db.execute(
                 sa_text(
-                    "INSERT INTO api_keys (tenant_id, key_hash, scopes, description) "
-                    "VALUES ('default', :hash, CAST(:scopes AS jsonb), 'seeded from API_KEY env var')"
+                    "INSERT INTO api_keys (tenant_id, key_hash, scopes, description, created_by, expires_at) "
+                    "VALUES ('default', :hash, CAST(:scopes AS jsonb), 'seeded from API_KEY env var', "
+                    "'bootstrap-environment', :expires_at)"
                 ),
-                {"hash": key_hash, "scopes": json.dumps(list(LEGACY_API_KEY_SCOPES))},
+                {
+                    "hash": key_hash,
+                    "scopes": json.dumps(list(DEFAULT_API_KEY_SCOPES)),
+                    "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.api_key_ttl_days),
+                },
             )
             await db.commit()
     logger.info("Default API key seeded")
@@ -228,11 +237,25 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allowed_origins(),
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-MCP-Scope", "X-MCP-Scopes"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-MCP-Scope",
+        "X-MCP-Scopes",
+        "X-Palace-CSRF",
+        "X-Palace-Consent-Session",
+    ],
+)
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[host.strip() for host in settings.trusted_hosts.split(",") if host.strip()],
 )
 
-# Added last so it runs outermost and stamps every response, including the ones
-# CORS and the error handlers produce.
+app.add_middleware(AdminHostMiddleware)
+app.add_middleware(SecurityRateLimitMiddleware)
+# Added last so it runs outermost and stamps every response, including direct
+# admin-host and rate-limit denials.
 app.add_middleware(SecurityHeadersMiddleware)
 
 

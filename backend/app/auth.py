@@ -3,7 +3,7 @@ import hmac
 import json
 import logging
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 from datetime import datetime, timezone
@@ -218,8 +218,8 @@ def _is_mcp_resource_validation_request(request: Request) -> bool:
     return request.url.path == "/api/v1/memory/whoami" or request.url.path.startswith("/mcp")
 
 
-def _expected_token_resources(request: Request, expected_resource: str | None = None) -> set[str]:
-    if expected_resource == "mcp" and _is_mcp_resource_validation_request(request):
+def _expected_token_resources(request: Request) -> set[str]:
+    if _is_mcp_resource_validation_request(request):
         return paired_service_resources(request, "/mcp")
     if request.url.path.startswith("/api/v1"):
         return paired_service_resources(request, "/api/v1")
@@ -230,9 +230,7 @@ def _resource_matches_token(*, token_resource: object, expected_resources: set[s
     if expected_resources is None:
         return True
     if token_resource is None:
-        # Legacy tokens minted before SAR-984 did not persist an audience. Keep
-        # them valid only for the MCP resource while clients rotate tokens.
-        return any(resource.endswith("/mcp") for resource in expected_resources)
+        return False
     return isinstance(token_resource, str) and token_resource in expected_resources
 
 
@@ -462,6 +460,7 @@ async def verify_api_key(
             text(
                 "SELECT id, tenant_id, scopes, key_hash FROM api_keys "
                 "WHERE key_hash IN (:hash, :legacy_hash) AND revoked_at IS NULL "
+                "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) "
                 "LIMIT 1"
             ),
             {"hash": key_hash, "legacy_hash": legacy_key_hash},
@@ -517,13 +516,15 @@ async def verify_memory_auth(
     request: Request,
     api_key: str | None = Security(api_key_header),
     authorization: str | None = Header(None, alias="Authorization"),
-    expected_resource: str | None = Header(None, alias="X-Palace-Expected-Resource"),
 ) -> str:
     if api_key:
         return await verify_api_key(request, api_key)
 
     if authorization is None:
-        raise _auth_exception(request, 403, "Missing API key or bearer token", error="invalid_token")
+        # Browser sessions carry their authority in the server-side stored
+        # grant loaded by verify_api_key. They must follow the same capability
+        # checks as API keys and bearer tokens.
+        return await verify_api_key(request, None)
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
@@ -619,7 +620,7 @@ async def verify_memory_auth(
             if any(scope not in allowed_scopes for scope in token_scopes):
                 raise HTTPException(status_code=403, detail="MCP bearer token scopes are invalid")
             token_resource = result.get("token_resource")
-            expected_resources = _expected_token_resources(request, expected_resource=expected_resource)
+            expected_resources = _expected_token_resources(request)
             if not _resource_matches_token(token_resource=token_resource, expected_resources=expected_resources):
                 await _record_token_validation_audit_event(
                     db,
@@ -781,6 +782,28 @@ async def _verify_scoped_bearer_token(
             token_scopes = _parse_json_list(result["token_scopes"])
             if any(scope not in allowed_scopes for scope in token_scopes):
                 raise HTTPException(status_code=403, detail=f"{detail_prefix} bearer token scopes are invalid")
+            expected_resources = _expected_token_resources(request)
+            if not _resource_matches_token(
+                token_resource=result.get("token_resource"),
+                expected_resources=expected_resources,
+            ):
+                await _record_token_validation_audit_event(
+                    db,
+                    request=request,
+                    token_row=result,
+                    operation="oauth.token_use",
+                    required_scope=required_scope,
+                    status="denied",
+                    error_class="invalid_resource",
+                    params_summary={"expected_resources": sorted(expected_resources)},
+                )
+                await db.commit()
+                raise _auth_exception(
+                    request,
+                    403,
+                    f"{detail_prefix} bearer token resource is invalid",
+                    error="invalid_token",
+                )
             if required_scope not in token_scopes:
                 await _record_token_validation_audit_event(
                     db,
@@ -827,7 +850,11 @@ async def _verify_scoped_bearer_token(
         request,
         _context_from_scopes(
             tenant_id=result["tenant_id"],
-            auth_mode=auth_mode,
+            auth_mode=(
+                "browser_extension"
+                if str(result["client_key"]).startswith("browser-extension:")
+                else auth_mode
+            ),
             token_hash_reference=token_hash,
             subject_id=str(result["client_id"]),
             client_id=result["client_id"],
@@ -853,15 +880,20 @@ async def verify_capture_write_auth(
     api_key: str | None = Security(api_key_header),
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> str:
-    if api_key:
-        return await verify_api_key(request, api_key)
-    return await _verify_scoped_bearer_token(
-        request,
-        authorization=authorization,
-        required_scope="capture:write",
-        auth_mode="browser_extension",
-        detail_prefix="extension",
-    )
+    if api_key or authorization is None:
+        credential = await verify_api_key(request, api_key)
+    else:
+        credential = await _verify_scoped_bearer_token(
+            request,
+            authorization=authorization,
+            required_scope="capture:write",
+            auth_mode="mcp_oauth",
+            detail_prefix="extension",
+        )
+    context = get_auth_context(request)
+    if not context.has_capability("capture:write"):
+        raise _auth_exception(request, 403, _insufficient_scope_detail(context.auth_mode, "capture:write"), error="insufficient_scope")
+    return credential
 
 
 async def verify_capture_job_read_auth(
@@ -869,15 +901,20 @@ async def verify_capture_job_read_auth(
     api_key: str | None = Security(api_key_header),
     authorization: str | None = Header(None, alias="Authorization"),
 ) -> str:
-    if api_key:
-        return await verify_api_key(request, api_key)
-    return await _verify_scoped_bearer_token(
-        request,
-        authorization=authorization,
-        required_scope="capture:job:read",
-        auth_mode="browser_extension",
-        detail_prefix="extension",
-    )
+    if api_key or authorization is None:
+        credential = await verify_api_key(request, api_key)
+    else:
+        credential = await _verify_scoped_bearer_token(
+            request,
+            authorization=authorization,
+            required_scope="capture:job:read",
+            auth_mode="mcp_oauth",
+            detail_prefix="extension",
+        )
+    context = get_auth_context(request)
+    if not context.has_capability("capture:job:read"):
+        raise _auth_exception(request, 403, _insufficient_scope_detail(context.auth_mode, "capture:job:read"), error="insufficient_scope")
+    return credential
 
 
 async def record_oauth_client_audit_event(
@@ -976,7 +1013,9 @@ def require_capability(required_capability: str):
             _require_api_key_scope_header(request, required_capability, mcp_scope, mcp_scopes)
             return
         _require_known_auth_mode(request, auth_mode)
-        context = get_auth_context(request)
+        context = _narrow_non_api_context(
+            request, get_auth_context(request), mcp_scope, mcp_scopes
+        )
         if not context.scopes:
             raise _auth_exception(request, 403, "MCP bearer token scopes are invalid", error="insufficient_scope")
         if not context.has_capability(required_capability):
@@ -1095,6 +1134,38 @@ def _require_api_key_scope_header(
     )
 
 
+def _narrow_non_api_context(
+    request: Request,
+    context: AuthContext,
+    mcp_scope: str | None,
+    mcp_scopes: str | None,
+) -> AuthContext:
+    """Apply an optional request narrowing to a stored non-API-key grant."""
+    header_present = mcp_scope is not None or mcp_scopes is not None
+    requested_scopes = _parse_scope_header(mcp_scope, mcp_scopes)
+    effective_scopes = (
+        tuple(scope for scope in context.scopes if scope in set(requested_scopes))
+        if header_present
+        else context.scopes
+    )
+    audit_metadata = dict(context.audit_metadata)
+    audit_metadata.update(
+        {
+            "stored_granted_scopes": sorted(context.scopes),
+            "mcp_requested_scopes": sorted(requested_scopes) if header_present else None,
+            "mcp_effective_scopes": sorted(effective_scopes),
+        }
+    )
+    narrowed = replace(
+        context,
+        scopes=effective_scopes,
+        capabilities=frozenset(effective_scopes),
+        audit_metadata=MappingProxyType(audit_metadata),
+    )
+    _attach_auth_context(request, narrowed)
+    return narrowed
+
+
 def require_api_key_scope_header(required_scope: str):
     async def dependency(
         request: Request,
@@ -1102,8 +1173,21 @@ def require_api_key_scope_header(required_scope: str):
         mcp_scope: str | None = Header(None, alias="X-MCP-Scope"),
         mcp_scopes: str | None = Header(None, alias="X-MCP-Scopes"),
     ) -> None:
-        if getattr(request.state, "auth_mode", None) == "api_key":
+        auth_mode = getattr(request.state, "auth_mode", None)
+        if auth_mode == "api_key":
             _require_api_key_scope_header(request, required_scope, mcp_scope, mcp_scopes)
+            return
+        auth_mode = _require_known_auth_mode(request, auth_mode)
+        context = _narrow_non_api_context(
+            request, get_auth_context(request), mcp_scope, mcp_scopes
+        )
+        if not context.scopes or not context.has_capability(required_scope):
+            raise _auth_exception(
+                request,
+                403,
+                _insufficient_scope_detail(auth_mode, required_scope),
+                error="insufficient_scope",
+            )
 
     return dependency
 

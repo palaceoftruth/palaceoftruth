@@ -95,6 +95,7 @@ class Settings(BaseSettings):
 
     # API auth
     api_key: str
+    api_key_ttl_days: int = 90
     # Server-side pepper for stored credential verifiers (API keys, OAuth
     # secrets, access and refresh tokens, extension tokens, pairing keys).
     # When set, verifiers are stored as HMAC-SHA256 under this value, so a
@@ -105,12 +106,16 @@ class Settings(BaseSettings):
     # the same lifetime as the database.
     credential_pepper: str = ""
     cors_allowed_origins: str ="https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
+    trusted_hosts: str = "palace.sarvent.cloud,api.palace.sarvent.cloud,mcp.palace.sarvent.cloud,palaceoftruth.test,api.palaceoftruth.test,mcp.palaceoftruth.test,localhost,127.0.0.1,testserver"
+    admin_allowed_hosts: str = "admin.palace.sarvent.cloud,admin.palaceoftruth.test,localhost,127.0.0.1,testserver"
 
     # Browser (SPA) sessions. The web app exchanges an API key for one of these
     # once and never stores the key; see app/browser_session.py. Keep the TTL
     # short - the SPA refreshes silently while the tab is in use, so a long TTL
     # buys nothing and only widens the window on a stolen cookie.
     browser_session_ttl_seconds: int = 43200  # 12 hours
+    elevated_browser_session_ttl_seconds: int = 300
+    browser_session_max_per_tenant: int = 20
     # Force the Secure cookie attribute on. Leave True in every deployment; it
     # is only relaxed automatically for a plain-HTTP localhost dev origin, which
     # would otherwise discard the cookie without an error.
