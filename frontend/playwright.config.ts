@@ -1,7 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
 const configuredBaseURL = process.env.PLAYWRIGHT_BASE_URL;
-const baseURL = configuredBaseURL || "http://127.0.0.1:3000";
+const localPort = Number(process.env.PLAYWRIGHT_PORT ?? "3000");
+const baseURL = configuredBaseURL || `http://127.0.0.1:${localPort}`;
 
 export default defineConfig({
   testDir: "./tests",
@@ -17,9 +18,9 @@ export default defineConfig({
   // Mocked browser specs should be runnable from a clean checkout. Full-stack
   // validation can still opt into devinfra with PLAYWRIGHT_BASE_URL.
   webServer: configuredBaseURL ? undefined : {
-    command: "npm run dev -- --host 127.0.0.1 --port 3000",
+    command: `npm run dev -- --host 127.0.0.1 --port ${localPort}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !process.env.CI && process.env.PLAYWRIGHT_PORT === undefined,
     timeout: 30_000,
   },
   use: {
