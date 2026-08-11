@@ -31,10 +31,11 @@ def _json_value(value: Any, fallback: Any) -> Any:
 
 
 def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, ...]:
+    # Metadata is an operator annotation, not part of the OAuth security
+    # contract. Preserve it while enforcing every authorization field below.
     expected = {
         "display_name": body.display_name,
         "allowed_scopes": sorted(body.allowed_scopes),
-        "metadata": body.metadata,
         "agent_scope_key": body.agent_scope_key,
         "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
         "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
@@ -54,7 +55,6 @@ def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, .
     actual = {
         "display_name": row["display_name"],
         "allowed_scopes": sorted(_json_value(row["allowed_scopes"], [])),
-        "metadata": _json_value(row["metadata"], {}),
         "agent_scope_key": row.get("agent_scope_key"),
         "allow_all_agent_scope_reads": bool(row.get("allow_all_agent_scope_reads")),
         "allow_tenant_shared_reads": bool(row.get("allow_tenant_shared_reads")),

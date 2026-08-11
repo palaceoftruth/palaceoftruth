@@ -905,6 +905,7 @@ def test_ensure_public_client_is_idempotent_and_rejects_drift() -> None:
         headers={"X-Admin-Secret": "test-admin-secret"},
         json=payload,
     )
+    session.mcp_clients[0]["metadata"] = {"owner": "existing-operator"}
     repeated = client.put(
         "/api/v1/admin/tenants/tenant-a/mcp-clients/ensure",
         headers={"X-Admin-Secret": "test-admin-secret"},
@@ -922,6 +923,7 @@ def test_ensure_public_client_is_idempotent_and_rejects_drift() -> None:
     assert "client_secret" not in created.json()
     assert repeated.status_code == 200
     assert repeated.json()["condition"] == "ready"
+    assert repeated.json()["client"]["metadata"] == {"owner": "existing-operator"}
     assert len(session.mcp_clients) == 1
     assert drifted.status_code == 409
     assert "allowed_resources" in drifted.json()["detail"]["drift_fields"]
