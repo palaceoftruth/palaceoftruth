@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -32,6 +33,18 @@ logger = logging.getLogger(__name__)
 # Reserved keys for the tagged-value envelope.
 _TAG = "__arq__"
 _VALUE = "v"
+
+# B-08: matches the credential half of an embedded connection string, e.g.
+# "postgresql://user:secret@host/db" -> "postgresql://user:***@host/db". Job
+# results (including a failed job's exception) can end up quoting a DSN
+# verbatim in their message; this keeps that out of the Valkey-persisted queue.
+_DSN_CREDENTIAL_PATTERN = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<user>[^:/@\s]+):(?P<password>[^@/\s]+)@"
+)
+
+
+def _scrub_dsn_credentials(text: str) -> str:
+    return _DSN_CREDENTIAL_PATTERN.sub(lambda m: f"{m.group('scheme')}{m.group('user')}:***@", text)
 
 
 def _encode(obj: Any) -> Any:
@@ -68,12 +81,18 @@ def _encode(obj: Any) -> Any:
         return {_TAG: "decimal", _VALUE: str(obj)}
     if isinstance(obj, (bytes, bytearray)):
         return {_TAG: "bytes", _VALUE: base64.b64encode(bytes(obj)).decode("ascii")}
-    # Unsupported types are degraded to their repr rather than raising. ARQ uses
-    # this same serializer for job *results*, and a failed job's result is the
-    # raised exception — refusing to encode it would replace the real error with
-    # ARQ's generic "unable to serialize result" placeholder and lose the cause.
-    logger.warning("ARQ payload contains non-JSON-serializable %s; storing repr", type(obj).__name__)
-    return {_TAG: "repr", _VALUE: f"{type(obj).__name__}: {obj!r}"}
+    # Unsupported types are degraded to a class name plus sanitized message
+    # rather than raising. ARQ uses this same serializer for job *results*,
+    # and a failed job's result is the raised exception — refusing to encode
+    # it would replace the real error with ARQ's generic "unable to serialize
+    # result" placeholder and lose the cause. str(), not repr() (B-08): repr()
+    # on some exceptions echoes raw constructor arguments verbatim, and a
+    # connection failure's message routinely contains the DSN it tried to
+    # reach, credentials included. The DSN scrub below is a second layer in
+    # case the message embeds one anyway.
+    logger.warning("ARQ payload contains non-JSON-serializable %s; storing sanitized message", type(obj).__name__)
+    message = _scrub_dsn_credentials(str(obj))
+    return {_TAG: "repr", _VALUE: f"{type(obj).__name__}: {message}"}
 
 
 def _decode(obj: Any) -> Any:

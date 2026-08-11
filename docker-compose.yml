@@ -15,8 +15,14 @@ services:
 
   redis:
     image: redis:7-alpine
+    # F-06: the chart and the localhost port-binding overlay both closed the
+    # unauthenticated-Valkey path (C-02); this base file never got the
+    # matching requirepass, so a plain `docker compose up` still ships an
+    # open queue on the default bridge network. REDIS_PASSWORD is required,
+    # not defaulted, same as DB_PASSWORD above.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -26,6 +32,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
       LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway.example:8080}
@@ -125,6 +132,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
       LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway.example:8080}
@@ -170,6 +178,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://palaceoftruth:${DB_PASSWORD}@postgres:5432/palaceoftruth
       REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai}
       LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway.example:8080}

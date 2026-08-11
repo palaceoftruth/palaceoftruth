@@ -168,7 +168,9 @@ def _build_app(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClie
         yield session
 
     async def override_verify(request: Request):
-        request.state.auth_context = AuthContext(tenant_id=tenant_id, auth_mode="api_key", token_hash_reference="key-hash", scopes=LEGACY_API_KEY_SCOPES, capabilities=frozenset(LEGACY_API_KEY_SCOPES))
+        # M-10: actor_id now reads the stable non-secret subject_id, not the
+        # credential verifier (key_hash below).
+        request.state.auth_context = AuthContext(tenant_id=tenant_id, auth_mode="api_key", subject_id="key-hash", token_hash_reference="key-hash", scopes=LEGACY_API_KEY_SCOPES, capabilities=frozenset(LEGACY_API_KEY_SCOPES))
         request.state.tenant_id = tenant_id
         request.state.key_hash = "key-hash"
         request.state.auth_mode = "api_key"

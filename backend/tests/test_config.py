@@ -405,3 +405,71 @@ def test_settings_reject_invalid_firecrawl_base_url_when_enabled() -> None:
                 firecrawl_base_url="not-a-url",
             )
         )
+
+
+# B-03 / M-05: refuse to boot on any credential that is still the exact
+# placeholder published in .env.example.
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("api_key", "change_me_api_key", "API_KEY"),
+        ("openai_api_key", "sk-...", "OPENAI_API_KEY"),
+        ("openrouter_api_key", "sk-or-...", "OPENROUTER_API_KEY"),
+        ("credential_pepper", "change_me_api_key", "CREDENTIAL_PEPPER"),
+        ("redis_password", "change_me_redis_password", "REDIS_PASSWORD"),
+    ],
+)
+def test_settings_reject_placeholder_credential_values(field: str, value: str, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        config.Settings(**_settings_kwargs(**{field: value}))
+
+
+def test_settings_accept_empty_redis_password_for_unauthenticated_local_redis() -> None:
+    # redis_password defaults to "" for a local Redis with no auth configured;
+    # that is not itself a placeholder and must not be rejected.
+    settings = config.Settings(**_settings_kwargs(redis_password=""))
+
+    assert settings.redis_password == ""
+
+
+def test_settings_reject_placeholder_password_embedded_in_database_url() -> None:
+    with pytest.raises(ValidationError, match="DATABASE_URL"):
+        config.Settings(
+            **_settings_kwargs(
+                database_url="postgresql+asyncpg://palace:change_me_secure_password@example.test/palace"
+            )
+        )
+
+
+def test_settings_reject_placeholder_admin_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PALACEOFTRUTH_ADMIN_SECRET", "change_me_admin_secret")
+
+    with pytest.raises(ValidationError, match="PALACEOFTRUTH_ADMIN_SECRET"):
+        config.Settings(**_settings_kwargs())
+
+
+def test_settings_accept_real_admin_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PALACEOFTRUTH_ADMIN_SECRET", "a-real-admin-secret")
+
+    config.Settings(**_settings_kwargs())
+
+
+# A-05: chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
+# dev and the test suite never do. The pepper is mandatory only there.
+def test_settings_require_credential_pepper_when_deployment_cluster_is_set() -> None:
+    with pytest.raises(ValidationError, match="CREDENTIAL_PEPPER"):
+        config.Settings(**_settings_kwargs(deployment_cluster="rke2-abby", credential_pepper=""))
+
+
+def test_settings_accept_missing_credential_pepper_without_deployment_cluster() -> None:
+    settings = config.Settings(**_settings_kwargs(credential_pepper=""))
+
+    assert settings.credential_pepper == ""
+
+
+def test_settings_accept_credential_pepper_with_deployment_cluster_set() -> None:
+    settings = config.Settings(
+        **_settings_kwargs(deployment_cluster="rke2-abby", credential_pepper="a-real-pepper-value")
+    )
+
+    assert settings.credential_pepper == "a-real-pepper-value"

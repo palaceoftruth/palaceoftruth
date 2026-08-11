@@ -10,7 +10,12 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File, R
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import record_oauth_client_audit_event, require_api_capability, verify_capture_write_auth
+from app.auth import (
+    generate_webhook_signing_key,
+    record_oauth_client_audit_event,
+    require_api_capability,
+    verify_capture_write_auth,
+)
 from app.database import get_db
 from app.ingest_sanitize import sanitize_filename
 from app.models.item import Item
@@ -349,7 +354,7 @@ async def ingest_media(
     item, job = await _create_item_and_job(
         db, "media", title=media_url, source_url=media_url,
         tenant_id=request.state.tenant_id,
-        webhook_url=webhook_url, signing_key=request.state.key_hash if webhook_url else None,
+        webhook_url=webhook_url, signing_key=generate_webhook_signing_key() if webhook_url else None,
         payload=retry_payload,
     )
     enqueued = await _enqueue_ingest_job(
@@ -408,7 +413,7 @@ async def ingest_webpage(
     item, job = await _create_item_and_job(
         db, "webpage", title=webpage_url, source_url=webpage_url,
         tenant_id=request.state.tenant_id,
-        webhook_url=webhook_url, signing_key=request.state.key_hash if webhook_url else None,
+        webhook_url=webhook_url, signing_key=generate_webhook_signing_key() if webhook_url else None,
         payload=retry_payload,
     )
     enqueued = await _enqueue_ingest_job(
@@ -520,7 +525,7 @@ async def ingest_doc(
         item, job = await _create_item_and_job(
             db, "doc", title=title, tenant_id=request.state.tenant_id,
             webhook_url=validated_webhook_url,
-            signing_key=request.state.key_hash if validated_webhook_url else None,
+            signing_key=generate_webhook_signing_key() if validated_webhook_url else None,
             payload=retry_payload,
             metadata=_build_upload_provenance(
                 filename=filename,
@@ -641,7 +646,7 @@ async def ingest_image(
         item, job = await _create_item_and_job(
             db, "image", title=filename or "Uploaded image", tenant_id=request.state.tenant_id,
             webhook_url=validated_webhook_url,
-            signing_key=request.state.key_hash if validated_webhook_url else None,
+            signing_key=generate_webhook_signing_key() if validated_webhook_url else None,
             payload=retry_payload,
             metadata={
                 **_build_upload_provenance(
@@ -724,7 +729,7 @@ async def ingest_note(
     )
     item, job = await _create_item_and_job(
         db, "note", title=request_body.title, tenant_id=request.state.tenant_id,
-        webhook_url=webhook_url, signing_key=request.state.key_hash if webhook_url else None,
+        webhook_url=webhook_url, signing_key=generate_webhook_signing_key() if webhook_url else None,
         payload=retry_payload,
     )
     enqueued = await _enqueue_ingest_job(
@@ -781,7 +786,7 @@ async def ingest_batch(
     db: AsyncSession = Depends(get_db),
 ):
     webhook_url = validate_webhook_url(body.webhook_url) if body.webhook_url else None
-    signing_key = request.state.key_hash if webhook_url else None
+    signing_key = generate_webhook_signing_key() if webhook_url else None
     results = []
     prepared_entries: list[tuple[BatchIngestItem, str, str, str, dict[str, Any]]] = []
     validation_limit = asyncio.Semaphore(10)

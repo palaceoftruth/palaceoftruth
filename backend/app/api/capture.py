@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import verify_capture_write_auth
+from app.auth import generate_webhook_signing_key, verify_capture_write_auth
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -604,7 +604,7 @@ async def capture_browser(
         )
 
     webhook_url = validate_webhook_url(body.webhook_url) if body.webhook_url else None
-    signing_key = request.state.key_hash if webhook_url else None
+    signing_key = generate_webhook_signing_key() if webhook_url else None
     title = body.page_title.strip() if body.page_title and body.page_title.strip() else normalized_url or "Browser selection"
 
     if route == "note":

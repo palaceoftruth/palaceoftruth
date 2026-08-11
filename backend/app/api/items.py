@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, select, func, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_api_capability
+from app.auth import get_auth_context, require_api_capability
 from app.config import settings
 from app.database import get_db
 from app.models.embedding import Embedding
@@ -61,6 +61,10 @@ def _decode_items_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
 
 
 def _tombstone_item(row: Item, *, actor_id: str | None, deleted_via: str) -> datetime:
+    # M-10: `actor_id` must be a stable, non-secret identifier (an api_keys.id
+    # or MCP client/token id — see AuthContext.subject_id), never a credential
+    # verifier hash. This metadata blob is tenant-readable through the API, so
+    # anything written here is effectively published back to the caller.
     deleted_at = datetime.now(timezone.utc)
     metadata = dict(row.metadata_ or {})
     metadata["deleted_at"] = deleted_at.isoformat()
@@ -265,7 +269,7 @@ async def batch_items(
             )
         ).scalars().all()
         for row in rows:
-            _tombstone_item(row, actor_id=getattr(request.state, "key_hash", None), deleted_via="items.batch")
+            _tombstone_item(row, actor_id=get_auth_context(request).subject_id, deleted_via="items.batch")
         await db.commit()
         await _schedule_palace_dirty(request, [row.id for row in rows], "item-soft-delete")
         return BatchActionResponse(affected=len(rows), action="delete")
@@ -440,7 +444,7 @@ async def delete_item(
         raise HTTPException(status_code=404, detail="Item not found")
     if str(row.tenant_id) != request.state.tenant_id:
         raise HTTPException(status_code=404, detail="Item not found")
-    deleted_at = _tombstone_item(row, actor_id=getattr(request.state, "key_hash", None), deleted_via="items.delete")
+    deleted_at = _tombstone_item(row, actor_id=get_auth_context(request).subject_id, deleted_via="items.delete")
     await db.commit()
     await _schedule_palace_dirty(request, [row.id], "item-soft-delete")
     return ItemDeleteResponse(deleted=True, item_id=row.id, status=row.status, deleted_at=deleted_at)

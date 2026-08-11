@@ -45,7 +45,7 @@ local HTTPS routing for `*.test` hostnames, bring that up after Compose:
 
 ```bash
 cp .env.example .env
-# Fill in DB_PASSWORD, API_KEY, PALACEOFTRUTH_ADMIN_SECRET, OPENAI_API_KEY, and OPENROUTER_API_KEY as needed.
+# Fill in DB_PASSWORD, REDIS_PASSWORD, API_KEY, PALACEOFTRUTH_ADMIN_SECRET, OPENAI_API_KEY, and OPENROUTER_API_KEY as needed.
 docker compose up --build -d
 di up palaceoftruth
 open https://palaceoftruth.test

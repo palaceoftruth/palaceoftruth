@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import hash_secret, require_api_capability, secret_hash_candidates
+from app.auth import get_auth_context, hash_secret, require_api_capability, secret_hash_candidates
 from app.database import async_session, get_db
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
@@ -896,7 +896,7 @@ async def remove_sync_source(
         tenant_id=request.state.tenant_id,
         source=source,
         actor_type=getattr(request.state, "auth_mode", "api"),
-        actor_id=getattr(request.state, "key_hash", None),
+        actor_id=get_auth_context(request).subject_id,
     )
     if items_deactivated:
         palace_run, created = await create_or_get_palace_run(
@@ -929,7 +929,7 @@ async def post_restore_sync_source(
         tenant_id=request.state.tenant_id,
         source=source,
         actor_type=getattr(request.state, "auth_mode", "api"),
-        actor_id=getattr(request.state, "key_hash", None),
+        actor_id=get_auth_context(request).subject_id,
     )
     return _sync_source_response(restored)
 
