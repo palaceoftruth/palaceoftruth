@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import app.models  # noqa: F401
+from app import enforce_tenant_rls
 from app.api import ingest
 from app.api.admin import _normalize_tenant_id
 from app.database import Base
@@ -44,6 +45,7 @@ def test_rls_inventory_matches_every_tenant_model() -> None:
     }
 
     assert set(migration.TENANT_TABLES) == tenant_models
+    assert set(enforce_tenant_rls.TENANT_TABLES) == tenant_models
 
 
 def test_rls_policy_is_forced_and_transaction_context_bound() -> None:
@@ -74,6 +76,9 @@ def test_tenant_constraints_use_online_safe_build_phases() -> None:
     assert "UNIQUE USING INDEX" in constraints
     assert "NOT VALID" in constraints
     assert "VALIDATE CONSTRAINT" in enforcement
+    assert "DEFER_TENANT_RLS_ENFORCEMENT" in enforcement
+    assert "autocommit_block" in enforcement
+    assert "lock_timeout" in enforcement
 
 
 @pytest.mark.parametrize("tenant_id", ["*", "__unbound__", "  *  "])

@@ -1,0 +1,52 @@
+{{- if and .Values.migrations.enabled .Release.IsUpgrade }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-tenant-rls-enforcement
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-rls-enforcement
+  annotations:
+    helm.sh/hook: post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.migrations.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-tenant-rls-enforcement
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tenant-rls-enforcement
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
+      {{- include "palaceoftruth.podSecurityContext" (list . "migration") | nindent 6 }}
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      containers:
+        - name: enforce-tenant-rls
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
+          command: ["python", "-m", "app.enforce_tenant_rls"]
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
+          env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
+{{- end }}

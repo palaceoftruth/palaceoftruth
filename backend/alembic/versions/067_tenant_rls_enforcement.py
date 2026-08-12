@@ -5,6 +5,7 @@ Revises: 066_tenant_constraints
 """
 
 from alembic import op
+import os
 import sqlalchemy as sa
 
 
@@ -46,8 +47,10 @@ FOREIGN_KEYS = (
 
 
 def _enable_rls(table: str) -> None:
+    op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     op.execute(sa.text(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY'))
     op.execute(sa.text(f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY'))
+    op.execute(sa.text(f'DROP POLICY IF EXISTS tenant_isolation ON "{table}"'))
     op.execute(sa.text(f'''
         CREATE POLICY tenant_isolation ON "{table}"
         USING (
@@ -80,7 +83,16 @@ def upgrade() -> None:
             op.drop_constraint(f"ck_{table}_{column}_not_null_063", table, type_="check")
     for table in TENANT_TABLES:
         op.execute(sa.text(f'ALTER TABLE "{table}" ALTER COLUMN tenant_id DROP DEFAULT'))
-        _enable_rls(table)
+    # A Helm pre-upgrade hook runs while old replicas are still serving. Those
+    # replicas do not set the new transaction context, so the chart defers only
+    # RLS activation to a post-upgrade hook after tenant-aware writers roll out.
+    if os.getenv("DEFER_TENANT_RLS_ENFORCEMENT", "").lower() in {"1", "true", "yes"}:
+        return
+    for table in TENANT_TABLES:
+        # Commit each table independently. A busy table can time out without
+        # retaining locks acquired for every table processed before it.
+        with op.get_context().autocommit_block():
+            _enable_rls(table)
 
 
 def downgrade() -> None:

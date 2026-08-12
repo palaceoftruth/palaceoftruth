@@ -691,7 +691,7 @@ When postgres.enabled=false: reads DATABASE_URL directly from existingSecret.
       name: {{ include "palaceoftruth.postgresSecretName" . }}
       key: dbname
 - name: DATABASE_URL
-  value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=verify-full"
+  value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME){{ if .Values.databaseTls.enabled }}?sslmode=verify-full{{ end }}"
 {{- else }}
 - name: DATABASE_URL
   valueFrom:

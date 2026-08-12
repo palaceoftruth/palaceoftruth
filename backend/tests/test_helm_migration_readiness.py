@@ -12,10 +12,12 @@ import yaml
 CHART_DIR = Path(__file__).resolve().parents[2] / "chart"
 
 
-def _render_chart(*set_args: str) -> list[dict[str, Any]]:
+def _render_chart(*set_args: str, is_upgrade: bool = False) -> list[dict[str, Any]]:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
     command = ["helm", "template", "palaceoftruth", str(CHART_DIR)]
+    if is_upgrade:
+        command.append("--is-upgrade")
     for arg in set_args:
         command.extend(["--set", arg])
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -73,6 +75,42 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
 def test_migration_readiness_gate_can_be_disabled() -> None:
     job = _migration_job(_render_chart("migrations.readiness.enabled=false"))
     assert "initContainers" not in job["spec"]["template"]["spec"]
+
+
+def test_database_tls_can_be_disabled_without_rendering_verify_full() -> None:
+    manifests = _render_chart("databaseTls.enabled=false")
+    job = _migration_job(manifests)
+    pod_spec = job["spec"]["template"]["spec"]
+    containers = [*pod_spec.get("initContainers", []), *pod_spec["containers"]]
+
+    for container in containers:
+        env = {entry["name"]: entry for entry in container["env"]}
+        assert "sslmode=verify-full" not in env["DATABASE_URL"]["value"]
+        assert "DATABASE_SSL_ROOT_CERT" not in env
+        assert "database-tls" not in {mount["name"] for mount in container.get("volumeMounts", [])}
+
+
+def test_upgrade_defers_rls_until_post_upgrade_hook() -> None:
+    manifests = _render_chart(is_upgrade=True)
+    migration = _migration_job(manifests)
+    migration_env = {
+        entry["name"]: entry
+        for entry in migration["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    enforcement = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
+        == "tenant-rls-enforcement"
+    )
+
+    assert migration_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
+    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-upgrade"
+    assert enforcement["spec"]["template"]["spec"]["containers"][0]["command"] == [
+        "python",
+        "-m",
+        "app.enforce_tenant_rls",
+    ]
 
 
 def test_backend_startup_probe_allows_dependency_gate_budget() -> None:
