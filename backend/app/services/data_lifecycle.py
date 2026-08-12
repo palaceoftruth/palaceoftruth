@@ -191,6 +191,26 @@ async def _purge_tenant_arq_jobs(
     return purged
 
 
+async def _finalize_committed_tenant_erasure(
+    arq_pool: Any,
+    *,
+    tenant_id: str,
+    tenant_identifiers: set[str],
+    staged_paths: list[tuple[Path, Path]],
+) -> None:
+    """Finish irreversible external cleanup after the database commit."""
+    try:
+        await _purge_tenant_arq_jobs(
+            arq_pool,
+            tenant_id=tenant_id,
+            tenant_identifiers=tenant_identifiers,
+        )
+    finally:
+        # The database erasure is already committed. Quarantined tenant files
+        # must not survive because the final best-effort Redis scan failed.
+        _purge_staged_paths(staged_paths)
+
+
 async def _tenant_identifiers(db: AsyncSession, tenant_id: str) -> set[str]:
     identifiers: set[str] = set()
     for table in _tenant_tables():
@@ -297,12 +317,12 @@ async def erase_tenant_data(
         raise
     # Catch an enqueue that was already between its database commit and Redis
     # write when the table locks were acquired.
-    await _purge_tenant_arq_jobs(
+    await _finalize_committed_tenant_erasure(
         arq_pool,
         tenant_id=tenant_id,
         tenant_identifiers=tenant_identifiers,
+        staged_paths=staged_paths,
     )
-    _purge_staged_paths(staged_paths)
     return counts
 
 

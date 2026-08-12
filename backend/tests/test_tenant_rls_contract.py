@@ -152,9 +152,14 @@ def test_containment_derivation_handles_adversarial_client_names() -> None:
     for client_key, expected in expectations.items():
         assert derive_containment_mode(client_key=client_key) == expected
 
+    containment_migration = (
+        ROOT / "alembic" / "versions" / "057_mcp_client_containment_mode.py"
+    ).read_text()
+    assert "regexp_replace(lower(trim(client_key))" in containment_migration
+    assert "LIKE 'hermes-%'" in containment_migration
+
     backfill = (ROOT / "alembic" / "versions" / "062_tenant_backfill.py").read_text()
-    assert "lower(client_key) LIKE 'hermes%'" in backfill
-    assert "NOT LIKE 'hermes-%'" in backfill
+    assert "UPDATE mcp_clients SET containment_mode = 'standard'" not in backfill
 
 
 @pytest.mark.asyncio

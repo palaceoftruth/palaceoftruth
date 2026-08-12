@@ -6,7 +6,9 @@ import pytest
 from arq.jobs import serialize_job
 
 from app.config import settings
+from app.services import data_lifecycle
 from app.services.data_lifecycle import (
+    _finalize_committed_tenant_erasure,
     _purge_tenant_arq_jobs,
     _purge_staged_paths,
     _restore_staged_paths,
@@ -116,3 +118,28 @@ async def test_tenant_erasure_removes_only_matching_arq_payloads() -> None:
     assert purged == 2
     assert set(pool.aborts) == {"tenant-direct", "tenant-reference"}
     assert set(pool.payloads) == {b"arq:job:other"}
+
+
+@pytest.mark.asyncio
+async def test_committed_tenant_erasure_purges_files_when_final_queue_scan_fails(
+    monkeypatch, tmp_path
+) -> None:
+    original = tmp_path / "active"
+    staged = tmp_path / "quarantine"
+    staged.mkdir()
+    (staged / "artifact.bin").write_bytes(b"tenant data")
+
+    async def fail_queue_scan(*args, **kwargs):
+        raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(data_lifecycle, "_purge_tenant_arq_jobs", fail_queue_scan)
+
+    with pytest.raises(ConnectionError, match="redis unavailable"):
+        await _finalize_committed_tenant_erasure(
+            object(),
+            tenant_id="tenant-a",
+            tenant_identifiers=set(),
+            staged_paths=[(original, staged)],
+        )
+
+    assert not staged.exists()
