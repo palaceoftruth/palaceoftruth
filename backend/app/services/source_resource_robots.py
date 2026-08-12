@@ -10,8 +10,8 @@ import httpx
 
 from app.utils.outbound_http import (
     OutboundUrlError,
+    Resolver,
     request_public_http_async,
-    validate_public_http_url,
 )
 
 
@@ -32,6 +32,7 @@ async def evaluate_robots(
     user_agent: str = "PalaceOfTruthSourceRefresh",
     timeout_seconds: float = 10.0,
     client: httpx.AsyncClient | None = None,
+    resolver: Resolver | None = None,
     trusted_exact_hosts: tuple[str, ...] = (),
 ) -> RobotsDecision:
     """Fail closed when robots cannot be checked; absent robots allows crawling."""
@@ -40,25 +41,15 @@ async def evaluate_robots(
     request_client = client or httpx.AsyncClient(timeout=timeout_seconds)
     try:
         target_url = robots_url(url)
-        if owns_client:
-            response = await request_public_http_async(
-                request_client,
-                "GET",
-                target_url,
-                headers={"User-Agent": user_agent},
-                follow_redirects=False,
-                trusted_exact_hosts=trusted_exact_hosts,
-            )
-        else:
-            response = await request_client.get(
-                validate_public_http_url(
-                    target_url,
-                    resolve=False,
-                    trusted_exact_hosts=trusted_exact_hosts,
-                ),
-                headers={"User-Agent": user_agent},
-                follow_redirects=False,
-            )
+        response = await request_public_http_async(
+            request_client,
+            "GET",
+            target_url,
+            headers={"User-Agent": user_agent},
+            follow_redirects=False,
+            resolver=resolver,
+            trusted_exact_hosts=trusted_exact_hosts,
+        )
     except OutboundUrlError:
         return RobotsDecision(False, "robots_unsafe_url")
     except httpx.RequestError:

@@ -24,6 +24,7 @@ from app.services.job_attempts import (
 )
 from app.services.item_dates import apply_effective_date
 from app.services.llm import LLMService
+from app.services.llm_admission import consume_tenant_token_budget, tenant_llm_slot
 from app.utils.hash import compute_content_hash
 
 logger = logging.getLogger(__name__)
@@ -205,9 +206,11 @@ class BasePipeline:
                     ).bindparams(tid=tenant_id)
                 )
                 existing_tags = [row.tag for row in vocab_result]
-                summary, tags, categories, entities_dict = await self._run_enrichment(
-                    text_preview, existing_tags, model=model
-                )
+                await consume_tenant_token_budget(tenant_id, len(text_preview) // 4 + 12_288)
+                async with tenant_llm_slot(tenant_id):
+                    summary, tags, categories, entities_dict = await self._run_enrichment(
+                        text_preview, existing_tags, model=model
+                    )
             except Exception as enrich_exc:
                 logger.warning("AI enrichment failed for job %s (continuing without): %s", job_id, enrich_exc)
             await self._update_job(job, phase="enriched", progress=80)

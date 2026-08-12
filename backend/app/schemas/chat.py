@@ -53,9 +53,9 @@ class ChatRequest(BaseModel):
     @field_validator("model")
     @classmethod
     def model_not_blank(cls, v: str | None) -> str | None:
-        if v is not None and v.strip() == "":
-            raise ValueError("model must not be blank")
-        return v.strip() if v is not None else None
+        from app.services.llm_admission import validate_client_llm_model
+
+        return validate_client_llm_model(v)
 
 
 class ChatResponse(BaseModel):

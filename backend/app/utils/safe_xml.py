@@ -27,13 +27,6 @@ def checked_xml_bytes(body: bytes | str, *, max_bytes: int = MAX_XML_DOCUMENT_BY
     encoded = body.encode("utf-8") if isinstance(body, str) else bytes(body)
     if len(encoded) > max_bytes:
         raise UnsafeXmlError("XML document exceeds the maximum size")
-    # The standard library parser does not fetch external entities, but reject
-    # declarations outright so this safety property is explicit and testable.
-    # Entity expansion (billion laughs) is a local operation and is blocked by
-    # the same check.
-    upper = encoded.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
-        raise UnsafeXmlError("XML doctype and entity declarations are not allowed")
     return encoded
 
 
@@ -44,15 +37,16 @@ def parse_safe_xml(
 ) -> Element:
     """Parse an untrusted XML document behind the size and declaration guard.
 
-    The declaration check above already rejects doctype and entity documents.
-    Parsing through ``defusedxml`` is a deliberate second layer, so a future
-    caller that reaches the parser by another route still fails closed.
+    ``defusedxml`` decodes the XML declaration before checking forbidden
+    constructs, so UTF-16 and other supported encodings cannot bypass a raw
+    UTF-8 substring check.
     """
 
     checked = checked_xml_bytes(body, max_bytes=max_bytes)
     try:
-        return DefusedElementTree.fromstring(checked)
+        return DefusedElementTree.fromstring(checked, forbid_dtd=True)
     except DefusedXmlException as exc:
-        raise UnsafeXmlError(f"XML document uses a forbidden construct: {exc}") from exc
+        construct = "doctype" if type(exc).__name__ == "DTDForbidden" else "construct"
+        raise UnsafeXmlError(f"XML document uses a forbidden {construct}: {exc}") from exc
     except DefusedElementTree.ParseError as exc:
-        raise UnsafeXmlError(f"XML document is not well formed: {exc}") from exc
+        raise UnsafeXmlError(f"XML document is not valid XML: {exc}") from exc

@@ -37,6 +37,7 @@ from app.models.palace import (
     SyncRun,
     SyncSource,
     SyncSourceFile,
+    TenantLlmDailyUsage,
     TemporalFact,
     Wing,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "SyncSource",
     "SyncRun",
     "SyncSourceFile",
+    "TenantLlmDailyUsage",
     "Wing",
     "Room",
     "RoomClosetArtifact",

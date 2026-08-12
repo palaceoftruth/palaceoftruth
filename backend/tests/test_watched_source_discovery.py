@@ -57,9 +57,18 @@ def test_discovery_rejects_oversized_or_entity_declaring_documents() -> None:
         discover_feed_candidates(
             feed_url="https://example.com/feed", body=b"x" * (MAX_DISCOVERY_DOCUMENT_BYTES + 1), allowed_hosts=["example.com"]
         )
-    with pytest.raises(ValueError, match="declarations"):
+    with pytest.raises(ValueError, match="forbidden doctype"):
         discover_sitemap_candidates(
             sitemap_url="https://example.com/sitemap.xml", body="<!DOCTYPE x><urlset/>", allowed_hosts=["example.com"]
+        )
+    utf16_doctype = (
+        '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE x><urlset/>'.encode("utf-16")
+    )
+    with pytest.raises(ValueError, match="forbidden doctype"):
+        discover_sitemap_candidates(
+            sitemap_url="https://example.com/sitemap.xml",
+            body=utf16_doctype,
+            allowed_hosts=["example.com"],
         )
 
 

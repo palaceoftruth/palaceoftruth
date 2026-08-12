@@ -6,11 +6,17 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.ingest_sanitize import sanitize_summary, sanitize_title
 from app.utils.outbound_http import OutboundUrlError, Resolver, validate_public_http_url
 
 
 class FirecrawlScrapeError(RuntimeError):
     """Raised when Firecrawl cannot return usable scrape content."""
+
+
+MAX_FIRECRAWL_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_FIRECRAWL_MARKDOWN_CHARS = 5_000_000
+MAX_FIRECRAWL_HTML_CHARS = 8_000_000
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,7 @@ def scrape_with_firecrawl(
     config: FirecrawlConfig,
     *,
     resolver: Resolver | None = None,
+    client: httpx.Client | None = None,
 ) -> tuple[str | None, str, dict[str, Any]]:
     if not config.enabled:
         raise FirecrawlScrapeError("Firecrawl scraping is not enabled")
@@ -71,26 +78,54 @@ def scrape_with_firecrawl(
         "formats": ["markdown", "html"],
         "onlyMainContent": config.only_main_content,
     }
+    owns_client = client is None
+    request_client = client or httpx.Client(timeout=config.timeout_seconds)
     try:
-        response = httpx.post(
+        with request_client.stream(
+            "POST",
             config.scrape_endpoint,
             headers=headers,
             json=payload,
             timeout=config.timeout_seconds,
-        )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = _response_error_detail(exc.response)
-        raise FirecrawlScrapeError(
-            f"Firecrawl scrape failed with HTTP {exc.response.status_code}: {detail}"
-        ) from exc
+        ) as response:
+            declared_length = response.headers.get("Content-Length")
+            if declared_length is not None:
+                try:
+                    if int(declared_length) > MAX_FIRECRAWL_RESPONSE_BYTES:
+                        raise FirecrawlScrapeError("Firecrawl scrape response exceeded the size limit")
+                except ValueError:
+                    pass
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                content.extend(chunk)
+                if len(content) > MAX_FIRECRAWL_RESPONSE_BYTES:
+                    raise FirecrawlScrapeError("Firecrawl scrape response exceeded the size limit")
+            status_code = response.status_code
+            reason_phrase = response.reason_phrase
+        if status_code >= 400:
+            error_response = httpx.Response(
+                status_code,
+                content=bytes(content),
+                request=httpx.Request("POST", config.scrape_endpoint),
+            )
+            detail = _response_error_detail(error_response)
+            if detail == "unknown Firecrawl error":
+                detail = reason_phrase
+            raise FirecrawlScrapeError(
+                f"Firecrawl scrape failed with HTTP {status_code}: {detail}"
+            )
+    except FirecrawlScrapeError:
+        raise
     except httpx.TimeoutException as exc:
         raise FirecrawlScrapeError(f"Firecrawl scrape timed out after {config.timeout_seconds:g}s") from exc
     except httpx.HTTPError as exc:
         raise FirecrawlScrapeError(f"Firecrawl scrape request failed: {exc}") from exc
+    finally:
+        if owns_client:
+            request_client.close()
 
     try:
-        body = response.json()
+        body = httpx.Response(200, content=bytes(content)).json()
     except ValueError as exc:
         raise FirecrawlScrapeError("Firecrawl scrape returned non-JSON response") from exc
 
@@ -104,9 +139,13 @@ def scrape_with_firecrawl(
     markdown = data.get("markdown")
     if not isinstance(markdown, str) or not markdown.strip():
         raise FirecrawlScrapeError("Firecrawl scrape response did not include markdown content")
+    if len(markdown) > MAX_FIRECRAWL_MARKDOWN_CHARS:
+        raise FirecrawlScrapeError("Firecrawl markdown exceeded the size limit")
 
     metadata = _metadata_from_response(data, config=config)
     html = data.get("html") if isinstance(data.get("html"), str) else None
+    if html is not None and len(html) > MAX_FIRECRAWL_HTML_CHARS:
+        raise FirecrawlScrapeError("Firecrawl HTML exceeded the size limit")
     return html, markdown.strip(), metadata
 
 
@@ -130,7 +169,13 @@ def _metadata_from_response(data: dict[str, Any], *, config: FirecrawlConfig) ->
     ):
         value = source_metadata.get(firecrawl_key)
         if value not in (None, ""):
-            metadata[palace_key] = value
+            metadata[palace_key] = (
+                sanitize_summary(value)
+                if palace_key == "description"
+                else sanitize_title(value)
+                if palace_key in {"title", "author"}
+                else value
+            )
     published_at = source_metadata.get("publishedTime") or source_metadata.get("date")
     if published_at:
         metadata["date"] = str(published_at)

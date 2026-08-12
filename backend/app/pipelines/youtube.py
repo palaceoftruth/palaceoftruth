@@ -138,11 +138,40 @@ def _reject_unbounded_media(info: dict[str, Any]) -> None:
     # yt-dlp's own max_filesize are what bound an unknown-length source.
 
     filesize = info.get("filesize") or info.get("filesize_approx")
-    max_bytes = int(settings.media_max_download_bytes)
+    max_bytes = _effective_media_artifact_limit()
     if isinstance(filesize, (int, float)) and filesize > max_bytes:
         raise MediaTranscriptionLimitError(
             f"Media size {int(filesize)} bytes exceeds the {max_bytes}-byte download limit."
         )
+
+
+def _download_size_hook(max_bytes: int):
+    """Abort while bytes are arriving, including fragmented unknown-size media."""
+
+    def check(progress: dict[str, Any]) -> None:
+        downloaded = progress.get("downloaded_bytes")
+        if isinstance(downloaded, (int, float)) and downloaded > max_bytes:
+            filename = progress.get("filename") or progress.get("tmpfilename")
+            if isinstance(filename, str):
+                try:
+                    os.remove(filename)
+                except OSError:
+                    pass
+            raise MediaTranscriptionLimitError(
+                f"Media download exceeded the {max_bytes}-byte limit."
+            )
+
+    return check
+
+
+def _effective_media_artifact_limit() -> int:
+    """Divide the tenant artifact budget across its admitted inflight jobs."""
+
+    return min(
+        int(settings.media_max_download_bytes),
+        int(settings.media_tenant_artifact_quota_bytes)
+        // max(1, int(settings.media_tenant_fair_per_tenant_inflight_limit)),
+    )
 
 
 def _enforce_downloaded_size(audio_path: str, job_id: str) -> None:
@@ -159,7 +188,7 @@ def _enforce_downloaded_size(audio_path: str, job_id: str) -> None:
     except OSError:
         return
 
-    max_bytes = int(settings.media_max_download_bytes)
+    max_bytes = _effective_media_artifact_limit()
     if size_bytes <= max_bytes:
         return
 
@@ -942,9 +971,10 @@ class MediaPipeline(BasePipeline):
             # The destination is a shared volume. Without these, one very long
             # or high-bitrate source consumes capacity for every tenant, and a
             # live stream never stops on its own at all.
-            "max_filesize": int(settings.media_max_download_bytes),
+            "max_filesize": _effective_media_artifact_limit(),
             "max_downloads": 1,
             "noplaylist": True,
+            "progress_hooks": [_download_size_hook(_effective_media_artifact_limit())],
         }
         if not settings.media_allow_live_streams:
             ydl_opts["live_from_start"] = False
@@ -954,9 +984,12 @@ class MediaPipeline(BasePipeline):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                if info:
-                    meta = _build_media_metadata(info)
-                    _reject_unbounded_media(info)
+                if not isinstance(info, dict):
+                    raise MediaTranscriptionLimitError(
+                        "Media metadata is required before download."
+                    )
+                meta = _build_media_metadata(info)
+                _reject_unbounded_media(info)
                 ydl.download([url])
         except MediaTranscriptionLimitError:
             raise

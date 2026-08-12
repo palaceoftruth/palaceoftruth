@@ -15,6 +15,7 @@ import httpx
 
 from app.utils.outbound_http import (
     OutboundUrlError,
+    Resolver,
     stream_public_http_async,
     validate_public_http_url,
 )
@@ -65,6 +66,7 @@ async def fetch_http_resource(
     last_modified: str | None = None,
     timeout_seconds: float = 30.0,
     client: httpx.AsyncClient | None = None,
+    resolver: Resolver | None = None,
     trusted_exact_hosts: tuple[str, ...] = (),
     max_body_bytes: int = MAX_RESOURCE_BODY_BYTES,
 ) -> HttpRefreshResult:
@@ -89,24 +91,15 @@ async def fetch_http_resource(
         # Stream rather than buffer: the body is read one chunk at a time and
         # abandoned past the ceiling, so a host that returns an endless or
         # multi-gigabyte response cannot exhaust the worker's memory.
-        if owns_client:
-            stream = stream_public_http_async(
-                request_client,
-                "GET",
-                url,
-                headers=headers,
-                follow_redirects=False,
-                trusted_exact_hosts=trusted_exact_hosts,
-            )
-        else:
-            safe_url = validate_public_http_url(
-                url,
-                resolve=False,
-                trusted_exact_hosts=trusted_exact_hosts,
-            )
-            stream = request_client.stream(
-                "GET", safe_url, headers=headers, follow_redirects=False
-            )
+        stream = stream_public_http_async(
+            request_client,
+            "GET",
+            url,
+            headers=headers,
+            follow_redirects=False,
+            resolver=resolver,
+            trusted_exact_hosts=trusted_exact_hosts,
+        )
 
         async with stream as response:
             status_code = response.status_code

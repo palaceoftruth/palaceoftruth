@@ -14,6 +14,8 @@ from app.services.doc_extraction import (
     DocumentExtractionError,
     DocumentExtractionTimeout,
     DocumentTooComplexError,
+    default_child_memory_limit_bytes,
+    default_max_concurrent_extractions,
     extract_document_bounded,
 )
 from app.utils.doc_extract import (
@@ -108,6 +110,41 @@ def test_bounded_extraction_reports_a_child_killed_by_its_resource_limit(tmp_pat
                 memory_limit_bytes=1024,
             )
         )
+
+
+def test_two_hundred_thousand_entry_ooxml_does_not_block_event_loop(tmp_path) -> None:
+    """Central-directory parsing stays in the killable child, not the API loop."""
+
+    path = tmp_path / "many-entries.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(200_001):
+            archive.writestr(f"empty/{index}", b"")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            extract_document_bounded(str(path), path.name, timeout_seconds=30)
+        )
+        started = time.monotonic()
+        await asyncio.sleep(0.02)
+        assert time.monotonic() - started < 0.5
+        with pytest.raises(DocumentExtractionError, match="too many archive entries"):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_default_extraction_concurrency_fits_cgroup_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory_limit = 512 * 1024 * 1024
+    monkeypatch.setattr("app.services.doc_extraction.cgroup_memory_limit_bytes", lambda: memory_limit)
+    monkeypatch.setattr("app.services.doc_extraction.cgroup_cpu_quota", lambda: 8.0)
+
+    workers = default_max_concurrent_extractions()
+    child_limit = default_child_memory_limit_bytes(concurrency=workers)
+
+    assert workers == 3
+    assert workers * child_limit <= memory_limit - (memory_limit // 4)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")

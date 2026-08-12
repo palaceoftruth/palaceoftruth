@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_api_capability
+from app.auth import get_auth_context, require_api_capability
 from app.database import get_db
 from app.schemas.curation_artifact import (
     CandidateCurationArtifactCreate,
@@ -34,6 +34,11 @@ router = APIRouter(
 
 def _validation_error(exc: CandidateCurationArtifactError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
+
+
+def _principal_id(request: Request) -> str:
+    context = get_auth_context(request)
+    return context.subject_id or str(context.client_id or context.client_key or context.auth_mode)
 
 
 @router.get("", response_model=CandidateCurationArtifactListResponse, dependencies=[Depends(require_api_capability("read"))])
@@ -69,6 +74,7 @@ async def post_curation_artifact(
             db,
             tenant_id=request.state.tenant_id,
             body=body,
+            principal_id=_principal_id(request),
         )
         await db.commit()
     except CandidateCurationArtifactError as exc:
@@ -98,8 +104,17 @@ async def post_review_inbox_action(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> ReviewInboxActionResponse:
+    context = get_auth_context(request)
+    if body.action in {"accept", "reject"} and not context.has_capability("curation:approve"):
+        raise HTTPException(status_code=403, detail="curation approval scope is required")
     try:
-        artifacts = await apply_review_inbox_action(db, tenant_id=request.state.tenant_id, body=body)
+        artifacts = await apply_review_inbox_action(
+            db,
+            tenant_id=request.state.tenant_id,
+            body=body,
+            principal_id=_principal_id(request),
+            can_approve=context.has_capability("curation:approve"),
+        )
         await db.commit()
     except CandidateCurationArtifactError as exc:
         await db.rollback()
@@ -160,8 +175,19 @@ async def patch_curation_artifact(
     )
     if artifact is None:
         raise HTTPException(status_code=404, detail="Candidate curation artifact not found")
+    context = get_auth_context(request)
+    if body.status in {"promoted", "approved", "rejected"} and not context.has_capability(
+        "curation:approve"
+    ):
+        raise HTTPException(status_code=403, detail="curation approval scope is required")
     try:
-        updated = await update_candidate_curation_artifact(db, artifact=artifact, body=body)
+        updated = await update_candidate_curation_artifact(
+            db,
+            artifact=artifact,
+            body=body,
+            principal_id=_principal_id(request),
+            can_approve=context.has_capability("curation:approve"),
+        )
         await db.commit()
     except CandidateCurationArtifactError as exc:
         await db.rollback()

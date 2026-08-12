@@ -21,6 +21,7 @@ from app.mcp_server import (
     McpHttpAuthMiddleware,
     McpHttpAuthResult,
     McpHttpAuthVerifier,
+    McpToolOperationError,
     PalaceApiError,
     SecondBrainApiClient,
     OAuthClientCredentialsTokenClient,
@@ -1026,6 +1027,7 @@ def test_capture_checkpoint_normalizes_payload_and_returns_compact_ack() -> None
                 checkpoint_kind="precompact",
                 tags=["sar-312"],
                 metadata={"task_id": "SAR-312"},
+                queue_relationship_backfill=True,
                 backfill_limit=3,
                 backfill_defer_seconds=0,
             )
@@ -1492,7 +1494,7 @@ def test_capture_checkpoint_kill_switch_blocks_writes(monkeypatch: pytest.Monkey
                 scope_key="palaceoftruth",
             )
 
-    with pytest.raises(RuntimeError, match="checkpoint capture is disabled"):
+    with pytest.raises(McpToolOperationError, match="internal_failure; correlation_id="):
         asyncio.run(scenario())
 
 
@@ -1527,6 +1529,7 @@ def test_palace_checkpoint_alias_reuses_checkpoint_safety_defaults() -> None:
     assert result["status"] == "dry_run"
     assert result["would_write"]["scope"] == {"type": "agent", "key": "codex"}  # type: ignore[index]
     assert result["would_write"]["relationship_policy"] == "deferred"  # type: ignore[index]
+    assert result["relationship_backfill"] == {"queued": False, "reason": "dry_run"}
 
 
 def test_mcp_tool_records_redacted_audit_after_success() -> None:
@@ -3522,6 +3525,7 @@ def test_palace_search_alias_can_request_strict_workspace_memory() -> None:
 
 def test_palace_context_alias_loads_wakeup_and_recent_memory() -> None:
     seen: list[tuple[str, str, dict[str, str]]] = []
+    audit_operations: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path, dict(request.url.params.multi_items())))
@@ -3538,6 +3542,7 @@ def test_palace_context_alias_loads_wakeup_and_recent_memory() -> None:
                 },
             )
         if request.url.path == "/api/v1/memory/mcp/audit":
+            audit_operations.append(json.loads(request.content.decode())["operation"])
             return httpx.Response(
                 201,
                 json={
@@ -3583,7 +3588,9 @@ def test_palace_context_alias_loads_wakeup_and_recent_memory() -> None:
             {"scope_type": "agent", "scope_key": "codex", "tags": "codex-memory", "tags_mode": "any", "limit": "3"},
         ),
         ("POST", "/api/v1/memory/mcp/audit", {}),
+        ("POST", "/api/v1/memory/mcp/audit", {}),
     ]
+    assert audit_operations == ["get_wakeup_brief", "list_memory_entries", "palace_context"]
 
 
 def test_get_wakeup_context_returns_compact_session_start_package() -> None:
@@ -4371,6 +4378,39 @@ def test_run_mcp_operation_denies_an_unmapped_operation() -> None:
     assert audit_payloads[0]["required_scope"] is None
 
 
+def test_run_mcp_operation_maps_internal_failure_to_stable_public_error() -> None:
+    audit_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        audit_payloads.append(json.loads(request.content.decode()))
+        return httpx.Response(201, json={"status": "recorded"})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.palaceoftruth.test",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            api = SecondBrainApiClient(
+                SecondBrainMcpSettings(api_base_url="https://api.palaceoftruth.test", api_key="secret"),
+                client=client,
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
+                )
+            )
+
+            async def call() -> None:
+                raise RuntimeError("provider hostname and secret detail")
+
+            with pytest.raises(McpToolOperationError, match=r"internal_failure; correlation_id=") as raised:
+                await _run_mcp_operation(ctx, operation="list_tags", params={}, call=call)
+            assert "provider hostname" not in str(raised.value)
+
+    asyncio.run(scenario())
+    assert audit_payloads[0]["error_class"] == "RuntimeError"
+
+
 def test_required_scopes_for_call_adds_the_destination_scope() -> None:
     assert _required_scopes_for_call("create_memory_entry", {"scope_type": "workspace"}) == (
         "write",
@@ -4385,6 +4425,12 @@ def test_required_scopes_for_call_adds_the_destination_scope() -> None:
         {"scope_type": "tenant_shared", "scope_types": ["tenant_shared", "agent", "workspace"]},
     ) == ("write", "write:agent", "write:workspace")
     assert _required_scopes_for_call("list_memory_entries", {"scope_type": "workspace"}) == ("read",)
+    assert _required_scopes_for_call(
+        "capture_checkpoint", {"queue_relationship_backfill": True}
+    ) == ("write", "admin")
+    assert _required_scopes_for_call(
+        "capture_checkpoint", {"queue_relationship_backfill": False}
+    ) == ("write",)
 
 
 def test_mcp_tool_denies_a_write_to_a_scope_the_client_does_not_hold() -> None:

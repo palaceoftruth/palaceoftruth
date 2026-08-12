@@ -959,7 +959,7 @@ async def create_memory_artifact(
     "/relationships/backfill",
     response_model=RelationshipBackfillAcceptedResponse,
     status_code=202,
-    dependencies=[Depends(require_mcp_scope("write"))],
+    dependencies=[Depends(require_mcp_scope("admin"))],
 )
 async def enqueue_relationship_backfill(
     body: RelationshipBackfillRequest,

@@ -24,6 +24,9 @@ config:
   redisSentinelStartupMaxBackoffSeconds: "10"
   # Default OpenRouter model for all text-generation tasks (summarize, tag, chat, etc.).
   openrouterDefaultModel: "minimax/minimax-m2.7"
+  clientLlmAllowedModels: ""
+  tenantLlmMaxConcurrentRequests: "2"
+  tenantLlmDailyTokenLimit: "250000"
   # Ordered fallback models for OpenRouter when the default model is unavailable.
   openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
   # Frozen relationship-classifier profile. Change only with a calibrated eval.
@@ -68,6 +71,7 @@ config:
   mediaTenantFairPerTenantInflightLimit: "3"
   mediaTenantFairDispatchBatchSize: "6"
   mediaTenantFairCandidateLimit: "100"
+  mediaTenantArtifactQuotaBytes: "2147483648"
   transcriptionRequestTimeoutSeconds: "300"
   # Connect is budgeted separately from read: a dropped link blackholes the SYN,
   # so sharing the (potentially multi-hour) read budget would stall a job for
@@ -102,6 +106,7 @@ config:
   retrievalCaptureEnabled: "false"
   retrievalCapturePath: "/tmp/palaceoftruth/retrieval-capture.ndjson"
   retrievalCaptureQueryMode: "fingerprint"
+  retrievalCaptureAllowRawQueries: "false"
   retrievalCaptureMaxQueryChars: "500"
   retrievalSourceRankingEnabled: "true"
   retrievalRelationshipExpansionEnabled: "false"

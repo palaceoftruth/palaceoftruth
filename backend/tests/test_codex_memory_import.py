@@ -8,7 +8,7 @@ from app.services.codex_memory_import import (
     normalize_codex_memory_files,
 )
 from app.schemas.memory import MemoryScope
-from app.services.codex_memory_privacy import detect_secret_warnings
+from app.services.codex_memory_privacy import detect_secret_warnings, scan_codex_memory_privacy
 
 
 def test_parser_normalizes_markdown_memory_entries(tmp_path: Path) -> None:
@@ -96,6 +96,17 @@ def test_privacy_detector_redacts_secret_warning_previews() -> None:
     assert warning.line_number == 42
     assert secret_value not in warning.detail
     assert "<redacted" in warning.detail
+
+
+def test_privacy_detector_finds_unlabeled_high_entropy_token_but_ignores_hashes() -> None:
+    token = "mP9/2vQ7rT4wX8yZ1aB3cD5eF6gH0jK+LmN="
+
+    scan = scan_codex_memory_privacy(f"Captured value {token} in a transcript")
+    hash_scan = scan_codex_memory_privacy("commit " + "a1" * 20)
+
+    assert scan.severity == "high"
+    assert [finding.pattern for finding in scan.findings] == ["high_entropy_token"]
+    assert hash_scan.findings == []
 
 
 def test_dry_run_redacts_body_by_default(tmp_path: Path) -> None:

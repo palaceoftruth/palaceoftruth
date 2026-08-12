@@ -16,6 +16,7 @@ McpOperationScope = Literal[
     "destructive_prohibited",
     "capture:write",
     "capture:job:read",
+    "curation:approve",
 ]
 
 
@@ -44,6 +45,7 @@ MCP_SCOPE_CATALOG: tuple[McpScopeDefinition, ...] = (
     ),
     McpScopeDefinition("capture:write", "Capture writes", "Allow browser extension or capture clients to create captures.", "capture"),
     McpScopeDefinition("capture:job:read", "Capture job reads", "Allow capture clients to poll their capture jobs.", "capture"),
+    McpScopeDefinition("curation:approve", "Approve curation", "Approve or reject candidate curation artifacts.", "curation"),
 )
 
 ALL_MCP_OPERATION_SCOPES: tuple[McpOperationScope, ...] = tuple(scope.value for scope in MCP_SCOPE_CATALOG)
@@ -76,6 +78,7 @@ LEGACY_API_KEY_SCOPES: tuple[McpOperationScope, ...] = (
     "admin",
     "capture:write",
     "capture:job:read",
+    "curation:approve",
 )
 
 # Scope grant given to an API key created after migration 055 when the caller
@@ -112,6 +115,7 @@ MCP_OPERATION_SCOPES: dict[str, McpOperationScope] = {
     "get_palace_room": "read",
     "get_wakeup_brief": "read",
     "get_wakeup_context": "read",
+    "palace_context": "read",
     "get_retrieval_doctor": "read",
     "retrieve_memory": "read",
     "retrieve_agent_memory": "read",

@@ -7,6 +7,7 @@ import trafilatura
 from playwright.async_api import async_playwright
 
 from app.config import settings
+from app.ingest_sanitize import sanitize_title
 from app.pipelines.base import BasePipeline
 from app.pipelines.social import (
     SocialCaptureError,
@@ -27,6 +28,21 @@ from app.utils.outbound_http import (
 
 _WORDS_PER_MINUTE = 200
 
+
+async def _guard_browser_request(route, *, source_url: str) -> None:
+    request_url = route.request.url
+    if not request_url.startswith(("http://", "https://")):
+        logger.warning("blocked non-HTTP browser request from %s to %s", source_url, request_url)
+        await route.abort("blockedbyclient")
+        return
+    try:
+        await validate_public_http_url_async(request_url)
+    except OutboundUrlError:
+        logger.warning("blocked unsafe browser request from %s to %s", source_url, request_url)
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()
+
 logger = logging.getLogger(__name__)
 
 # Chromium flags required for headless operation inside Docker/Kubernetes
@@ -45,7 +61,6 @@ class WebpagePipeline(BasePipeline):
     1. trafilatura (fast, no browser) — works for most sites
     2. Playwright headless Chromium — fallback for JS-rendered / bot-protected sites
        - Navigates and waits for network idle
-       - Asks the LLM to identify and dismiss any overlays (cookie banners, age gates)
        - Extracts the rendered HTML and passes it back through trafilatura
     """
 
@@ -182,9 +197,9 @@ class WebpagePipeline(BasePipeline):
         )
         if meta:
             if meta.title:
-                metadata["title"] = meta.title
+                metadata["title"] = sanitize_title(meta.title)
             if meta.author:
-                metadata["author"] = meta.author
+                metadata["author"] = sanitize_title(meta.author)
             if meta.date:
                 date_str = str(meta.date)
                 metadata["date"] = date_str
@@ -202,23 +217,13 @@ class WebpagePipeline(BasePipeline):
         return html, article, metadata
 
     async def _scrape_with_browser(self, url: str) -> tuple[str | None, dict[str, Any]]:
-        """Navigate with headless Chromium, let the LLM dismiss any overlays, extract text."""
+        """Navigate with headless Chromium without taking page-directed actions."""
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
             try:
                 page = await browser.new_page()
                 async def guard_outbound_request(route) -> None:
-                    request_url = route.request.url
-                    if not request_url.startswith(("http://", "https://")):
-                        await route.continue_()
-                        return
-                    try:
-                        await validate_public_http_url_async(request_url)
-                    except OutboundUrlError:
-                        logger.warning("blocked unsafe browser request from %s to %s", url, request_url)
-                        await route.abort("blockedbyclient")
-                        return
-                    await route.continue_()
+                    await _guard_browser_request(route, source_url=url)
 
                 # Browser navigation, redirects, and subresources all pass
                 # through this guard. Cluster egress policy remains the final
@@ -233,19 +238,6 @@ class WebpagePipeline(BasePipeline):
                 })
 
                 await page.goto(url, wait_until="networkidle", timeout=30_000)
-
-                # Ask the LLM whether anything needs to be clicked first
-                visible_text = await page.inner_text("body")
-                actions = await self.llm.get_browser_actions(visible_text, url)
-
-                if actions:
-                    logger.info("Browser actions for %s: %s", url, actions)
-                    for action in actions:
-                        try:
-                            await page.get_by_text(action["text"], exact=False).first.click(timeout=3_000)
-                            await page.wait_for_load_state("networkidle", timeout=5_000)
-                        except Exception as exc:
-                            logger.debug("Browser action failed (%s): %s", action, exc)
 
                 # Pull the fully-rendered HTML and run it through trafilatura
                 html = await page.content()
@@ -262,9 +254,9 @@ class WebpagePipeline(BasePipeline):
         metadata: dict[str, Any] = {"scraped_with": "playwright"}
         if meta:
             if meta.title:
-                metadata["title"] = meta.title
+                metadata["title"] = sanitize_title(meta.title)
             if meta.author:
-                metadata["author"] = meta.author
+                metadata["author"] = sanitize_title(meta.author)
             if meta.date:
                 date_str = str(meta.date)
                 metadata["date"] = date_str

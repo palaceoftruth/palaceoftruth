@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 from fastapi import FastAPI, Request
@@ -246,6 +247,15 @@ async def test_chat_service_preserves_retrieval_provenance_on_sources(monkeypatc
 
     monkeypatch.setattr(ChatService, "_tenant_has_ready_items", fake_has_ready_items)
     monkeypatch.setattr("app.services.search.SearchService.vector_search", fake_vector_search)
+
+    @asynccontextmanager
+    async def distributed_slot(_tenant_id: str):
+        yield
+
+    monkeypatch.setattr(
+        "app.services.llm_admission._distributed_tenant_llm_slot",
+        distributed_slot,
+    )
 
     service = ChatService(db=object(), embedder=object(), llm=FakeLlm(), tenant_id="tenant-a")
     response = await service.chat([ChatMessage(role="user", content="What does the diagram show?")])

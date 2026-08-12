@@ -10,15 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from io import BytesIO
 from typing import Iterable, Literal
 from urllib.parse import urljoin, urlsplit
-from xml.etree import ElementTree
 
 import feedparser
 
 from app.services.source_resources import normalize_http_url
-from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, checked_xml_bytes
+from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, checked_xml_bytes, parse_safe_xml
 
 
 SourceClass = Literal["webpage", "feed", "sitemap"]
@@ -71,7 +69,9 @@ def _allowed_hosts(hosts: Iterable[str]) -> set[str]:
 def _checked_body(body: bytes | str) -> bytes:
     # The size cap and declaration rejection live in one shared helper so every
     # XML entry point in the service inherits the same guard.
-    return checked_xml_bytes(body, max_bytes=MAX_DISCOVERY_DOCUMENT_BYTES)
+    checked = checked_xml_bytes(body, max_bytes=MAX_DISCOVERY_DOCUMENT_BYTES)
+    parse_safe_xml(checked, max_bytes=MAX_DISCOVERY_DOCUMENT_BYTES)
+    return checked
 
 
 def _allowed_url(raw_url: str, *, base_url: str, allowed_hosts: set[str]) -> str | None:
@@ -163,27 +163,20 @@ def discover_sitemap_candidates(
     normalized_sitemap = _allowed_url(sitemap_url, base_url=sitemap_url, allowed_hosts=host_set)
     if normalized_sitemap is None:
         raise ValueError("sitemap_url must be an allowed HTTP URL")
-    stream = BytesIO(_checked_body(body))
+    root = parse_safe_xml(body, max_bytes=MAX_DISCOVERY_DOCUMENT_BYTES)
 
     candidates: list[DiscoveryCandidate] = []
     seen: set[str] = set()
     rejected = 0
-    try:
-        elements = ElementTree.iterparse(stream, events=("end",))
-        for _, element in elements:
-            if element.tag.rsplit("}", 1)[-1] != "loc":
-                continue
-            accepted = _append_candidate(
-                candidates, seen, url=element.text, base_url=normalized_sitemap, allowed_hosts=host_set,
-                source_class="webpage", provenance="sitemap_url", max_candidates=max_candidates,
-            )
-            if not accepted:
-                rejected += 1
-            if len(candidates) == max_candidates:
-                # Do not continue walking an attacker-controlled sitemap once
-                # the caller's explicit canary cap is satisfied.
-                break
-            element.clear()
-    except ElementTree.ParseError as exc:
-        raise ValueError("sitemap is not valid XML") from exc
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "loc":
+            continue
+        accepted = _append_candidate(
+            candidates, seen, url=element.text, base_url=normalized_sitemap, allowed_hosts=host_set,
+            source_class="webpage", provenance="sitemap_url", max_candidates=max_candidates,
+        )
+        if not accepted:
+            rejected += 1
+        if len(candidates) == max_candidates:
+            break
     return DiscoveryResult(tuple(candidates), (), rejected)

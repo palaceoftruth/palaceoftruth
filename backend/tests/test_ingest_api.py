@@ -7,6 +7,7 @@ import app.api.ingest as ingest_api
 import httpx
 import app.api.capture as capture_api
 import app.utils.outbound_http as outbound_http
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -29,6 +30,14 @@ PNG_1X1_BYTES = (
     b"\x1f\x15\xc4\x89"
 )
 _REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.llm_admission.settings.client_llm_allowed_models",
+        "media-model,note-model,page-model,doc-model",
+    )
 
 
 class _ScalarResult:
@@ -1425,11 +1434,11 @@ def test_ingest_doc_rejects_content_that_contradicts_the_extension(tmp_path: Pat
     async def fake_stream_to_tmp(*_args, **_kwargs) -> str:
         return str(doc_path)
 
-    def unexpected_extraction(*_args, **_kwargs):
-        raise AssertionError("extraction must not run on unverified content")
+    async def rejected_extraction(*_args, **_kwargs):
+        raise ingest_api.DocumentValidationError("File content does not match the .pdf extension")
 
     monkeypatch.setattr(ingest_api, "_stream_to_tmp", fake_stream_to_tmp)
-    monkeypatch.setattr(ingest_api, "extract_document_bounded", unexpected_extraction)
+    monkeypatch.setattr(ingest_api, "extract_document_bounded", rejected_extraction)
 
     response = client.post(
         "/api/v1/ingest/doc",

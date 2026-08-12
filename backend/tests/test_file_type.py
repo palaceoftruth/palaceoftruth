@@ -5,6 +5,7 @@ import pytest
 
 from app.utils.file_type import (
     FileTypeError,
+    MAX_OOXML_ENTRIES,
     matches_extension,
     safe_media_type,
     verify_file_type,
@@ -85,6 +86,17 @@ def test_verify_rejects_a_plain_zip_named_as_an_office_file(tmp_path: Path) -> N
 
     with pytest.raises(FileTypeError, match="does not match"):
         verify_file_type(str(archive_path), ".xlsx")
+
+
+def test_verify_rejects_ooxml_with_excessive_central_directory_entries(tmp_path: Path) -> None:
+    archive_path = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("word/document.xml", "<document/>")
+        for index in range(MAX_OOXML_ENTRIES):
+            archive.writestr(f"padding/{index}", "")
+
+    with pytest.raises(FileTypeError, match="too many archive entries"):
+        verify_file_type(str(archive_path), ".docx")
 
 
 def test_verify_rejects_an_extension_outside_the_allowlist(tmp_path: Path) -> None:

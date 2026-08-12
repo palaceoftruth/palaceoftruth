@@ -12,6 +12,9 @@ import zipfile
 # Enough bytes for every signature checked here, and enough text for a useful
 # UTF-8 decode test on a plain text upload.
 SNIFF_BYTES = 4096
+MAX_OOXML_ENTRIES = 4_096
+MAX_OOXML_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_OOXML_COMPRESSION_RATIO = 100
 
 
 class FileTypeError(ValueError):
@@ -123,9 +126,26 @@ def _verify_ooxml_package(path: str, extension: str, member_prefix: str) -> None
 
     try:
         with zipfile.ZipFile(path) as archive:
-            names = archive.namelist()
+            entries = archive.infolist()
+            if len(entries) > MAX_OOXML_ENTRIES:
+                raise FileTypeError(
+                    f"{extension} package contains too many archive entries"
+                )
+            compressed_bytes = sum(max(entry.compress_size, 0) for entry in entries)
+            uncompressed_bytes = sum(max(entry.file_size, 0) for entry in entries)
+            if uncompressed_bytes > MAX_OOXML_UNCOMPRESSED_BYTES:
+                raise FileTypeError(
+                    f"{extension} package expands beyond the allowed size"
+                )
+            if compressed_bytes and uncompressed_bytes > compressed_bytes * MAX_OOXML_COMPRESSION_RATIO:
+                raise FileTypeError(
+                    f"{extension} package exceeds the allowed compression ratio"
+                )
+            has_expected_member = any(
+                name.startswith(member_prefix) for name in archive.NameToInfo
+            )
     except (OSError, zipfile.BadZipFile) as exc:
         raise FileTypeError(f"File is not a readable {extension} package: {exc}") from exc
 
-    if not any(name.startswith(member_prefix) for name in names):
+    if not has_expected_member:
         raise FileTypeError(f"File content does not match the {extension} extension")

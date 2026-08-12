@@ -1,7 +1,22 @@
+import socket
+
 import httpx
 import pytest
 
 from app.services.source_resource_fetch import fetch_http_resource, parse_retry_after
+
+
+def _resolver(address: str = "93.184.216.34"):
+    def resolve(_host: str, _port, *, type: int):
+        assert type == socket.SOCK_STREAM
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    return resolve
+
+
+@pytest.fixture(autouse=True)
+def public_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.utils.outbound_http.socket.getaddrinfo", _resolver())
 
 
 @pytest.mark.asyncio

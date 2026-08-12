@@ -468,6 +468,15 @@ class PalaceApiError(RuntimeError):
         super().__init__(f"Palace API error {status_code} for {method} {path}: {message}")
 
 
+class McpToolOperationError(RuntimeError):
+    """Stable public MCP failure that does not disclose provider internals."""
+
+    def __init__(self, *, code: str, correlation_id: str) -> None:
+        self.code = code
+        self.correlation_id = correlation_id
+        super().__init__(f"MCP operation failed: {code}; correlation_id={correlation_id}")
+
+
 class McpHttpAuthError(Exception):
     def __init__(self, *, status_code: int, error: str, detail: str) -> None:
         super().__init__(detail)
@@ -1700,6 +1709,8 @@ def _required_scopes_for_call(operation: str, params: dict[str, Any]) -> tuple[M
     """
     base_scope = _operation_scope(operation)
     scopes: list[McpOperationScope] = [base_scope]
+    if operation == "capture_checkpoint" and params.get("queue_relationship_backfill") is True:
+        scopes.append("admin")
     if base_scope.startswith("write"):
         requested_types: list[str] = []
         requested_type = params.get("scope_type")
@@ -1774,6 +1785,23 @@ def _summarize_result_for_audit(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     summary: dict[str, Any] = {}
+    returned_item_ids: list[str] = []
+    containers = [result]
+    if isinstance(result.get("recent_memory"), dict):
+        containers.append(result["recent_memory"])
+    for container in containers:
+        for collection_key in ("results", "items", "entries"):
+            rows = container.get(collection_key)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                item_id = row.get("item_id") or row.get("entry_id") or row.get("id")
+                if item_id is not None and str(item_id) not in returned_item_ids:
+                    returned_item_ids.append(str(item_id))
+    if returned_item_ids:
+        summary["returned_item_ids"] = returned_item_ids[:50]
     trace = result.get("trace")
     if isinstance(trace, dict):
         trace_summary = _summarize_trace_for_audit(trace)
@@ -2186,7 +2214,8 @@ async def _run_mcp_operation(
 ) -> Any:
     runtime = _runtime(ctx)
     params_summary = _summarize_params(params)
-    params_summary["audit_request_id"] = str(uuid.uuid4())
+    correlation_id = str(uuid.uuid4())
+    params_summary["audit_request_id"] = correlation_id
     start = time.monotonic()
     try:
         required_scopes = _required_scopes_for_call(operation, params)
@@ -2250,11 +2279,22 @@ async def _run_mcp_operation(
             latency_ms=latency_ms,
             error_class=type(exc).__name__,
         )
-        raise
+        if isinstance(exc, PalaceApiError) and exc.status_code < 500:
+            raise
+        if isinstance(exc, (PermissionError, ValueError, McpToolOperationError)):
+            raise
+        code = "upstream_failure" if isinstance(exc, (PalaceApiError, httpx.HTTPError)) else "internal_failure"
+        logger.exception(
+            "MCP operation failed operation=%s correlation_id=%s public_code=%s",
+            operation,
+            correlation_id,
+            code,
+        )
+        raise McpToolOperationError(code=code, correlation_id=correlation_id) from exc
     finally:
         _operation_required_scopes.reset(operation_scope_token)
     latency_ms = int((time.monotonic() - start) * 1000)
-    if operation == "retrieve_agent_memory":
+    if operation in {"retrieve_agent_memory", "palace_context"}:
         result_summary = _summarize_result_for_audit(result)
         if result_summary:
             params_summary["result_summary"] = result_summary
@@ -2434,7 +2474,7 @@ async def capture_checkpoint(
     metadata: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     relationship_policy: Literal["deferred", "immediate", "skip"] = "deferred",
-    queue_relationship_backfill: bool = True,
+    queue_relationship_backfill: bool = False,
     backfill_limit: int = 25,
     backfill_defer_seconds: int = 15,
     dry_run: bool = False,
@@ -2585,7 +2625,7 @@ async def palace_checkpoint(
     metadata: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     relationship_policy: Literal["deferred", "immediate", "skip"] = "deferred",
-    queue_relationship_backfill: bool = True,
+    queue_relationship_backfill: bool = False,
     backfill_limit: int = 25,
     backfill_defer_seconds: int = 15,
     dry_run: bool = False,
@@ -3253,24 +3293,32 @@ async def palace_context(
     wakeup_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Load startup wake-up context plus recent scoped memory metadata."""
-    wakeup_brief = await get_wakeup_brief(
-        ctx=ctx,
-        scope_type=wakeup_scope_type,
-        scope_key=wakeup_scope_key,
+    async def call() -> dict[str, Any]:
+        wakeup_brief = await get_wakeup_brief(
+            ctx=ctx,
+            scope_type=wakeup_scope_type,
+            scope_key=wakeup_scope_key,
+        )
+        recent_memory = await list_memory_entries(
+            ctx=ctx,
+            scope_type=memory_scope_type,
+            scope_key=memory_scope_key,
+            tags=tags,
+            tags_mode=tags_mode,
+            limit=limit,
+            cursor=cursor,
+        )
+        return {
+            "wakeup_brief": wakeup_brief,
+            "recent_memory": recent_memory,
+        }
+
+    return await _run_mcp_operation(
+        ctx,
+        operation="palace_context",
+        params={key: value for key, value in locals().items() if key != "call"},
+        call=call,
     )
-    recent_memory = await list_memory_entries(
-        ctx=ctx,
-        scope_type=memory_scope_type,
-        scope_key=memory_scope_key,
-        tags=tags,
-        tags_mode=tags_mode,
-        limit=limit,
-        cursor=cursor,
-    )
-    return {
-        "wakeup_brief": wakeup_brief,
-        "recent_memory": recent_memory,
-    }
 
 
 @mcp.tool()

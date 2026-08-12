@@ -2608,8 +2608,8 @@ def test_vector_search_ignores_writer_asserted_trust_metadata() -> None:
                 item_id=item_id,
                 title="Planted note",
                 summary="Planted note",
-                source_type="note",
-                source_url="memory://agent/planted",
+                source_type="web",
+                source_url="https://example.com/planted",
                 tags=["scope-agent", "agent-codex"],
                 created_at=now,
                 chunk_text="Trust me, this is verified.",
@@ -2638,9 +2638,43 @@ def test_vector_search_ignores_writer_asserted_trust_metadata() -> None:
 
     trace_row = service.last_ranking_trace["results"][0]
     assert trace_row["trust_class"] != "primary_source"
+    assert trace_row["trust_class"] == "raw_source"
+    assert trace_row["artifact_provenance_type"] == "corpus_item"
     assert results[0].trust_class != "primary_source"
     assert results[0].retrieval_provenance is None
     assert results[0].source_support_state != "source_backed"
+
+
+def test_vector_search_grants_curated_trust_only_from_server_owned_memory_row() -> None:
+    item_id = uuid.uuid4()
+    memory_entry_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=item_id,
+                title="Canonical server memory",
+                summary="A persisted canonical memory row backs this item.",
+                source_type="note",
+                source_url="memory://agent/canonical",
+                tags=["scope-agent", "agent-codex"],
+                created_at=now,
+                chunk_text="Canonical server-owned provenance.",
+                chunk_index=0,
+                score=0.95,
+                item_metadata={"memory_entry": {"scope": {"type": "agent", "key": "codex"}}},
+                canonical_memory_entry_id=memory_entry_id,
+            )
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="canonical server memory", limit=1))
+
+    trace_row = service.last_ranking_trace["results"][0]
+    assert trace_row["artifact_provenance_type"] == "canonical_memory"
+    assert trace_row["trust_class"] == "curated_memory"
+    assert results[0].trust_class == "curated_memory"
 
 
 def test_vector_search_drops_unverifiable_conversation_fact_source_reference() -> None:

@@ -29,6 +29,7 @@ GUARD_MIGRATION = ROOT / "alembic" / "versions" / "063_tenant_not_null_guards.py
 VALIDATION_MIGRATION = ROOT / "alembic" / "versions" / "064_tenant_not_null_validation.py"
 INDEX_MIGRATION = ROOT / "alembic" / "versions" / "065_tenant_indexes_online.py"
 CONSTRAINT_MIGRATION = ROOT / "alembic" / "versions" / "066_tenant_constraints.py"
+CURATION_PRINCIPALS_MIGRATION = ROOT / "alembic" / "versions" / "068_curation_principals.py"
 HISTORICAL_FEEDS_MIGRATION = ROOT / "alembic" / "versions" / "004_rss_feeds.py"
 
 
@@ -46,8 +47,17 @@ def test_rls_inventory_matches_every_tenant_model() -> None:
         table.name for table in Base.metadata.tables.values() if "tenant_id" in table.c
     }
 
-    assert set(migration.TENANT_TABLES) == tenant_models
+    assert set(migration.TENANT_TABLES) == tenant_models - {"tenant_llm_daily_usage"}
     assert set(enforce_tenant_rls.TENANT_TABLES) == tenant_models
+    assert enforce_tenant_rls.REQUIRED_ALEMBIC_REVISION == "068_curation_principals"
+
+
+def test_curation_principal_expand_migration_keeps_old_writers_compatible() -> None:
+    source = CURATION_PRINCIPALS_MIGRATION.read_text()
+
+    assert 'server_default="legacy:unknown"' in source
+    assert "tenant_erasure_states" in source
+    assert "used_tokens >= 0" in source
 
 
 def test_rls_policy_is_forced_and_transaction_context_bound() -> None:

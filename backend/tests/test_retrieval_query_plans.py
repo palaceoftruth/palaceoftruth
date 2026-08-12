@@ -116,6 +116,7 @@ async def plan_session() -> AsyncSession:
             await session.execute(text("CREATE TEMP TABLE room_memberships (tenant_id text, item_id uuid, room_id uuid)"))
             await session.execute(text("""
                 CREATE TEMP TABLE memory_entries (
+                    id uuid PRIMARY KEY,
                     tenant_id text NOT NULL,
                     item_id uuid NOT NULL,
                     valid_until timestamptz,

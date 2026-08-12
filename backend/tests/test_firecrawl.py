@@ -29,12 +29,16 @@ _PUBLIC_RESOLVER = _resolver("93.184.216.34")
 def test_firecrawl_self_hosted_uses_configured_base_url_and_optional_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
-    def fake_post(url: str, *, headers: dict, json: dict, timeout: float) -> httpx.Response:
-        seen.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
-        request = httpx.Request("POST", url)
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(
+            {
+                "url": str(request.url),
+                "headers": dict(request.headers),
+                "json": request.read(),
+            }
+        )
         return httpx.Response(
             200,
-            request=request,
             json={
                 "success": True,
                 "data": {
@@ -49,26 +53,25 @@ def test_firecrawl_self_hosted_uses_configured_base_url_and_optional_auth(monkey
             },
         )
 
-    monkeypatch.setattr("app.services.firecrawl.httpx.post", fake_post)
-
-    html, markdown, metadata = scrape_with_firecrawl(
-        "https://example.test/article",
-        FirecrawlConfig(
-            provider="firecrawl-self-hosted",
-            base_url="https://firecrawl.internal.example/v2/",
-            timeout_seconds=12,
-        ),
-        resolver=_PUBLIC_RESOLVER,
-    )
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        html, markdown, metadata = scrape_with_firecrawl(
+            "https://example.test/article",
+            FirecrawlConfig(
+                provider="firecrawl-self-hosted",
+                base_url="https://firecrawl.internal.example/v2/",
+                timeout_seconds=12,
+            ),
+            resolver=_PUBLIC_RESOLVER,
+            client=client,
+        )
 
     assert seen["url"] == "https://firecrawl.internal.example/v2/scrape"
-    assert seen["headers"] == {"Content-Type": "application/json"}
-    assert seen["json"] == {
+    assert seen["headers"]["content-type"] == "application/json"
+    assert __import__("json").loads(seen["json"]) == {
         "url": "https://example.test/article",
         "formats": ["markdown", "html"],
         "onlyMainContent": True,
     }
-    assert seen["timeout"] == 12
     assert html == "<h1>Captured</h1>"
     assert markdown == "# Captured\n\nFirecrawl body"
     assert metadata["content_source"] == "firecrawl"
@@ -80,39 +83,51 @@ def test_firecrawl_self_hosted_uses_configured_base_url_and_optional_auth(monkey
 def test_firecrawl_cloud_adds_bearer_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_headers: dict[str, str] = {}
 
-    def fake_post(_url: str, *, headers: dict, json: dict, timeout: float) -> httpx.Response:
-        seen_headers.update(headers)
-        request = httpx.Request("POST", _url)
-        return httpx.Response(200, request=request, json={"success": True, "data": {"markdown": "Cloud body"}})
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update(request.headers)
+        return httpx.Response(200, json={"success": True, "data": {"markdown": "Cloud body"}})
 
-    monkeypatch.setattr("app.services.firecrawl.httpx.post", fake_post)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        scrape_with_firecrawl(
+            "https://example.test/article",
+            FirecrawlConfig(
+                provider="firecrawl-cloud",
+                base_url="https://api.firecrawl.dev/v2",
+                api_key="fc-secret",
+            ),
+            resolver=_PUBLIC_RESOLVER,
+            client=client,
+        )
 
-    scrape_with_firecrawl(
-        "https://example.test/article",
-        FirecrawlConfig(
-            provider="firecrawl-cloud",
-            base_url="https://api.firecrawl.dev/v2",
-            api_key="fc-secret",
-        ),
-        resolver=_PUBLIC_RESOLVER,
-    )
-
-    assert seen_headers["Authorization"] == "Bearer fc-secret"
+    assert seen_headers["authorization"] == "Bearer fc-secret"
 
 
 def test_firecrawl_surfaces_http_error_detail(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_post(_url: str, *, headers: dict, json: dict, timeout: float) -> httpx.Response:
-        request = httpx.Request("POST", "https://firecrawl.internal.example/v2/scrape")
-        return httpx.Response(429, json={"error": "rate limited"}, request=request)
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "rate limited"})
 
-    monkeypatch.setattr("app.services.firecrawl.httpx.post", fake_post)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(FirecrawlScrapeError, match="HTTP 429: rate limited"):
+            scrape_with_firecrawl(
+                "https://example.test/article",
+                FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
+                resolver=_PUBLIC_RESOLVER,
+                client=client,
+            )
 
-    with pytest.raises(FirecrawlScrapeError, match="HTTP 429: rate limited"):
-        scrape_with_firecrawl(
-            "https://example.test/article",
-            FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
-            resolver=_PUBLIC_RESOLVER,
-        )
+
+def test_firecrawl_response_is_bounded_before_json_parsing() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Content-Length": str(17 * 1024 * 1024)})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(FirecrawlScrapeError, match="response exceeded the size limit"):
+            scrape_with_firecrawl(
+                "https://example.test/article",
+                FirecrawlConfig(provider="firecrawl-self-hosted", base_url="https://firecrawl.internal.example/v2"),
+                resolver=_PUBLIC_RESOLVER,
+                client=client,
+            )
 
 
 def test_webpage_pipeline_uses_firecrawl_before_local_article_scraper(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     # able to consume every tenant's capacity. A live stream never ends on its
     # own, and only the duration ceiling stops one.
     media_max_download_bytes: int = 2 * 1024 * 1024 * 1024
+    media_tenant_artifact_quota_bytes: int = 2 * 1024 * 1024 * 1024
     media_max_duration_seconds: int = 6 * 60 * 60
     media_allow_live_streams: bool = False
     media_ffmpeg_timeout_seconds: int = 300
@@ -117,6 +118,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_default_model: str = "minimax/minimax-m2.7"
     openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
+    client_llm_allowed_models: str = ""
+    tenant_llm_max_concurrent_requests: int = 2
+    tenant_llm_daily_token_limit: int = 0
     relationship_classification_model: str = "openai/gpt-4.1"
     relationship_classification_temperature: float = 0.0
     relationship_classification_seed: int = 1083
@@ -174,6 +178,7 @@ class Settings(BaseSettings):
     retrieval_capture_enabled: bool = False
     retrieval_capture_path: str = "/tmp/palaceoftruth/retrieval-capture.ndjson"
     retrieval_capture_query_mode: str = "fingerprint"
+    retrieval_capture_allow_raw_queries: bool = False
     retrieval_capture_max_query_chars: int = 500
     retrieval_source_ranking_enabled: bool = True
     retrieval_relationship_expansion_enabled: bool = False
@@ -353,6 +358,15 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_IDLE_TRANSACTION_TIMEOUT_MS must be at least 1")
         if self.doc_extraction_per_tenant_concurrency < 1:
             raise ValueError("DOC_EXTRACTION_PER_TENANT_CONCURRENCY must be at least 1")
+        if self.tenant_llm_max_concurrent_requests < 1:
+            raise ValueError("TENANT_LLM_MAX_CONCURRENT_REQUESTS must be at least 1")
+        if self.tenant_llm_daily_token_limit < 0:
+            raise ValueError("TENANT_LLM_DAILY_TOKEN_LIMIT must not be negative")
+        if self.retrieval_capture_query_mode == "raw" and not self.retrieval_capture_allow_raw_queries:
+            raise ValueError(
+                "RETRIEVAL_CAPTURE_ALLOW_RAW_QUERIES must be true before "
+                "RETRIEVAL_CAPTURE_QUERY_MODE=raw is accepted"
+            )
         if self.deployment_cluster and not self.credential_pepper.strip():
             raise ValueError(
                 "CREDENTIAL_PEPPER must be set when DEPLOYMENT_CLUSTER is configured; "

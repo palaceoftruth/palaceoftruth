@@ -454,6 +454,26 @@ def test_settings_accept_real_admin_secret(monkeypatch: pytest.MonkeyPatch) -> N
     config.Settings(**_settings_kwargs())
 
 
+def test_settings_require_explicit_opt_in_for_raw_retrieval_queries() -> None:
+    with pytest.raises(ValidationError, match="RETRIEVAL_CAPTURE_ALLOW_RAW_QUERIES"):
+        config.Settings(**_settings_kwargs(retrieval_capture_query_mode="raw"))
+
+    settings = config.Settings(
+        **_settings_kwargs(
+            retrieval_capture_query_mode="raw",
+            retrieval_capture_allow_raw_queries=True,
+        )
+    )
+    assert settings.retrieval_capture_query_mode == "raw"
+
+
+def test_settings_reject_invalid_tenant_llm_limits() -> None:
+    with pytest.raises(ValidationError, match="TENANT_LLM_MAX_CONCURRENT_REQUESTS"):
+        config.Settings(**_settings_kwargs(tenant_llm_max_concurrent_requests=0))
+    with pytest.raises(ValidationError, match="TENANT_LLM_DAILY_TOKEN_LIMIT"):
+        config.Settings(**_settings_kwargs(tenant_llm_daily_token_limit=-1))
+
+
 # A-05: chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
 # dev and the test suite never do. The pepper is mandatory only there.
 def test_settings_require_credential_pepper_when_deployment_cluster_is_set() -> None:

@@ -464,6 +464,9 @@ class _SearchCandidate:
     chunk_index: int
     score: float
     item_metadata: dict[str, Any] | None
+    # This identifier comes only from the server-owned memory_entries join.
+    # Client metadata must never be enough to grant curated-memory trust.
+    canonical_memory_entry_id: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -675,8 +678,12 @@ def _artifact_provenance(candidate: _SearchCandidate) -> tuple[str, str]:
 
     metadata = candidate.item_metadata or {}
     memory_entry = metadata.get("memory_entry")
-    if isinstance(memory_entry, dict):
-        key = "legacy_memory_artifact" if memory_entry.get("legacy_kind") else "canonical_memory"
+    if candidate.canonical_memory_entry_id is not None:
+        key = (
+            "legacy_memory_artifact"
+            if isinstance(memory_entry, dict) and memory_entry.get("legacy_kind")
+            else "canonical_memory"
+        )
         return key, _ARTIFACT_PROVENANCE_LABELS[key]
 
     return "corpus_item", _ARTIFACT_PROVENANCE_LABELS["corpus_item"]
@@ -1336,6 +1343,7 @@ class SearchService:
                 i.effective_date_source,
                 i.effective_date_quality,
                 i.metadata AS item_metadata,
+                me.id AS canonical_memory_entry_id,
                 me.valid_until AS canonical_valid_until,
                 me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
                 (SELECT sr.status FROM source_records sr
@@ -1654,6 +1662,7 @@ class SearchService:
                     i.effective_date_source,
                     i.effective_date_quality,
                     i.metadata AS item_metadata,
+                    me.id AS canonical_memory_entry_id,
                     me.valid_until AS canonical_valid_until,
                     me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
                     (SELECT sr.status FROM source_records sr
@@ -1682,7 +1691,8 @@ class SearchService:
                 item_id, chunk_text, chunk_index,
                 title, summary, source_type, source_url, tags, created_at,
                 effective_date, effective_date_source, effective_date_quality, item_metadata,
-                canonical_valid_until, canonical_superseded_by_entry_id, canonical_source_status,
+                canonical_memory_entry_id, canonical_valid_until,
+                canonical_superseded_by_entry_id, canonical_source_status,
                 (:vw * vec_score + :tw * text_score) AS score
             FROM ranked
             WHERE rn = 1
@@ -1752,6 +1762,7 @@ class SearchService:
                 chunk_index=r.chunk_index,
                 score=float(r.score),
                 item_metadata=_with_canonical_currentness(r),
+                canonical_memory_entry_id=getattr(r, "canonical_memory_entry_id", None),
             )
             for r in rows
         ]
@@ -2205,6 +2216,7 @@ class SearchService:
                             i.effective_date_source,
                             i.effective_date_quality,
                             i.metadata AS item_metadata,
+                            me.id AS canonical_memory_entry_id,
                             me.valid_until AS canonical_valid_until,
                             me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
                             (SELECT sr.status FROM source_records sr
@@ -2375,6 +2387,7 @@ class SearchService:
                     chunk_index=row.chunk_index,
                     score=float(row.score),
                     item_metadata=_with_canonical_currentness(row),
+                    canonical_memory_entry_id=getattr(row, "canonical_memory_entry_id", None),
                 )
             )
         return graph_candidates, graph_scores

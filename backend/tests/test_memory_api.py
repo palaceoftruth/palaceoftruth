@@ -1322,6 +1322,22 @@ def test_memory_entries_quarantines_secret_body_before_storage(monkeypatch) -> N
     assert client.app.state.arq_pool.enqueued == []
 
 
+def test_memory_entries_quarantines_unlabeled_high_entropy_token(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_accept_canonical_memory_entry(*args, **kwargs):
+        raise AssertionError("quarantined writes must not reach storage")
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    payload = _canonical_payload()
+    payload["body"] = "Captured mP9/2vQ7rT4wX8yZ1aB3cD5eF6gH0jK+LmN= during a run"
+
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["audit"]["privacy_scan"]["findings"][0]["pattern"] == "high_entropy_token"
+
+
 def test_memory_entries_quarantines_raw_transcript_body_before_storage(monkeypatch) -> None:
     client = _build_app(FakeSession())
 
