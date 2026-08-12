@@ -8,6 +8,13 @@ import uuid
 import httpx
 
 from app.database import async_session
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
 from app.models.job import Job
 from app.services.webhook_payload import build_webhook_payload
 from app.utils.outbound_http import OutboundUrlError, request_public_http_async
@@ -41,7 +48,7 @@ async def deliver_webhook(
     Self-managed retry: on connection error, timeout, or HTTP 5xx, re-enqueues
     itself with attempt+1 up to _MAX_ATTEMPTS. After exhaustion logs and stops.
     """
-    async with async_session() as db:
+    async with system_async_session() as db:
         job = await db.get(Job, uuid.UUID(job_id))
 
     if not job:

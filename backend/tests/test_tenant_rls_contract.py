@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import app.models  # noqa: F401
-from app import enforce_tenant_rls
+from app import database, enforce_tenant_rls
 from app.api import ingest
 from app.api.admin import _normalize_tenant_id
 from app.database import Base
@@ -103,7 +103,7 @@ def test_historical_feed_migration_fails_instead_of_deleting_duplicates() -> Non
     assert "DELETE FROM items" not in upgrade_source
 
 
-def test_worker_tenant_arguments_have_no_implicit_default() -> None:
+def test_worker_tenant_arguments_accept_only_legacy_missing_tenant_default() -> None:
     functions = (
         tasks.process_media,
         tasks.process_webpage,
@@ -119,7 +119,28 @@ def test_worker_tenant_arguments_have_no_implicit_default() -> None:
 
     for function in functions:
         tenant = inspect.signature(function).parameters["tenant_id"]
-        assert tenant.default is inspect.Parameter.empty, function.__name__
+        assert tenant.default is None, function.__name__
+
+
+def test_unbound_session_factory_has_no_system_access() -> None:
+    assert database.async_session.kw["info"] == {
+        "tenant_id": "__unbound__",
+        "system_access": False,
+    }
+
+
+def test_tenant_erasure_keeps_external_io_outside_atomic_lock_window() -> None:
+    source = (ROOT / "app" / "services" / "data_lifecycle.py").read_text()
+    function = source.split("async def erase_tenant_data", 1)[1].split(
+        "async def hard_delete_item", 1
+    )[0]
+
+    first_queue_scan = function.index("purged_arq_jobs = await _purge_tenant_arq_jobs")
+    lock = function.index("LOCK TABLE")
+    marker = function.index("INSERT INTO tenant_erasure_states")
+    assert first_queue_scan < lock < marker
+    assert "SET LOCAL statement_timeout = 0" in function
+    assert "SET LOCAL idle_in_transaction_session_timeout = 0" in function
 
 
 def test_arq_worker_entrypoints_do_not_swallow_unknown_arguments() -> None:

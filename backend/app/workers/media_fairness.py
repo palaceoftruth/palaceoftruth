@@ -13,6 +13,13 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
 from app.utils.job_payloads import load_retry_task_from_payload
 from app.workers.queues import MEDIA_TASK_NAMES, MEDIA_WORKER_QUEUE
 
@@ -142,7 +149,7 @@ async def dispatch_tenant_fair_media_jobs(
         default=100,
     )
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         pending_rows = (
             await db.execute(
                 text(

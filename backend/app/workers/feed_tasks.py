@@ -36,6 +36,17 @@ def system_async_session():
     except TypeError:
         return async_session()
 
+
+async def _feed_tenant(feed_id: str, tenant_id: str | None) -> str:
+    if tenant_id is not None:
+        return str(tenant_id)
+    parsed_feed_id = uuid.UUID(feed_id)
+    async with system_async_session() as db:
+        resolved = await db.scalar(select(Feed.tenant_id).where(Feed.id == parsed_feed_id))
+    if resolved is None:
+        raise ValueError(f"Legacy feed queue row {feed_id} was not found")
+    return str(resolved)
+
 _JOB_TYPE_TO_TASK = {
     "media": "process_media",
     "video": "process_media",
@@ -287,8 +298,9 @@ async def poll_all_feeds(ctx: dict) -> None:
     logger.info("poll_all_feeds: dispatched %d jobs", len(feeds_due))
 
 
-async def poll_feed(ctx: dict, feed_id: str, tenant_id: str) -> None:
+async def poll_feed(ctx: dict, feed_id: str, tenant_id: str | None = None) -> None:
     """Fetch feed XML, parse entries, enqueue per-article jobs."""
+    tenant_id = await _feed_tenant(feed_id, tenant_id)
     import feedparser
     from app.utils.outbound_http import fetch_public_http_bytes
 
@@ -396,7 +408,7 @@ async def process_feed_item(
     feed_id: str,
     entry_url: str,
     *,
-    tenant_id: str,
+    tenant_id: str | None = None,
     entry_title: str = "",
     entry_summary: str = "",
     entry_author: str | None = None,
@@ -404,6 +416,7 @@ async def process_feed_item(
     entry_guid: str | None = None,
 ) -> None:
     """Run FeedPipeline for one article; enqueue relationship extraction on success."""
+    tenant_id = await _feed_tenant(feed_id, tenant_id)
     async with tenant_async_session(tenant_id) as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
         if not feed:

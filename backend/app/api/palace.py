@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_auth_context, hash_secret, require_api_capability, secret_hash_candidates
-from app.database import async_session, get_db
+from app.database import get_db, system_async_session
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
@@ -291,7 +291,7 @@ def _config_snippets(request: Request, *, client_key: str = "<client_key>", scop
 
 
 async def _run_sync_inline(app, sync_run_id: uuid.UUID) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         status, _error = await run_sync_run(
             db,
             run_id=sync_run_id,

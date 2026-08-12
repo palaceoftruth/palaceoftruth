@@ -69,7 +69,9 @@ async_session = async_sessionmaker(
     class_=AsyncSession,
     sync_session_class=TenantSession,
     expire_on_commit=False,
-    info={"tenant_id": "__unbound__", "system_access": True},
+    # Unbound sessions are deliberately empty under forced RLS. Cross-tenant
+    # control-plane work must opt in through system_async_session().
+    info={"tenant_id": "__unbound__", "system_access": False},
 )
 
 

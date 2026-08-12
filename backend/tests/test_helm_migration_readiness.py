@@ -107,6 +107,21 @@ def test_rollout_defers_rls_until_post_rollout_hook() -> None:
     assert migration_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
     assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
     assert enforcement["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "3"
+    enforcement_spec = enforcement["spec"]["template"]["spec"]
+    assert enforcement_spec["serviceAccountName"] == "palaceoftruth-tenant-rls-enforcement"
+    rollout_gate = enforcement_spec["initContainers"][0]
+    assert rollout_gate["name"] == "wait-for-tenant-aware-rollout"
+    assert "updatedReplicas" in rollout_gate["command"][-1]
+    assert "readyReplicas" in rollout_gate["command"][-1]
+    role = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("kind") == "Role"
+        and manifest.get("metadata", {}).get("name") == "palaceoftruth-tenant-rls-enforcement"
+    )
+    assert role["rules"] == [
+        {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list"]}
+    ]
     assert enforcement["spec"]["template"]["spec"]["containers"][0]["command"] == [
         "python",
         "-m",

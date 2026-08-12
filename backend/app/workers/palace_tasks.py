@@ -88,7 +88,7 @@ async def _list_diary_rollup_tenants(db) -> tuple[str, ...]:
 
 
 async def run_fact_registry_extraction(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_fact_registry_extraction skipped; no ready-item tenants found")
@@ -108,7 +108,7 @@ async def run_fact_registry_extraction(ctx: dict) -> None:
 
 
 async def run_wakeup_story_refresh(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_wakeup_story_refresh skipped; no ready-item tenants found")
@@ -136,7 +136,7 @@ async def run_memory_dream_refresh(ctx: dict) -> None:
     if not target_days:
         return
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_memory_dream_refresh skipped; no ready-item tenants found")
@@ -170,7 +170,7 @@ async def run_memory_dream_refresh(ctx: dict) -> None:
 
 
 async def run_fact_registry_contradiction_sweep(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_fact_registry_contradiction_sweep skipped; no ready-item tenants found")
@@ -369,7 +369,7 @@ async def _enqueue_sync_source_run(ctx: dict, db, *, source: SyncSource, trigger
 
 
 async def poll_sync_sources(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         rows = (
             await db.execute(
                 select(SyncSource)
@@ -395,7 +395,7 @@ async def poll_sync_sources(ctx: dict) -> None:
 async def watch_local_sync_sources_once(ctx: dict) -> int:
     """Probe local sync sources between scheduled rescans and enqueue changed ones."""
     enqueued = 0
-    async with async_session() as db:
+    async with system_async_session() as db:
         rows = (
             await db.execute(
                 select(SyncSource)
@@ -447,7 +447,7 @@ async def run_diary_rollup_maintenance(ctx: dict) -> None:
     if not target_days:
         return
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await _list_diary_rollup_tenants(db)
         if not tenant_ids:
             logger.debug("run_diary_rollup_maintenance skipped; no note tenants found")
@@ -474,7 +474,7 @@ async def run_diary_rollup_maintenance(ctx: dict) -> None:
 
 
 async def recover_palace_backlog(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -493,7 +493,7 @@ async def recover_palace_backlog(ctx: dict) -> None:
 
 
 async def refresh_dirty_palace_rooms(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -575,7 +575,7 @@ async def run_palace_maintenance(ctx: dict) -> None:
 
 
 async def repair_palace_artifacts(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -610,7 +610,7 @@ async def repair_palace_artifacts(ctx: dict) -> None:
 
 
 async def refresh_palace_consolidation_candidates(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -635,7 +635,7 @@ async def refresh_palace_consolidation_candidates(ctx: dict) -> None:
 
 
 async def recompute_palace_tunnel_strengths(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -663,7 +663,7 @@ async def recompute_palace_tunnel_strengths(ctx: dict) -> None:
 
 
 async def refresh_caught_up_wakeup_briefs(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -683,7 +683,7 @@ async def refresh_caught_up_wakeup_briefs(ctx: dict) -> None:
 
 
 async def sweep_palace_index_integrity(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -757,7 +757,14 @@ async def sweep_palace_index_integrity(ctx: dict) -> None:
                 )
 
 
-async def mark_item_dirty_and_schedule(ctx: dict, item_id: str, tenant_id: str, reason: str = "ingest") -> None:
+async def mark_item_dirty_and_schedule(
+    ctx: dict,
+    item_id: str,
+    tenant_id: str | None = None,
+    reason: str = "ingest",
+) -> None:
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(Item, uuid.UUID(item_id))
     await mark_items_dirty_and_schedule(ctx, item_ids=[item_id], tenant_id=tenant_id, reason=reason)
 
 
@@ -775,7 +782,7 @@ async def mark_items_dirty_and_schedule(
     if not parsed_item_ids:
         return
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         existing_item_ids = (
             await db.execute(
                 select(Item.id)

@@ -15,6 +15,13 @@ from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
 from app.services.search import SearchService
 
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
 logger = logging.getLogger(__name__)
 
 _RETRIEVAL_LIMIT = 8
@@ -82,7 +89,7 @@ async def persist_messages_background(
     from FastAPI BackgroundTasks (the request-scoped session will already be closed).
     """
     try:
-        async with async_session() as session:
+        async with tenant_async_session(tenant_id) as session:
             async with session.begin():
                 await session.execute(
                     text(

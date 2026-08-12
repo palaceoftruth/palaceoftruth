@@ -257,33 +257,36 @@ async def erase_tenant_data(
         await db.commit()
         return counts
 
-    # Commit a permanent marker first. Every RLS WITH CHECK rejects later data
-    # for this tenant, including writes made through system/background sessions.
-    await db.execute(
-        text(
-            """
-            INSERT INTO tenant_erasure_states (subject_tenant_id)
-            VALUES (:tenant_id)
-            ON CONFLICT (subject_tenant_id) DO NOTHING
-            """
-        ),
-        {"tenant_id": tenant_id},
-    )
-    await db.commit()
-
     staged_paths: list[tuple[Path, Path]] = []
     try:
         tables = tuple(_tenant_tables())
-        # Drain all transactions that can still write a tenant table, then hold
-        # the tables until this erasure transaction commits. The committed RLS
-        # marker prevents new inserts or updates while the locks are acquired.
-        quoted_tables = ", ".join(f'"{table.name}"' for table in tables)
-        await db.execute(text(f"LOCK TABLE {quoted_tables} IN SHARE ROW EXCLUSIVE MODE"))
+        # Inspect and purge durable queue references before taking locks that
+        # block writes for every tenant. A slow or unavailable Redis service
+        # must not extend the database maintenance window.
         tenant_identifiers = await _tenant_identifiers(db, tenant_id)
         purged_arq_jobs = await _purge_tenant_arq_jobs(
             arq_pool,
             tenant_id=tenant_id,
             tenant_identifiers=tenant_identifiers,
+        )
+
+        # Erasure is deliberate maintenance and can exceed normal request query
+        # limits. Keep the marker, row deletion, and audit record atomic: if a
+        # lock or delete fails, the marker rolls back and the tenant is not left
+        # frozen around still-readable data.
+        await db.execute(text("SET LOCAL statement_timeout = 0"))
+        await db.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
+        quoted_tables = ", ".join(f'"{table.name}"' for table in tables)
+        await db.execute(text(f"LOCK TABLE {quoted_tables} IN SHARE ROW EXCLUSIVE MODE"))
+        await db.execute(
+            text(
+                """
+                INSERT INTO tenant_erasure_states (subject_tenant_id)
+                VALUES (:tenant_id)
+                ON CONFLICT (subject_tenant_id) DO NOTHING
+                """
+            ),
+            {"tenant_id": tenant_id},
         )
         counts = await tenant_row_counts(db, tenant_id)
         staged_paths = _stage_tenant_artifacts(tenant_id)

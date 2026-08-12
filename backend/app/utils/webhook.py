@@ -26,7 +26,11 @@ async def maybe_dispatch_webhook(arq_pool, job_id: str) -> None:
     from app.models.job import Job
 
     try:
-        async with async_session() as db:
+        try:
+            session = async_session(info={"tenant_id": "__unbound__", "system_access": True})
+        except TypeError:
+            session = async_session()
+        async with session as db:
             job = await db.get(Job, uuid.UUID(job_id))
             if job and job.webhook_url:
                 await arq_pool.enqueue_job(

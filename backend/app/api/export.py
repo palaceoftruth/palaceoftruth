@@ -16,6 +16,13 @@ from app.database import async_session
 from app.models.item import Item
 from app.services.bundle import build_bundle_archive
 
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
@@ -49,7 +56,7 @@ async def export_library(
             )
         tmp = tempfile.NamedTemporaryFile(prefix="palaceoftruth-bundle-", suffix=".zip", delete=False)
         tmp.close()
-        async with async_session() as db:
+        async with tenant_async_session(request.state.tenant_id) as db:
             await build_bundle_archive(db, request.state.tenant_id, tmp.name)
         background_tasks.add_task(_cleanup_file, tmp.name)
         return FileResponse(
@@ -58,7 +65,7 @@ async def export_library(
             filename=f"palaceoftruth-bundle-{today}.zip",
         )
 
-    async with async_session() as db:
+    async with tenant_async_session(request.state.tenant_id) as db:
         q = select(Item).where(
             Item.status == "ready",
             Item.tenant_id == request.state.tenant_id,

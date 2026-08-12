@@ -90,7 +90,7 @@ async def test_legacy_restore_job_resolves_tenant_from_durable_job(monkeypatch) 
         lambda: ScalarSessionContext("tenant-legacy"),
     )
 
-    assert await tasks._legacy_restore_job_tenant(uuid.uuid4()) == "tenant-legacy"
+    assert await tasks._durable_job_tenant(uuid.uuid4()) == "tenant-legacy"
 
 
 class FakeLlm:
