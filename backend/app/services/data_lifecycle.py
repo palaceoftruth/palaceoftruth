@@ -499,7 +499,7 @@ async def erase_tenant_data(
         )
         commit_attempted = True
         await db.commit()
-    except Exception:
+    except BaseException:
         await db.rollback()
         if not commit_attempted:
             _restore_staged_paths(staged_paths)
@@ -510,7 +510,7 @@ async def erase_tenant_data(
             raise
         try:
             committed = await _audit_event_was_committed(audit_id)
-        except Exception:
+        except BaseException:
             logger.critical(
                 "Could not resolve tenant erasure commit outcome for %s; "
                 "leaving artifacts quarantined and queue closed",
@@ -613,7 +613,7 @@ async def hard_delete_item(
             commit_attempted = True
             await db.commit()
             database_committed = True
-        except Exception:
+        except BaseException:
             await db.rollback()
             if commit_attempted:
                 try:
@@ -660,7 +660,7 @@ async def hard_delete_item(
         await reopen_tenant_queue(arq_pool, tenant_id)
         queue_closed = False
         return True
-    except Exception:
+    except BaseException:
         if queue_closed and not database_committed:
             await reopen_tenant_queue(arq_pool, tenant_id)
         raise

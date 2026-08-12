@@ -199,6 +199,7 @@ def test_destructive_deletion_paths_fail_closed_across_external_state() -> None:
     assert commit < verify < restore
     assert "leaving artifacts quarantined and queue closed" in tenant_erasure
     assert "if not commit_attempted" in tenant_erasure
+    assert "except BaseException" in tenant_erasure
 
     find_jobs = item_erasure.index("_find_identifier_arq_jobs")
     delete_jobs = item_erasure.index("delete(Job)", find_jobs)
@@ -209,6 +210,7 @@ def test_destructive_deletion_paths_fail_closed_across_external_state() -> None:
     assert "if queue_closed and not database_committed" in item_erasure
     assert "_audit_event_was_committed" in item_erasure
     assert "leaving artifacts quarantined" in item_erasure
+    assert item_erasure.count("except BaseException") >= 2
 
 
 def test_every_worker_honors_tenant_erasure_abort_requests() -> None:
