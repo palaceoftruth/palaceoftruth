@@ -104,19 +104,29 @@ def test_distributed_gate_holds_and_releases_postgres_slot(
 ) -> None:
     calls: list[str] = []
 
-    class Session:
+    class Connection:
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *_args):
             return None
 
+        async def execution_options(self, **options):
+            assert options == {"isolation_level": "AUTOCOMMIT"}
+            calls.append("AUTOCOMMIT")
+            return self
+
         async def scalar(self, statement, _params):
             sql = str(statement)
             calls.append(sql)
             return True
 
-    monkeypatch.setattr("app.database.tenant_async_session", lambda _tenant_id: Session())
+    class Engine:
+        @staticmethod
+        def connect():
+            return Connection()
+
+    monkeypatch.setattr("app.database.engine", Engine())
     monkeypatch.setattr("app.services.llm_admission.settings.tenant_llm_max_concurrent_requests", 2)
 
     async def scenario() -> None:
@@ -124,4 +134,5 @@ def test_distributed_gate_holds_and_releases_postgres_slot(
             assert any("pg_try_advisory_lock" in call for call in calls)
 
     asyncio.run(scenario())
+    assert "AUTOCOMMIT" in calls
     assert any("pg_advisory_unlock" in call for call in calls)

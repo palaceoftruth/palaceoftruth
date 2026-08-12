@@ -484,25 +484,21 @@ async def update_candidate_curation_artifact(
     principal_id: str | None = None,
     can_approve: bool = False,
 ) -> CandidateCurationArtifact:
-    requested_status = (
-        _normalize_status(body.status) if body.status is not None else artifact.status
-    )
-    if requested_status in PROMOTED_STATUSES | {"rejected"} and requested_status != artifact.status:
-        # Serialize approval decisions. Without a row lock, two sessions can
-        # both validate the same stale reviewable state and commit conflicting
-        # decisions for one artifact.
-        locked = (
-            await db.execute(
-                select(CandidateCurationArtifact)
-                .where(CandidateCurationArtifact.id == artifact.id)
-                .where(CandidateCurationArtifact.tenant_id == artifact.tenant_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if locked is None or locked.tenant_id != artifact.tenant_id:
-            raise CandidateCurationArtifactError("candidate curation artifact not found")
-        artifact = locked
+    # Serialize every update and refresh stale identity-map state before status
+    # validation. Otherwise a material PATCH can read ``reviewable``, wait
+    # behind an approval transaction, and write mutable evidence after approval.
+    locked = (
+        await db.execute(
+            select(CandidateCurationArtifact)
+            .where(CandidateCurationArtifact.id == artifact.id)
+            .where(CandidateCurationArtifact.tenant_id == artifact.tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if locked is None or locked.tenant_id != artifact.tenant_id:
+        raise CandidateCurationArtifactError("candidate curation artifact not found")
+    artifact = locked
     if artifact.status in TERMINAL_STATUSES and body.status not in (None, artifact.status):
         raise CandidateCurationArtifactError("terminal candidate artifacts cannot move to a new lifecycle status")
     previous_snapshot = _artifact_snapshot(artifact)

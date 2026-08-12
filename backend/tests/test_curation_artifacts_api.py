@@ -629,6 +629,21 @@ def test_approved_candidate_cannot_change_evidence_without_new_revision() -> Non
     assert response.status_code == 422
     assert "immutable" in response.json()["detail"]
     assert artifact.source_item_ids == ["SAR-512"]
+    assert "FOR UPDATE" in session.statements[0]
+
+
+def test_ordinary_candidate_update_locks_before_status_validation() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session, subject_id="writer-b", scopes=("read", "write"))
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={"metadata": {"review": "pending"}},
+    )
+
+    assert response.status_code == 200
+    assert "FOR UPDATE" in session.statements[0]
 
 
 def test_patch_candidate_curation_artifact_promotes_source_backed_generated_insight() -> None:

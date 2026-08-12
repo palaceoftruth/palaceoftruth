@@ -82,10 +82,16 @@ async def _distributed_tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
 
     from sqlalchemy import text
 
-    from app.database import tenant_async_session
+    from app.database import engine
 
     slot_count = max(1, settings.tenant_llm_max_concurrent_requests)
-    async with tenant_async_session(tenant_id) as session:
+    # Session-level advisory locks must not sit inside an open transaction while
+    # external provider work runs. PostgreSQL can terminate an idle transaction
+    # and silently release its locks before that work completes.
+    async with engine.connect() as raw_connection:
+        connection = await raw_connection.execution_options(
+            isolation_level="AUTOCOMMIT"
+        )
         acquired_slot: int | None = None
         try:
             while acquired_slot is None:
@@ -95,7 +101,7 @@ async def _distributed_tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
                         "big",
                         signed=True,
                     )
-                    acquired = await session.scalar(
+                    acquired = await connection.scalar(
                         text("SELECT pg_try_advisory_lock(:lock_key)"),
                         {"lock_key": lock_key},
                     )
@@ -115,7 +121,7 @@ async def _distributed_tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
                     signed=True,
                 )
                 await asyncio.shield(
-                    session.scalar(
+                    connection.scalar(
                         text("SELECT pg_advisory_unlock(:lock_key)"),
                         {"lock_key": lock_key},
                     )
