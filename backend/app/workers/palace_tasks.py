@@ -26,7 +26,7 @@ from app.services.palace import (
     run_sync_run,
     sync_source_has_local_file_changes,
 )
-from app.workers.queues import enqueue_palace_job
+from app.workers.queues import enqueue_palace_job, enqueue_tenant_job
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,8 @@ async def _enqueue_missing_embedding_repairs(
         item.status = "processing"
         await db.commit()
         try:
-            await ctx["redis"].enqueue_job(
+            await enqueue_tenant_job(
+                ctx["redis"],
                 "embed_item",
                 item_id=str(item.id),
                 skip_ai_enrichment=False,

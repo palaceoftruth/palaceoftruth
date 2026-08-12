@@ -36,6 +36,7 @@ from app.services.source_subscriptions import (
     record_source_subscription_manual_sync,
     sanitize_source_subscription_error,
 )
+from app.workers.queues import enqueue_tenant_job
 
 router = APIRouter(prefix="/source-subscriptions", tags=["source-subscriptions"])
 
@@ -334,7 +335,8 @@ async def manual_sync_source_subscription(
             detail=f"Manual sync rate limited; retry after {remaining_cooldown_seconds} seconds",
         )
     try:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "poll_source_subscription_task",
             subscription_id=str(subscription.id),
             tenant_id=request.state.tenant_id,

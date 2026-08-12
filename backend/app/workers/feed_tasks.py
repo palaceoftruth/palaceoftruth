@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from arq.jobs import Job as ArqJob, JobStatus
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.config import settings
 from app.database import async_session
@@ -16,7 +16,12 @@ from app.models.item import Item
 from app.models.job import Job
 from app.pipelines.feed import FeedPipeline
 from app.workers.queues import DEFAULT_WORKER_QUEUE
-from app.workers.queues import enqueue_palace_job, enqueue_worker_job, queue_kwargs_for_task
+from app.workers.queues import (
+    enqueue_palace_job,
+    enqueue_tenant_job,
+    enqueue_worker_job,
+    queue_kwargs_for_task,
+)
 from app.utils.job_payloads import load_retry_task_from_payload
 from app.utils.webhook import maybe_dispatch_webhook
 
@@ -274,7 +279,9 @@ async def requeue_stale_jobs(ctx: dict) -> None:
         if task_name in ("process_media", "process_youtube"):
             await enqueue_worker_job(ctx["redis"], task_name, _job_id=job_id, **task_kwargs)
         else:
-            await ctx["redis"].enqueue_job(task_name, _job_id=job_id, **queue_kwargs, **task_kwargs)
+            await enqueue_worker_job(
+                ctx["redis"], task_name, _job_id=job_id, **queue_kwargs, **task_kwargs
+            )
         logger.info("requeue_stale_jobs: requeued job %s (%s) → %s", job_id, row.job_type, task_name)
 
 
@@ -293,7 +300,9 @@ async def poll_all_feeds(ctx: dict) -> None:
         feeds_due = [(str(row.id), row.tenant_id) for row in result]
 
     for feed_id, tenant_id in feeds_due:
-        await ctx["redis"].enqueue_job("poll_feed", feed_id=feed_id, tenant_id=tenant_id)
+        await enqueue_tenant_job(
+            ctx["redis"], "poll_feed", feed_id=feed_id, tenant_id=tenant_id
+        )
 
     logger.info("poll_all_feeds: dispatched %d jobs", len(feeds_due))
 
@@ -387,7 +396,8 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str | None = None) -> No
             entry_url = entry.get("link") or entry.get("id")
             if not entry_url:
                 continue
-            await ctx["redis"].enqueue_job(
+            await enqueue_tenant_job(
+                ctx["redis"],
                 "process_feed_item",
                 feed_id=feed_id,
                 entry_url=entry_url,
@@ -444,6 +454,11 @@ async def process_feed_item(
         )
 
     if item_id:
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_tenant_job(
+            ctx["redis"],
+            "extract_relationships",
+            item_id=str(item_id),
+            tenant_id=tenant_id,
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
         logger.info("process_feed_item: item %s ready, relationships enqueued", item_id)

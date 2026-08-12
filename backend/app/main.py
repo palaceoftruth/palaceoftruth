@@ -34,13 +34,6 @@ from app.api import (
 from app.admin_host import AdminHostMiddleware
 from app.config import settings, make_redis_settings
 from app.database import async_session
-
-
-def system_async_session():
-    try:
-        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
-    except TypeError:
-        return async_session()
 from app.logging_config import configure_logging
 from app.models.palace import SyncSource
 from app.schemas.palace import SyncSourceCreate
@@ -59,6 +52,13 @@ from app.workers.serialization import (
     job_deserializer as json_job_deserializer,
     job_serializer as json_job_serializer,
 )
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
 
 # Must run at import time, before the first logger.info() below. Uvicorn
 # configures only its own "uvicorn.*" loggers, so without this the root logger

@@ -42,6 +42,7 @@ from app.services.source_resources import (
     persist_refresh_observation,
     refresh_lease_job_id,
 )
+from app.workers.queues import enqueue_tenant_job
 from app.utils.hash import compute_content_hash
 from app.workers.queues import enqueue_palace_job
 
@@ -190,7 +191,8 @@ async def dispatch_due_source_resources(ctx: dict) -> int:
         await db.commit()
 
     for lease in leases:
-        await ctx["redis"].enqueue_job(
+        await enqueue_tenant_job(
+            ctx["redis"],
             "refresh_source_resource",
             resource_id=str(lease.resource_id),
             tenant_id=lease.tenant_id,

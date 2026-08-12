@@ -22,7 +22,13 @@ from app.models.data_lifecycle import DataLifecycleAuditEvent, TenantErasureStat
 from app.models.item import Item
 from app.services.bundle import acquire_item_artifact_lock, item_artifact_tombstone
 from app.config import settings
-from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
+from app.workers.queues import (
+    DEFAULT_WORKER_QUEUE,
+    MEDIA_WORKER_QUEUE,
+    PALACE_WORKER_QUEUE,
+    close_tenant_queue,
+    reopen_tenant_queue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +292,7 @@ async def erase_tenant_data(
         return counts
 
     staged_paths: list[tuple[Path, Path]] = []
+    await close_tenant_queue(arq_pool, tenant_id)
     try:
         tables = tuple(_tenant_tables())
         # Validate every queue payload before the transaction becomes
@@ -345,6 +352,7 @@ async def erase_tenant_data(
         artifact_tombstone = _tenant_artifact_directory(tenant_id)
         if artifact_tombstone.is_file() or artifact_tombstone.is_symlink():
             artifact_tombstone.unlink()
+        await reopen_tenant_queue(arq_pool, tenant_id)
         raise
     # Catch an enqueue that was already between its database commit and Redis
     # write when the table locks were acquired.

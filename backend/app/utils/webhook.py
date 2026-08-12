@@ -24,6 +24,7 @@ async def maybe_dispatch_webhook(arq_pool, job_id: str) -> None:
     """
     from app.database import async_session
     from app.models.job import Job
+    from app.workers.queues import enqueue_tenant_job
 
     try:
         try:
@@ -33,8 +34,10 @@ async def maybe_dispatch_webhook(arq_pool, job_id: str) -> None:
         async with session as db:
             job = await db.get(Job, uuid.UUID(job_id))
             if job and job.webhook_url:
-                await arq_pool.enqueue_job(
+                await enqueue_tenant_job(
+                    arq_pool,
                     "deliver_webhook",
+                    tenant_id=str(job.tenant_id),
                     job_id=job_id,
                     webhook_url=job.webhook_url,
                     signing_key=job.signing_key,

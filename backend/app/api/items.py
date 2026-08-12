@@ -22,7 +22,7 @@ from app.schemas.relationship import RelatedItemResponse, RelatedItemsResponse
 from app.services.item_dates import apply_effective_date
 from app.services.data_lifecycle import hard_delete_item
 from app.utils.file_type import SNIFF_BYTES, matches_extension, safe_media_type
-from app.workers.queues import enqueue_palace_job
+from app.workers.queues import enqueue_palace_job, enqueue_tenant_job
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -237,7 +237,8 @@ async def create_item(
 
     embedding_queued = False
     if body.raw_content:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "embed_item",
             item_id=str(item.id),
             skip_ai_enrichment=body.skip_ai_enrichment,
@@ -423,7 +424,8 @@ async def update_item(
     await db.commit()
     await db.refresh(row)
     if reindex_requested:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "embed_item",
             item_id=str(row.id),
             skip_ai_enrichment=False,

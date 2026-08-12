@@ -13,6 +13,8 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+from app.utils.job_payloads import load_retry_task_from_payload
+from app.workers.queues import MEDIA_TASK_NAMES, MEDIA_WORKER_QUEUE, enqueue_tenant_job
 
 
 def system_async_session():
@@ -20,8 +22,6 @@ def system_async_session():
         return async_session(info={"tenant_id": "__unbound__", "system_access": True})
     except TypeError:
         return async_session()
-from app.utils.job_payloads import load_retry_task_from_payload
-from app.workers.queues import MEDIA_TASK_NAMES, MEDIA_WORKER_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -234,8 +234,11 @@ async def dispatch_tenant_fair_media_jobs(
         if task is None:
             continue
         task_name, task_kwargs = task
-        await ctx["redis"].enqueue_job(
+        tenant_id = str(task_kwargs.pop("tenant_id"))
+        await enqueue_tenant_job(
+            ctx["redis"],
             task_name,
+            tenant_id=tenant_id,
             _job_id=str(row.id),
             _queue_name=MEDIA_WORKER_QUEUE,
             **task_kwargs,

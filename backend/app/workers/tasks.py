@@ -291,7 +291,9 @@ async def process_webpage(ctx: dict, job_id: str, url: str, tenant_id: str | Non
         async with tenant_async_session(tenant_id) as db:
             pipeline = WebpagePipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(uuid.UUID(job_id), url=url, tenant_id=tenant_id, model=model)
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
@@ -310,7 +312,9 @@ async def process_pdf(ctx: dict, job_id: str, extracted_text: str, pdf_metadata:
                 tenant_id=tenant_id,
                 model=model,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
@@ -329,7 +333,9 @@ async def process_doc(ctx: dict, job_id: str, extracted_text: str, doc_metadata:
                 tenant_id=tenant_id,
                 model=model,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
@@ -348,7 +354,9 @@ async def process_image(ctx: dict, job_id: str, description: str = "", image_met
                 image_metadata=image_metadata or {},
                 tenant_id=tenant_id,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     except ImageAnalysisError as exc:
         await _record_image_analysis_failure(job_id, tenant_id, exc)
@@ -366,7 +374,9 @@ async def process_note(ctx: dict, job_id: str, title: str, content: str, tags: l
         async with tenant_async_session(tenant_id) as db:
             pipeline = NotePipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(uuid.UUID(job_id), title=title, content=content, tags=tags, tenant_id=tenant_id, model=model)
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
@@ -451,7 +461,7 @@ async def backfill_deferred_relationships(
         defer_by = index * defer_seconds
         if defer_by > 0:
             enqueue_kwargs["_defer_by"] = defer_by
-        await ctx["redis"].enqueue_job("extract_relationships", **enqueue_kwargs)
+        await enqueue_worker_job(ctx["redis"], "extract_relationships", **enqueue_kwargs)
 
     logger.info(
         "backfill_deferred_relationships: queued %d relationship job(s) for tenant %s",
@@ -657,7 +667,9 @@ async def embed_item(ctx: dict, item_id: str, skip_ai_enrichment: bool = False, 
             enable_ai_enrichment=not skip_ai_enrichment,
         )
     if result.status == "completed":
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=item_id, tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=item_id, tenant_id=tenant_id
+        )
     await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=item_id, tenant_id=tenant_id, reason="ingest")
 
 
@@ -700,7 +712,8 @@ async def memory_artifact(ctx: dict, job_id: str, *, tenant_id: str | None = Non
         if result.status == "completed":
             relationship_policy = _relationship_policy_from_job(job)
             if relationship_policy == "immediate":
-                await ctx["redis"].enqueue_job(
+                await enqueue_worker_job(
+                    ctx["redis"],
                     "extract_relationships",
                     item_id=str(result.item_id),
                     tenant_id=job.tenant_id,
@@ -821,7 +834,8 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
             # can never outrun its durable lineage record.
             await db.commit()
             try:
-                enqueued = await ctx["redis"].enqueue_job(
+                enqueued = await enqueue_worker_job(
+                    ctx["redis"],
                     "memory_artifact",
                     job_id=job_id,
                     tenant_id=str(row.tenant_id),

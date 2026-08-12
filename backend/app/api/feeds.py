@@ -15,6 +15,7 @@ from app.database import get_db
 from app.schemas.feed import FeedCreate, FeedUpdate, FeedOut, FeedListResponse, OPMLImportResponse
 from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
 from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, UnsafeXmlError, parse_safe_xml
+from app.workers.queues import enqueue_tenant_job
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -106,7 +107,9 @@ async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Dep
     feed_row = feed_result.mappings().one()
 
     # Trigger immediate first poll
-    await request.app.state.arq_pool.enqueue_job("poll_feed", feed_id=feed_id, tenant_id=tenant_id)
+    await enqueue_tenant_job(
+        request.app.state.arq_pool, "poll_feed", feed_id=feed_id, tenant_id=tenant_id
+    )
 
     return _row_to_feed_out(feed_row)
 
@@ -221,7 +224,12 @@ async def force_poll(feed_id: uuid.UUID, request: Request, db: AsyncSession = De
     if result.mappings().one_or_none() is None:
         raise HTTPException(status_code=404, detail="Feed not found")
 
-    await request.app.state.arq_pool.enqueue_job("poll_feed", feed_id=str(feed_id), tenant_id=tenant_id)
+    await enqueue_tenant_job(
+        request.app.state.arq_pool,
+        "poll_feed",
+        feed_id=str(feed_id),
+        tenant_id=tenant_id,
+    )
     return {"status": "queued", "feed_id": str(feed_id)}
 
 
@@ -365,7 +373,8 @@ async def import_opml(
 
     # Trigger immediate poll for newly created feeds
     for fid in feed_ids:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "poll_feed",
             feed_id=str(fid),
             tenant_id=tenant_id,

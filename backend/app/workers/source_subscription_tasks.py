@@ -14,6 +14,7 @@ from app.services.source_subscriptions import (
     poll_source_subscription,
     queue_source_subscription_entry,
 )
+from app.workers.queues import enqueue_tenant_job
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ async def poll_all_source_subscriptions(ctx: dict) -> None:
             due_at = last_checked_at.timestamp() + int(subscription.poll_interval_seconds or 3600)
             if due_at > now.timestamp():
                 continue
-        await ctx["redis"].enqueue_job(
+        await enqueue_tenant_job(
+            ctx["redis"],
             "poll_source_subscription_task",
             subscription_id=str(subscription.id),
             tenant_id=subscription.tenant_id,
