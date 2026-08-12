@@ -15,7 +15,7 @@ def _engine_configuration() -> tuple[str, dict]:
     url = make_url(settings.database_url)
     query = dict(url.query)
     sslmode = query.pop("sslmode", "")
-    query.pop("sslrootcert", None)
+    sslrootcert = query.pop("sslrootcert", None) or settings.database_ssl_root_cert
     connect_args: dict = {
         "server_settings": {
             "statement_timeout": str(settings.database_statement_timeout_ms),
@@ -27,7 +27,11 @@ def _engine_configuration() -> tuple[str, dict]:
     if sslmode:
         if sslmode != "verify-full":
             raise ValueError("Only sslmode=verify-full is accepted for database TLS")
-        context = ssl.create_default_context(cafile=settings.database_ssl_root_cert)
+        if not sslrootcert:
+            raise ValueError(
+                "DATABASE_SSL_ROOT_CERT or sslrootcert is required for sslmode=verify-full"
+            )
+        context = ssl.create_default_context(cafile=sslrootcert)
         context.check_hostname = True
         context.verify_mode = ssl.CERT_REQUIRED
         connect_args["ssl"] = context

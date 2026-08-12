@@ -63,12 +63,29 @@ def _restore_staged_paths(staged_paths: list[tuple[Path, Path]]) -> None:
 
 def _purge_staged_paths(staged_paths: list[tuple[Path, Path]]) -> None:
     for _original, staged in staged_paths:
-        try:
-            _purge_staged_path(staged)
-        except OSError:
-            # The artifact is no longer addressable through the active tenant path.
-            # Keep the quarantine path for an operator to remove safely.
-            logger.critical("Could not purge quarantined deletion artifact %s", staged, exc_info=True)
+        _purge_staged_path(staged)
+
+
+def _tenant_quarantine_paths(tenant_id: str) -> list[Path]:
+    """Find quarantine paths left by earlier committed tenant erasures."""
+    artifact_directory = _tenant_artifact_directory(tenant_id)
+    return list(
+        artifact_directory.parent.glob(f".{artifact_directory.name}.erasing-*")
+    )
+
+
+def _item_quarantine_paths(tenant_id: str, item_id: uuid.UUID) -> list[Path]:
+    """Find quarantine directories left by earlier committed item deletions."""
+    artifact_directory = _tenant_artifact_directory(tenant_id)
+    if not artifact_directory.is_dir():
+        return []
+    return list(artifact_directory.glob(f".erasing-{item_id}-*"))
+
+
+def _purge_quarantine_paths(paths: Iterable[Path]) -> None:
+    """Purge quarantines and propagate failures so deletion cannot report success."""
+    for path in paths:
+        _purge_staged_path(path)
 
 
 def _stage_tenant_artifacts(tenant_id: str) -> list[tuple[Path, Path]]:
@@ -364,7 +381,7 @@ async def _finalize_committed_tenant_erasure(
     finally:
         # The database erasure is already committed. Quarantined tenant files
         # must not survive because the final best-effort Redis scan failed.
-        _purge_staged_paths(staged_paths)
+        _purge_quarantine_paths(_tenant_quarantine_paths(tenant_id))
 
 
 async def _tenant_identifiers(
@@ -597,6 +614,9 @@ async def hard_delete_item(
                 _restore_staged_paths(staged_paths)
                 if tombstone_created:
                     tombstone.unlink(missing_ok=True)
+                _purge_quarantine_paths(
+                    _item_quarantine_paths(tenant_id, item_id)
+                )
                 await reopen_tenant_queue(arq_pool, tenant_id)
                 queue_closed = False
                 return False
@@ -646,17 +666,7 @@ async def hard_delete_item(
         # The tenant enqueue barrier prevents new work from racing this scan.
         # Purge only after the database commit so a rollback cannot lose work.
         await _purge_arq_jobs(arq_pool, matching_arq_jobs)
-        _purge_staged_paths(staged_paths)
-        quarantine_directories = {staged.parent for _original, staged in staged_paths}
-        for quarantine in quarantine_directories:
-            try:
-                quarantine.rmdir()
-            except OSError:
-                logger.critical(
-                    "Could not remove item deletion quarantine %s",
-                    quarantine,
-                    exc_info=True,
-                )
+        _purge_quarantine_paths(_item_quarantine_paths(tenant_id, item_id))
         await reopen_tenant_queue(arq_pool, tenant_id)
         queue_closed = False
         return True

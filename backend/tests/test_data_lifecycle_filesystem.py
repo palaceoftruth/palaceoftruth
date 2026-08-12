@@ -12,6 +12,7 @@ from app.services.data_lifecycle import (
     _finalize_committed_tenant_erasure,
     _purge_tenant_arq_jobs,
     _purge_staged_paths,
+    _purge_quarantine_paths,
     _restore_staged_paths,
     _stage_item_artifacts,
     _stage_tenant_artifacts,
@@ -84,6 +85,27 @@ def test_item_artifact_staging_matches_exact_id_and_extensions(monkeypatch, tmp_
     for quarantine in {path.parent for _original, path in staged}:
         quarantine.rmdir()
     assert sorted(path.name for path in active.iterdir()) == [f"{item_id}-other.pdf"]
+
+
+def test_quarantine_purge_failure_is_reported_and_can_be_retried(
+    monkeypatch, tmp_path
+) -> None:
+    quarantine = tmp_path / ".erasing-item"
+    quarantine.mkdir()
+    (quarantine / "artifact.bin").write_bytes(b"tenant data")
+    real_rmtree = data_lifecycle.shutil.rmtree
+
+    def fail_purge(_path):
+        raise PermissionError("purge denied")
+
+    monkeypatch.setattr(data_lifecycle.shutil, "rmtree", fail_purge)
+    with pytest.raises(PermissionError, match="purge denied"):
+        _purge_quarantine_paths([quarantine])
+
+    assert quarantine.exists()
+    monkeypatch.setattr(data_lifecycle.shutil, "rmtree", real_rmtree)
+    _purge_quarantine_paths([quarantine])
+    assert not quarantine.exists()
 
 
 def test_item_tombstone_prevents_artifact_recreation(monkeypatch, tmp_path) -> None:
@@ -230,8 +252,9 @@ async def test_tenant_erasure_fails_closed_on_uninspectable_arq_payload() -> Non
 async def test_committed_tenant_erasure_purges_files_when_final_queue_scan_fails(
     monkeypatch, tmp_path
 ) -> None:
-    original = tmp_path / "active"
-    staged = tmp_path / "quarantine"
+    monkeypatch.setattr(settings, "upload_artifact_dir", str(tmp_path))
+    original = _tenant_artifact_directory("tenant-a")
+    staged = original.with_name(f".{original.name}.erasing-previous")
     staged.mkdir()
     (staged / "artifact.bin").write_bytes(b"tenant data")
 
