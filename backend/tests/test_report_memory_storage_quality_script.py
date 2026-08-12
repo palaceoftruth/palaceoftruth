@@ -67,7 +67,13 @@ def test_report_memory_storage_quality_cli_invokes_opt_in_adjudication_gate(
         calls.append(kwargs)
         return _warn_report()
 
-    monkeypatch.setattr(report_module, "async_session", lambda: _FakeSessionContext())
+    bound_tenants: list[str] = []
+
+    def tenant_session(tenant_id: str) -> _FakeSessionContext:
+        bound_tenants.append(tenant_id)
+        return _FakeSessionContext()
+
+    monkeypatch.setattr(report_module, "tenant_async_session", tenant_session)
     monkeypatch.setattr(report_module, "run_memory_storage_quality_report", fake_report)
     monkeypatch.setattr(
         sys,
@@ -86,6 +92,7 @@ def test_report_memory_storage_quality_cli_invokes_opt_in_adjudication_gate(
     output = json.loads(capsys.readouterr().out)
 
     assert exit_code == 1
+    assert bound_tenants == ["tenant-a"]
     assert calls == [
         {
             "tenant_id": "tenant-a",

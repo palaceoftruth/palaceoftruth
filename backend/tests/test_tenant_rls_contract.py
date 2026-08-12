@@ -144,6 +144,22 @@ def test_unbound_session_factory_has_no_system_access() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "scripts/backfill_conversation_facts.py",
+        "scripts/report_memory_storage_quality.py",
+    ],
+)
+def test_standalone_tenant_scripts_bind_their_database_session(
+    relative_path: str,
+) -> None:
+    source = (ROOT.parent / relative_path).read_text()
+
+    assert "from app.database import tenant_async_session" in source
+    assert "async with tenant_async_session(args.tenant_id) as db:" in source
+
+
 @pytest.mark.asyncio
 async def test_credential_discovery_rebinds_before_tenant_work() -> None:
     class Session:

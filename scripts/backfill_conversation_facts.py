@@ -19,7 +19,7 @@ os.environ.setdefault("API_KEY", "conversation-facts-unused")
 os.environ.setdefault("OPENAI_API_KEY", "conversation-facts-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "conversation-facts-unused")
 
-from app.database import async_session  # noqa: E402
+from app.database import tenant_async_session  # noqa: E402
 from app.services.conversation_facts import backfill_conversation_facts  # noqa: E402
 
 
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main() -> int:
     args = parse_args()
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         result = await backfill_conversation_facts(
             db,
             tenant_id=args.tenant_id,

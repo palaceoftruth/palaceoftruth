@@ -76,10 +76,11 @@ def test_item_artifact_staging_matches_exact_id_and_extensions(monkeypatch, tmp_
     (active / str(item_id)).write_bytes(b"exact")
     (active / f"{item_id}.pdf").write_bytes(b"extension")
     (active / f"{item_id}-other.pdf").write_bytes(b"unrelated")
+    (active / f".uploading-{item_id}-{uuid.uuid4()}").write_bytes(b"interrupted")
 
     staged = _stage_item_artifacts("tenant-a", item_id)
 
-    assert len(staged) == 2
+    assert len(staged) == 3
     assert (active / f"{item_id}-other.pdf").exists()
     _purge_staged_paths(staged)
     for quarantine in {path.parent for _original, path in staged}:

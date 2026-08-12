@@ -116,7 +116,9 @@ def _stage_item_artifacts(tenant_id: str, item_id: uuid.UUID) -> list[tuple[Path
     candidates = [
         path
         for path in artifact_directory.iterdir()
-        if path.name == item_prefix or path.name.startswith(f"{item_prefix}.")
+        if path.name == item_prefix
+        or path.name.startswith(f"{item_prefix}.")
+        or path.name.startswith(f".uploading-{item_prefix}-")
     ]
     if not candidates:
         return []

@@ -19,7 +19,7 @@ os.environ.setdefault("API_KEY", "memory-quality-unused")
 os.environ.setdefault("OPENAI_API_KEY", "memory-quality-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "memory-quality-unused")
 
-from app.database import async_session  # noqa: E402
+from app.database import tenant_async_session  # noqa: E402
 from app.services.memory_storage_quality import (  # noqa: E402
     memory_storage_quality_report_to_json,
     render_memory_storage_quality_report,
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main() -> int:
     args = parse_args()
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         report = await run_memory_storage_quality_report(
             db,
             tenant_id=args.tenant_id,
