@@ -173,6 +173,11 @@ def _artifact_snapshot(artifact: CandidateCurationArtifact) -> dict[str, Any]:
         "privacy_review": dict(artifact.privacy_review or {}),
         "eval_summary": dict(artifact.eval_summary or {}),
         "approval": dict(artifact.approval or {}),
+        "created_by_principal": artifact.created_by_principal,
+        "approved_by_principal": artifact.approved_by_principal,
+        "approval_decided_at": (
+            artifact.approval_decided_at.isoformat() if artifact.approval_decided_at else None
+        ),
         "metadata": dict(artifact.metadata_ or {}),
         "supersedes_artifact_id": str(artifact.supersedes_artifact_id) if artifact.supersedes_artifact_id else None,
         "superseded_by_artifact_id": (
@@ -304,6 +309,8 @@ async def apply_review_inbox_action(
     *,
     tenant_id: str,
     body: ReviewInboxActionRequest,
+    principal_id: str,
+    can_approve: bool,
 ) -> list[CandidateCurationArtifact]:
     if len(body.artifact_ids) > 1 and body.action not in SAFE_BATCH_REVIEW_ACTIONS:
         raise CandidateCurationArtifactError("batch review inbox actions are limited to pin and defer")
@@ -324,16 +331,18 @@ async def apply_review_inbox_action(
         metadata = _review_inbox_metadata(
             artifact,
             action=body.action,
-            actor=body.actor,
+            actor=principal_id,
             note=body.note,
             defer_until=body.defer_until,
         )
         update = CandidateCurationArtifactUpdate(metadata=metadata)
         if body.action == "accept":
+            if not can_approve:
+                raise CandidateCurationArtifactError("curation approval scope is required")
             update.status = "promoted"
             update.approval = {
                 **dict(artifact.approval or {}),
-                "approved_by": body.actor,
+                "approved_by": principal_id,
                 "approved_at": _utc_now().isoformat(),
                 "decision": "approved",
                 "promotion_target": dict(artifact.approval or {}).get("promotion_target")
@@ -341,15 +350,25 @@ async def apply_review_inbox_action(
                 "note": body.note,
             }
         elif body.action == "reject":
+            if not can_approve:
+                raise CandidateCurationArtifactError("curation approval scope is required")
             update.status = "rejected"
             update.approval = {
                 **dict(artifact.approval or {}),
-                "approved_by": body.actor,
+                "approved_by": principal_id,
                 "approved_at": _utc_now().isoformat(),
                 "decision": "rejected",
                 "note": body.note,
             }
-        updated.append(await update_candidate_curation_artifact(db, artifact=artifact, body=update))
+        updated.append(
+            await update_candidate_curation_artifact(
+                db,
+                artifact=artifact,
+                body=update,
+                principal_id=principal_id,
+                can_approve=can_approve,
+            )
+        )
     return updated
 
 
@@ -379,6 +398,7 @@ async def create_candidate_curation_artifact(
     *,
     tenant_id: str,
     body: CandidateCurationArtifactCreate,
+    principal_id: str = "system:internal",
 ) -> CandidateCurationArtifact:
     status = validate_candidate_payload(
         status=body.status,
@@ -403,6 +423,7 @@ async def create_candidate_curation_artifact(
         privacy_review=body.privacy_review,
         eval_summary=body.eval_summary,
         approval=body.approval,
+        created_by_principal=principal_id,
         metadata_=body.metadata,
         supersedes_artifact_id=body.supersedes_artifact_id,
     )
@@ -460,14 +481,33 @@ async def update_candidate_curation_artifact(
     *,
     artifact: CandidateCurationArtifact,
     body: CandidateCurationArtifactUpdate,
+    principal_id: str | None = None,
+    can_approve: bool = False,
 ) -> CandidateCurationArtifact:
     if artifact.status in TERMINAL_STATUSES and body.status not in (None, artifact.status):
         raise CandidateCurationArtifactError("terminal candidate artifacts cannot move to a new lifecycle status")
     previous_snapshot = _artifact_snapshot(artifact)
 
     next_status = _normalize_status(body.status) if body.status is not None else artifact.status
+    approval_transition = next_status in PROMOTED_STATUSES | {"rejected"} and next_status != artifact.status
+    if body.approval is not None and not approval_transition:
+        raise CandidateCurationArtifactError(
+            "approval can only be set during an approval or rejection transition"
+        )
+    if approval_transition:
+        if not can_approve or not principal_id:
+            raise CandidateCurationArtifactError("curation approval scope is required")
+        if principal_id == artifact.created_by_principal:
+            raise CandidateCurationArtifactError("artifact creator cannot approve or reject the same artifact")
     next_privacy_review = body.privacy_review if body.privacy_review is not None else artifact.privacy_review
     next_approval = body.approval if body.approval is not None else artifact.approval
+    if approval_transition:
+        next_approval = {
+            **dict(next_approval or {}),
+            "approved_by": principal_id,
+            "approved_at": _utc_now().isoformat(),
+            "decision": "rejected" if next_status == "rejected" else "approved",
+        }
     next_source_item_ids = body.source_item_ids if body.source_item_ids is not None else artifact.source_item_ids
     next_source_digests = body.source_digests if body.source_digests is not None else artifact.source_digests
     next_metadata = body.metadata if body.metadata is not None else artifact.metadata_
@@ -501,8 +541,8 @@ async def update_candidate_curation_artifact(
         artifact.privacy_review = body.privacy_review
     if body.eval_summary is not None:
         artifact.eval_summary = body.eval_summary
-    if body.approval is not None:
-        artifact.approval = body.approval
+    if body.approval is not None or approval_transition:
+        artifact.approval = next_approval
     if body.metadata is not None:
         artifact.metadata_ = body.metadata
     if body.superseded_by_artifact_id is not None:
@@ -511,6 +551,9 @@ async def update_candidate_curation_artifact(
         artifact.deprecated_reason = body.deprecated_reason
     if body.status is not None:
         artifact.status = next_status
+        if approval_transition:
+            artifact.approved_by_principal = principal_id
+            artifact.approval_decided_at = _utc_now()
         if next_status in PROMOTED_STATUSES and artifact.approved_at is None:
             artifact.approved_at = _utc_now()
         if next_status in {"deprecated", "stale"} and artifact.deprecated_at is None:

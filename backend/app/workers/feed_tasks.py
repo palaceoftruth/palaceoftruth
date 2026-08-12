@@ -312,6 +312,7 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str | None = None) -> No
     tenant_id = await _feed_tenant(feed_id, tenant_id)
     import feedparser
     from app.utils.outbound_http import fetch_public_http_bytes
+    from app.utils.safe_xml import parse_safe_xml
 
     async with tenant_async_session(tenant_id) as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
@@ -349,6 +350,7 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str | None = None) -> No
                 return
             if status >= 400:
                 raise ValueError(f"HTTP {status}")
+            parse_safe_xml(feed_bytes)
             parsed = feedparser.parse(
                 feed_bytes,
                 response_headers=dict(response.headers),

@@ -446,7 +446,13 @@ def test_capture_facebook_post_falls_back_to_static_metadata_without_token(monke
         ]
     )
 
-    capture = capture_social_post("https://www.facebook.com/example/posts/pfbid123", client=client)
+    capture = capture_social_post(
+        "https://www.facebook.com/example/posts/pfbid123",
+        client=client,
+        resolver=lambda _host, _port, **_kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 0))
+        ],
+    )
 
     assert capture is not None
     assert capture.text == "Launch update\nWe shipped the public beta today."
@@ -459,7 +465,8 @@ def test_capture_facebook_post_falls_back_to_static_metadata_without_token(monke
     # blind redirect following.
     assert len(client.calls) == 1
     call = client.calls[0]
-    assert call["url"] == "https://www.facebook.com/example/posts/pfbid123"
+    assert call["url"] == "https://93.184.216.34/example/posts/pfbid123"
+    assert call["headers"]["Host"] == "www.facebook.com"
     assert call["method"] == "GET"
     assert call["follow_redirects"] is False
     assert call["headers"]["Accept"] == (

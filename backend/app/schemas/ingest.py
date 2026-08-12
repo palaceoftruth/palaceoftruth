@@ -5,9 +5,9 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def _validate_model_not_blank(v: str | None) -> str | None:
-    if v is not None and v.strip() == "":
-        raise ValueError("model must not be blank")
-    return v
+    from app.services.llm_admission import validate_client_llm_model
+
+    return validate_client_llm_model(v)
 
 
 class IngestMediaRequest(BaseModel):

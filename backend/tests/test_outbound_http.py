@@ -115,9 +115,26 @@ def test_redirect_to_private_address_is_rejected_before_second_request() -> None
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(OutboundUrlError):
-            fetch_public_http_bytes("https://public.example/start", client=client)
+            fetch_public_http_bytes(
+                "https://public.example/start",
+                client=client,
+                resolver=_resolver("93.184.216.34"),
+            )
 
-    assert seen == ["https://public.example/start"]
+    assert seen == ["https://93.184.216.34/start"]
+
+
+def test_injected_client_cannot_bypass_private_hostname_resolution() -> None:
+    def fail_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("private hostname must be rejected before transport")
+
+    with httpx.Client(transport=httpx.MockTransport(fail_request)) as client:
+        with pytest.raises(OutboundUrlError, match="private"):
+            fetch_public_http_bytes(
+                "https://internal.example/secret",
+                client=client,
+                resolver=_resolver("10.0.0.8"),
+            )
 
 
 @pytest.mark.asyncio

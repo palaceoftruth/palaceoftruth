@@ -22,6 +22,9 @@ data:
   REDIS_SENTINEL_MASTER: {{ .Values.valkey.sentinel.masterName | quote }}
   {{- end }}
   OPENROUTER_DEFAULT_MODEL: {{ .Values.config.openrouterDefaultModel | quote }}
+  CLIENT_LLM_ALLOWED_MODELS: {{ .Values.config.clientLlmAllowedModels | quote }}
+  TENANT_LLM_MAX_CONCURRENT_REQUESTS: {{ .Values.config.tenantLlmMaxConcurrentRequests | quote }}
+  TENANT_LLM_DAILY_TOKEN_LIMIT: {{ .Values.config.tenantLlmDailyTokenLimit | quote }}
   OPENROUTER_FALLBACK_MODELS: {{ .Values.config.openrouterFallbackModels | quote }}
   RELATIONSHIP_CLASSIFICATION_MODEL: {{ .Values.config.relationshipClassificationModel | quote }}
   RELATIONSHIP_CLASSIFICATION_TEMPERATURE: {{ .Values.config.relationshipClassificationTemperature | quote }}
@@ -59,6 +62,7 @@ data:
   MEDIA_TENANT_FAIR_PER_TENANT_INFLIGHT_LIMIT: {{ .Values.config.mediaTenantFairPerTenantInflightLimit | quote }}
   MEDIA_TENANT_FAIR_DISPATCH_BATCH_SIZE: {{ .Values.config.mediaTenantFairDispatchBatchSize | quote }}
   MEDIA_TENANT_FAIR_CANDIDATE_LIMIT: {{ .Values.config.mediaTenantFairCandidateLimit | quote }}
+  MEDIA_TENANT_ARTIFACT_QUOTA_BYTES: {{ .Values.config.mediaTenantArtifactQuotaBytes | quote }}
   TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS: {{ .Values.config.transcriptionRequestTimeoutSeconds | quote }}
   TRANSCRIPTION_CONNECT_TIMEOUT_SECONDS: {{ .Values.config.transcriptionConnectTimeoutSeconds | quote }}
   TRANSCRIPTION_TRANSIENT_RETRIES: {{ .Values.config.transcriptionTransientRetries | quote }}
@@ -86,6 +90,7 @@ data:
   RETRIEVAL_CAPTURE_ENABLED: {{ .Values.config.retrievalCaptureEnabled | quote }}
   RETRIEVAL_CAPTURE_PATH: {{ .Values.config.retrievalCapturePath | quote }}
   RETRIEVAL_CAPTURE_QUERY_MODE: {{ .Values.config.retrievalCaptureQueryMode | quote }}
+  RETRIEVAL_CAPTURE_ALLOW_RAW_QUERIES: {{ .Values.config.retrievalCaptureAllowRawQueries | quote }}
   RETRIEVAL_CAPTURE_MAX_QUERY_CHARS: {{ .Values.config.retrievalCaptureMaxQueryChars | quote }}
   RETRIEVAL_SOURCE_RANKING_ENABLED: {{ .Values.config.retrievalSourceRankingEnabled | quote }}
   RETRIEVAL_RELATIONSHIP_EXPANSION_ENABLED: {{ .Values.config.retrievalRelationshipExpansionEnabled | quote }}

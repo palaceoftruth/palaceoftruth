@@ -840,6 +840,9 @@ class CandidateCurationArtifact(Base):
     privacy_review: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     eval_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     approval: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_by_principal: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_by_principal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approval_decided_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
     supersedes_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

@@ -124,7 +124,7 @@ def _query_payload(query: str) -> dict[str, Any]:
     }
     if mode == "redacted":
         payload["query_redacted"] = redact_query(query, settings.retrieval_capture_max_query_chars)
-    elif mode == "raw":
+    elif mode == "raw" and settings.retrieval_capture_allow_raw_queries:
         payload["query_text"] = query[: settings.retrieval_capture_max_query_chars]
     return payload
 

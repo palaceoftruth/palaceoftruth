@@ -18,8 +18,8 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import settings
-from app.ingest_sanitize import sanitize_embed_html
-from app.utils.outbound_http import OutboundUrlError, fetch_public_http_bytes
+from app.ingest_sanitize import sanitize_embed_html, sanitize_summary, sanitize_title
+from app.utils.outbound_http import OutboundUrlError, Resolver, fetch_public_http_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,12 @@ def detect_social_post_platform(url: str) -> str | None:
     return None
 
 
-def capture_social_post(url: str, client: httpx.Client | None = None) -> SocialPostCapture | None:
+def capture_social_post(
+    url: str,
+    client: httpx.Client | None = None,
+    *,
+    resolver: Resolver | None = None,
+) -> SocialPostCapture | None:
     """Capture readable social post text without rendering browser JavaScript."""
     platform = detect_social_post_platform(url)
     if not platform:
@@ -208,7 +213,7 @@ def capture_social_post(url: str, client: httpx.Client | None = None) -> SocialP
             if capture:
                 return capture
 
-        capture = _capture_static_metadata(client, url, platform, errors)
+        capture = _capture_static_metadata(client, url, platform, errors, resolver=resolver)
         if capture:
             return capture
     finally:
@@ -274,12 +279,12 @@ def _capture_x_fxtwitter(
         "captured_without_javascript": True,
         "provider_name": "FxTwitter",
         "provider_url": "https://api.fxtwitter.com",
-        "author": author_name,
+        "author": sanitize_title(author_name),
         "author_url": f"https://x.com/{author_screen_name}" if author_screen_name else None,
         "created_at": tweet.get("created_at"),
         "article_id": article.get("id") if isinstance(article, dict) else None,
-        "article_title": article.get("title") if isinstance(article, dict) else None,
-        "article_preview_text": article.get("preview_text") if isinstance(article, dict) else None,
+        "article_title": sanitize_title(article.get("title")) if isinstance(article, dict) else None,
+        "article_preview_text": sanitize_summary(article.get("preview_text")) if isinstance(article, dict) else None,
         "article_url": article_url,
         "image_url": _x_article_image_url(article),
         "original_post_text": post_text,
@@ -343,7 +348,7 @@ def _capture_x_oembed(
         "captured_without_javascript": True,
         "provider_name": data.get("provider_name") or "X",
         "provider_url": data.get("provider_url"),
-        "author": data.get("author_name"),
+        "author": sanitize_title(data.get("author_name")),
         "author_url": data.get("author_url"),
         "oembed_cache_age": data.get("cache_age"),
         # Never persist provider markup verbatim: see app/ingest_sanitize.py.
@@ -408,6 +413,8 @@ def _capture_static_metadata(
     url: str,
     platform: str,
     errors: list[str],
+    *,
+    resolver: Resolver | None = None,
 ) -> SocialPostCapture | None:
     # This is the one attacker-supplied URL in the module. Fetch it through the
     # centralized guard so every redirect hop is re-validated against the
@@ -423,6 +430,7 @@ def _capture_static_metadata(
             max_bytes=_MAX_PAGE_BYTES,
             raise_for_status=False,
             client=client,
+            resolver=resolver,
         )
     except OutboundUrlError as exc:
         errors.append(f"static metadata fetch was refused: {exc}")
@@ -434,18 +442,18 @@ def _capture_static_metadata(
 
     page_text = _decode_page(body, response)
     page_metadata = _html_metadata(page_text)
-    title = _first_value(
+    title = sanitize_title(_first_value(
         page_metadata,
         "og:title",
         "twitter:title",
         "html_title",
-    )
-    description = _first_value(
+    ))
+    description = sanitize_summary(_first_value(
         page_metadata,
         "og:description",
         "twitter:description",
         "description",
-    )
+    ))
 
     text_parts = [part for part in (title, description) if part and not _is_low_value_text(part)]
     text = _dedupe_lines("\n".join(text_parts))

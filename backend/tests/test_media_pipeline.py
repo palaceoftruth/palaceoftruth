@@ -404,10 +404,24 @@ def test_download_audio_applies_byte_and_playlist_ceilings(monkeypatch, tmp_path
     assert factory.opts["max_filesize"] == int(settings.media_max_download_bytes)
     assert factory.opts["max_downloads"] == 1
     assert factory.opts["noplaylist"] is True
+    assert len(factory.opts["progress_hooks"]) == 1
     # The live-stream guard is on by default and must be expressed to yt-dlp
     # itself, not only in the pre-download metadata check.
     assert factory.opts["live_from_start"] is False
     assert "match_filter" in factory.opts
+
+
+def test_download_progress_hook_aborts_and_removes_partial_file(monkeypatch, tmp_path: Path) -> None:
+    from app.pipelines.youtube import _download_size_hook
+
+    partial = tmp_path / "oversized.part"
+    partial.write_bytes(b"partial")
+    hook = _download_size_hook(10)
+
+    with pytest.raises(MediaTranscriptionLimitError, match="exceeded"):
+        hook({"downloaded_bytes": 11, "tmpfilename": str(partial)})
+
+    assert not partial.exists()
 
 
 def test_download_audio_rejects_a_live_stream_before_downloading(monkeypatch, tmp_path: Path) -> None:

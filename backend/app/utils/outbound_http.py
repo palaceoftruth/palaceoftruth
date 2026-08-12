@@ -173,6 +173,7 @@ async def request_public_http_async(
     method: str,
     url: str,
     *,
+    resolver: Resolver | None = None,
     trusted_exact_hosts: Collection[str] = (),
     **kwargs,
 ) -> httpx.Response:
@@ -181,6 +182,7 @@ async def request_public_http_async(
     target = await asyncio.to_thread(
         resolve_public_http_target,
         url,
+        resolver=resolver,
         trusted_exact_hosts=trusted_exact_hosts,
     )
     connect_url, host_header, extensions = _pinned_request_parts(target)
@@ -201,6 +203,7 @@ async def stream_public_http_async(
     method: str,
     url: str,
     *,
+    resolver: Resolver | None = None,
     trusted_exact_hosts: Collection[str] = (),
     **kwargs,
 ):
@@ -209,6 +212,7 @@ async def stream_public_http_async(
     target = await asyncio.to_thread(
         resolve_public_http_target,
         url,
+        resolver=resolver,
         trusted_exact_hosts=trusted_exact_hosts,
     )
     connect_url, host_header, extensions = _pinned_request_parts(target)
@@ -233,6 +237,7 @@ def fetch_public_http_bytes(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     raise_for_status: bool = True,
     client: httpx.Client | None = None,
+    resolver: Resolver | None = None,
 ) -> tuple[bytes, httpx.Response]:
     """Fetch bytes while validating the initial target and every redirect hop."""
 
@@ -250,18 +255,13 @@ def fetch_public_http_bytes(
     request_headers = {"User-Agent": _DEFAULT_USER_AGENT, **(headers or {})}
     try:
         for hop in range(max_redirects + 1):
-            if owns_client:
-                target = resolve_public_http_target(current_url)
-                request_url, host_header, extensions = _pinned_request_parts(target)
-                current_url = target.url
-                hop_headers = {**request_headers, "Host": host_header}
-            else:
-                # Supplying a client is an explicit test/transport injection
-                # point. Keep parsing strict without bypassing MockTransport.
-                current_url = validate_public_http_url(current_url, resolve=False)
-                request_url = current_url
-                hop_headers = request_headers
-                extensions = None
+            # Transport injection must never select a weaker network policy.
+            # Tests that need deterministic DNS supply ``resolver`` while the
+            # same resolve/check/pin sequence stays active in every call path.
+            target = resolve_public_http_target(current_url, resolver=resolver)
+            request_url, host_header, extensions = _pinned_request_parts(target)
+            current_url = target.url
+            hop_headers = {**request_headers, "Host": host_header}
             with request_client.stream(
                 "GET",
                 request_url,

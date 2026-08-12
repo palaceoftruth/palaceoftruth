@@ -34,3 +34,15 @@ async def test_same_origin_respects_concurrency_bound() -> None:
     release.set()
     await asyncio.gather(first_task, second_task)
     assert second_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_idle_origin_gates_are_lru_bounded() -> None:
+    fairness = HostFairness(minimum_interval_seconds=0, max_origins=3)
+
+    for index in range(20):
+        async with fairness.acquire(f"https://host-{index}.example/resource"):
+            pass
+
+    assert len(fairness._gates) <= 3
+    assert set(fairness._next_start) <= set(fairness._gates)

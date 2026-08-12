@@ -13,6 +13,7 @@ from app.auth import AuthContext, verify_memory_auth
 from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.schemas.search import SearchResult
+from app.services.retrieval_capture import build_capture_record
 
 
 class FakeSession:
@@ -332,6 +333,23 @@ def test_search_capture_is_disabled_by_default(monkeypatch, tmp_path) -> None:
 
     assert response.status_code == 200
     assert not (tmp_path / "capture.ndjson").exists()
+
+
+def test_raw_capture_mode_needs_second_runtime_gate(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.retrieval_capture.settings.retrieval_capture_query_mode", "raw")
+    monkeypatch.setattr("app.services.retrieval_capture.settings.retrieval_capture_allow_raw_queries", False)
+
+    record = build_capture_record(
+        endpoint="/api/v1/search",
+        tenant_id="tenant-a",
+        query="private query text",
+        request_params={},
+        results=[],
+        latency_ms=1,
+    )
+
+    assert record["request"]["query_mode"] == "raw"
+    assert "query_text" not in record["request"]
 
 
 def test_search_capture_writes_sanitized_replay_record(monkeypatch, tmp_path) -> None:

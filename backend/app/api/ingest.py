@@ -26,6 +26,7 @@ from app.services.doc_extraction import (
     DocumentExtractionError,
     DocumentExtractionTimeout,
     DocumentTooComplexError,
+    DocumentValidationError,
     concurrency_limiter,
     default_max_concurrent_extractions,
     extract_document_bounded,
@@ -478,6 +479,12 @@ async def ingest_doc(
     model: str | None = Form(None),
 ):
     """Upload a document (.pdf, .docx, .xlsx, .md, .txt) for text extraction and ingestion."""
+    from app.services.llm_admission import validate_client_llm_model
+
+    try:
+        model = validate_client_llm_model(model)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     # The client picks this name and it is stored, displayed and exported. Take
     # the basename and strip control characters before it is used at all (L-15).
     filename = sanitize_filename(file.filename)
@@ -492,8 +499,6 @@ async def ingest_doc(
     tmp_path = await _stream_to_tmp(file, suffix=ext, size_limit=_DOC_SIZE_LIMIT)
 
     try:
-        _verify_uploaded_content(tmp_path, ext)
-
         # Extract text inline (before creating the job) so there are no orphaned jobs
         # if extraction fails or times out. The work runs in a killable child
         # process with its own memory and CPU limits, and the number of children
@@ -517,6 +522,8 @@ async def ingest_doc(
                     detail="Document extraction exceeded the resource limit for a single file. "
                            "Try a smaller or less complex file.",
                 )
+            except DocumentValidationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             except DocumentExtractionError as exc:
                 logger.warning("document extraction failed for %s: %s", filename, exc)
                 raise HTTPException(

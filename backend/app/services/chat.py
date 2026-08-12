@@ -13,6 +13,11 @@ from app.schemas.chat import ChatMessage, ChatResponse, ChatSource, UsageInfo
 from app.services.artifact_citations import build_artifact_citation
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
+from app.services.llm_admission import (
+    TenantLlmBudgetExceeded,
+    consume_tenant_token_budget,
+    tenant_llm_slot,
+)
 from app.services.search import SearchService
 
 
@@ -274,7 +279,13 @@ class ChatService:
                 )
             return ChatResponse(response=_NO_CONTEXT_REPLY, sources=[], usage=None)
 
-        answer, raw_usage = await self.llm.complete_with_usage(prompt_messages, model=model)
+        estimated_tokens = sum(len(str(message.get("content", ""))) for message in prompt_messages) // 4 + 4096
+        try:
+            await consume_tenant_token_budget(self.tenant_id, estimated_tokens)
+            async with tenant_llm_slot(self.tenant_id):
+                answer, raw_usage = await self.llm.complete_with_usage(prompt_messages, model=model)
+        except TenantLlmBudgetExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
 
         usage = None
         if raw_usage is not None:
@@ -321,5 +332,23 @@ class ChatService:
 
             return _no_context_stream(), lambda: None, []
 
-        token_iter, get_usage = await self.llm.stream_complete(prompt_messages, model=model)
-        return token_iter, get_usage, sources
+        estimated_tokens = sum(len(str(message.get("content", ""))) for message in prompt_messages) // 4 + 4096
+        try:
+            await consume_tenant_token_budget(self.tenant_id, estimated_tokens)
+        except TenantLlmBudgetExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+        async def _admitted_stream() -> AsyncIterator[str]:
+            async with tenant_llm_slot(self.tenant_id):
+                token_iter, _get_usage = await self.llm.stream_complete(prompt_messages, model=model)
+                get_usage_holder[0] = _get_usage
+                async for token in token_iter:
+                    yield token
+
+        get_usage_holder: list[Callable[[], dict | None] | None] = [None]
+
+        def _usage() -> dict | None:
+            getter = get_usage_holder[0]
+            return getter() if getter is not None else None
+
+        return _admitted_stream(), _usage, sources

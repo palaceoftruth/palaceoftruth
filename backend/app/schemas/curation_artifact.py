@@ -157,6 +157,9 @@ class CandidateCurationArtifactOut(BaseModel):
     privacy_review: dict[str, Any]
     eval_summary: dict[str, Any]
     approval: dict[str, Any]
+    created_by_principal: str
+    approved_by_principal: str | None
+    approval_decided_at: datetime | None
     metadata: dict[str, Any] = Field(default={}, validation_alias="metadata_")
     promotion_state: str = "draft"
     source_support_level: str = "no_source"

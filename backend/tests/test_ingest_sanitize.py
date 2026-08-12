@@ -99,4 +99,6 @@ def test_filename_drops_bidirectional_override_characters() -> None:
 
 
 def test_filename_is_length_capped() -> None:
-    assert len(sanitize_filename("a" * 1000 + ".pdf")) == MAX_FILENAME_LENGTH
+    cleaned = sanitize_filename("a" * 1000 + ".pdf")
+    assert len(cleaned) == MAX_FILENAME_LENGTH
+    assert cleaned.endswith(".pdf")

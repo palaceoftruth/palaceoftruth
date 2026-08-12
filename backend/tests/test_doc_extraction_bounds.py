@@ -110,6 +110,27 @@ def test_bounded_extraction_reports_a_child_killed_by_its_resource_limit(tmp_pat
         )
 
 
+def test_two_hundred_thousand_entry_ooxml_does_not_block_event_loop(tmp_path) -> None:
+    """Central-directory parsing stays in the killable child, not the API loop."""
+
+    path = tmp_path / "many-entries.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(200_001):
+            archive.writestr(f"empty/{index}", b"")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            extract_document_bounded(str(path), path.name, timeout_seconds=30)
+        )
+        started = time.monotonic()
+        await asyncio.sleep(0.02)
+        assert time.monotonic() - started < 0.5
+        with pytest.raises(DocumentExtractionError, match="too many archive entries"):
+            await task
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
 def test_bounded_extraction_kills_a_child_that_will_never_finish(tmp_path) -> None:
     """The timeout must stop the work, not merely stop waiting for it."""

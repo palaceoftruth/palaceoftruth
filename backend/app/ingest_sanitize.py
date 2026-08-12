@@ -156,4 +156,9 @@ def sanitize_filename(value: object) -> str:
     text = text.lstrip(". ")
     if not text:
         return ""
+    if len(text) <= MAX_FILENAME_LENGTH:
+        return text
+    stem, separator, suffix = text.rpartition(".")
+    if separator and stem and len(suffix) <= 32:
+        return f"{stem[: MAX_FILENAME_LENGTH - len(suffix) - 1]}.{suffix}"
     return text[:MAX_FILENAME_LENGTH]

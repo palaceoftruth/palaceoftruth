@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.ingest_sanitize import sanitize_summary, sanitize_title
 from app.utils.outbound_http import OutboundUrlError, Resolver, validate_public_http_url
 
 
@@ -130,7 +131,13 @@ def _metadata_from_response(data: dict[str, Any], *, config: FirecrawlConfig) ->
     ):
         value = source_metadata.get(firecrawl_key)
         if value not in (None, ""):
-            metadata[palace_key] = value
+            metadata[palace_key] = (
+                sanitize_summary(value)
+                if palace_key == "description"
+                else sanitize_title(value)
+                if palace_key in {"title", "author"}
+                else value
+            )
     published_at = source_metadata.get("publishedTime") or source_metadata.get("date")
     if published_at:
         metadata["date"] = str(published_at)

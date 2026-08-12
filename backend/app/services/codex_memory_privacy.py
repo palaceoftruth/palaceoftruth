@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import math
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -57,6 +59,9 @@ _KNOWN_TOKEN_RE = re.compile(
     r"(?:rk|sk)_(?:live|test)_[0-9A-Za-z]{20,}"
     r")"
 )
+_ENTROPY_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9_+./-]{32,256}={0,2}(?![A-Za-z0-9_])")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", re.I)
+_HASH_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", re.I)
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,7 @@ def scan_codex_memory_privacy(text: str) -> CodexMemoryPrivacyScan:
             *_bearer_token_findings(text),
             *_assignment_findings(text),
             *_known_token_findings(text),
+            *_high_entropy_token_findings(text),
         ]
     )
     return CodexMemoryPrivacyScan(
@@ -217,6 +223,43 @@ def _known_token_findings(text: str) -> list[CodexMemorySecretFinding]:
             )
         )
     return findings
+
+
+def _high_entropy_token_findings(text: str) -> list[CodexMemorySecretFinding]:
+    """Detect unlabeled random credentials that prefix regexes cannot know."""
+
+    findings: list[CodexMemorySecretFinding] = []
+    for match in _ENTROPY_TOKEN_RE.finditer(text):
+        value = match.group(0)
+        if _looks_like_placeholder(value) or _UUID_RE.fullmatch(value) or _HASH_RE.fullmatch(value):
+            continue
+        character_classes = sum(
+            (
+                any(char.islower() for char in value),
+                any(char.isupper() for char in value),
+                any(char.isdigit() for char in value),
+                any(char in "_+./=-" for char in value),
+            )
+        )
+        if character_classes < 3 or _shannon_entropy(value) < 4.2:
+            continue
+        findings.append(
+            _finding(
+                text,
+                kind="token",
+                severity="high",
+                start=match.start(),
+                end=match.end(),
+                pattern="high_entropy_token",
+            )
+        )
+    return findings
+
+
+def _shannon_entropy(value: str) -> float:
+    counts = Counter(value)
+    length = len(value)
+    return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
 def _dedupe_findings(findings: list[CodexMemorySecretFinding]) -> list[CodexMemorySecretFinding]:

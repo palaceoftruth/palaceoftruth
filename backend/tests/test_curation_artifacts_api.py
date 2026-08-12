@@ -114,6 +114,7 @@ def _artifact(*, tenant_id: str = "tenant-a", status: str = "draft") -> Candidat
         }
         if status in {"approved", "promoted"}
         else {},
+        created_by_principal="creator-a",
         metadata_={"created_from": "test"},
         created_at=now,
         updated_at=now,
@@ -140,7 +141,13 @@ def _payload() -> dict:
     }
 
 
-def _client(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClient:
+def _client(
+    session: FakeSession,
+    *,
+    tenant_id: str = "tenant-a",
+    subject_id: str = "principal-a",
+    scopes: tuple[str, ...] = LEGACY_API_KEY_SCOPES,
+) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
 
@@ -148,7 +155,7 @@ def _client(session: FakeSession, *, tenant_id: str = "tenant-a") -> TestClient:
         yield session
 
     async def override_verify(request: Request):
-        request.state.auth_context = AuthContext(tenant_id=tenant_id, auth_mode="api_key", token_hash_reference="key-hash", scopes=LEGACY_API_KEY_SCOPES, capabilities=frozenset(LEGACY_API_KEY_SCOPES))
+        request.state.auth_context = AuthContext(tenant_id=tenant_id, auth_mode="api_key", subject_id=subject_id, token_hash_reference="key-hash", scopes=scopes, capabilities=frozenset(scopes))
         request.state.tenant_id = tenant_id
         request.state.key_hash = "key-hash"
         request.state.auth_mode = "api_key"
@@ -430,7 +437,7 @@ def test_review_inbox_safe_batch_pin_updates_metadata_without_status_change() ->
     assert first.status == "reviewable"
     assert second.status == "proposed"
     assert first.metadata_["review_inbox"]["pinned"] is True
-    assert first.metadata_["review_inbox"]["last_actor"] == "operator-a"
+    assert first.metadata_["review_inbox"]["last_actor"] == "principal-a"
     assert session.commits == 1
     assert len(session.events) == 2
 
@@ -471,11 +478,32 @@ def test_review_inbox_accept_promotes_only_source_backed_artifacts() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["artifacts"][0]["status"] == "promoted"
-    assert body["artifacts"][0]["approval"]["approved_by"] == "operator-a"
+    assert body["artifacts"][0]["approval"]["approved_by"] == "principal-a"
     assert body["artifacts"][0]["metadata"]["review_inbox"]["resolved"] is True
     assert artifact.approved_at is not None
     assert session.commits == 1
     assert session.refreshes == [artifact]
+
+
+def test_review_inbox_accept_requires_distinct_scoped_approver() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.created_by_principal = "creator-a"
+    payload = {"action": "accept", "artifact_ids": [str(artifact.id)], "actor": "forged-actor"}
+
+    unscoped = _client(
+        FakeSession(artifacts={artifact.id: artifact}),
+        subject_id="approver-a",
+        scopes=("read", "write"),
+    ).post("/api/v1/curation-artifacts/review-inbox/actions", json=payload)
+    same_principal = _client(
+        FakeSession(artifacts={artifact.id: artifact}),
+        subject_id="creator-a",
+    ).post("/api/v1/curation-artifacts/review-inbox/actions", json=payload)
+
+    assert unscoped.status_code == 403
+    assert "approval scope" in unscoped.json()["detail"]
+    assert same_principal.status_code == 422
+    assert "creator cannot approve" in same_principal.json()["detail"]
 
 
 def test_review_inbox_accept_rejects_source_backed_draft() -> None:
@@ -552,7 +580,8 @@ def test_patch_candidate_curation_artifact_updates_metadata_status_and_approval(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "approved"
-    assert body["approval"]["approved_by"] == "codex-review"
+    assert body["approval"]["approved_by"] == "principal-a"
+    assert body["approved_by_principal"] == "principal-a"
     assert body["metadata"] == {"review": "passed"}
     assert artifact.approved_at is not None
     assert session.commits == 1
