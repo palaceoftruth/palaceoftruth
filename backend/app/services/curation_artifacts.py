@@ -404,7 +404,7 @@ async def create_candidate_curation_artifact(
         status=body.status,
         candidate_body=body.candidate_body,
         privacy_review=body.privacy_review,
-        approval=body.approval,
+        approval={},
         source_item_ids=body.source_item_ids,
         source_digests=body.source_digests,
         metadata=body.metadata,
@@ -422,7 +422,7 @@ async def create_candidate_curation_artifact(
         candidate_body=body.candidate_body,
         privacy_review=body.privacy_review,
         eval_summary=body.eval_summary,
-        approval=body.approval,
+        approval={},
         created_by_principal=principal_id,
         metadata_=body.metadata,
         supersedes_artifact_id=body.supersedes_artifact_id,
@@ -484,12 +484,50 @@ async def update_candidate_curation_artifact(
     principal_id: str | None = None,
     can_approve: bool = False,
 ) -> CandidateCurationArtifact:
+    requested_status = (
+        _normalize_status(body.status) if body.status is not None else artifact.status
+    )
+    if requested_status in PROMOTED_STATUSES | {"rejected"} and requested_status != artifact.status:
+        # Serialize approval decisions. Without a row lock, two sessions can
+        # both validate the same stale reviewable state and commit conflicting
+        # decisions for one artifact.
+        locked = (
+            await db.execute(
+                select(CandidateCurationArtifact)
+                .where(CandidateCurationArtifact.id == artifact.id)
+                .where(CandidateCurationArtifact.tenant_id == artifact.tenant_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if locked is None or locked.tenant_id != artifact.tenant_id:
+            raise CandidateCurationArtifactError("candidate curation artifact not found")
+        artifact = locked
     if artifact.status in TERMINAL_STATUSES and body.status not in (None, artifact.status):
         raise CandidateCurationArtifactError("terminal candidate artifacts cannot move to a new lifecycle status")
     previous_snapshot = _artifact_snapshot(artifact)
 
+    material_change = any(
+        value is not None
+        for value in (
+            body.source_item_ids,
+            body.source_digests,
+            body.privacy_review,
+            body.eval_summary,
+            body.metadata,
+            body.superseded_by_artifact_id,
+            body.deprecated_reason,
+        )
+    )
+    if artifact.status in PROMOTED_STATUSES and material_change:
+        raise CandidateCurationArtifactError(
+            "approved candidate artifacts are immutable; create a new reviewable revision"
+        )
+
     next_status = _normalize_status(body.status) if body.status is not None else artifact.status
     approval_transition = next_status in PROMOTED_STATUSES | {"rejected"} and next_status != artifact.status
+    if approval_transition and artifact.approval_decided_at is not None:
+        raise CandidateCurationArtifactError("artifact approval has already been decided")
     if body.approval is not None and not approval_transition:
         raise CandidateCurationArtifactError(
             "approval can only be set during an approval or rejection transition"

@@ -11,7 +11,7 @@ from sqlalchemy.pool import NullPool
 from app.database import _database_url, _engine_options
 
 
-# Keep this inventory synchronized with migration 067. The contract test makes
+# Keep this inventory synchronized with the current migration head. The contract test makes
 # drift fail in CI before a tenant-owned table can be omitted.
 TENANT_TABLES = (
     "api_key_audit_events", "api_keys", "browser_extension_pairing_keys", "browser_sessions",
@@ -25,8 +25,10 @@ TENANT_TABLES = (
     "room_closet_artifacts", "room_memberships", "room_snapshots", "room_tunnels", "rooms",
     "source_chunks", "source_records", "source_resource_aliases", "source_resource_audit_snapshots",
     "source_resources", "source_subscription_entries", "source_subscriptions", "sync_runs",
-    "sync_source_files", "sync_sources", "temporal_facts", "web_saves", "wings",
+    "sync_source_files", "sync_sources", "temporal_facts", "tenant_llm_daily_usage", "web_saves", "wings",
 )
+
+REQUIRED_ALEMBIC_REVISION = "068_curation_principals"
 
 POLICY_SQL = """
     CREATE POLICY tenant_isolation ON {table}
@@ -65,10 +67,10 @@ async def enforce_tenant_rls() -> None:
             await connection.commit()
             try:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-                if revision != "067_tenant_rls_enforcement":
+                if revision != REQUIRED_ALEMBIC_REVISION:
                     raise RuntimeError(
                         "Tenant RLS enforcement requires Alembic revision "
-                        f"067_tenant_rls_enforcement, found {revision!r}"
+                        f"{REQUIRED_ALEMBIC_REVISION}, found {revision!r}"
                     )
                 await connection.commit()
                 for table in TENANT_TABLES:

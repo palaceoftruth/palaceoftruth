@@ -1529,6 +1529,7 @@ def test_palace_checkpoint_alias_reuses_checkpoint_safety_defaults() -> None:
     assert result["status"] == "dry_run"
     assert result["would_write"]["scope"] == {"type": "agent", "key": "codex"}  # type: ignore[index]
     assert result["would_write"]["relationship_policy"] == "deferred"  # type: ignore[index]
+    assert result["relationship_backfill"] == {"queued": False, "reason": "dry_run"}
 
 
 def test_mcp_tool_records_redacted_audit_after_success() -> None:

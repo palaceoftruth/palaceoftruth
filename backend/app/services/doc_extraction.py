@@ -122,8 +122,7 @@ def default_child_memory_limit_bytes(*, concurrency: int | None = None) -> int:
     pod_limit = cgroup_memory_limit_bytes()
     if pod_limit is None:
         return EXTRACTION_MEMORY_LIMIT_BYTES
-    headroom = min(_POD_MEMORY_HEADROOM_BYTES, max(pod_limit // 4, 64 * 1024 * 1024))
-    available = max(pod_limit - headroom, _MIN_CHILD_MEMORY_BYTES)
+    available = _available_child_memory_bytes(pod_limit)
     return max(
         _MIN_CHILD_MEMORY_BYTES,
         min(EXTRACTION_MEMORY_LIMIT_BYTES, available // max(workers, 1)),
@@ -253,4 +252,22 @@ def default_max_concurrent_extractions() -> int:
     """Leave the pod enough CPU to keep serving every other tenant's requests."""
 
     cpu_budget = cgroup_cpu_quota() or float(os.cpu_count() or 2)
-    return max(1, min(4, math.floor(cpu_budget)))
+    cpu_workers = max(1, min(4, math.floor(cpu_budget)))
+    pod_limit = cgroup_memory_limit_bytes()
+    if pod_limit is None:
+        return cpu_workers
+    memory_workers = max(
+        1,
+        _available_child_memory_bytes(pod_limit) // _MIN_CHILD_MEMORY_BYTES,
+    )
+    return min(cpu_workers, memory_workers)
+
+
+def _available_child_memory_bytes(pod_limit: int) -> int:
+    """Keep process headroom outside the aggregate extraction-child budget."""
+
+    headroom = min(
+        _POD_MEMORY_HEADROOM_BYTES,
+        max(pod_limit // 4, 64 * 1024 * 1024),
+    )
+    return max(pod_limit - headroom, _MIN_CHILD_MEMORY_BYTES)

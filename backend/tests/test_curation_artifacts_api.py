@@ -21,6 +21,9 @@ class FakeScalarResult:
     def all(self):
         return self.rows
 
+    def scalar_one_or_none(self):
+        return self.rows[0] if self.rows else None
+
 
 class FakeSession:
     def __init__(self, *, artifacts=None) -> None:
@@ -184,6 +187,23 @@ def test_create_candidate_curation_artifact_stores_sanitized_tenant_scoped_paylo
     assert session.events[0].event_type == "created"
     assert session.events[0].previous_snapshot is None
     assert session.events[0].next_snapshot["status"] == "draft"
+
+
+def test_create_candidate_ignores_forged_approval_evidence() -> None:
+    session = FakeSession()
+    client = _client(session, scopes=("read", "write"))
+    payload = _payload()
+    payload["approval"] = {
+        "approved_by": "forged-approver",
+        "approved_at": "2026-08-12T00:00:00Z",
+        "decision": "approved",
+    }
+
+    response = client.post("/api/v1/curation-artifacts", json=payload)
+
+    assert response.status_code == 201
+    assert response.json()["approval"] == {}
+    assert response.json()["approved_by_principal"] is None
 
 
 def test_create_no_source_generated_insight_remains_advisory_and_needs_source() -> None:
@@ -591,6 +611,24 @@ def test_patch_candidate_curation_artifact_updates_metadata_status_and_approval(
     assert session.events[0].next_status == "approved"
     assert session.events[0].previous_snapshot["metadata"] == {"created_from": "test"}
     assert session.events[0].next_snapshot["metadata"] == {"review": "passed"}
+    assert "FOR UPDATE" in session.statements[0]
+
+
+def test_approved_candidate_cannot_change_evidence_without_new_revision() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="approved")
+    artifact.approved_by_principal = "approver-a"
+    artifact.approval_decided_at = datetime.now(timezone.utc)
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session, subject_id="writer-b", scopes=("read", "write"))
+
+    response = client.patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={"source_item_ids": ["attacker-replacement"]},
+    )
+
+    assert response.status_code == 422
+    assert "immutable" in response.json()["detail"]
+    assert artifact.source_item_ids == ["SAR-512"]
 
 
 def test_patch_candidate_curation_artifact_promotes_source_backed_generated_insight() -> None:

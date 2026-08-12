@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -49,7 +50,7 @@ def validate_client_llm_model(model: str | None) -> str | None:
 
 @asynccontextmanager
 async def tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
-    """Bound concurrent LLM admission per tenant with bounded gate state."""
+    """Bound tenant LLM work in this process and across all replicas."""
 
     async with _GATES_LOCK:
         gate = _GATES.get(tenant_id)
@@ -67,11 +68,58 @@ async def tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
                 del _GATES[key]
     try:
         async with gate.semaphore:
-            yield
+            async with _distributed_tenant_llm_slot(tenant_id):
+                yield
     finally:
         async with _GATES_LOCK:
             gate.users -= 1
             _GATES.move_to_end(tenant_id)
+
+
+@asynccontextmanager
+async def _distributed_tenant_llm_slot(tenant_id: str) -> AsyncIterator[None]:
+    """Hold one PostgreSQL advisory-lock slot for the lifetime of provider work."""
+
+    from sqlalchemy import text
+
+    from app.database import tenant_async_session
+
+    slot_count = max(1, settings.tenant_llm_max_concurrent_requests)
+    async with tenant_async_session(tenant_id) as session:
+        acquired_slot: int | None = None
+        try:
+            while acquired_slot is None:
+                for slot in range(slot_count):
+                    lock_key = int.from_bytes(
+                        hashlib.sha256(f"{tenant_id}:{slot}".encode()).digest()[:8],
+                        "big",
+                        signed=True,
+                    )
+                    acquired = await session.scalar(
+                        text("SELECT pg_try_advisory_lock(:lock_key)"),
+                        {"lock_key": lock_key},
+                    )
+                    if acquired is True:
+                        acquired_slot = slot
+                        break
+                if acquired_slot is None:
+                    await asyncio.sleep(0.05)
+            yield
+        finally:
+            if acquired_slot is not None:
+                lock_key = int.from_bytes(
+                    hashlib.sha256(
+                        f"{tenant_id}:{acquired_slot}".encode()
+                    ).digest()[:8],
+                    "big",
+                    signed=True,
+                )
+                await asyncio.shield(
+                    session.scalar(
+                        text("SELECT pg_advisory_unlock(:lock_key)"),
+                        {"lock_key": lock_key},
+                    )
+                )
 
 
 async def consume_tenant_token_budget(tenant_id: str, estimated_tokens: int) -> None:
@@ -93,7 +141,8 @@ async def consume_tenant_token_budget(tenant_id: str, estimated_tokens: int) -> 
             result = await session.execute(
                 text(
                     "INSERT INTO tenant_llm_daily_usage (tenant_id, usage_day, used_tokens) "
-                    "VALUES (:tenant_id, CURRENT_DATE, :tokens) "
+                    "SELECT :tenant_id, CURRENT_DATE, :tokens "
+                    "WHERE :tokens <= :limit "
                     "ON CONFLICT (tenant_id, usage_day) DO UPDATE "
                     "SET used_tokens = tenant_llm_daily_usage.used_tokens + EXCLUDED.used_tokens, "
                     "updated_at = now() "

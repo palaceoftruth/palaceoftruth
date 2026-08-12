@@ -2,9 +2,14 @@ import asyncio
 import uuid
 
 import pytest
+from contextlib import asynccontextmanager
 
 from app.schemas.chat import ChatRequest
-from app.services.llm_admission import tenant_llm_slot
+from app.services.llm_admission import (
+    _distributed_tenant_llm_slot,
+    consume_tenant_token_budget,
+    tenant_llm_slot,
+)
 
 
 def test_client_model_override_requires_operator_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,6 +33,15 @@ def test_tenant_llm_gate_prevents_same_tenant_starvation(monkeypatch: pytest.Mon
     active = 0
     maximum = 0
 
+    @asynccontextmanager
+    async def distributed_slot(_tenant_id: str):
+        yield
+
+    monkeypatch.setattr(
+        "app.services.llm_admission._distributed_tenant_llm_slot",
+        distributed_slot,
+    )
+
     async def worker() -> None:
         nonlocal active, maximum
         async with tenant_llm_slot(tenant_id):
@@ -41,3 +55,73 @@ def test_tenant_llm_gate_prevents_same_tenant_starvation(monkeypatch: pytest.Mon
 
     asyncio.run(scenario())
     assert maximum == 1
+
+
+def test_first_daily_budget_write_cannot_exceed_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return None
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @staticmethod
+        def begin():
+            return Transaction()
+
+        async def execute(self, statement, _params):
+            statements.append(str(statement))
+            return Result()
+
+    monkeypatch.setattr("app.services.llm_admission.settings.tenant_llm_daily_token_limit", 100)
+    monkeypatch.setattr("app.database.async_session", lambda **_kwargs: Session())
+
+    with pytest.raises(Exception, match="daily LLM token limit"):
+        asyncio.run(consume_tenant_token_budget("tenant-a", 101))
+
+    normalized = " ".join(statements[0].split())
+    assert "SELECT :tenant_id, CURRENT_DATE, :tokens WHERE :tokens <= :limit" in normalized
+
+
+def test_distributed_gate_holds_and_releases_postgres_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, statement, _params):
+            sql = str(statement)
+            calls.append(sql)
+            return True
+
+    monkeypatch.setattr("app.database.tenant_async_session", lambda _tenant_id: Session())
+    monkeypatch.setattr("app.services.llm_admission.settings.tenant_llm_max_concurrent_requests", 2)
+
+    async def scenario() -> None:
+        async with _distributed_tenant_llm_slot("tenant-a"):
+            assert any("pg_try_advisory_lock" in call for call in calls)
+
+    asyncio.run(scenario())
+    assert any("pg_advisory_unlock" in call for call in calls)

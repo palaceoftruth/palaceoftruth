@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     ARRAY,
@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Float,
+    Date,
     ForeignKey,
     Index,
     Integer,
@@ -807,6 +808,28 @@ class PalaceRoomEvent(Base):
     )
 
 
+class TenantLlmDailyUsage(Base):
+    __tablename__ = "tenant_llm_daily_usage"
+    __table_args__ = (
+        CheckConstraint(
+            "used_tokens >= 0",
+            name="ck_tenant_llm_daily_usage_nonnegative",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    usage_day: Mapped[date] = mapped_column(Date, primary_key=True)
+    used_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class CandidateCurationArtifact(Base):
     __tablename__ = "candidate_curation_artifacts"
     __table_args__ = (
@@ -840,7 +863,9 @@ class CandidateCurationArtifact(Base):
     privacy_review: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     eval_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     approval: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
-    created_by_principal: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_principal: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="legacy:unknown"
+    )
     approved_by_principal: Mapped[str | None] = mapped_column(Text, nullable=True)
     approval_decided_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")

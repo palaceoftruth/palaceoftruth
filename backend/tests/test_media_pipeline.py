@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1124,7 +1125,17 @@ def test_stable_merge_tags_preserves_order_and_normalizes_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_base_pipeline_preserves_source_subscription_tags_after_media_completion() -> None:
+async def test_base_pipeline_preserves_source_subscription_tags_after_media_completion(
+    monkeypatch,
+) -> None:
+    @asynccontextmanager
+    async def distributed_slot(_tenant_id: str):
+        yield
+
+    monkeypatch.setattr(
+        "app.services.llm_admission._distributed_tenant_llm_slot",
+        distributed_slot,
+    )
     item_id = uuid.uuid4()
     job_id = uuid.uuid4()
     item = Item(

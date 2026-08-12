@@ -17,7 +17,12 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "candidate_curation_artifacts",
-        sa.Column("created_by_principal", sa.Text(), nullable=True),
+        sa.Column(
+            "created_by_principal",
+            sa.Text(),
+            nullable=True,
+            server_default="legacy:unknown",
+        ),
     )
     op.add_column(
         "candidate_curation_artifacts",
@@ -40,6 +45,7 @@ def upgrade() -> None:
         sa.Column("used_tokens", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("tenant_id", "usage_day"),
+        sa.CheckConstraint("used_tokens >= 0", name="ck_tenant_llm_daily_usage_nonnegative"),
     )
     op.execute("ALTER TABLE tenant_llm_daily_usage ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE tenant_llm_daily_usage FORCE ROW LEVEL SECURITY")
@@ -47,8 +53,10 @@ def upgrade() -> None:
         "CREATE POLICY tenant_isolation ON tenant_llm_daily_usage "
         "USING (current_setting('app.system_access', true) = 'true' "
         "OR tenant_id = current_setting('app.tenant_id', true)) "
-        "WITH CHECK (current_setting('app.system_access', true) = 'true' "
-        "OR tenant_id = current_setting('app.tenant_id', true))"
+        "WITH CHECK ((current_setting('app.system_access', true) = 'true' "
+        "OR tenant_id = current_setting('app.tenant_id', true)) "
+        "AND NOT EXISTS (SELECT 1 FROM tenant_erasure_states AS erasure "
+        "WHERE erasure.subject_tenant_id = tenant_id))"
     )
 
 

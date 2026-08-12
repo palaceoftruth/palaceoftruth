@@ -2625,7 +2625,7 @@ async def palace_checkpoint(
     metadata: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     relationship_policy: Literal["deferred", "immediate", "skip"] = "deferred",
-    queue_relationship_backfill: bool = True,
+    queue_relationship_backfill: bool = False,
     backfill_limit: int = 25,
     backfill_defer_seconds: int = 15,
     dry_run: bool = False,
