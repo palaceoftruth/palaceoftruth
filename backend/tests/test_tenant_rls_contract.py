@@ -18,6 +18,7 @@ from app.services.mcp_containment import (
     normalize_containment_mode,
 )
 from app.workers import feed_tasks, palace_tasks, tasks
+from app.workers.worker import MediaWorkerSettings, PalaceWorkerSettings, WorkerSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +142,12 @@ def test_tenant_erasure_keeps_external_io_outside_atomic_lock_window() -> None:
     assert first_queue_scan < lock < marker
     assert "SET LOCAL statement_timeout = 0" in function
     assert "SET LOCAL idle_in_transaction_session_timeout = 0" in function
+
+
+def test_every_worker_honors_tenant_erasure_abort_requests() -> None:
+    assert WorkerSettings.allow_abort_jobs is True
+    assert MediaWorkerSettings.allow_abort_jobs is True
+    assert PalaceWorkerSettings.allow_abort_jobs is True
 
 
 def test_arq_worker_entrypoints_do_not_swallow_unknown_arguments() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 import hashlib
 import logging
@@ -10,7 +11,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from arq.constants import abort_jobs_ss, job_key_prefix, result_key_prefix, retry_key_prefix
+from arq.constants import abort_jobs_ss, in_progress_key_prefix, job_key_prefix, result_key_prefix, retry_key_prefix
 from arq.jobs import DeserializationError, deserialize_job
 from arq.utils import timestamp_ms
 from sqlalchemy import delete, func, insert, select, text, update
@@ -161,7 +162,7 @@ async def _purge_tenant_arq_jobs(
         PALACE_WORKER_QUEUE,
         getattr(arq_pool, "default_queue_name", DEFAULT_WORKER_QUEUE),
     }
-    purged = 0
+    matching_jobs: list[tuple[str, object]] = []
     async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
         key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
         payload = await arq_pool.get(raw_key)
@@ -169,9 +170,10 @@ async def _purge_tenant_arq_jobs(
             continue
         try:
             definition = deserialize_job(payload, deserializer=deserializer)
-        except DeserializationError:
-            logger.warning("Could not inspect ARQ payload during tenant erasure: %s", key)
-            continue
+        except (DeserializationError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Could not inspect ARQ payload during tenant erasure: {key}"
+            ) from exc
         if not _payload_references_tenant(
             {"args": definition.args, "kwargs": definition.kwargs},
             tenant_id=tenant_id,
@@ -179,16 +181,31 @@ async def _purge_tenant_arq_jobs(
         ):
             continue
         job_id = key.removeprefix(job_key_prefix)
+        matching_jobs.append((job_id, raw_key))
+
+    for job_id, _raw_key in matching_jobs:
         await arq_pool.zadd(abort_jobs_ss, {job_id: timestamp_ms()})
         for queue_name in queue_names:
             await arq_pool.zrem(queue_name, job_id)
+
+    # ARQ workers poll the abort set and remove their in-progress key after the
+    # task accepts cancellation. Do not claim erasure while tenant code is still
+    # running. A timeout fails closed and leaves the permanent marker uncommitted.
+    if matching_jobs:
+        async with asyncio.timeout(30):
+            while any([
+                await arq_pool.exists(f"{in_progress_key_prefix}{job_id}")
+                for job_id, _raw_key in matching_jobs
+            ]):
+                await asyncio.sleep(0.1)
+
+    for job_id, raw_key in matching_jobs:
         await arq_pool.delete(
             raw_key,
             f"{result_key_prefix}{job_id}",
             f"{retry_key_prefix}{job_id}",
         )
-        purged += 1
-    return purged
+    return len(matching_jobs)
 
 
 async def _finalize_committed_tenant_erasure(

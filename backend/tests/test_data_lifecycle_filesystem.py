@@ -36,6 +36,9 @@ class _FakeArqPool:
     async def get(self, key):
         return self.payloads.get(key)
 
+    async def exists(self, _key):
+        return 0
+
     async def zadd(self, key, values):
         assert key == "arq:abort"
         self.aborts.update(values)
@@ -118,6 +121,20 @@ async def test_tenant_erasure_removes_only_matching_arq_payloads() -> None:
     assert purged == 2
     assert set(pool.aborts) == {"tenant-direct", "tenant-reference"}
     assert set(pool.payloads) == {b"arq:job:other"}
+
+
+@pytest.mark.asyncio
+async def test_tenant_erasure_fails_closed_on_uninspectable_arq_payload() -> None:
+    pool = _FakeArqPool({b"arq:job:corrupt": b"not-a-job"})
+
+    with pytest.raises(RuntimeError, match="Could not inspect ARQ payload"):
+        await _purge_tenant_arq_jobs(
+            pool,
+            tenant_id="tenant-a",
+            tenant_identifiers=set(),
+        )
+
+    assert b"arq:job:corrupt" in pool.payloads
 
 
 @pytest.mark.asyncio
