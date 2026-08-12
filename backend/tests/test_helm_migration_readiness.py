@@ -113,6 +113,15 @@ def test_rollout_defers_rls_until_post_rollout_hook() -> None:
     assert rollout_gate["name"] == "wait-for-tenant-aware-rollout"
     assert "updatedReplicas" in rollout_gate["command"][-1]
     assert "readyReplicas" in rollout_gate["command"][-1]
+    database_gate = enforcement_spec["initContainers"][1]
+    assert database_gate["name"] == "wait-for-writable-database"
+    assert database_gate["command"] == ["python", "-m", "app.wait_for_database"]
+    database_env = {entry["name"]: entry for entry in database_gate["env"]}
+    assert database_env["DATABASE_URL"]["value"].startswith("postgresql+asyncpg://")
+    assert database_env["MIGRATION_DB_WAIT_TIMEOUT_SECONDS"]["value"] == "240"
+    assert {mount["name"] for mount in database_gate["volumeMounts"]} >= {
+        "database-tls"
+    }
     role = next(
         manifest
         for manifest in manifests

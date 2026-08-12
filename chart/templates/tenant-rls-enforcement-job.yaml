@@ -77,6 +77,28 @@ spec:
             {{- toYaml .Values.migrations.readiness.resources | nindent 12 }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+        {{- if .Values.migrations.readiness.enabled }}
+        - name: wait-for-writable-database
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
+          command: ["python", "-m", "app.wait_for_database"]
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
+          env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+            {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
+            - name: MIGRATION_DB_WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.migrations.readiness.timeoutSeconds | quote }}
+            - name: MIGRATION_DB_WAIT_INTERVAL_SECONDS
+              value: {{ .Values.migrations.readiness.intervalSeconds | quote }}
+            - name: MIGRATION_DB_CONNECT_TIMEOUT_SECONDS
+              value: {{ .Values.migrations.readiness.connectTimeoutSeconds | quote }}
+          resources:
+            {{- toYaml .Values.migrations.readiness.resources | nindent 12 }}
+        {{- end }}
       containers:
         - name: enforce-tenant-rls
           image: {{ include "palaceoftruth.backendImage" . }}
