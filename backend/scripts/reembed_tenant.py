@@ -63,6 +63,7 @@ async def reembed_tenant(*, tenant_id: str, limit: int | None) -> None:
             for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 db.add(
                     embedding_record_for_profile(
+                        tenant_id=tenant_id,
                         item_id=uuid.UUID(str(item_id)),
                         chunk_index=chunk.get("index", chunk_index),
                         chunk_text=chunk["text"],

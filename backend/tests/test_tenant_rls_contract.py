@@ -20,7 +20,12 @@ from app.workers import feed_tasks, palace_tasks, tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "alembic" / "versions" / "061_tenant_rls.py"
+MIGRATION = ROOT / "alembic" / "versions" / "067_tenant_rls_enforcement.py"
+PREPARATION_MIGRATION = ROOT / "alembic" / "versions" / "061_tenant_rls.py"
+GUARD_MIGRATION = ROOT / "alembic" / "versions" / "063_tenant_not_null_guards.py"
+VALIDATION_MIGRATION = ROOT / "alembic" / "versions" / "064_tenant_not_null_validation.py"
+INDEX_MIGRATION = ROOT / "alembic" / "versions" / "065_tenant_indexes_online.py"
+CONSTRAINT_MIGRATION = ROOT / "alembic" / "versions" / "066_tenant_constraints.py"
 HISTORICAL_FEEDS_MIGRATION = ROOT / "alembic" / "versions" / "004_rss_feeds.py"
 
 
@@ -52,6 +57,23 @@ def test_rls_policy_is_forced_and_transaction_context_bound() -> None:
     assert "tenant_erasure_states" in source
     assert "app.tenant_id', true) = '*'" not in source
     assert "ALTER COLUMN tenant_id DROP DEFAULT" in source
+
+
+def test_tenant_constraints_use_online_safe_build_phases() -> None:
+    preparation = PREPARATION_MIGRATION.read_text()
+    guards = GUARD_MIGRATION.read_text()
+    validation = VALIDATION_MIGRATION.read_text()
+    indexes = INDEX_MIGRATION.read_text()
+    constraints = CONSTRAINT_MIGRATION.read_text()
+    enforcement = MIGRATION.read_text()
+
+    assert "CREATE TRIGGER" in preparation
+    assert "NOT VALID" in guards
+    assert "VALIDATE CONSTRAINT" in validation
+    assert "postgresql_concurrently=True" in indexes
+    assert "UNIQUE USING INDEX" in constraints
+    assert "NOT VALID" in constraints
+    assert "VALIDATE CONSTRAINT" in enforcement
 
 
 @pytest.mark.parametrize("tenant_id", ["*", "__unbound__", "  *  "])

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import sys
 import time
 from collections.abc import Awaitable, Callable
 
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -18,7 +20,25 @@ Clock = Callable[[], float]
 
 async def database_is_writable(database_url: str, connect_timeout: float) -> bool:
     """Return whether the target is the writable PostgreSQL primary."""
-    engine = create_async_engine(database_url, pool_pre_ping=True)
+    url = make_url(database_url)
+    query = dict(url.query)
+    sslmode = query.pop("sslmode", "")
+    sslrootcert = query.pop("sslrootcert", None) or os.getenv("DATABASE_SSL_ROOT_CERT")
+    connect_args: dict[str, object] = {}
+    if sslmode:
+        if sslmode != "verify-full":
+            raise ValueError("Only sslmode=verify-full is accepted for database TLS")
+        if not sslrootcert:
+            raise ValueError("DATABASE_SSL_ROOT_CERT is required for sslmode=verify-full")
+        context = ssl.create_default_context(cafile=sslrootcert)
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        connect_args["ssl"] = context
+    engine = create_async_engine(
+        url.set(query=query).render_as_string(hide_password=False),
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
     try:
         async with asyncio.timeout(connect_timeout):
             async with engine.connect() as connection:

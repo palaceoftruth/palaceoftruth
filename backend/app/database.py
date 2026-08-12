@@ -82,7 +82,10 @@ async def get_db(request: Request):
         tenant_id = getattr(request.state, "tenant_id", None)
         if not tenant_id:
             tenant_id = request.path_params.get("tenant_id")
-        system_access = not tenant_id and request.url.path.startswith("/api/v1/admin")
+        system_access = not tenant_id and (
+            request.url.path.startswith("/api/v1/admin")
+            or request.url.path == "/api/v1/metrics"
+        )
         session.info["tenant_id"] = str(tenant_id or "__unbound__")
         session.info["system_access"] = system_access
         yield session
