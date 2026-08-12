@@ -11,6 +11,12 @@ tenant upload-artifact directory, and retains a control-plane audit event. The
 single-item hard-delete route requires the exact item UUID as confirmation and
 also retains an audit event.
 
+The committed erasure marker first blocks every later tenant insert or update
+through RLS. The purge then locks all tenant tables long enough to drain earlier
+writes before it counts and deletes rows. The artifact path becomes a permanent
+file tombstone, so late upload work cannot recreate the erased directory. A
+failed purge keeps the database marker active and can be retried safely.
+
 Database backups are outside the request transaction. Operators must configure
 their backup system's retention and expiry policy to match the deployment's
 legal retention period. An erasure removes live data immediately; backup copies

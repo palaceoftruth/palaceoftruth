@@ -74,6 +74,7 @@ EXPECTED_TABLES = frozenset(
         "browser_extension_pairing_keys",
         "browser_sessions",
         "data_lifecycle_audit_events",
+        "tenant_erasure_states",
         "mcp_clients",
         "mcp_request_audit_events",
         "mcp_oauth_access_tokens",

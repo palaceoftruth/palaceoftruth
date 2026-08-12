@@ -24,3 +24,17 @@ class DataLifecycleAuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TenantErasureState(Base):
+    """Permanent tombstone that prevents erased tenant data from returning."""
+
+    __tablename__ = "tenant_erasure_states"
+
+    subject_tenant_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )

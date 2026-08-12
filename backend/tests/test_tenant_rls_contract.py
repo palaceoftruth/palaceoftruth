@@ -8,6 +8,7 @@ import pytest
 
 import app.models  # noqa: F401
 from app.api import ingest
+from app.api.admin import _normalize_tenant_id
 from app.database import Base
 from app.services.mcp_containment import (
     CONTAINMENT_HERMES_AGENT,
@@ -47,7 +48,23 @@ def test_rls_policy_is_forced_and_transaction_context_bound() -> None:
     assert "FORCE ROW LEVEL SECURITY" in source
     assert "current_setting('app.tenant_id', true)" in source
     assert "WITH CHECK" in source
+    assert "app.system_access" in source
+    assert "tenant_erasure_states" in source
+    assert "app.tenant_id', true) = '*'" not in source
     assert "ALTER COLUMN tenant_id DROP DEFAULT" in source
+
+
+@pytest.mark.parametrize("tenant_id", ["*", "__unbound__", "  *  "])
+def test_internal_database_context_cannot_be_registered_as_tenant(tenant_id: str) -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        _normalize_tenant_id(tenant_id)
+
+
+def test_alembic_does_not_inherit_application_statement_timeouts() -> None:
+    source = (ROOT / "alembic" / "env.py").read_text()
+
+    assert 'migration_server_settings.pop("statement_timeout", None)' in source
+    assert 'migration_server_settings.pop("idle_in_transaction_session_timeout", None)' in source
 
 
 def test_historical_feed_migration_fails_instead_of_deleting_duplicates() -> None:

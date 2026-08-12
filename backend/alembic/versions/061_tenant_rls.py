@@ -73,8 +73,8 @@ TENANT_TABLES = (
 
 
 def _enable_rls(table: str) -> None:
-    # The '*' context is reserved for background and explicitly-admin sessions.
-    # Request sessions always receive one exact tenant from app.database.
+    # System access is a separate server-owned flag, so no tenant identifier can
+    # collide with the background/admin database context.
     op.execute(sa.text(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY'))
     op.execute(sa.text(f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY'))
     op.execute(
@@ -82,12 +82,19 @@ def _enable_rls(table: str) -> None:
             f'''
             CREATE POLICY tenant_isolation ON "{table}"
             USING (
-                current_setting('app.tenant_id', true) = '*'
+                current_setting('app.system_access', true) = 'true'
                 OR tenant_id = current_setting('app.tenant_id', true)
             )
             WITH CHECK (
-                current_setting('app.tenant_id', true) = '*'
-                OR tenant_id = current_setting('app.tenant_id', true)
+                (
+                    current_setting('app.system_access', true) = 'true'
+                    OR tenant_id = current_setting('app.tenant_id', true)
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tenant_erasure_states AS erasure
+                    WHERE erasure.subject_tenant_id = tenant_id
+                )
             )
             '''
         )
@@ -110,6 +117,18 @@ def upgrade() -> None:
         "ix_data_lifecycle_audit_events_subject_tenant_id",
         "data_lifecycle_audit_events",
         ["subject_tenant_id"],
+    )
+    op.create_table(
+        "tenant_erasure_states",
+        sa.Column("subject_tenant_id", sa.Text(), nullable=False),
+        sa.Column(
+            "started_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("subject_tenant_id"),
     )
 
     # Align historical nullable declarations with the ORM contract. Existing
@@ -299,3 +318,4 @@ def downgrade() -> None:
         table_name="data_lifecycle_audit_events",
     )
     op.drop_table("data_lifecycle_audit_events")
+    op.drop_table("tenant_erasure_states")

@@ -72,10 +72,17 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    migration_connect_args = dict(_engine_options["connect_args"])
+    migration_server_settings = dict(migration_connect_args.get("server_settings", {}))
+    # Application queries need short limits. Schema migrations can legitimately
+    # scan or validate large tables, so they use PostgreSQL's unlimited default.
+    migration_server_settings.pop("statement_timeout", None)
+    migration_server_settings.pop("idle_in_transaction_session_timeout", None)
+    migration_connect_args["server_settings"] = migration_server_settings
     connectable = create_async_engine(
         _database_url,
         poolclass=pool.NullPool,
-        connect_args=_engine_options["connect_args"],
+        connect_args=migration_connect_args,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

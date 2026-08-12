@@ -56,6 +56,10 @@ def _apply_tenant_context(session: Session, _transaction, connection) -> None:
         text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
         {"tenant_id": tenant_id},
     )
+    connection.execute(
+        text("SELECT set_config('app.system_access', :system_access, true)"),
+        {"system_access": "true" if session.info.get("system_access") else "false"},
+    )
 
 
 _database_url, _engine_options = _engine_configuration()
@@ -65,7 +69,7 @@ async_session = async_sessionmaker(
     class_=AsyncSession,
     sync_session_class=TenantSession,
     expire_on_commit=False,
-    info={"tenant_id": "*"},
+    info={"tenant_id": "__unbound__", "system_access": True},
 )
 
 
@@ -78,7 +82,7 @@ async def get_db(request: Request):
         tenant_id = getattr(request.state, "tenant_id", None)
         if not tenant_id:
             tenant_id = request.path_params.get("tenant_id")
-        if not tenant_id and request.url.path.startswith("/api/v1/admin"):
-            tenant_id = "*"
+        system_access = not tenant_id and request.url.path.startswith("/api/v1/admin")
         session.info["tenant_id"] = str(tenant_id or "__unbound__")
+        session.info["system_access"] = system_access
         yield session

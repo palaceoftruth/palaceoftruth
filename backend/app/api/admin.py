@@ -53,6 +53,8 @@ def _normalize_tenant_id(value: str) -> str:
     tenant_id = value.strip()
     if not tenant_id:
         raise ValueError("tenant_id must not be blank")
+    if tenant_id in {"*", "__unbound__"}:
+        raise ValueError("tenant_id is reserved for internal database context")
     return tenant_id
 
 
@@ -658,6 +660,7 @@ async def register_tenant(
 async def erase_tenant(
     tenant_id: str,
     body: TenantErasureRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TenantErasureResponse:
     """Preview or perform a transaction-scoped tenant erasure."""
@@ -667,6 +670,7 @@ async def erase_tenant(
         raise HTTPException(status_code=422, detail=f'confirmation must equal "{expected}"')
     counts = await erase_tenant_data(
         db,
+        arq_pool=request.app.state.arq_pool,
         tenant_id=tenant_id,
         actor_id="admin-secret",
         dry_run=body.dry_run,

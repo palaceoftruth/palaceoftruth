@@ -2,14 +2,49 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from arq.jobs import serialize_job
+
 from app.config import settings
 from app.services.data_lifecycle import (
+    _purge_tenant_arq_jobs,
     _purge_staged_paths,
     _restore_staged_paths,
     _stage_item_artifacts,
     _stage_tenant_artifacts,
     _tenant_artifact_directory,
 )
+from app.workers.serialization import job_deserializer, job_serializer
+
+
+class _FakeArqPool:
+    default_queue_name = "arq:queue"
+    job_deserializer = staticmethod(job_deserializer)
+
+    def __init__(self, payloads: dict[bytes, bytes]) -> None:
+        self.payloads = payloads
+        self.aborts: dict[str, float] = {}
+        self.removed_from_queues: list[tuple[str, str]] = []
+
+    async def scan_iter(self, *, match: str):
+        assert match == "arq:job:*"
+        for key in list(self.payloads):
+            yield key
+
+    async def get(self, key):
+        return self.payloads.get(key)
+
+    async def zadd(self, key, values):
+        assert key == "arq:abort"
+        self.aborts.update(values)
+
+    async def zrem(self, queue_name, job_id):
+        self.removed_from_queues.append((queue_name, job_id))
+
+    async def delete(self, *keys):
+        for key in keys:
+            encoded = key.encode() if isinstance(key, str) else key
+            self.payloads.pop(encoded, None)
 
 
 def test_tenant_artifact_staging_is_reversible(monkeypatch, tmp_path) -> None:
@@ -20,7 +55,7 @@ def test_tenant_artifact_staging_is_reversible(monkeypatch, tmp_path) -> None:
 
     staged = _stage_tenant_artifacts("tenant-a")
 
-    assert not active.exists()
+    assert active.is_file()
     assert (staged[0][1] / "artifact.bin").read_bytes() == b"tenant data"
     _restore_staged_paths(staged)
     assert (active / "artifact.bin").read_bytes() == b"tenant data"
@@ -43,3 +78,41 @@ def test_item_artifact_staging_matches_exact_id_and_extensions(monkeypatch, tmp_
     for quarantine in {path.parent for _original, path in staged}:
         quarantine.rmdir()
     assert sorted(path.name for path in active.iterdir()) == [f"{item_id}-other.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_tenant_erasure_removes_only_matching_arq_payloads() -> None:
+    tenant_job_id = str(uuid.uuid4())
+
+    def payload(job_id: str, kwargs: dict) -> tuple[bytes, bytes]:
+        return (
+            f"arq:job:{job_id}".encode(),
+            serialize_job(
+                "process_note",
+                (),
+                kwargs,
+                None,
+                0,
+                serializer=job_serializer,
+            ),
+        )
+
+    pool = _FakeArqPool(
+        dict(
+            [
+                payload("tenant-direct", {"tenant_id": "tenant-a"}),
+                payload("tenant-reference", {"job_id": tenant_job_id}),
+                payload("other", {"tenant_id": "tenant-b"}),
+            ]
+        )
+    )
+
+    purged = await _purge_tenant_arq_jobs(
+        pool,
+        tenant_id="tenant-a",
+        tenant_identifiers={tenant_job_id},
+    )
+
+    assert purged == 2
+    assert set(pool.aborts) == {"tenant-direct", "tenant-reference"}
+    assert set(pool.payloads) == {b"arq:job:other"}

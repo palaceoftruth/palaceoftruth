@@ -2,7 +2,7 @@ from app.models.item import Item
 from app.models.web_save import WebSave
 from app.models.embedding import Embedding, EmbeddingProfileVector
 from app.models.relationship import ItemRelationship
-from app.models.data_lifecycle import DataLifecycleAuditEvent
+from app.models.data_lifecycle import DataLifecycleAuditEvent, TenantErasureState
 from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.feed import Feed
@@ -48,6 +48,7 @@ __all__ = [
     "EmbeddingProfileVector",
     "ItemRelationship",
     "DataLifecycleAuditEvent",
+    "TenantErasureState",
     "Job",
     "JobAttempt",
     "JobProgressEvent",
