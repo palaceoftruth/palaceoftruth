@@ -157,7 +157,11 @@ def test_valkey_ingress_is_limited_to_application_pods() -> None:
     } <= _peer_apps(app_rule)
     # Nothing else in the cluster, and no namespace-wide or empty allowance.
     # MCP and the frontend never touch the queue.
-    assert not {"palaceoftruth-frontend", "palaceoftruth-mcp"} & _peer_apps(app_rule)
+    assert not {
+        "palaceoftruth-frontend",
+        "palaceoftruth-mcp",
+        "palaceoftruth-tenant-rls-enforcement",
+    } & _peer_apps(app_rule)
     assert all(rule.get("from") for rule in policy["spec"]["ingress"])
 
 
@@ -168,7 +172,11 @@ def test_postgres_ingress_allows_the_cnpg_operator_and_replication() -> None:
     assert policy["spec"]["podSelector"] == {
         "matchLabels": {"cnpg.io/cluster": "palaceoftruth-postgres"}
     }
-    assert any(_peer_apps(rule) and _ports(rule) == {5432} for rule in rules)
+    app_rule = next(
+        rule for rule in rules if "palaceoftruth-backend" in _peer_apps(rule)
+    )
+    assert _ports(app_rule) == {5432}
+    assert "palaceoftruth-tenant-rls-enforcement" in _peer_apps(app_rule)
     assert any(
         peer.get("podSelector", {}).get("matchLabels", {}).get("cnpg.io/cluster")
         == "palaceoftruth-postgres"
