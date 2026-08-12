@@ -68,6 +68,31 @@ class MappingResult:
         return self.rows
 
 
+class ScalarSessionContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def scalar(self, _statement):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_legacy_restore_job_resolves_tenant_from_durable_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tasks,
+        "system_async_session",
+        lambda: ScalarSessionContext("tenant-legacy"),
+    )
+
+    assert await tasks._legacy_restore_job_tenant(uuid.uuid4()) == "tenant-legacy"
+
+
 class FakeLlm:
     async def classify_relationship(self, *_args):
         return ("related_to", 0.92)

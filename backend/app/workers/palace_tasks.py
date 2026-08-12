@@ -8,7 +8,7 @@ from sqlalchemy import and_, func, select
 from app.config import settings
 from app.database import async_session
 from app.models.item import Item
-from app.models.palace import PalaceDirtyItem, PalaceRun, PalaceTenantState, RoomMembership, SyncSource
+from app.models.palace import PalaceDirtyItem, PalaceRun, PalaceTenantState, RoomMembership, SyncRun, SyncSource
 from app.services.fact_registry import extract_temporal_facts, list_fact_registry_tenants, sweep_fact_registry_contradictions
 from app.services.diary_rollups import generate_memory_diary_rollups
 from app.services.memory_dreams import generate_memory_dreams, memory_dream_target_days
@@ -36,6 +36,22 @@ def tenant_async_session(tenant_id: str):
         return async_session(info={"tenant_id": tenant_id, "system_access": False})
     except TypeError:
         return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
+
+async def _legacy_palace_job_tenant(model, row_id: uuid.UUID) -> str:
+    """Resolve only legacy queue payloads that predate embedded tenant IDs."""
+    async with system_async_session() as db:
+        tenant_id = await db.scalar(select(model.tenant_id).where(model.id == row_id))
+    if tenant_id is None:
+        raise ValueError(f"Legacy {model.__name__} queue row {row_id} was not found")
+    return str(tenant_id)
 DIARY_ROLLUP_REPLAY_DAYS = 2
 TUNNEL_RECOMPUTE_BATCH_SIZE = 50
 DIRTY_ROOM_REFRESH_BATCH_SIZE = 50
@@ -284,13 +300,16 @@ async def _refresh_wakeup_briefs_for_caught_up_palace(
         logger.exception("wake-up brief refresh after Palace build failed for tenant %s", tenant_id)
 
 
-async def palace_run_build(ctx: dict, palace_run_id: str, *, tenant_id: str) -> None:
+async def palace_run_build(ctx: dict, palace_run_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_run_id = uuid.UUID(palace_run_id)
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(PalaceRun, parsed_run_id)
     logger.info("palace_run_build worker executing run_id=%s", palace_run_id)
     async with tenant_async_session(tenant_id) as db:
-        status, _error = await run_palace_run(db, run_id=uuid.UUID(palace_run_id))
+        status, _error = await run_palace_run(db, run_id=parsed_run_id)
         logger.info("palace_run_build worker finished run_id=%s status=%s", palace_run_id, status)
         if status == "completed":
-            run = await db.get(PalaceRun, uuid.UUID(palace_run_id))
+            run = await db.get(PalaceRun, parsed_run_id)
             if run is not None:
                 has_follow_on = await _enqueue_follow_on_palace_run(
                     ctx,
@@ -306,19 +325,20 @@ async def palace_run_build(ctx: dict, palace_run_id: str, *, tenant_id: str) -> 
                     )
 
 
-async def run_sync_source(ctx: dict, sync_run_id: str, *, tenant_id: str) -> None:
+async def run_sync_source(ctx: dict, sync_run_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_run_id = uuid.UUID(sync_run_id)
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(SyncRun, parsed_run_id)
     async with tenant_async_session(tenant_id) as db:
         status, _error = await run_sync_run(
             db,
-            run_id=uuid.UUID(sync_run_id),
+            run_id=parsed_run_id,
             embedder=ctx["embedder"],
             llm=ctx["llm"],
         )
         if status == "completed":
-            # reload via explicit query, keeping tenant/source context in the same session
-            from app.models.palace import SyncRun
-
-            sync_run = await db.get(SyncRun, uuid.UUID(sync_run_id))
+            # Reload via explicit query, keeping tenant/source context in the same session.
+            sync_run = await db.get(SyncRun, parsed_run_id)
             if sync_run and sync_run.generation > 0:
                 palace_run, created = await create_or_get_palace_run(
                     db,

@@ -77,7 +77,8 @@ def test_tenant_constraints_use_online_safe_build_phases() -> None:
     assert "NOT VALID" in constraints
     assert "VALIDATE CONSTRAINT" in enforcement
     assert "DEFER_TENANT_RLS_ENFORCEMENT" in enforcement
-    assert "autocommit_block" in enforcement
+    assert "autocommit_block" not in enforcement
+    assert "SET LOCAL lock_timeout" in enforcement
     assert "lock_timeout" in enforcement
 
 

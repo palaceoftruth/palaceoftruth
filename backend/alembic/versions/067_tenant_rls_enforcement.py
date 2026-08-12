@@ -88,11 +88,13 @@ def upgrade() -> None:
     # RLS activation to a post-upgrade hook after tenant-aware writers roll out.
     if os.getenv("DEFER_TENANT_RLS_ENFORCEMENT", "").lower() in {"1", "true", "yes"}:
         return
+    # Direct Alembic callers keep revision 067 atomic. SET LOCAL therefore
+    # applies to every RLS lock, and any failure rolls back the complete
+    # revision so Alembic can retry it. The chart uses the deferred branch and
+    # app.enforce_tenant_rls for independent per-table transactions after the
+    # tenant-aware application rollout.
     for table in TENANT_TABLES:
-        # Commit each table independently. A busy table can time out without
-        # retaining locks acquired for every table processed before it.
-        with op.get_context().autocommit_block():
-            _enable_rls(table)
+        _enable_rls(table)
 
 
 def downgrade() -> None:

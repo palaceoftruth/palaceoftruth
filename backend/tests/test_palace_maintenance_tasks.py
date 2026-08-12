@@ -15,6 +15,7 @@ from app.models.palace import PalaceRun, PalaceTenantState
 from app.services.palace import PalaceIndexIntegrityPlan
 from app.workers.palace_tasks import _enqueue_missing_embedding_repairs, mark_items_dirty_and_schedule, palace_run_build, poll_sync_sources, recover_palace_backlog, refresh_caught_up_wakeup_briefs, refresh_dirty_palace_rooms, refresh_palace_consolidation_candidates, repair_palace_artifacts, recompute_palace_tunnel_strengths, run_fact_registry_contradiction_sweep, run_fact_registry_extraction, run_memory_dream_refresh, run_palace_maintenance, run_wakeup_story_refresh, sweep_palace_index_integrity, watch_local_sync_sources_once
 from app.workers.queues import MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
+from app.workers import palace_tasks
 from app.workers.worker import MediaWorkerSettings, PalaceWorkerSettings, WorkerSettings
 
 
@@ -27,6 +28,33 @@ class FakeRows:
 
     def all(self):
         return self._rows
+
+
+class ScalarSessionContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def scalar(self, _statement):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_legacy_palace_job_resolves_tenant_from_durable_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        palace_tasks,
+        "system_async_session",
+        lambda: ScalarSessionContext("tenant-legacy"),
+    )
+
+    tenant_id = await palace_tasks._legacy_palace_job_tenant(PalaceRun, uuid.uuid4())
+
+    assert tenant_id == "tenant-legacy"
 
 
 class FakeDb:

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from arq.jobs import Job as ArqJob, JobStatus
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 
 from app.database import async_session
 from app.models.embedding import Embedding
@@ -59,6 +59,15 @@ def system_async_session():
         return async_session(info={"tenant_id": "__unbound__", "system_access": True})
     except TypeError:
         return async_session()
+
+
+async def _legacy_restore_job_tenant(job_id: uuid.UUID) -> str:
+    """Resolve only restore payloads queued before tenant IDs were embedded."""
+    async with system_async_session() as db:
+        tenant_id = await db.scalar(select(Job.tenant_id).where(Job.id == job_id))
+    if tenant_id is None:
+        raise ValueError(f"Legacy restore queue job {job_id} was not found")
+    return str(tenant_id)
 
 _RELATIONSHIP_BACKFILL_DEFAULT_LIMIT = 50
 _RELATIONSHIP_BACKFILL_MAX_LIMIT = 500
@@ -833,6 +842,9 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
         logger.info("recover_stale_memory_jobs: requeued job %s for tenant %s", job_id, row.tenant_id)
 
 
-async def restore_bundle(ctx: dict, job_id: str, *, tenant_id: str) -> None:
-    async with tenant_async_session(tenant_id) as db:
-        await run_restore_job(db, ctx["embedder"], uuid.UUID(job_id))
+async def restore_bundle(ctx: dict, job_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_job_id = uuid.UUID(job_id)
+    if tenant_id is None:
+        tenant_id = await _legacy_restore_job_tenant(parsed_job_id)
+    async with tenant_async_session(str(tenant_id)) as db:
+        await run_restore_job(db, ctx["embedder"], parsed_job_id)
