@@ -1,6 +1,6 @@
 import ssl
 
-from fastapi import Request
+from fastapi import Depends, Request
 from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -95,6 +95,16 @@ def system_async_session() -> AsyncSession:
         return async_session()
 
 
+async def bind_session_to_tenant(session: AsyncSession, tenant_id: str) -> None:
+    """End a credential-discovery transaction and bind later work to its tenant."""
+    info = getattr(session, "info", None)
+    if info is None:  # Narrow test doubles may not implement SQLAlchemy metadata.
+        return
+    await session.rollback()
+    info["tenant_id"] = str(tenant_id)
+    info["system_access"] = False
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -111,3 +121,14 @@ async def get_db(request: Request):
         session.info["tenant_id"] = str(tenant_id or "__unbound__")
         session.info["system_access"] = system_access
         yield session
+
+
+async def get_credential_exchange_db(
+    session: AsyncSession = Depends(get_db),
+):
+    """Allow only credential discovery; callers must bind before tenant writes."""
+    info = getattr(session, "info", None)
+    if info is not None:
+        info["tenant_id"] = "__unbound__"
+        info["system_access"] = True
+    yield session

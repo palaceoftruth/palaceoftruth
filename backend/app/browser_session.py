@@ -34,6 +34,7 @@ from app.auth import (
     secret_hash_candidates,
 )
 from app.config import settings
+from app.database import bind_session_to_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,8 @@ async def issue_session(
     scopes = resolve_session_scopes(stored_scopes, elevated=elevated)
     if not scopes:
         return None
+
+    await bind_session_to_tenant(db, key["tenant_id"])
 
     # Serialize this tenant's prune+insert pair so concurrent exchanges cannot
     # exceed the configured live-session cap.

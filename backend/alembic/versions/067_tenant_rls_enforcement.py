@@ -45,6 +45,18 @@ FOREIGN_KEYS = (
     ("fk_item_relationships_tenant_target", "item_relationships"),
 )
 
+# Revision 066 still carries these compatibility defaults for old writers.
+# Revision 067 removes them after the tenant-aware application is available.
+LEGACY_DEFAULT_TABLES = (
+    "candidate_curation_artifact_events", "candidate_curation_artifacts",
+    "memory_entries", "memory_scope_profiles", "palace_dirty_items",
+    "palace_room_events", "palace_runs", "retrieval_hint_artifacts",
+    "room_closet_artifacts", "room_memberships", "room_snapshots",
+    "room_tunnels", "rooms", "source_subscription_entries",
+    "source_subscriptions", "sync_runs", "sync_source_files", "sync_sources",
+    "temporal_facts", "wings",
+)
+
 
 def _enable_rls(table: str) -> None:
     op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
@@ -101,3 +113,17 @@ def downgrade() -> None:
     for table in reversed(TENANT_TABLES):
         op.execute(sa.text(f'DROP POLICY IF EXISTS tenant_isolation ON "{table}"'))
         op.execute(sa.text(f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY'))
+        op.execute(sa.text(f'ALTER TABLE "{table}" NO FORCE ROW LEVEL SECURITY'))
+    for table in LEGACY_DEFAULT_TABLES:
+        op.execute(
+            sa.text(
+                f'ALTER TABLE "{table}" ALTER COLUMN tenant_id SET DEFAULT \'default\''
+            )
+        )
+    # Restore revision 066 exactly: nullable columns protected by validated
+    # check constraints. A later upgrade can remove each guard again.
+    for table, columns in NOT_NULL_COLUMNS.items():
+        for column in columns:
+            name = f"ck_{table}_{column}_not_null_063"
+            op.create_check_constraint(name, table, f'"{column}" IS NOT NULL')
+            op.alter_column(table, column, nullable=True)

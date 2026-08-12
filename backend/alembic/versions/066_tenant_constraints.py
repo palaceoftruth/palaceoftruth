@@ -38,3 +38,13 @@ def downgrade() -> None:
     for name, table, _item_column in reversed(FOREIGN_KEYS):
         op.drop_constraint(name, table, type_="foreignkey")
     op.drop_constraint("uq_items_tenant_id_id", "items", type_="unique")
+    # UNIQUE USING INDEX transfers index ownership to the constraint. Restore
+    # revision 065's standalone index so a later upgrade can attach it again.
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "ix_items_tenant_id_id_unique",
+            "items",
+            ["tenant_id", "id"],
+            unique=True,
+            postgresql_concurrently=True,
+        )

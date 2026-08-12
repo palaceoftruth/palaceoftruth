@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_auth_context, hash_secret, require_api_capability, secret_hash_candidates
-from app.database import get_db, system_async_session
+from app.database import bind_session_to_tenant, get_credential_exchange_db, get_db, system_async_session
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
@@ -691,7 +691,7 @@ async def issue_browser_extension_token(
     request: Request,
     body: BrowserExtensionTokenIssueRequest,
     pairing_key: str | None = Header(None, alias="X-Palace-Pairing-Key"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_credential_exchange_db),
 ) -> BrowserExtensionTokenIssueResponse:
     if not pairing_key or not pairing_key.startswith("palpair_") or len(pairing_key) < 32 or len(pairing_key) > 128:
         raise HTTPException(status_code=403, detail="Invalid pairing key")
@@ -712,6 +712,7 @@ async def issue_browser_extension_token(
     if pairing is None:
         raise HTTPException(status_code=403, detail="Invalid pairing key")
     tenant_id = pairing["tenant_id"]
+    await bind_session_to_tenant(db, tenant_id)
     now = datetime.now(timezone.utc)
     if pairing["used_at"] is not None:
         await _record_pairing_audit(

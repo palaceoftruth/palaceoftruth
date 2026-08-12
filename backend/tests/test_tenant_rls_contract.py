@@ -75,12 +75,19 @@ def test_tenant_constraints_use_online_safe_build_phases() -> None:
     assert "VALIDATE CONSTRAINT" in validation
     assert "postgresql_concurrently=True" in indexes
     assert "UNIQUE USING INDEX" in constraints
+    assert '"ix_items_tenant_id_id_unique"' in constraints.split("def downgrade", 1)[1]
+    assert "postgresql_concurrently=True" in constraints.split("def downgrade", 1)[1]
     assert "NOT VALID" in constraints
     assert "VALIDATE CONSTRAINT" in enforcement
     assert "DEFER_TENANT_RLS_ENFORCEMENT" in enforcement
     assert "autocommit_block" not in enforcement
     assert "SET LOCAL lock_timeout" in enforcement
     assert "lock_timeout" in enforcement
+    downgrade = enforcement.split("def downgrade", 1)[1]
+    assert "NO FORCE ROW LEVEL SECURITY" in downgrade
+    assert "SET DEFAULT" in downgrade
+    assert "op.create_check_constraint" in downgrade
+    assert "nullable=True" in downgrade
 
 
 @pytest.mark.parametrize("tenant_id", ["*", "__unbound__", "  *  "])
@@ -128,6 +135,23 @@ def test_unbound_session_factory_has_no_system_access() -> None:
         "tenant_id": "__unbound__",
         "system_access": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_credential_discovery_rebinds_before_tenant_work() -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.info = {"tenant_id": "__unbound__", "system_access": True}
+            self.rolled_back = False
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    session = Session()
+    await database.bind_session_to_tenant(session, "tenant-a")
+
+    assert session.rolled_back is True
+    assert session.info == {"tenant_id": "tenant-a", "system_access": False}
 
 
 def test_tenant_erasure_keeps_external_io_outside_atomic_lock_window() -> None:
