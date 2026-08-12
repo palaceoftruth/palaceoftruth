@@ -551,7 +551,11 @@ async def hard_delete_item(
     actor_id: str,
 ) -> bool:
     artifact_lock = acquire_item_artifact_lock(tenant_id, item_id)
+    database_committed = False
+    queue_closed = False
     try:
+        await close_tenant_queue(arq_pool, tenant_id)
+        queue_closed = True
         audit_id = uuid.uuid4()
         commit_attempted = False
         tombstone = item_artifact_tombstone(tenant_id, item_id)
@@ -576,9 +580,6 @@ async def hard_delete_item(
                 arq_pool,
                 identifiers=identifiers,
             )
-            # Queue removal is irreversible, so do it only after every payload
-            # has been validated. It must finish before the source rows vanish.
-            await _purge_arq_jobs(arq_pool, matching_arq_jobs)
             await db.execute(
                 delete(Job).where(
                     Job.item_id == item_id,
@@ -596,6 +597,8 @@ async def hard_delete_item(
                 _restore_staged_paths(staged_paths)
                 if tombstone_created:
                     tombstone.unlink(missing_ok=True)
+                await reopen_tenant_queue(arq_pool, tenant_id)
+                queue_closed = False
                 return False
             await db.execute(
                 insert(DataLifecycleAuditEvent).values(
@@ -609,6 +612,7 @@ async def hard_delete_item(
             )
             commit_attempted = True
             await db.commit()
+            database_committed = True
         except Exception:
             await db.rollback()
             if commit_attempted:
@@ -623,6 +627,7 @@ async def hard_delete_item(
                     )
                     raise
                 if committed:
+                    database_committed = True
                     logger.warning(
                         "Item erasure commit acknowledgment failed for %s, but "
                         "the committed audit event was confirmed",
@@ -638,6 +643,9 @@ async def hard_delete_item(
                 if tombstone_created:
                     tombstone.unlink(missing_ok=True)
                 raise
+        # The tenant enqueue barrier prevents new work from racing this scan.
+        # Purge only after the database commit so a rollback cannot lose work.
+        await _purge_arq_jobs(arq_pool, matching_arq_jobs)
         _purge_staged_paths(staged_paths)
         quarantine_directories = {staged.parent for _original, staged in staged_paths}
         for quarantine in quarantine_directories:
@@ -649,6 +657,12 @@ async def hard_delete_item(
                     quarantine,
                     exc_info=True,
                 )
+        await reopen_tenant_queue(arq_pool, tenant_id)
+        queue_closed = False
         return True
+    except Exception:
+        if queue_closed and not database_committed:
+            await reopen_tenant_queue(arq_pool, tenant_id)
+        raise
     finally:
         artifact_lock.close()

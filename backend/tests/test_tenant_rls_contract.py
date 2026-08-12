@@ -201,10 +201,12 @@ def test_destructive_deletion_paths_fail_closed_across_external_state() -> None:
     assert "if not commit_attempted" in tenant_erasure
 
     find_jobs = item_erasure.index("_find_identifier_arq_jobs")
-    purge_jobs = item_erasure.index("_purge_arq_jobs", find_jobs)
-    delete_jobs = item_erasure.index("delete(Job)", purge_jobs)
+    delete_jobs = item_erasure.index("delete(Job)", find_jobs)
     delete_item = item_erasure.index("delete(Item)", delete_jobs)
-    assert find_jobs < purge_jobs < delete_jobs < delete_item
+    commit_item = item_erasure.index("await db.commit()", delete_item)
+    purge_jobs = item_erasure.index("_purge_arq_jobs", commit_item)
+    assert find_jobs < delete_jobs < delete_item < commit_item < purge_jobs
+    assert "if queue_closed and not database_committed" in item_erasure
     assert "_audit_event_was_committed" in item_erasure
     assert "leaving artifacts quarantined" in item_erasure
 
