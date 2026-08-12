@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import Base
 from app.models.data_lifecycle import DataLifecycleAuditEvent, TenantErasureState
 from app.models.item import Item
+from app.services.bundle import acquire_item_artifact_lock, item_artifact_tombstone
 from app.config import settings
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
 
@@ -120,48 +121,39 @@ def _tenant_tables() -> Iterable:
 
 
 def _payload_references_tenant(
-    value: object,
+    payload: object,
     *,
     tenant_id: str,
     tenant_identifiers: set[str],
 ) -> bool:
-    if isinstance(value, dict):
-        if value.get("tenant_id") == tenant_id:
+    if isinstance(payload, dict):
+        if payload.get("tenant_id") == tenant_id:
             return True
-        return any(
-            _payload_references_tenant(
-                nested,
+        for key, value in payload.items():
+            if key == "tenant_id":
+                continue
+            if key.endswith("_id") and isinstance(value, str) and value in tenant_identifiers:
+                return True
+            if key.endswith("_ids") and isinstance(value, (list, tuple)):
+                if any(isinstance(entry, str) and entry in tenant_identifiers for entry in value):
+                    return True
+            if isinstance(value, dict) and _payload_references_tenant(
+                value,
                 tenant_id=tenant_id,
                 tenant_identifiers=tenant_identifiers,
-            )
-            for nested in value.values()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(
-            _payload_references_tenant(
-                nested,
-                tenant_id=tenant_id,
-                tenant_identifiers=tenant_identifiers,
-            )
-            for nested in value
-        )
-    return isinstance(value, str) and value in tenant_identifiers
+            ):
+                return True
+    return False
 
 
-async def _purge_tenant_arq_jobs(
+async def _find_tenant_arq_jobs(
     arq_pool: Any,
     *,
     tenant_id: str,
     tenant_identifiers: set[str],
-) -> int:
-    """Abort queued/running tenant work and remove serialized job payloads."""
+) -> list[tuple[str, object]]:
+    """Validate queue payloads and return only typed tenant references."""
     deserializer = getattr(arq_pool, "job_deserializer", None)
-    queue_names = {
-        DEFAULT_WORKER_QUEUE,
-        MEDIA_WORKER_QUEUE,
-        PALACE_WORKER_QUEUE,
-        getattr(arq_pool, "default_queue_name", DEFAULT_WORKER_QUEUE),
-    }
     matching_jobs: list[tuple[str, object]] = []
     async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
         key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
@@ -174,14 +166,33 @@ async def _purge_tenant_arq_jobs(
             raise RuntimeError(
                 f"Could not inspect ARQ payload during tenant erasure: {key}"
             ) from exc
-        if not _payload_references_tenant(
+        if _payload_references_tenant(
             {"args": definition.args, "kwargs": definition.kwargs},
             tenant_id=tenant_id,
             tenant_identifiers=tenant_identifiers,
         ):
-            continue
-        job_id = key.removeprefix(job_key_prefix)
-        matching_jobs.append((job_id, raw_key))
+            matching_jobs.append((key.removeprefix(job_key_prefix), raw_key))
+    return matching_jobs
+
+
+async def _purge_tenant_arq_jobs(
+    arq_pool: Any,
+    *,
+    tenant_id: str,
+    tenant_identifiers: set[str],
+) -> int:
+    """Abort queued/running tenant work and remove serialized job payloads."""
+    queue_names = {
+        DEFAULT_WORKER_QUEUE,
+        MEDIA_WORKER_QUEUE,
+        PALACE_WORKER_QUEUE,
+        getattr(arq_pool, "default_queue_name", DEFAULT_WORKER_QUEUE),
+    }
+    matching_jobs = await _find_tenant_arq_jobs(
+        arq_pool,
+        tenant_id=tenant_id,
+        tenant_identifiers=tenant_identifiers,
+    )
 
     for job_id, _raw_key in matching_jobs:
         await arq_pool.zadd(abort_jobs_ss, {job_id: timestamp_ms()})
@@ -277,11 +288,11 @@ async def erase_tenant_data(
     staged_paths: list[tuple[Path, Path]] = []
     try:
         tables = tuple(_tenant_tables())
-        # Inspect and purge durable queue references before taking locks that
-        # block writes for every tenant. A slow or unavailable Redis service
-        # must not extend the database maintenance window.
+        # Validate every queue payload before the transaction becomes
+        # irreversible. Do not remove jobs yet: a database rollback must leave
+        # the active tenant's queued work intact.
         tenant_identifiers = await _tenant_identifiers(db, tenant_id)
-        purged_arq_jobs = await _purge_tenant_arq_jobs(
+        tenant_arq_jobs = await _find_tenant_arq_jobs(
             arq_pool,
             tenant_id=tenant_id,
             tenant_identifiers=tenant_identifiers,
@@ -318,7 +329,7 @@ async def erase_tenant_data(
                 details={
                     "row_counts": counts,
                     "artifact_paths_staged": len(staged_paths),
-                    "arq_jobs_purged": purged_arq_jobs,
+                    "arq_jobs_identified": len(tenant_arq_jobs),
                 },
             )
         )
@@ -353,37 +364,53 @@ async def hard_delete_item(
     item_id: uuid.UUID,
     actor_id: str,
 ) -> bool:
-    staged_paths = _stage_item_artifacts(tenant_id, item_id)
+    artifact_lock = acquire_item_artifact_lock(tenant_id, item_id)
     try:
-        result = await db.execute(
-            delete(Item)
-            .where(Item.id == item_id, Item.tenant_id == tenant_id)
-            .returning(Item.id)
-        )
-        deleted = result.scalar_one_or_none()
-        if deleted is None:
+        tombstone = item_artifact_tombstone(tenant_id, item_id)
+        tombstone.parent.mkdir(parents=True, exist_ok=True)
+        tombstone_created = not tombstone.exists()
+        tombstone.touch(exist_ok=True)
+        staged_paths = _stage_item_artifacts(tenant_id, item_id)
+        try:
+            result = await db.execute(
+                delete(Item)
+                .where(Item.id == item_id, Item.tenant_id == tenant_id)
+                .returning(Item.id)
+            )
+            deleted = result.scalar_one_or_none()
+            if deleted is None:
+                await db.rollback()
+                _restore_staged_paths(staged_paths)
+                if tombstone_created:
+                    tombstone.unlink(missing_ok=True)
+                return False
+            await db.execute(
+                insert(DataLifecycleAuditEvent).values(
+                    subject_tenant_id=tenant_id,
+                    subject_item_id=item_id,
+                    action="item_hard_delete",
+                    actor_id=actor_id,
+                    details={"artifact_paths_staged": len(staged_paths)},
+                )
+            )
+            await db.commit()
+        except Exception:
             await db.rollback()
             _restore_staged_paths(staged_paths)
-            return False
-        await db.execute(
-            insert(DataLifecycleAuditEvent).values(
-                subject_tenant_id=tenant_id,
-                subject_item_id=item_id,
-                action="item_hard_delete",
-                actor_id=actor_id,
-                details={"artifact_paths_staged": len(staged_paths)},
-            )
-        )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        _restore_staged_paths(staged_paths)
-        raise
-    _purge_staged_paths(staged_paths)
-    quarantine_directories = {staged.parent for _original, staged in staged_paths}
-    for quarantine in quarantine_directories:
-        try:
-            quarantine.rmdir()
-        except OSError:
-            logger.critical("Could not remove item deletion quarantine %s", quarantine, exc_info=True)
-    return True
+            if tombstone_created:
+                tombstone.unlink(missing_ok=True)
+            raise
+        _purge_staged_paths(staged_paths)
+        quarantine_directories = {staged.parent for _original, staged in staged_paths}
+        for quarantine in quarantine_directories:
+            try:
+                quarantine.rmdir()
+            except OSError:
+                logger.critical(
+                    "Could not remove item deletion quarantine %s",
+                    quarantine,
+                    exc_info=True,
+                )
+        return True
+    finally:
+        artifact_lock.close()

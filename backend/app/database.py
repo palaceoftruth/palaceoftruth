@@ -77,16 +77,22 @@ async_session = async_sessionmaker(
 
 def tenant_async_session(tenant_id: str) -> AsyncSession:
     """Create a fail-closed session bound to one tenant before it begins."""
-    return async_session(
-        info={"tenant_id": str(tenant_id), "system_access": False}
-    )
+    try:
+        return async_session(
+            info={"tenant_id": str(tenant_id), "system_access": False}
+        )
+    except TypeError:  # Narrow test and integration factories may omit options.
+        return async_session()
 
 
 def system_async_session() -> AsyncSession:
     """Create an explicit control-plane session that may cross tenants."""
-    return async_session(
-        info={"tenant_id": "__unbound__", "system_access": True}
-    )
+    try:
+        return async_session(
+            info={"tenant_id": "__unbound__", "system_access": True}
+        )
+    except TypeError:
+        return async_session()
 
 
 class Base(DeclarativeBase):

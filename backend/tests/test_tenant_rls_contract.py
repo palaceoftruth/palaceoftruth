@@ -136,7 +136,7 @@ def test_tenant_erasure_keeps_external_io_outside_atomic_lock_window() -> None:
         "async def hard_delete_item", 1
     )[0]
 
-    first_queue_scan = function.index("purged_arq_jobs = await _purge_tenant_arq_jobs")
+    first_queue_scan = function.index("tenant_arq_jobs = await _find_tenant_arq_jobs")
     lock = function.index("LOCK TABLE")
     marker = function.index("INSERT INTO tenant_erasure_states")
     assert first_queue_scan < lock < marker
@@ -148,6 +148,19 @@ def test_every_worker_honors_tenant_erasure_abort_requests() -> None:
     assert WorkerSettings.allow_abort_jobs is True
     assert MediaWorkerSettings.allow_abort_jobs is True
     assert PalaceWorkerSettings.allow_abort_jobs is True
+
+
+def test_tenant_maintenance_scripts_bind_database_sessions() -> None:
+    scripts = (
+        "backfill_claim_sources.py",
+        "enroll_watched_sources.py",
+        "reembed_tenant.py",
+        "seed_watched_source_canary.py",
+    )
+    for name in scripts:
+        source = (ROOT / "scripts" / name).read_text()
+        assert "tenant_async_session(" in source, name
+        assert "async with async_session()" not in source, name
 
 
 def test_arq_worker_entrypoints_do_not_swallow_unknown_arguments() -> None:

@@ -7,7 +7,7 @@ import uuid
 
 from sqlalchemy import delete, or_, select
 
-from app.database import async_session
+from app.database import tenant_async_session
 from app.embedding_profile import is_default_embedding_profile, resolve_embedding_profile
 from app.models.embedding import Embedding, EmbeddingProfileVector
 from app.models.item import Item
@@ -19,7 +19,7 @@ from app.services.embedding_storage import embedding_record_for_profile
 async def reembed_tenant(*, tenant_id: str, limit: int | None) -> None:
     embedder = EmbeddingService()
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         query = (
             select(Item.id)
             .where(Item.tenant_id == tenant_id)
@@ -37,7 +37,7 @@ async def reembed_tenant(*, tenant_id: str, limit: int | None) -> None:
     if total == 0:
         return
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         for index, item_id in enumerate(item_ids, start=1):
             item = await db.get(Item, item_id)
             if item is None:

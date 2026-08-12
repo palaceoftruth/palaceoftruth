@@ -6,6 +6,7 @@ import pytest
 from arq.jobs import serialize_job
 
 from app.config import settings
+from app.services.bundle import BundleValidationError, item_artifact_tombstone, persist_upload_artifact
 from app.services import data_lifecycle
 from app.services.data_lifecycle import (
     _finalize_committed_tenant_erasure,
@@ -85,6 +86,26 @@ def test_item_artifact_staging_matches_exact_id_and_extensions(monkeypatch, tmp_
     assert sorted(path.name for path in active.iterdir()) == [f"{item_id}-other.pdf"]
 
 
+def test_item_tombstone_prevents_artifact_recreation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "upload_artifact_dir", str(tmp_path))
+    item_id = uuid.uuid4()
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"late tenant data")
+    tombstone = item_artifact_tombstone("tenant-a", item_id)
+    tombstone.parent.mkdir(parents=True)
+    tombstone.touch()
+
+    with pytest.raises(BundleValidationError, match="permanently deleted"):
+        persist_upload_artifact(
+            str(source),
+            tenant_id="tenant-a",
+            item_id=item_id,
+            extension=".bin",
+        )
+
+    assert not (tombstone.parent / f"{item_id}.bin").exists()
+
+
 @pytest.mark.asyncio
 async def test_tenant_erasure_removes_only_matching_arq_payloads() -> None:
     tenant_job_id = str(uuid.uuid4())
@@ -121,6 +142,32 @@ async def test_tenant_erasure_removes_only_matching_arq_payloads() -> None:
     assert purged == 2
     assert set(pool.aborts) == {"tenant-direct", "tenant-reference"}
     assert set(pool.payloads) == {b"arq:job:other"}
+
+
+@pytest.mark.asyncio
+async def test_tenant_erasure_does_not_match_arbitrary_payload_text() -> None:
+    key = b"arq:job:other-tenant"
+    pool = _FakeArqPool(
+        {
+            key: serialize_job(
+                "process_note",
+                (),
+                {"tenant_id": "tenant-b", "title": "tenant-a", "content": "tenant-a"},
+                None,
+                0,
+                serializer=job_serializer,
+            )
+        }
+    )
+
+    purged = await _purge_tenant_arq_jobs(
+        pool,
+        tenant_id="tenant-a",
+        tenant_identifiers=set(),
+    )
+
+    assert purged == 0
+    assert key in pool.payloads
 
 
 @pytest.mark.asyncio

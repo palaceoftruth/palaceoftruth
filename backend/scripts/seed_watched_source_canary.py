@@ -67,13 +67,13 @@ async def seed(args: argparse.Namespace) -> dict[str, object]:
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
 
-    from app.database import async_session
+    from app.database import tenant_async_session
     from app.models.source_resource import SourceResource
     from app.services.source_resources import build_alias, canonical_http_identity, normalize_http_url
 
     canonical_url = normalize_http_url(args.url)
     canonical_identity = canonical_http_identity(canonical_url)
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         try:
             async with db.begin_nested():
                 existing = await db.scalar(
