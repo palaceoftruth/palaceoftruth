@@ -19,6 +19,9 @@ class _RowsResult:
     def fetchall(self):
         return self._rows
 
+    def scalar_one(self):
+        return self._rows[0]
+
 
 class TagsSession:
     def __init__(self) -> None:
@@ -26,6 +29,8 @@ class TagsSession:
 
     async def execute(self, statement, params):
         self.execute_calls.append((str(statement), params))
+        if "COUNT(DISTINCT tag)" in str(statement):
+            return _RowsResult([7])
         return _RowsResult([SimpleNamespace(tag="alpha"), SimpleNamespace(tag="beta")])
 
 
@@ -128,10 +133,11 @@ def test_list_tags_uses_authenticated_tenant_and_prefix_filter() -> None:
     response = client.get("/api/v1/tags?q=a")
 
     assert response.status_code == 200
-    assert response.json() == {"tags": ["alpha", "beta"], "total": 2}
-    sql, params = session.execute_calls[0]
+    assert response.json() == {"tags": ["alpha", "beta"], "total": 7}
+    assert session.execute_calls[0][1] == {"q": "a", "tenant_id": "tenant-a"}
+    sql, params = session.execute_calls[1]
     assert "tenant_id = :tenant_id" in sql
-    assert params == {"q": "a", "tenant_id": "tenant-a"}
+    assert params == {"q": "a", "tenant_id": "tenant-a", "limit": 100, "offset": 0}
 
 
 def test_list_tags_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
@@ -141,8 +147,17 @@ def test_list_tags_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
     response = client.get("/api/v1/tags", headers={"Authorization": "Bearer raw-token"})
 
     assert response.status_code == 200
-    assert response.json()["total"] == 2
-    assert session.execute_calls[0][1] == {"q": None, "tenant_id": "tenant-a"}
+    assert response.json()["total"] == 7
+    assert session.execute_calls[0][1] == {
+        "q": None,
+        "tenant_id": "tenant-a",
+    }
+    assert session.execute_calls[1][1] == {
+        "q": None,
+        "tenant_id": "tenant-a",
+        "limit": 100,
+        "offset": 0,
+    }
 
 
 def test_list_tags_rejects_oauth_bearer_missing_read_scope(monkeypatch) -> None:

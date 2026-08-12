@@ -281,7 +281,7 @@ def test_list_feeds_scopes_item_count_query_by_tenant() -> None:
     assert normalized_sql.count("tenant_id = :tenant_id") >= 2
     assert "f.deleted_at is null" in normalized_sql
     assert "deleted_at is null" in normalized_sql
-    assert params == {"tenant_id": "tenant-a"}
+    assert params == {"tenant_id": "tenant-a", "limit": 100, "offset": 0}
 
 
 def test_list_feeds_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
@@ -292,7 +292,7 @@ def test_list_feeds_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["total"] == 1
-    assert session.calls[0][1] == {"tenant_id": "tenant-a"}
+    assert session.calls[0][1] == {"tenant_id": "tenant-a", "limit": 100, "offset": 0}
 
 
 def test_create_feed_rejects_oauth_bearer_missing_write_scope(monkeypatch) -> None:

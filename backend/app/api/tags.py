@@ -13,18 +13,41 @@ router = APIRouter(prefix="/tags", tags=["tags"], dependencies=[Depends(require_
 async def list_tags(
     request: Request,
     q: str | None = Query(None, description="Optional prefix filter"),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
     db: AsyncSession = Depends(get_db),
 ):
-    sql = sa_text("""
-        SELECT DISTINCT tag
+    filter_sql = """
         FROM items, unnest(tags) AS tag
         WHERE status = 'ready'
           AND deleted_at IS NULL
           AND tenant_id = :tenant_id
           AND cardinality(tags) > 0
-          AND (CAST(:q AS text) IS NULL OR tag ILIKE CAST(:q AS text) || '%')
+          AND (CAST(:q AS text) IS NULL OR tag ILIKE CAST(:q AS text) || '%' ESCAPE '\\')
+    """
+    sql = sa_text("""
+        SELECT DISTINCT tag
+    """ + filter_sql + """
         ORDER BY tag
+        LIMIT :limit OFFSET :offset
     """)
-    rows = (await db.execute(sql, {"q": q, "tenant_id": request.state.tenant_id})).fetchall()
+    escaped_q = None if q is None else q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    filter_params = {"q": escaped_q, "tenant_id": request.state.tenant_id}
+    total = (
+        await db.execute(
+            sa_text("SELECT COUNT(DISTINCT tag) " + filter_sql),
+            filter_params,
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            sql,
+            {
+                **filter_params,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+    ).fetchall()
     tags = [row.tag for row in rows]
-    return TagListResponse(tags=tags, total=len(tags))
+    return TagListResponse(tags=tags, total=total)

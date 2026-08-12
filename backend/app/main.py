@@ -53,6 +53,13 @@ from app.workers.serialization import (
     job_serializer as json_job_serializer,
 )
 
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
 # Must run at import time, before the first logger.info() below. Uvicorn
 # configures only its own "uvicorn.*" loggers, so without this the root logger
 # stays at WARNING with no handler and every app log record is discarded.
@@ -81,7 +88,7 @@ async def _seed_default_api_key() -> None:
     # the legacy row would insert a duplicate and break the unique key_hash.
     key_hash, legacy_key_hash = secret_hash_candidates(settings.api_key)
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         existing = await db.scalar(
             sa_text("SELECT 1 FROM api_keys WHERE key_hash IN (:hash, :legacy_hash) LIMIT 1"),
             {"hash": key_hash, "legacy_hash": legacy_key_hash},
@@ -131,7 +138,7 @@ async def _seed_default_palace_sync_source() -> None:
         force_path_style=settings.palace_default_s3_force_path_style,
     )
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         existing = await db.scalar(
             select(SyncSource.id)
             .where(SyncSource.tenant_id == "default")

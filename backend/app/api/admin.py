@@ -35,6 +35,9 @@ from app.services.bundle import (
     tenant_has_state,
 )
 from app.services.mcp_client_registration import PublicClientDriftError, ensure_public_mcp_client
+from app.services.mcp_containment import derive_containment_mode
+from app.services.data_lifecycle import erase_tenant_data
+from app.workers.queues import enqueue_tenant_job
 from app.services.relationship_canary import (
     FIXTURE_SHA256,
     RelationshipCanaryContractError,
@@ -51,6 +54,8 @@ def _normalize_tenant_id(value: str) -> str:
     tenant_id = value.strip()
     if not tenant_id:
         raise ValueError("tenant_id must not be blank")
+    if tenant_id in {"*", "__unbound__"}:
+        raise ValueError("tenant_id is reserved for internal database context")
     return tenant_id
 
 
@@ -118,6 +123,17 @@ class RegisterTenantResponse(BaseModel):
     api_key: str | None = None  # raw key — returned once only, never stored
     active_key: TenantApiKeySummary
     active_key_count: int
+
+
+class TenantErasureRequest(BaseModel):
+    confirmation: str
+    dry_run: bool = True
+
+
+class TenantErasureResponse(BaseModel):
+    tenant_id: str
+    dry_run: bool
+    row_counts: dict[str, int]
 
 
 class TenantApiKeyListResponse(BaseModel):
@@ -637,6 +653,36 @@ async def register_tenant(
     )
 
 
+@router.post(
+    "/tenants/{tenant_id}/erase",
+    response_model=TenantErasureResponse,
+    dependencies=[Depends(_verify_admin)],
+)
+async def erase_tenant(
+    tenant_id: str,
+    body: TenantErasureRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> TenantErasureResponse:
+    """Preview or perform a transaction-scoped tenant erasure."""
+    tenant_id = _tenant_id_from_path(tenant_id)
+    expected = f"ERASE {tenant_id}"
+    if body.confirmation != expected:
+        raise HTTPException(status_code=422, detail=f'confirmation must equal "{expected}"')
+    counts = await erase_tenant_data(
+        db,
+        arq_pool=request.app.state.arq_pool,
+        tenant_id=tenant_id,
+        actor_id="admin-secret",
+        dry_run=body.dry_run,
+    )
+    return TenantErasureResponse(
+        tenant_id=tenant_id,
+        dry_run=body.dry_run,
+        row_counts=counts,
+    )
+
+
 @router.get(
     "/tenants/{tenant_id}/api-keys",
     response_model=TenantApiKeyListResponse,
@@ -923,16 +969,16 @@ async def register_mcp_oauth_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
                  client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                  token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :allow_tenant_shared_reads,
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :allow_tenant_shared_reads, :containment_mode,
                  :client_type, CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), :authorization_code_enabled, :oauth_client_id,
                  :token_endpoint_auth_method, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
                       client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                       token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds
             """
@@ -946,6 +992,10 @@ async def register_mcp_oauth_client(
             "agent_scope_key": body.agent_scope_key,
             "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
             "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
+            "containment_mode": derive_containment_mode(
+                client_key=body.client_key,
+                requested_mode=body.containment_mode,
+            ),
             "client_type": body.client_type,
             "redirect_uris": json.dumps(body.redirect_uris),
             "allowed_resources": json.dumps(body.allowed_resources),
@@ -1253,7 +1303,10 @@ async def import_bundle(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     job = await create_restore_job(db, tenant_id=tenant_id, payload=payload)
-    await request.app.state.arq_pool.enqueue_job("restore_bundle", job_id=str(job.id))
+    await enqueue_tenant_job(
+        request.app.state.arq_pool,
+        "restore_bundle", job_id=str(job.id), tenant_id=str(job.tenant_id)
+    )
     return AdminImportResponse(job_id=job.id, tenant_id=tenant_id, status=job.status)
 
 
@@ -1285,7 +1338,10 @@ async def retry_admin_job(
     if job.status not in ("failed", "cancelled"):
         raise HTTPException(status_code=409, detail=f"Job is {job.status}; only failed or cancelled jobs can be retried")
     job = await retry_restore_job(db, job)
-    await request.app.state.arq_pool.enqueue_job("restore_bundle", job_id=str(job.id))
+    await enqueue_tenant_job(
+        request.app.state.arq_pool,
+        "restore_bundle", job_id=str(job.id), tenant_id=str(job.tenant_id)
+    )
     return serialize_admin_job(job)
 
 

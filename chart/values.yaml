@@ -87,6 +87,13 @@ config:
   chunkSize: "500"
   chunkOverlap: "50"
   searchLimit: "10"
+  databasePoolSize: "10"
+  databaseMaxOverflow: "10"
+  databasePoolTimeoutSeconds: "30"
+  databasePoolRecycleSeconds: "1800"
+  databaseStatementTimeoutMs: "30000"
+  databaseIdleTransactionTimeoutMs: "60000"
+  docExtractionPerTenantConcurrency: "1"
   # Fail-closed deployment identity for explicitly authorized bounded canaries.
   deploymentCluster: ""
   deploymentNamespace: ""
@@ -267,6 +274,13 @@ externalSecrets:
 existingSecret: ""
 # existingRegistrySecret must be a kubernetes.io/dockerconfigjson type secret
 existingRegistrySecret: ""
+
+# Production database TLS. CNPG publishes its server CA in <cluster>-ca.
+# External database users must set caSecretName to a Secret with caKey.
+databaseTls:
+  enabled: true
+  caSecretName: ""
+  caKey: ca.crt
 
 # CloudNative-PG cluster (requires CNPG operator)
 postgres:

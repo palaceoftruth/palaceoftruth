@@ -8,6 +8,7 @@ from app.models.embedding import Embedding, EmbeddingProfileVector
 
 def embedding_record_for_profile(
     *,
+    tenant_id: str,
     item_id: uuid.UUID,
     chunk_index: int,
     chunk_text: str,
@@ -16,6 +17,7 @@ def embedding_record_for_profile(
 ) -> Embedding | EmbeddingProfileVector:
     if is_default_embedding_profile(profile):
         return Embedding(
+            tenant_id=tenant_id,
             item_id=item_id,
             chunk_index=chunk_index,
             chunk_text=chunk_text,
@@ -31,6 +33,7 @@ def embedding_record_for_profile(
         raise ValueError(f"unsupported embedding profile dimensions: {profile.dimensions}")
 
     values: dict[str, object] = {
+        "tenant_id": tenant_id,
         "item_id": item_id,
         "chunk_index": chunk_index,
         "chunk_text": chunk_text,

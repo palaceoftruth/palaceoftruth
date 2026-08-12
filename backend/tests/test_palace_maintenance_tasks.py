@@ -15,6 +15,7 @@ from app.models.palace import PalaceRun, PalaceTenantState
 from app.services.palace import PalaceIndexIntegrityPlan
 from app.workers.palace_tasks import _enqueue_missing_embedding_repairs, mark_items_dirty_and_schedule, palace_run_build, poll_sync_sources, recover_palace_backlog, refresh_caught_up_wakeup_briefs, refresh_dirty_palace_rooms, refresh_palace_consolidation_candidates, repair_palace_artifacts, recompute_palace_tunnel_strengths, run_fact_registry_contradiction_sweep, run_fact_registry_extraction, run_memory_dream_refresh, run_palace_maintenance, run_wakeup_story_refresh, sweep_palace_index_integrity, watch_local_sync_sources_once
 from app.workers.queues import MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE
+from app.workers import palace_tasks
 from app.workers.worker import MediaWorkerSettings, PalaceWorkerSettings, WorkerSettings
 
 
@@ -27,6 +28,33 @@ class FakeRows:
 
     def all(self):
         return self._rows
+
+
+class ScalarSessionContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def scalar(self, _statement):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_legacy_palace_job_resolves_tenant_from_durable_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        palace_tasks,
+        "system_async_session",
+        lambda: ScalarSessionContext("tenant-legacy"),
+    )
+
+    tenant_id = await palace_tasks._legacy_palace_job_tenant(PalaceRun, uuid.uuid4())
+
+    assert tenant_id == "tenant-legacy"
 
 
 class FakeDb:
@@ -107,8 +135,8 @@ async def test_recover_palace_backlog_enqueues_runs_for_backlogged_tenants(monke
 
     assert [tenant_id for tenant_id, _run_id in created_runs] == ["tenant-a", "tenant-b"]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[0][1]}),
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[1][1]}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[0][1], "tenant_id": "tenant-a"}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[1][1], "tenant_id": "tenant-b"}),
     ]
 
 
@@ -152,8 +180,9 @@ async def test_mark_items_dirty_and_schedule_coalesces_one_palace_run(monkeypatc
         (
             "palace_run_build",
             {
-                "_queue_name": PALACE_WORKER_QUEUE,
-                "palace_run_id": "00000000-0000-0000-0000-000000000123",
+                    "_queue_name": PALACE_WORKER_QUEUE,
+                    "palace_run_id": "00000000-0000-0000-0000-000000000123",
+                    "tenant_id": "tenant-a",
             },
         )
     ]
@@ -226,7 +255,7 @@ async def test_refresh_dirty_palace_rooms_marks_missing_memberships_and_enqueues
         ("tenant-a", item_b, "maintenance"),
     ]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(run_id)}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(run_id), "tenant_id": "tenant-a"}),
     ]
 
 
@@ -272,7 +301,7 @@ async def test_poll_sync_sources_enqueues_recent_source_when_watcher_detects_cha
 
     assert triggers == ["watcher"]
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-a"})
     ]
 
 
@@ -311,7 +340,7 @@ async def test_watch_local_sync_sources_once_enqueues_changed_sources(monkeypatc
     assert enqueued == 1
     assert triggers == [("tenant-a", changed_source.id, "watcher")]
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-a"})
     ]
 
 
@@ -344,7 +373,7 @@ async def test_watch_local_sync_sources_once_continues_after_source_failure(monk
 
     assert enqueued == 1
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-b"})
     ]
     assert "local sync watcher failed" in caplog.text
 
@@ -655,11 +684,20 @@ async def test_palace_run_build_enqueues_follow_on_run_when_backlog_remains(monk
     monkeypatch.setattr("app.workers.palace_tasks.create_or_get_palace_run", fake_create_or_get_palace_run)
     monkeypatch.setattr("app.workers.palace_tasks.generate_wakeup_briefs", fail_generate_wakeup_briefs)
 
-    await palace_run_build({"redis": redis}, palace_run_id=str(run_id))
+    await palace_run_build(
+        {"redis": redis}, palace_run_id=str(run_id), tenant_id="tenant-a"
+    )
 
     assert created_runs == [("tenant-a", str(next_run_id))]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(next_run_id)}),
+        (
+            "palace_run_build",
+            {
+                "_queue_name": PALACE_WORKER_QUEUE,
+                "palace_run_id": str(next_run_id),
+                "tenant_id": "tenant-a",
+            },
+        ),
     ]
 
 
@@ -699,6 +737,7 @@ async def test_palace_run_build_skips_follow_on_when_backlog_is_clear(monkeypatc
     await palace_run_build(
         {"redis": redis, "embedder": embedder_obj, "llm": llm_obj},
         palace_run_id=str(run_id),
+        tenant_id="tenant-a",
     )
 
     assert refreshed == ["tenant-a"]

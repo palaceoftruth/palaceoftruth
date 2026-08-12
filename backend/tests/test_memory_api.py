@@ -2418,7 +2418,7 @@ def test_memory_job_retry_requeues_failed_job() -> None:
     assert client.app.state.arq_pool.enqueued == [
         (
             "memory_artifact",
-            {"job_id": str(job_id), "_job_id": f"memory-artifact:{job_id}:3"},
+                {"job_id": str(job_id), "tenant_id": "tenant-a", "_job_id": f"memory-artifact:{job_id}:3"},
         )
     ]
 
@@ -4408,8 +4408,9 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         (
             "memory_artifact",
             {
-                "job_id": write_response.json()["job_id"],
-                "_job_id": f'memory-artifact:{write_response.json()["job_id"]}:0',
+                    "job_id": write_response.json()["job_id"],
+                    "tenant_id": "tenant-a",
+                    "_job_id": f'memory-artifact:{write_response.json()["job_id"]}:0',
             },
         )
     ]

@@ -68,6 +68,31 @@ class MappingResult:
         return self.rows
 
 
+class ScalarSessionContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def scalar(self, _statement):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_legacy_restore_job_resolves_tenant_from_durable_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tasks,
+        "system_async_session",
+        lambda: ScalarSessionContext("tenant-legacy"),
+    )
+
+    assert await tasks._durable_job_tenant(uuid.uuid4()) == "tenant-legacy"
+
+
 class FakeLlm:
     async def classify_relationship(self, *_args):
         return ("related_to", 0.92)
@@ -540,9 +565,10 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
     assert redis.enqueued == [
         (
             "memory_artifact",
-            {
-                "job_id": str(job_id),
-                "_job_id": f"memory-artifact:{job_id}:0",
+                {
+                    "job_id": str(job_id),
+                    "tenant_id": "tenant-a",
+                    "_job_id": f"memory-artifact:{job_id}:0",
             },
         )
     ]
@@ -1021,7 +1047,11 @@ async def test_memory_artifact_defers_relationships_when_job_policy_requests_it(
     monkeypatch.setattr(tasks, "async_session", SessionFactory(FakeMemoryArtifactSession(job, item)))
     monkeypatch.setattr(tasks, "process_prebuilt_item", fake_process_prebuilt_item)
 
-    await tasks.memory_artifact({"redis": redis, "embedder": object(), "llm": object()}, job_id=str(job_id))
+    await tasks.memory_artifact(
+        {"redis": redis, "embedder": object(), "llm": object()},
+        job_id=str(job_id),
+        tenant_id="tenant-a",
+    )
 
     assert process_calls == [
         {
@@ -1080,6 +1110,7 @@ async def test_memory_artifact_does_not_retry_terminal_embedding_validation(monk
     await tasks.memory_artifact(
         {"redis": redis, "embedder": object(), "llm": object()},
         job_id=str(job_id),
+        tenant_id="tenant-a",
     )
 
     assert redis.enqueued == []
@@ -1122,6 +1153,7 @@ async def test_memory_artifact_reraises_exhausted_transient_embedding_failure(mo
         await tasks.memory_artifact(
             {"redis": FakeArqPool(), "embedder": object(), "llm": object()},
             job_id=str(job_id),
+            tenant_id="tenant-a",
         )
 
 

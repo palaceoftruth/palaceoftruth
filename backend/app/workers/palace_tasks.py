@@ -8,7 +8,7 @@ from sqlalchemy import and_, func, select
 from app.config import settings
 from app.database import async_session
 from app.models.item import Item
-from app.models.palace import PalaceDirtyItem, PalaceRun, PalaceTenantState, RoomMembership, SyncSource
+from app.models.palace import PalaceDirtyItem, PalaceRun, PalaceTenantState, RoomMembership, SyncRun, SyncSource
 from app.services.fact_registry import extract_temporal_facts, list_fact_registry_tenants, sweep_fact_registry_contradictions
 from app.services.diary_rollups import generate_memory_diary_rollups
 from app.services.memory_dreams import generate_memory_dreams, memory_dream_target_days
@@ -26,9 +26,32 @@ from app.services.palace import (
     run_sync_run,
     sync_source_has_local_file_changes,
 )
-from app.workers.queues import enqueue_palace_job
+from app.workers.queues import enqueue_palace_job, enqueue_tenant_job
 
 logger = logging.getLogger(__name__)
+
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
+
+async def _legacy_palace_job_tenant(model, row_id: uuid.UUID) -> str:
+    """Resolve only legacy queue payloads that predate embedded tenant IDs."""
+    async with system_async_session() as db:
+        tenant_id = await db.scalar(select(model.tenant_id).where(model.id == row_id))
+    if tenant_id is None:
+        raise ValueError(f"Legacy {model.__name__} queue row {row_id} was not found")
+    return str(tenant_id)
 DIARY_ROLLUP_REPLAY_DAYS = 2
 TUNNEL_RECOMPUTE_BATCH_SIZE = 50
 DIRTY_ROOM_REFRESH_BATCH_SIZE = 50
@@ -64,8 +87,8 @@ async def _list_diary_rollup_tenants(db) -> tuple[str, ...]:
     return tuple(tenant_ids)
 
 
-async def run_fact_registry_extraction(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def run_fact_registry_extraction(ctx: dict) -> None:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_fact_registry_extraction skipped; no ready-item tenants found")
@@ -84,8 +107,8 @@ async def run_fact_registry_extraction(ctx: dict, **_ignored_future_kwargs) -> N
             )
 
 
-async def run_wakeup_story_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def run_wakeup_story_refresh(ctx: dict) -> None:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_wakeup_story_refresh skipped; no ready-item tenants found")
@@ -108,12 +131,12 @@ async def run_wakeup_story_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
             )
 
 
-async def run_memory_dream_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_memory_dream_refresh(ctx: dict) -> None:
     target_days = memory_dream_target_days()
     if not target_days:
         return
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_memory_dream_refresh skipped; no ready-item tenants found")
@@ -146,8 +169,8 @@ async def run_memory_dream_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
                     )
 
 
-async def run_fact_registry_contradiction_sweep(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def run_fact_registry_contradiction_sweep(ctx: dict) -> None:
+    async with system_async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
             logger.debug("run_fact_registry_contradiction_sweep skipped; no ready-item tenants found")
@@ -183,7 +206,8 @@ async def _enqueue_missing_embedding_repairs(
         item.status = "processing"
         await db.commit()
         try:
-            await ctx["redis"].enqueue_job(
+            await enqueue_tenant_job(
+                ctx["redis"],
                 "embed_item",
                 item_id=str(item.id),
                 skip_ai_enrichment=False,
@@ -222,7 +246,10 @@ async def _enqueue_follow_on_palace_run(
             palace_run.id,
             palace_run.requested_generation,
         )
-        await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+        await enqueue_palace_job(
+            ctx["redis"], "palace_run_build",
+            palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+        )
     else:
         logger.info(
             "follow-on palace run coalesced for tenant %s trigger=%s active_run_id=%s status=%s generation=%s",
@@ -274,13 +301,16 @@ async def _refresh_wakeup_briefs_for_caught_up_palace(
         logger.exception("wake-up brief refresh after Palace build failed for tenant %s", tenant_id)
 
 
-async def palace_run_build(ctx: dict, palace_run_id: str, **_ignored_future_kwargs) -> None:
+async def palace_run_build(ctx: dict, palace_run_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_run_id = uuid.UUID(palace_run_id)
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(PalaceRun, parsed_run_id)
     logger.info("palace_run_build worker executing run_id=%s", palace_run_id)
-    async with async_session() as db:
-        status, _error = await run_palace_run(db, run_id=uuid.UUID(palace_run_id))
+    async with tenant_async_session(tenant_id) as db:
+        status, _error = await run_palace_run(db, run_id=parsed_run_id)
         logger.info("palace_run_build worker finished run_id=%s status=%s", palace_run_id, status)
         if status == "completed":
-            run = await db.get(PalaceRun, uuid.UUID(palace_run_id))
+            run = await db.get(PalaceRun, parsed_run_id)
             if run is not None:
                 has_follow_on = await _enqueue_follow_on_palace_run(
                     ctx,
@@ -296,19 +326,20 @@ async def palace_run_build(ctx: dict, palace_run_id: str, **_ignored_future_kwar
                     )
 
 
-async def run_sync_source(ctx: dict, sync_run_id: str, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def run_sync_source(ctx: dict, sync_run_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_run_id = uuid.UUID(sync_run_id)
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(SyncRun, parsed_run_id)
+    async with tenant_async_session(tenant_id) as db:
         status, _error = await run_sync_run(
             db,
-            run_id=uuid.UUID(sync_run_id),
+            run_id=parsed_run_id,
             embedder=ctx["embedder"],
             llm=ctx["llm"],
         )
         if status == "completed":
-            # reload via explicit query, keeping tenant/source context in the same session
-            from app.models.palace import SyncRun
-
-            sync_run = await db.get(SyncRun, uuid.UUID(sync_run_id))
+            # Reload via explicit query, keeping tenant/source context in the same session.
+            sync_run = await db.get(SyncRun, parsed_run_id)
             if sync_run and sync_run.generation > 0:
                 palace_run, created = await create_or_get_palace_run(
                     db,
@@ -317,7 +348,10 @@ async def run_sync_source(ctx: dict, sync_run_id: str, **_ignored_future_kwargs)
                     source_sync_run_id=sync_run.id,
                 )
                 if created:
-                    await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                    await enqueue_palace_job(
+                        ctx["redis"], "palace_run_build",
+                        palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+                    )
 
 
 async def _enqueue_sync_source_run(ctx: dict, db, *, source: SyncSource, triggered_by: str) -> bool:
@@ -328,12 +362,15 @@ async def _enqueue_sync_source_run(ctx: dict, db, *, source: SyncSource, trigger
         triggered_by=triggered_by,
     )
     if created:
-        await enqueue_palace_job(ctx["redis"], "run_sync_source", sync_run_id=str(sync_run.id))
+        await enqueue_palace_job(
+            ctx["redis"], "run_sync_source",
+            sync_run_id=str(sync_run.id), tenant_id=str(source.tenant_id),
+        )
     return created
 
 
 async def poll_sync_sources(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         rows = (
             await db.execute(
                 select(SyncSource)
@@ -359,7 +396,7 @@ async def poll_sync_sources(ctx: dict) -> None:
 async def watch_local_sync_sources_once(ctx: dict) -> int:
     """Probe local sync sources between scheduled rescans and enqueue changed ones."""
     enqueued = 0
-    async with async_session() as db:
+    async with system_async_session() as db:
         rows = (
             await db.execute(
                 select(SyncSource)
@@ -406,12 +443,12 @@ async def watch_local_sync_sources(ctx: dict) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-async def run_diary_rollup_maintenance(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_diary_rollup_maintenance(ctx: dict) -> None:
     target_days = _diary_rollup_target_days()
     if not target_days:
         return
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         tenant_ids = await _list_diary_rollup_tenants(db)
         if not tenant_ids:
             logger.debug("run_diary_rollup_maintenance skipped; no note tenants found")
@@ -438,7 +475,7 @@ async def run_diary_rollup_maintenance(ctx: dict, **_ignored_future_kwargs) -> N
 
 
 async def recover_palace_backlog(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -457,7 +494,7 @@ async def recover_palace_backlog(ctx: dict) -> None:
 
 
 async def refresh_dirty_palace_rooms(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -516,7 +553,10 @@ async def refresh_dirty_palace_rooms(ctx: dict) -> None:
                 triggered_by="maintenance",
             )
             if created:
-                await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                await enqueue_palace_job(
+                    ctx["redis"], "palace_run_build",
+                    palace_run_id=str(palace_run.id), tenant_id=str(state.tenant_id),
+                )
             logger.info(
                 "refresh_dirty_palace_rooms tenant=%s items=%d generation=%d",
                 state.tenant_id,
@@ -525,7 +565,7 @@ async def refresh_dirty_palace_rooms(ctx: dict) -> None:
             )
 
 
-async def run_palace_maintenance(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_palace_maintenance(ctx: dict) -> None:
     """Run the bounded Palace upkeep phases without letting one failure starve the rest."""
     for phase_name, task_name in PALACE_MAINTENANCE_PHASES:
         task = globals()[task_name]
@@ -536,7 +576,7 @@ async def run_palace_maintenance(ctx: dict, **_ignored_future_kwargs) -> None:
 
 
 async def repair_palace_artifacts(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -570,8 +610,8 @@ async def repair_palace_artifacts(ctx: dict) -> None:
                 )
 
 
-async def refresh_palace_consolidation_candidates(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def refresh_palace_consolidation_candidates(ctx: dict) -> None:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -595,8 +635,8 @@ async def refresh_palace_consolidation_candidates(ctx: dict, **_ignored_future_k
                 )
 
 
-async def recompute_palace_tunnel_strengths(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def recompute_palace_tunnel_strengths(ctx: dict) -> None:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -623,8 +663,8 @@ async def recompute_palace_tunnel_strengths(ctx: dict, **_ignored_future_kwargs)
                 )
 
 
-async def refresh_caught_up_wakeup_briefs(ctx: dict, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
+async def refresh_caught_up_wakeup_briefs(ctx: dict) -> None:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -644,7 +684,7 @@ async def refresh_caught_up_wakeup_briefs(ctx: dict, **_ignored_future_kwargs) -
 
 
 async def sweep_palace_index_integrity(ctx: dict) -> None:
-    async with async_session() as db:
+    async with system_async_session() as db:
         states = (
             await db.execute(
                 select(PalaceTenantState)
@@ -679,7 +719,10 @@ async def sweep_palace_index_integrity(ctx: dict) -> None:
                     triggered_by="maintenance",
                 )
                 if created:
-                    await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                    await enqueue_palace_job(
+                        ctx["redis"], "palace_run_build",
+                        palace_run_id=str(palace_run.id), tenant_id=str(state.tenant_id),
+                    )
 
             repaired_embeddings = await _enqueue_missing_embedding_repairs(
                 ctx,
@@ -715,14 +758,21 @@ async def sweep_palace_index_integrity(ctx: dict) -> None:
                 )
 
 
-async def mark_item_dirty_and_schedule(ctx: dict, item_id: str, tenant_id: str = "default", reason: str = "ingest") -> None:
+async def mark_item_dirty_and_schedule(
+    ctx: dict,
+    item_id: str,
+    tenant_id: str | None = None,
+    reason: str = "ingest",
+) -> None:
+    if tenant_id is None:
+        tenant_id = await _legacy_palace_job_tenant(Item, uuid.UUID(item_id))
     await mark_items_dirty_and_schedule(ctx, item_ids=[item_id], tenant_id=tenant_id, reason=reason)
 
 
 async def mark_items_dirty_and_schedule(
     ctx: dict,
     item_ids: list[str],
-    tenant_id: str = "default",
+    tenant_id: str,
     reason: str = "ingest",
 ) -> None:
     try:
@@ -733,7 +783,7 @@ async def mark_items_dirty_and_schedule(
     if not parsed_item_ids:
         return
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         existing_item_ids = (
             await db.execute(
                 select(Item.id)
@@ -756,4 +806,7 @@ async def mark_items_dirty_and_schedule(
         )
         await db.commit()
         if created:
-            await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+            await enqueue_palace_job(
+                ctx["redis"], "palace_run_build",
+                palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+            )

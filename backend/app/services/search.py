@@ -1215,7 +1215,9 @@ def _apply_second_stage_reranker(
 
 
 class SearchService:
-    def __init__(self, db: AsyncSession, embedder: EmbeddingService, tenant_id: str = "default"):
+    def __init__(self, db: AsyncSession, embedder: EmbeddingService, tenant_id: str):
+        if not tenant_id.strip():
+            raise ValueError("tenant_id is required")
         self.db = db
         self.embedder = embedder
         self.embedding_profile = getattr(embedder, "profile", resolve_embedding_profile())
@@ -2160,6 +2162,7 @@ class SearchService:
                                 ir.relationship
                             FROM item_relationships ir
                             WHERE ir.source_item_id = seed.seed_item_id
+                              AND ir.tenant_id = :tenant_id
                               AND ir.confidence >= :min_confidence
                             ORDER BY ir.confidence DESC, ir.target_item_id ASC, ir.relationship ASC
                             LIMIT :fanout_limit
@@ -2178,6 +2181,7 @@ class SearchService:
                                 ir.relationship
                             FROM item_relationships ir
                             WHERE ir.target_item_id = seed.seed_item_id
+                              AND ir.tenant_id = :tenant_id
                               AND ir.confidence >= :min_confidence
                             ORDER BY ir.confidence DESC, ir.source_item_id ASC, ir.relationship ASC
                             LIMIT :fanout_limit

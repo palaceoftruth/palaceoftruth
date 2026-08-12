@@ -32,6 +32,13 @@ from app.schemas.memory import (
     McpOAuthTokenResponse,
 )
 
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
 router = APIRouter(prefix="/memory/mcp/oauth", tags=["mcp-oauth"])
 metadata_router = APIRouter(tags=["mcp-oauth"])
 
@@ -196,7 +203,7 @@ async def _authenticate_oauth_client(
     else:
         raise HTTPException(status_code=401, detail="invalid_client")
     tenant_id, client_key = _split_tenant_qualified_client_id(resolved_client_id)
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 """
@@ -214,9 +221,12 @@ async def _authenticate_oauth_client(
             {"client_key": client_key, "tenant_id": tenant_id},
         )
         rows = list(result.mappings().all())
-    if tenant_id is None and len(rows) > 1:
+    # A client key must resolve to exactly one row. This also rejects a
+    # same-tenant collision between one row's client_key and another row's
+    # generated oauth_client_id.
+    if len(rows) != 1:
         raise HTTPException(status_code=401, detail="invalid_client")
-    row = rows[0] if rows else None
+    row = rows[0]
     if row is None or row["oauth_revoked_at"] is not None:
         raise HTTPException(status_code=401, detail="invalid_client")
     if row.get("client_type") == "public":
@@ -231,7 +241,7 @@ async def _authenticate_oauth_client(
     if is_legacy_secret_hash(stored_secret_hash):
         # Upgrade only the verifier that was authenticated. The conditional
         # update preserves a concurrent client-secret rotation.
-        async with async_session() as db:
+        async with system_async_session() as db:
             await db.execute(
                 text(
                     """
@@ -543,7 +553,7 @@ async def begin_mcp_authorization(
     if requested_resource is None or requested_resource not in _supported_resources(request):
         raise HTTPException(status_code=400, detail="invalid_request")
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 """
@@ -635,7 +645,7 @@ async def get_mcp_authorization_interaction(
     if not isinstance(tenant_id, str) or not tenant_id or not browser_session:
         raise HTTPException(status_code=400, detail="invalid_request")
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 """
@@ -701,7 +711,7 @@ async def decide_mcp_authorization(
     if not isinstance(tenant_id, str) or not tenant_id:
         raise HTTPException(status_code=403, detail="invalid_request")
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 """
@@ -803,7 +813,7 @@ async def issue_mcp_access_token(
         authorization=authorization,
     )
     if grant_type == "authorization_code":
-        async with async_session() as db:
+        async with system_async_session() as db:
             return await _issue_authorization_code_access_token(
                 db=db,
                 client_row=row,
@@ -812,7 +822,7 @@ async def issue_mcp_access_token(
                 redirect_uri=redirect_uri,
             )
     if grant_type == "refresh_token":
-        async with async_session() as db:
+        async with system_async_session() as db:
             return await _issue_refresh_access_token(
                 db=db,
                 client_row=row,
@@ -826,7 +836,7 @@ async def issue_mcp_access_token(
     try:
         requested_resource = _normalize_resource(resource)
     except HTTPException:
-        async with async_session() as db:
+        async with system_async_session() as db:
             await _deny_token_issue(
                 db,
                 client_row=row,
@@ -841,7 +851,7 @@ async def issue_mcp_access_token(
                 error_class="invalid_resource",
             )
     if requested_resource is None:
-        async with async_session() as db:
+        async with system_async_session() as db:
             await _deny_token_issue(
                 db,
                 client_row=row,
@@ -856,7 +866,7 @@ async def issue_mcp_access_token(
                 error_class="invalid_resource",
             )
     if requested_resource not in _supported_resources(request):
-        async with async_session() as db:
+        async with system_async_session() as db:
             await _deny_token_issue(
                 db,
                 client_row=row,
@@ -871,7 +881,7 @@ async def issue_mcp_access_token(
                 error_class="invalid_resource",
             )
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         try:
             allowed_scopes = _parse_scopes(row["allowed_scopes"])
             token_scopes = _requested_scopes(scope, allowed_scopes)
@@ -964,7 +974,7 @@ async def revoke_mcp_access_token(
         form_client_secret=client_secret,
         authorization=authorization,
     )
-    async with async_session() as db:
+    async with system_async_session() as db:
         # RFC 7009 requires success for unknown tokens. For a caller-owned
         # refresh token, revoke the whole family and every derived access token.
         family = await db.execute(
@@ -1027,7 +1037,7 @@ async def introspect_mcp_access_token(
         form_client_secret=client_secret,
         authorization=authorization,
     )
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 """
@@ -1081,7 +1091,7 @@ async def introspect_mcp_access_token(
         and row["client_revoked_at"] is None
     )
     if not active:
-        async with async_session() as db:
+        async with system_async_session() as db:
             await _record_oauth_endpoint_audit_event(
                 db,
                 client_row=caller,
@@ -1097,7 +1107,7 @@ async def introspect_mcp_access_token(
             await db.commit()
         return McpOAuthIntrospectionResponse(active=False)
     token_scopes = _parse_scopes(row["token_scopes"])
-    async with async_session() as db:
+    async with system_async_session() as db:
         await _record_oauth_endpoint_audit_event(
             db,
             client_row=caller,

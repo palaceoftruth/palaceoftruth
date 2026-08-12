@@ -48,7 +48,7 @@ class MemoryScopeProfile(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     retain_mission: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
@@ -94,7 +94,7 @@ class MemoryEntry(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     item_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("items.id", ondelete="CASCADE"),
@@ -172,7 +172,7 @@ class TemporalFact(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_item_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("items.id", ondelete="CASCADE"),
@@ -204,7 +204,7 @@ class SyncSource(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     root_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_kind: Mapped[str] = mapped_column(String(20), server_default="folder")
@@ -247,7 +247,7 @@ class SyncRun(Base):
         ForeignKey("sync_sources.id", ondelete="CASCADE"),
         nullable=False,
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default="queued")
     triggered_by: Mapped[str] = mapped_column(String(20), server_default="manual")
     files_seen: Mapped[int] = mapped_column(Integer, server_default="0")
@@ -286,7 +286,7 @@ class SyncSourceFile(Base):
         ForeignKey("sync_sources.id", ondelete="CASCADE"),
         nullable=False,
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     relative_path: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -487,7 +487,7 @@ class Wing(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     slug: Mapped[str] = mapped_column(String(120), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(String(20), server_default="derived")
@@ -511,7 +511,7 @@ class Room(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     wing_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("wings.id", ondelete="CASCADE"),
@@ -561,7 +561,7 @@ class RoomSnapshot(Base):
         ForeignKey("rooms.id", ondelete="CASCADE"),
         nullable=False,
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     item_count: Mapped[int] = mapped_column(Integer, server_default="0")
     summary: Mapped[str] = mapped_column(Text, nullable=False)
@@ -586,7 +586,7 @@ class RoomClosetArtifact(Base):
         ForeignKey("rooms.id", ondelete="CASCADE"),
         nullable=False,
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     item_count: Mapped[int] = mapped_column(Integer, server_default="0")
     drawer_refs: Mapped[list[dict[str, object]]] = mapped_column(JSONB, server_default="[]")
@@ -615,7 +615,7 @@ class RetrievalHintArtifact(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     room_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("rooms.id", ondelete="CASCADE"),
@@ -659,7 +659,7 @@ class RoomMembership(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     room_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("rooms.id", ondelete="CASCADE"),
@@ -702,7 +702,7 @@ class RoomTunnel(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_room_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("rooms.id", ondelete="CASCADE"),
@@ -737,7 +737,7 @@ class PalaceRun(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default="queued")
     triggered_by: Mapped[str] = mapped_column(String(20), server_default="manual")
     scope: Mapped[str] = mapped_column(String(20), server_default="tenant")
@@ -766,7 +766,7 @@ class PalaceDirtyItem(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     item_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("items.id", ondelete="CASCADE"),
@@ -793,7 +793,7 @@ class PalaceRoomEvent(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     room_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("rooms.id", ondelete="SET NULL"),
@@ -829,7 +829,7 @@ class CandidateCurationArtifact(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     artifact_kind: Mapped[str] = mapped_column(String(80), nullable=False)
     target_runtime: Mapped[str] = mapped_column(String(80), nullable=False)
     target_surface: Mapped[str] = mapped_column(Text, nullable=False)
@@ -873,7 +873,7 @@ class CandidateCurationArtifactEvent(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     artifact_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("candidate_curation_artifacts.id", ondelete="CASCADE"),

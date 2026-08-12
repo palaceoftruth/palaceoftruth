@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import String, Text, ARRAY, func, Computed
+from sqlalchemy import String, Text, ARRAY, UniqueConstraint, func, Computed
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, TIMESTAMP, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,9 @@ from app.database import Base
 
 class Item(Base):
     __tablename__ = "items"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_items_tenant_id_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -21,19 +24,19 @@ class Item(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     raw_content: Mapped[str | None] = mapped_column(Text)
     content_chunks: Mapped[Any | None] = mapped_column(JSONB)
-    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}")
-    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}")
-    categories: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}")
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}", nullable=False)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}", nullable=False)
+    categories: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}", nullable=False)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
-    status: Mapped[str] = mapped_column(String(20), server_default="processing")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), server_default="processing", nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now()
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
     effective_date: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     effective_date_source: Mapped[str | None] = mapped_column(String(80), nullable=True)

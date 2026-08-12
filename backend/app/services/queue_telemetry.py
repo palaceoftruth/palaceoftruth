@@ -151,15 +151,15 @@ async def _recent_result_latencies(arq_pool: Any) -> dict[str, list[tuple[dateti
     return by_function
 
 
-async def _media_pressure(db: Any | None) -> dict[str, Any]:
+async def _media_pressure(db: Any | None, tenant_id: str | None = None) -> dict[str, Any]:
     if db is None:
         return {}
 
     try:
-        aggregate_rows = (
-            await db.execute(
-                text(
-                    """
+        tenant_filter = "AND tenant_id = :tenant_id" if tenant_id else ""
+        query_params = {"tenant_id": tenant_id} if tenant_id else {}
+        aggregate_query = text(
+                    f"""
                     SELECT
                         tenant_id,
                         COUNT(*) FILTER (WHERE status = 'queued') AS queued_depth,
@@ -177,6 +177,7 @@ async def _media_pressure(db: Any | None) -> dict[str, Any]:
                     FROM jobs
                     WHERE job_type IN ('media', 'video', 'youtube')
                       AND status IN ('queued', 'processing', 'failed')
+                      {tenant_filter}
                     GROUP BY tenant_id
                     HAVING
                         COUNT(*) FILTER (WHERE status IN ('queued', 'processing')) > 0
@@ -189,12 +190,14 @@ async def _media_pressure(db: Any | None) -> dict[str, Any]:
                         MIN(created_at) FILTER (WHERE status = 'queued') ASC NULLS LAST
                     """
                 )
-            )
-        ).fetchall()
-        sample_rows = (
-            await db.execute(
-                text(
-                    """
+        aggregate_result = (
+            await db.execute(aggregate_query, query_params)
+            if query_params
+            else await db.execute(aggregate_query)
+        )
+        aggregate_rows = aggregate_result.fetchall()
+        sample_query = text(
+                    f"""
                     SELECT
                         tenant_id,
                         COUNT(*) FILTER (WHERE status = 'queued') AS queued_depth,
@@ -212,6 +215,7 @@ async def _media_pressure(db: Any | None) -> dict[str, Any]:
                     FROM jobs
                     WHERE job_type IN ('media', 'video', 'youtube')
                       AND status IN ('queued', 'processing', 'failed')
+                      {tenant_filter}
                     GROUP BY tenant_id
                     HAVING
                         COUNT(*) FILTER (WHERE status IN ('queued', 'processing')) > 0
@@ -225,8 +229,12 @@ async def _media_pressure(db: Any | None) -> dict[str, Any]:
                     LIMIT 5
                     """
                 )
-            )
-        ).fetchall()
+        sample_result = (
+            await db.execute(sample_query, query_params)
+            if query_params
+            else await db.execute(sample_query)
+        )
+        sample_rows = sample_result.fetchall()
     except Exception as exc:
         return {"telemetry_error": f"media DB pressure unavailable: {type(exc).__name__}: {exc}"}
 
@@ -290,7 +298,12 @@ async def _media_pressure(db: Any | None) -> dict[str, Any]:
     }
 
 
-async def build_worker_backpressure(arq_pool: Any | None, db: Any | None = None) -> PalaceWorkerBackpressureSummary:
+async def build_worker_backpressure(
+    arq_pool: Any | None,
+    db: Any | None = None,
+    *,
+    tenant_id: str | None = None,
+) -> PalaceWorkerBackpressureSummary:
     generated_at = datetime.now(UTC)
     empty_metrics = [
         PalaceWorkerQueueMetrics(
@@ -314,7 +327,7 @@ async def build_worker_backpressure(arq_pool: Any | None, db: Any | None = None)
         job_functions = await _job_functions(arq_pool, job_ids)
         health = await _health_by_queue(arq_pool, set(queue_entries))
         result_latencies = await _recent_result_latencies(arq_pool)
-        media_pressure = await _media_pressure(db)
+        media_pressure = await _media_pressure(db, tenant_id=tenant_id)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         return PalaceWorkerBackpressureSummary(

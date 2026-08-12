@@ -83,6 +83,7 @@ async def palace_shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
+    allow_abort_jobs = True
     queue_name = DEFAULT_WORKER_QUEUE
     functions = [
         process_webpage, process_pdf, process_doc, process_image, process_note,
@@ -124,6 +125,7 @@ class WorkerSettings:
 
 
 class MediaWorkerSettings:
+    allow_abort_jobs = True
     queue_name = _env_string("ARQ_QUEUE_NAME", MEDIA_WORKER_QUEUE)
     functions = [
         process_media,
@@ -143,6 +145,7 @@ class MediaWorkerSettings:
 
 
 class PalaceWorkerSettings:
+    allow_abort_jobs = True
     queue_name = PALACE_WORKER_QUEUE
     functions = [
         palace_run_build,

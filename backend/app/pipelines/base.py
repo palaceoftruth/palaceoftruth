@@ -122,7 +122,7 @@ class BasePipeline:
             logger.warning("extract_entities failed during enrichment: %s", results[2])
         return summary, tags, categories, entities_dict
 
-    async def process(self, job_id: uuid.UUID, tenant_id: str = "default", model: str | None = None, **kwargs) -> uuid.UUID:
+    async def process(self, job_id: uuid.UUID, tenant_id: str, model: str | None = None, **kwargs) -> uuid.UUID:
         """Full pipeline: extract → chunk → embed → enrich → store."""
         job = await self.db.get(Job, job_id)
         if not job:
@@ -236,6 +236,7 @@ class BasePipeline:
             # --- Store embeddings ---
             for i, (chunk, vector) in enumerate(zip(chunks, embeddings_data)):
                 emb = embedding_record_for_profile(
+                    tenant_id=tenant_id,
                     item_id=item.id,
                     chunk_index=chunk["index"],
                     chunk_text=chunk["text"],

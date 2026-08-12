@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import async_session
+from app.database import system_async_session
 from app.models.job import Job, JobProgressEvent
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ async def record_job_progress_event_best_effort(
 ) -> None:
     try:
         parsed_job_id = job_id if isinstance(job_id, uuid.UUID) else uuid.UUID(str(job_id))
-        async with async_session() as db:
+        async with system_async_session() as db:
             job = await db.get(Job, parsed_job_id)
             if job is None:
                 return

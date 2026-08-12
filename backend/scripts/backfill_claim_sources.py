@@ -6,7 +6,7 @@ import json
 import uuid
 from dataclasses import asdict
 
-from app.database import async_session
+from app.database import tenant_async_session
 from app.services.source_compiler import backfill_claims_from_temporal_facts
 
 
@@ -36,7 +36,7 @@ def _parse_fact_ids(values: list[str] | None) -> list[uuid.UUID] | None:
 
 async def _main() -> None:
     args = _parse_args()
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         report = await backfill_claims_from_temporal_facts(
             db,
             tenant_id=args.tenant_id,

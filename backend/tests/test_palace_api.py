@@ -1546,7 +1546,7 @@ def test_delete_sync_source_enqueues_palace_cleanup_when_items_are_deactivated(m
         "status": "disabled",
     }
     assert client.app.state.arq_pool.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(palace_run_id)})
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(palace_run_id), "tenant_id": "tenant-a"})
     ]
 
 
@@ -1774,7 +1774,7 @@ def test_start_sync_source_enqueues_new_run(monkeypatch) -> None:
 
     assert response.status_code == 202
     assert client.app.state.arq_pool.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+            ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-a"})
     ]
 
 

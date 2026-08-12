@@ -266,8 +266,8 @@ class RelationshipService:
                       AND dst.deleted_at IS NULL
                     FOR KEY SHARE OF src, dst
                 )
-                INSERT INTO item_relationships (source_item_id, target_item_id, relationship, confidence)
-                SELECT source_item_id, target_item_id, :rel, :conf
+                INSERT INTO item_relationships (tenant_id, source_item_id, target_item_id, relationship, confidence)
+                SELECT :tenant_id, source_item_id, target_item_id, :rel, :conf
                 FROM endpoints
                 ON CONFLICT (source_item_id, target_item_id, relationship)
                 DO UPDATE SET confidence = EXCLUDED.confidence

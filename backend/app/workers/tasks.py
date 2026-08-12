@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from arq.jobs import Job as ArqJob, JobStatus
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 
 from app.database import async_session
 from app.models.embedding import Embedding
@@ -46,6 +46,46 @@ from app.utils.webhook import maybe_dispatch_webhook
 
 logger = logging.getLogger(__name__)
 
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:  # Test session factories do not accept SQLAlchemy options.
+        return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
+
+async def _durable_job_tenant(job_id: uuid.UUID) -> str:
+    """Resolve a legacy queue payload from its durable tenant-owned job."""
+    async with system_async_session() as db:
+        tenant_id = await db.scalar(select(Job.tenant_id).where(Job.id == job_id))
+    if tenant_id is None:
+        raise ValueError(f"Legacy queue job {job_id} was not found")
+    return str(tenant_id)
+
+
+async def _durable_item_tenant(item_id: uuid.UUID) -> str:
+    """Resolve a legacy queue payload from its durable tenant-owned item."""
+    async with system_async_session() as db:
+        tenant_id = await db.scalar(select(Item.tenant_id).where(Item.id == item_id))
+    if tenant_id is None:
+        raise ValueError(f"Legacy queue item {item_id} was not found")
+    return str(tenant_id)
+
+
+async def _job_tenant(job_id: str, tenant_id: str | None) -> str:
+    return str(tenant_id) if tenant_id is not None else await _durable_job_tenant(uuid.UUID(job_id))
+
+
+async def _item_tenant(item_id: str, tenant_id: str | None) -> str:
+    return str(tenant_id) if tenant_id is not None else await _durable_item_tenant(uuid.UUID(item_id))
+
 _RELATIONSHIP_BACKFILL_DEFAULT_LIMIT = 50
 _RELATIONSHIP_BACKFILL_MAX_LIMIT = 500
 _RELATIONSHIP_BACKFILL_DEFAULT_DEFER_SECONDS = 15
@@ -59,7 +99,7 @@ _ACTIVE_ARQ_STATUSES = {JobStatus.queued, JobStatus.deferred, JobStatus.in_progr
 
 async def reap_browser_sessions(_ctx: dict | None = None) -> int:
     """Delete expired or long-revoked browser sessions."""
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 "DELETE FROM browser_sessions "
@@ -123,8 +163,10 @@ def _taxonomy_backfill_error_payload(exc: Exception) -> dict[str, str]:
     }
 
 
-async def _record_image_analysis_failure(job_id: str, exc: ImageAnalysisError) -> None:
-    async with async_session() as db:
+async def _record_image_analysis_failure(
+    job_id: str, tenant_id: str, exc: ImageAnalysisError
+) -> None:
+    async with tenant_async_session(tenant_id) as db:
         job = await db.get(Job, uuid.UUID(job_id))
         if job is None:
             return
@@ -197,10 +239,11 @@ def _relationship_policy_from_job(job: Job) -> str:
     return policy
 
 
-async def process_media(ctx: dict, job_id: str, url: str, tenant_id: str = "default", model: str | None = None, **_ignored_future_kwargs) -> None:
+async def process_media(ctx: dict, job_id: str, url: str, tenant_id: str | None = None, model: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = MediaPipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(uuid.UUID(job_id), url=url, tenant_id=tenant_id, model=model)
         await enqueue_default_job(ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
@@ -225,7 +268,7 @@ async def process_media(ctx: dict, job_id: str, url: str, tenant_id: str = "defa
             logger.exception("process_media could not schedule pending availability retry wake for job %s", job_id)
     finally:
         try:
-            async with async_session() as db:
+            async with tenant_async_session(tenant_id) as db:
                 await reflect_source_subscription_entry_for_job(db, job_id=uuid.UUID(job_id))
         except Exception:
             logger.exception("process_media could not reflect source subscription entry for job %s", job_id)
@@ -237,26 +280,30 @@ async def process_media(ctx: dict, job_id: str, url: str, tenant_id: str = "defa
 
 
 # Keep old name registered so any queued jobs still in Redis drain cleanly.
-async def process_youtube(ctx: dict, job_id: str, url: str, tenant_id: str = "default", model: str | None = None, **ignored_future_kwargs) -> None:
-    await process_media(ctx, job_id=job_id, url=url, tenant_id=tenant_id, model=model, **ignored_future_kwargs)
+async def process_youtube(ctx: dict, job_id: str, url: str, tenant_id: str | None = None, model: str | None = None) -> None:
+    await process_media(ctx, job_id=job_id, url=url, tenant_id=tenant_id, model=model)
 
 
-async def process_webpage(ctx: dict, job_id: str, url: str, tenant_id: str = "default", model: str | None = None, **_ignored_future_kwargs) -> None:
+async def process_webpage(ctx: dict, job_id: str, url: str, tenant_id: str | None = None, model: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = WebpagePipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(uuid.UUID(job_id), url=url, tenant_id=tenant_id, model=model)
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
 
 
-async def process_pdf(ctx: dict, job_id: str, extracted_text: str, pdf_metadata: dict | None = None, content_hash: str | None = None, tenant_id: str = "default", webhook_url: str | None = None, signing_key: str | None = None, model: str | None = None, **_ignored_future_kwargs) -> None:
+async def process_pdf(ctx: dict, job_id: str, extracted_text: str, pdf_metadata: dict | None = None, content_hash: str | None = None, *, tenant_id: str | None = None, webhook_url: str | None = None, signing_key: str | None = None, model: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = PDFPipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(
                 uuid.UUID(job_id),
@@ -265,16 +312,19 @@ async def process_pdf(ctx: dict, job_id: str, extracted_text: str, pdf_metadata:
                 tenant_id=tenant_id,
                 model=model,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
 
 
-async def process_doc(ctx: dict, job_id: str, extracted_text: str, doc_metadata: dict | None = None, tenant_id: str = "default", model: str | None = None, **_ignored_future_kwargs) -> None:
+async def process_doc(ctx: dict, job_id: str, extracted_text: str, doc_metadata: dict | None = None, *, tenant_id: str | None = None, model: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = DocPipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(
                 uuid.UUID(job_id),
@@ -283,17 +333,20 @@ async def process_doc(ctx: dict, job_id: str, extracted_text: str, doc_metadata:
                 tenant_id=tenant_id,
                 model=model,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
 
 
-async def process_image(ctx: dict, job_id: str, description: str = "", image_metadata: dict | None = None, tenant_id: str = "default", **_ignored_future_kwargs) -> None:
+async def process_image(ctx: dict, job_id: str, description: str = "", image_metadata: dict | None = None, *, tenant_id: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     # model override does not apply to image pipeline (uses vision model separately)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = ImagePipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(
                 uuid.UUID(job_id),
@@ -301,10 +354,12 @@ async def process_image(ctx: dict, job_id: str, description: str = "", image_met
                 image_metadata=image_metadata or {},
                 tenant_id=tenant_id,
             )
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     except ImageAnalysisError as exc:
-        await _record_image_analysis_failure(job_id, exc)
+        await _record_image_analysis_failure(job_id, tenant_id, exc)
         if exc.retryable:
             raise
         logger.info("process_image marked job %s failed without retry: %s", job_id, exc)
@@ -312,28 +367,32 @@ async def process_image(ctx: dict, job_id: str, description: str = "", image_met
         await maybe_dispatch_webhook(ctx["redis"], job_id)
 
 
-async def process_note(ctx: dict, job_id: str, title: str, content: str, tags: list | None = None, tenant_id: str = "default", model: str | None = None, **_ignored_future_kwargs) -> None:
+async def process_note(ctx: dict, job_id: str, title: str, content: str, tags: list | None = None, *, tenant_id: str | None = None, model: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     item_id = None
     try:
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             pipeline = NotePipeline(db, ctx["embedder"], ctx["llm"])
             item_id = await pipeline.process(uuid.UUID(job_id), title=title, content=content, tags=tags, tenant_id=tenant_id, model=model)
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=str(item_id), tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=str(item_id), tenant_id=tenant_id
+        )
         await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=str(item_id), tenant_id=tenant_id, reason="ingest")
     finally:
         await maybe_dispatch_webhook(ctx["redis"], job_id)
 
 
-async def extract_relationships(ctx: dict, item_id: str, tenant_id: str = "default") -> None:
+async def extract_relationships(ctx: dict, item_id: str, tenant_id: str | None = None) -> None:
+    tenant_id = await _item_tenant(item_id, tenant_id)
     from app.services.relationships import RelationshipService
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         service = RelationshipService(db, ctx["embedder"], ctx["llm"])
         await service.find_relationships(uuid.UUID(item_id), tenant_id=tenant_id)
 
 
 async def backfill_deferred_relationships(
     ctx: dict,
-    tenant_id: str = "default",
+    tenant_id: str,
     limit: int = _RELATIONSHIP_BACKFILL_DEFAULT_LIMIT,
     defer_seconds: int = _RELATIONSHIP_BACKFILL_DEFAULT_DEFER_SECONDS,
 ) -> int:
@@ -348,7 +407,7 @@ async def backfill_deferred_relationships(
         limit = _RELATIONSHIP_BACKFILL_DEFAULT_LIMIT
         defer_seconds = _RELATIONSHIP_BACKFILL_DEFAULT_DEFER_SECONDS
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         lock_acquired = (
             await db.execute(
                 text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
@@ -379,8 +438,8 @@ async def backfill_deferred_relationships(
                       AND NOT EXISTS (
                           SELECT 1
                           FROM item_relationships r
-                          WHERE r.source_item_id = i.id
-                             OR r.target_item_id = i.id
+                          WHERE r.tenant_id = :tenant_id
+                            AND (r.source_item_id = i.id OR r.target_item_id = i.id)
                       )
                     ORDER BY i.updated_at ASC, i.id ASC
                     LIMIT :limit
@@ -402,7 +461,7 @@ async def backfill_deferred_relationships(
         defer_by = index * defer_seconds
         if defer_by > 0:
             enqueue_kwargs["_defer_by"] = defer_by
-        await ctx["redis"].enqueue_job("extract_relationships", **enqueue_kwargs)
+        await enqueue_worker_job(ctx["redis"], "extract_relationships", **enqueue_kwargs)
 
     logger.info(
         "backfill_deferred_relationships: queued %d relationship job(s) for tenant %s",
@@ -414,7 +473,7 @@ async def backfill_deferred_relationships(
 
 async def backfill_missing_taxonomy(
     ctx: dict,
-    tenant_id: str = "default",
+    tenant_id: str,
     limit: int = _TAXONOMY_BACKFILL_DEFAULT_LIMIT,
     dry_run: bool = True,
     source_types: tuple[str, ...] | list[str] | None = None,
@@ -452,7 +511,7 @@ async def backfill_missing_taxonomy(
     }
     changed_item_ids: list[str] = []
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         candidate_filter = _empty_taxonomy_condition_sql()
         rows = (
             await db.execute(
@@ -583,13 +642,19 @@ async def backfill_missing_taxonomy(
     return report
 
 
-async def embed_item(ctx: dict, item_id: str, skip_ai_enrichment: bool = False, tenant_id: str = "default") -> None:
+async def embed_item(ctx: dict, item_id: str, skip_ai_enrichment: bool = False, *, tenant_id: str | None = None) -> None:
     """Chunk, embed, and optionally AI-enrich an item created via POST /items."""
-    async with async_session() as db:
+    tenant_id = await _item_tenant(item_id, tenant_id)
+    async with tenant_async_session(tenant_id) as db:
         item = await db.get(Item, uuid.UUID(item_id))
         if not item or not item.raw_content:
             return
-        await db.execute(delete(Embedding).where(Embedding.item_id == item.id))
+        await db.execute(
+            delete(Embedding).where(
+                Embedding.item_id == item.id,
+                Embedding.tenant_id == tenant_id,
+            )
+        )
         item.content_chunks = None
         item.content_hash = None
         item.status = "processing"
@@ -602,14 +667,17 @@ async def embed_item(ctx: dict, item_id: str, skip_ai_enrichment: bool = False, 
             enable_ai_enrichment=not skip_ai_enrichment,
         )
     if result.status == "completed":
-        await ctx["redis"].enqueue_job("extract_relationships", item_id=item_id, tenant_id=tenant_id)
+        await enqueue_worker_job(
+            ctx["redis"], "extract_relationships", item_id=item_id, tenant_id=tenant_id
+        )
     await enqueue_palace_job(ctx["redis"], "mark_item_dirty_and_schedule", item_id=item_id, tenant_id=tenant_id, reason="ingest")
 
 
-async def memory_artifact(ctx: dict, job_id: str, **_ignored_future_kwargs) -> None:
+async def memory_artifact(ctx: dict, job_id: str, *, tenant_id: str | None = None) -> None:
+    tenant_id = await _job_tenant(job_id, tenant_id)
     try:
         try:
-            async with async_session() as db:
+            async with tenant_async_session(tenant_id) as db:
                 job = await db.get(Job, uuid.UUID(job_id))
                 if not job:
                     raise ValueError(f"Job {job_id} not found")
@@ -644,7 +712,8 @@ async def memory_artifact(ctx: dict, job_id: str, **_ignored_future_kwargs) -> N
         if result.status == "completed":
             relationship_policy = _relationship_policy_from_job(job)
             if relationship_policy == "immediate":
-                await ctx["redis"].enqueue_job(
+                await enqueue_worker_job(
+                    ctx["redis"],
                     "extract_relationships",
                     item_id=str(result.item_id),
                     tenant_id=job.tenant_id,
@@ -669,7 +738,7 @@ async def memory_artifact(ctx: dict, job_id: str, **_ignored_future_kwargs) -> N
 
 async def recover_stale_memory_jobs(ctx: dict) -> None:
     """Re-enqueue durable memory jobs orphaned by worker restarts."""
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             text(
                 f"""
@@ -698,7 +767,7 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
         arq_job_id = str(row_payload.get("memory_arq_job_id") or f"memory-artifact:{job_id}:0")
         if not await _memory_job_is_requeueable(ctx["redis"], arq_job_id):
             continue
-        async with async_session() as db:
+        async with tenant_async_session(str(row.tenant_id)) as db:
             # Serialize recovery against a worker completing the same durable row,
             # then revalidate after the external ARQ-state observation.
             job = await db.get(Job, row.id, with_for_update=True)
@@ -765,9 +834,11 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
             # can never outrun its durable lineage record.
             await db.commit()
             try:
-                enqueued = await ctx["redis"].enqueue_job(
+                enqueued = await enqueue_worker_job(
+                    ctx["redis"],
                     "memory_artifact",
                     job_id=job_id,
+                    tenant_id=str(row.tenant_id),
                     _job_id=arq_job_id,
                 )
             except Exception as exc:
@@ -811,6 +882,9 @@ async def recover_stale_memory_jobs(ctx: dict) -> None:
         logger.info("recover_stale_memory_jobs: requeued job %s for tenant %s", job_id, row.tenant_id)
 
 
-async def restore_bundle(ctx: dict, job_id: str, **_ignored_future_kwargs) -> None:
-    async with async_session() as db:
-        await run_restore_job(db, ctx["embedder"], uuid.UUID(job_id))
+async def restore_bundle(ctx: dict, job_id: str, *, tenant_id: str | None = None) -> None:
+    parsed_job_id = uuid.UUID(job_id)
+    if tenant_id is None:
+        tenant_id = await _durable_job_tenant(parsed_job_id)
+    async with tenant_async_session(str(tenant_id)) as db:
+        await run_restore_job(db, ctx["embedder"], parsed_job_id)

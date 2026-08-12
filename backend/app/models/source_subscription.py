@@ -24,7 +24,7 @@ class SourceSubscription(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     provider_type: Mapped[str] = mapped_column(String(80), nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
     external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -80,7 +80,7 @@ class SourceSubscriptionEntry(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     subscription_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("source_subscriptions.id", ondelete="CASCADE"),

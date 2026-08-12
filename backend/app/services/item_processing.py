@@ -157,17 +157,26 @@ async def process_prebuilt_item(
         # Clear only the active profile so side-by-side comparison vectors survive.
         embedding_profile = getattr(embedder, "profile", resolve_embedding_profile())
         if is_default_embedding_profile(embedding_profile):
-            await db.execute(delete(Embedding).where(Embedding.item_id == item.id))
+            await db.execute(
+                delete(Embedding).where(
+                    Embedding.item_id == item.id,
+                    Embedding.tenant_id == tenant_id,
+                )
+            )
         else:
             await db.execute(
                 delete(EmbeddingProfileVector)
-                .where(EmbeddingProfileVector.item_id == item.id)
+                .where(
+                    EmbeddingProfileVector.item_id == item.id,
+                    EmbeddingProfileVector.tenant_id == tenant_id,
+                )
                 .where(EmbeddingProfileVector.profile_name == embedding_profile.profile_name)
             )
 
         for chunk, vector in zip(chunks, embeddings_data):
             db.add(
                 embedding_record_for_profile(
+                    tenant_id=item.tenant_id,
                     item_id=item.id,
                     chunk_index=chunk["index"],
                     chunk_text=chunk["text"],

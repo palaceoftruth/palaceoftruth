@@ -1,4 +1,5 @@
 import hashlib
+import fcntl
 import io
 import json
 import logging
@@ -70,7 +71,43 @@ def _normalize_upload_artifact_extension(extension: str | None) -> str:
 def artifact_storage_path(tenant_id: str, item_id: uuid.UUID, extension: str | None) -> Path:
     normalized_extension = _normalize_upload_artifact_extension(extension)
     tenant_dir = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
-    return Path(settings.upload_artifact_dir) / tenant_dir / f"{item_id}{normalized_extension}"
+    directory = Path(settings.upload_artifact_dir) / tenant_dir
+    if item_artifact_tombstone(tenant_id, item_id).exists():
+        raise BundleValidationError(f"Item {item_id} was permanently deleted")
+    return directory / f"{item_id}{normalized_extension}"
+
+
+def item_artifact_tombstone(tenant_id: str, item_id: uuid.UUID) -> Path:
+    tenant_dir = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+    return Path(settings.upload_artifact_dir) / tenant_dir / f".deleted-{item_id}"
+
+
+def acquire_item_artifact_lock(tenant_id: str, item_id: uuid.UUID):
+    """Acquire the cross-process lock shared by artifact writers and deletion."""
+    lock_path = item_artifact_tombstone(tenant_id, item_id).with_name(f".lock-{item_id}")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _publish_upload_artifact(source, destination: Path, *, tenant_id: str, item_id: uuid.UUID) -> None:
+    """Publish through a temporary file and recheck permanent deletion."""
+    lock = acquire_item_artifact_lock(tenant_id, item_id)
+    try:
+        if item_artifact_tombstone(tenant_id, item_id).exists():
+            raise BundleValidationError(f"Item {item_id} was permanently deleted")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.parent / f".uploading-{item_id}-{uuid.uuid4()}"
+        with temporary.open("wb") as target:
+            shutil.copyfileobj(source, target)
+        if item_artifact_tombstone(tenant_id, item_id).exists():
+            raise BundleValidationError(f"Item {item_id} was permanently deleted")
+        temporary.replace(destination)
+    finally:
+        if "temporary" in locals() and (temporary.exists() or temporary.is_symlink()):
+            temporary.unlink()
+        lock.close()
 
 
 def persist_upload_artifact(
@@ -81,8 +118,8 @@ def persist_upload_artifact(
     extension: str | None,
 ) -> str:
     destination = artifact_storage_path(tenant_id, item_id, extension)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_path, destination)
+    with open(source_path, "rb") as source:
+        _publish_upload_artifact(source, destination, tenant_id=tenant_id, item_id=item_id)
     return str(destination)
 
 
@@ -387,9 +424,12 @@ def materialize_bundle_upload_artifacts(
                 )
                 try:
                     with zf.open(item.upload_artifact.bundle_path) as source:
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        with destination.open("wb") as target:
-                            shutil.copyfileobj(source, target)
+                        _publish_upload_artifact(
+                            source,
+                            destination,
+                            tenant_id=tenant_id,
+                            item_id=item.id,
+                        )
                 except KeyError as exc:
                     raise BundleValidationError(
                         f"Bundle is missing upload artifact: {item.upload_artifact.bundle_path}"
@@ -481,7 +521,12 @@ async def reset_tenant_restore_state(
     )
     if item_ids:
         for batch in _batch(item_ids, 500):
-            await db.execute(delete(Embedding).where(Embedding.item_id.in_(batch)))
+            await db.execute(
+                delete(Embedding).where(
+                    Embedding.item_id.in_(batch),
+                    Embedding.tenant_id == tenant_id,
+                )
+            )
     await db.execute(
         delete(ConversationMessage).where(ConversationMessage.tenant_id == tenant_id)
     )
@@ -584,11 +629,13 @@ async def run_restore_job(
                 await db.execute(
                     delete(EmbeddingProfileVector)
                     .where(EmbeddingProfileVector.item_id == restored_item.id)
+                    .where(EmbeddingProfileVector.tenant_id == tenant_id)
                     .where(EmbeddingProfileVector.profile_name == embedding_profile.profile_name)
                 )
             for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 db.add(
                     embedding_record_for_profile(
+                        tenant_id=tenant_id,
                         item_id=restored_item.id,
                         chunk_index=chunk.get("index", chunk_index),
                         chunk_text=chunk["text"],

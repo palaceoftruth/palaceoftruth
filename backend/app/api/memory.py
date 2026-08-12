@@ -81,7 +81,7 @@ from app.services.queue_telemetry import build_memory_queue_hint
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
 from app.services.source_trust_summary import get_source_trust_summaries
 from app.services.search import RetrievalDependencyUnavailableError
-from app.workers.queues import enqueue_singleton_job
+from app.workers.queues import enqueue_singleton_job, enqueue_tenant_job
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -274,9 +274,11 @@ async def _enqueue_memory_job_or_raise(request: Request, db: AsyncSession, *, jo
     job.payload = payload
     await db.commit()
     try:
-        enqueued = await request.app.state.arq_pool.enqueue_job(
+        enqueued = await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "memory_artifact",
             job_id=str(job.id),
+            tenant_id=str(job.tenant_id),
             _job_id=arq_job_id,
         )
         if enqueued is None:

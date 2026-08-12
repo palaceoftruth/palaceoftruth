@@ -71,9 +71,10 @@ async def test_maybe_dispatch_webhook_snapshots_memory_status(monkeypatch) -> No
 
     assert redis.enqueued == [
         (
-            "deliver_webhook",
-            {
-                "job_id": str(job_id),
+                "deliver_webhook",
+                {
+                    "tenant_id": "tenant-a",
+                    "job_id": str(job_id),
                 "webhook_url": "https://example.com/hook",
                 "signing_key": "signing-key",
                 "payload_snapshot": {

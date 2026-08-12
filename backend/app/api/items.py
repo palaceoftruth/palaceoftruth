@@ -8,7 +8,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select, func, text as sa_text
+from sqlalchemy import ARRAY, Text, bindparam, delete, select, func, text as sa_text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_auth_context, require_api_capability
@@ -19,8 +20,9 @@ from app.models.item import Item
 from app.schemas.item import ItemResponse, ItemListResponse, ItemUpdate, ItemCreate, ItemCreateResponse, BatchActionRequest, BatchActionResponse, ItemDeleteResponse, ItemRestoreResponse
 from app.schemas.relationship import RelatedItemResponse, RelatedItemsResponse
 from app.services.item_dates import apply_effective_date
+from app.services.data_lifecycle import hard_delete_item
 from app.utils.file_type import SNIFF_BYTES, matches_extension, safe_media_type
-from app.workers.queues import enqueue_palace_job
+from app.workers.queues import enqueue_palace_job, enqueue_tenant_job
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -162,9 +164,11 @@ async def list_items(
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         if tag_list:
-            q = q.where(sa_text("tags && CAST(:tags AS text[])").bindparams(
-                tags="{" + ",".join(tag_list) + "}"
-            ))
+            q = q.where(
+                sa_text("tags && :tags").bindparams(
+                    bindparam("tags", value=tag_list, type_=ARRAY(Text()))
+                )
+            )
     if date_from:
         q = q.where(Item.created_at >= date_from)
     if date_to:
@@ -233,7 +237,8 @@ async def create_item(
 
     embedding_queued = False
     if body.raw_content:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "embed_item",
             item_id=str(item.id),
             skip_ai_enrichment=body.skip_ai_enrichment,
@@ -254,8 +259,6 @@ async def batch_items(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    id_strs = [str(i) for i in body.ids]
-    ids_pg = "{" + ",".join(id_strs) + "}"
     tid = request.state.tenant_id
 
     if body.action == "delete":
@@ -276,32 +279,32 @@ async def batch_items(
 
     if not body.tags:
         raise HTTPException(status_code=422, detail="tags required for tag/untag action")
-    tags_pg = "{" + ",".join(body.tags) + "}"
-
     if body.action == "tag":
-        result = await db.execute(
-            sa_text("""
+        statement = sa_text("""
                 UPDATE items
                 SET tags = (
                     SELECT array_agg(DISTINCT t)
-                    FROM unnest(tags || CAST(:new_tags AS text[])) AS t
+                    FROM unnest(tags || :new_tags) AS t
                 )
-                WHERE id = ANY(CAST(:ids AS uuid[])) AND tenant_id = :tid
-            """),
-            {"new_tags": tags_pg, "ids": ids_pg, "tid": tid},
+                WHERE id = ANY(:ids) AND tenant_id = :tid
+            """).bindparams(
+            bindparam("new_tags", type_=ARRAY(Text())),
+            bindparam("ids", type_=ARRAY(PG_UUID(as_uuid=True))),
         )
+        result = await db.execute(statement, {"new_tags": body.tags, "ids": body.ids, "tid": tid})
     else:  # untag
-        result = await db.execute(
-            sa_text("""
+        statement = sa_text("""
                 UPDATE items
                 SET tags = array(
                     SELECT unnest(tags)
-                    EXCEPT SELECT unnest(CAST(:remove_tags AS text[]))
+                    EXCEPT SELECT unnest(:remove_tags)
                 )
-                WHERE id = ANY(CAST(:ids AS uuid[])) AND tenant_id = :tid
-            """),
-            {"remove_tags": tags_pg, "ids": ids_pg, "tid": tid},
+                WHERE id = ANY(:ids) AND tenant_id = :tid
+            """).bindparams(
+            bindparam("remove_tags", type_=ARRAY(Text())),
+            bindparam("ids", type_=ARRAY(PG_UUID(as_uuid=True))),
         )
+        result = await db.execute(statement, {"remove_tags": body.tags, "ids": body.ids, "tid": tid})
 
     await db.commit()
     return BatchActionResponse(affected=result.rowcount, action=body.action)
@@ -399,7 +402,12 @@ async def update_item(
         raw_content_changed = body.raw_content != row.raw_content
         row.raw_content = body.raw_content
         if raw_content_changed:
-            await db.execute(delete(Embedding).where(Embedding.item_id == row.id))
+            await db.execute(
+                delete(Embedding).where(
+                    Embedding.item_id == row.id,
+                    Embedding.tenant_id == request.state.tenant_id,
+                )
+            )
             row.content_chunks = None
             row.content_hash = None
             if body.summary is None:
@@ -416,7 +424,8 @@ async def update_item(
     await db.commit()
     await db.refresh(row)
     if reindex_requested:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "embed_item",
             item_id=str(row.id),
             skip_ai_enrichment=False,
@@ -469,6 +478,28 @@ async def restore_item(
     return ItemRestoreResponse(restored=True, item=ItemResponse.model_validate(row))
 
 
+@router.delete("/{item_id}/hard", dependencies=[Depends(require_api_capability("write"))])
+async def hard_delete_item_route(
+    item_id: uuid.UUID,
+    request: Request,
+    confirmation: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Permanently delete one tenant-owned item and its dependent rows."""
+    if confirmation != str(item_id):
+        raise HTTPException(status_code=422, detail="confirmation must equal item_id")
+    deleted = await hard_delete_item(
+        db,
+        arq_pool=request.app.state.arq_pool,
+        tenant_id=request.state.tenant_id,
+        item_id=item_id,
+        actor_id=get_auth_context(request).subject_id or "unknown",
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"deleted": True, "item_id": item_id, "permanent": True}
+
+
 @router.get("/{item_id}/related", response_model=RelatedItemsResponse, dependencies=[Depends(require_api_capability("read"))])
 async def get_related(
     item_id: uuid.UUID,
@@ -488,6 +519,7 @@ async def get_related(
         FROM item_relationships r
         JOIN items i ON r.target_item_id = i.id
         WHERE r.source_item_id = CAST(:item_id AS uuid)
+          AND r.tenant_id = :tenant_id
           AND i.tenant_id = :tenant_id
           AND i.status != 'deleted'
           AND i.deleted_at IS NULL
@@ -499,6 +531,7 @@ async def get_related(
         FROM item_relationships r
         JOIN items i ON r.source_item_id = i.id
         WHERE r.target_item_id = CAST(:item_id AS uuid)
+          AND r.tenant_id = :tenant_id
           AND i.tenant_id = :tenant_id
           AND i.status != 'deleted'
           AND i.deleted_at IS NULL

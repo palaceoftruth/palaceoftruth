@@ -12,10 +12,12 @@ import yaml
 CHART_DIR = Path(__file__).resolve().parents[2] / "chart"
 
 
-def _render_chart(*set_args: str) -> list[dict[str, Any]]:
+def _render_chart(*set_args: str, is_upgrade: bool = False) -> list[dict[str, Any]]:
     if shutil.which("helm") is None:
         pytest.skip("helm is required for chart rendering tests")
     command = ["helm", "template", "palaceoftruth", str(CHART_DIR)]
+    if is_upgrade:
+        command.append("--is-upgrade")
     for arg in set_args:
         command.extend(["--set", arg])
     result = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -54,8 +56,10 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
     env = {entry["name"]: entry for entry in readiness["env"]}
     assert env["DATABASE_URL"] == {
         "name": "DATABASE_URL",
-        "value": "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)",
+        "value": "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=verify-full",
     }
+    assert env["DATABASE_SSL_ROOT_CERT"]["value"] == "/etc/palaceoftruth/database-tls/ca.crt"
+    assert {mount["name"] for mount in readiness["volumeMounts"]} >= {"database-tls"}
     assert env["MIGRATION_DB_WAIT_TIMEOUT_SECONDS"]["value"] == "30"
     assert env["MIGRATION_DB_WAIT_INTERVAL_SECONDS"]["value"] == "2"
     assert env["MIGRATION_DB_CONNECT_TIMEOUT_SECONDS"]["value"] == "3"
@@ -71,6 +75,76 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
 def test_migration_readiness_gate_can_be_disabled() -> None:
     job = _migration_job(_render_chart("migrations.readiness.enabled=false"))
     assert "initContainers" not in job["spec"]["template"]["spec"]
+
+
+def test_database_tls_can_be_disabled_without_rendering_verify_full() -> None:
+    manifests = _render_chart("databaseTls.enabled=false")
+    job = _migration_job(manifests)
+    pod_spec = job["spec"]["template"]["spec"]
+    containers = [*pod_spec.get("initContainers", []), *pod_spec["containers"]]
+
+    for container in containers:
+        env = {entry["name"]: entry for entry in container["env"]}
+        assert "sslmode=verify-full" not in env["DATABASE_URL"]["value"]
+        assert "DATABASE_SSL_ROOT_CERT" not in env
+        assert "database-tls" not in {mount["name"] for mount in container.get("volumeMounts", [])}
+
+
+def test_rollout_defers_rls_until_post_rollout_hook() -> None:
+    manifests = _render_chart()
+    migration = _migration_job(manifests)
+    migration_env = {
+        entry["name"]: entry
+        for entry in migration["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    enforcement = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
+        == "tenant-rls-enforcement"
+    )
+
+    assert migration_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
+    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    assert enforcement["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "3"
+    enforcement_spec = enforcement["spec"]["template"]["spec"]
+    assert enforcement_spec["serviceAccountName"] == "palaceoftruth-tenant-rls-enforcement"
+    rollout_gate = enforcement_spec["initContainers"][0]
+    assert rollout_gate["name"] == "wait-for-tenant-aware-rollout"
+    assert "updatedReplicas" in rollout_gate["command"][-1]
+    assert "readyReplicas" in rollout_gate["command"][-1]
+    role = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("kind") == "Role"
+        and manifest.get("metadata", {}).get("name") == "palaceoftruth-tenant-rls-enforcement"
+    )
+    assert role["rules"] == [
+        {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list"]}
+    ]
+    assert enforcement["spec"]["template"]["spec"]["containers"][0]["command"] == [
+        "python",
+        "-m",
+        "app.enforce_tenant_rls",
+    ]
+
+
+def test_disabled_migration_job_still_defers_and_enforces_rls_after_rollout() -> None:
+    manifests = _render_chart("migrations.enabled=false", is_upgrade=True)
+    backend = _backend_deployment(manifests)
+    backend_env = {
+        entry["name"]: entry
+        for entry in backend["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    enforcement = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
+        == "tenant-rls-enforcement"
+    )
+
+    assert backend_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
+    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
 
 
 def test_backend_startup_probe_allows_dependency_gate_budget() -> None:

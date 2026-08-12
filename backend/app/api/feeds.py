@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.database import get_db
 from app.schemas.feed import FeedCreate, FeedUpdate, FeedOut, FeedListResponse, OPMLImportResponse
 from app.utils.outbound_http import OutboundUrlError, validate_public_http_url_async
 from app.utils.safe_xml import MAX_XML_DOCUMENT_BYTES, UnsafeXmlError, parse_safe_xml
+from app.workers.queues import enqueue_tenant_job
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -44,15 +45,27 @@ def _row_to_feed_out(row: dict) -> FeedOut:
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=FeedListResponse, dependencies=[Depends(require_api_capability("read"))])
-async def list_feeds(request: Request, db: AsyncSession = Depends(get_db)):
+async def list_feeds(
+    request: Request,
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
+    db: AsyncSession = Depends(get_db),
+):
     tenant_id = request.state.tenant_id
     result = await db.execute(
-        text(_FEED_WITH_COUNT_SQL + " ORDER BY f.created_at DESC"),
-        {"tenant_id": tenant_id},
+        text(_FEED_WITH_COUNT_SQL + " ORDER BY f.created_at DESC LIMIT :limit OFFSET :offset"),
+        {"tenant_id": tenant_id, "limit": limit, "offset": offset},
     )
     rows = result.mappings().all()
     feeds = [_row_to_feed_out(row) for row in rows]
-    return {"feeds": feeds, "total": len(feeds)}
+    if hasattr(db, "scalar"):
+        total = await db.scalar(
+            text("SELECT COUNT(*) FROM feeds WHERE tenant_id = :tenant_id AND deleted_at IS NULL"),
+            {"tenant_id": tenant_id},
+        )
+    else:  # Narrow test doubles and third-party AsyncSession facades.
+        total = len(feeds)
+    return {"feeds": feeds, "total": int(total or 0)}
 
 
 @router.post("", response_model=FeedOut, status_code=201, dependencies=[Depends(require_api_capability("write"))])
@@ -94,7 +107,9 @@ async def create_feed(body: FeedCreate, request: Request, db: AsyncSession = Dep
     feed_row = feed_result.mappings().one()
 
     # Trigger immediate first poll
-    await request.app.state.arq_pool.enqueue_job("poll_feed", feed_id=feed_id, tenant_id=tenant_id)
+    await enqueue_tenant_job(
+        request.app.state.arq_pool, "poll_feed", feed_id=feed_id, tenant_id=tenant_id
+    )
 
     return _row_to_feed_out(feed_row)
 
@@ -209,7 +224,12 @@ async def force_poll(feed_id: uuid.UUID, request: Request, db: AsyncSession = De
     if result.mappings().one_or_none() is None:
         raise HTTPException(status_code=404, detail="Feed not found")
 
-    await request.app.state.arq_pool.enqueue_job("poll_feed", feed_id=str(feed_id), tenant_id=tenant_id)
+    await enqueue_tenant_job(
+        request.app.state.arq_pool,
+        "poll_feed",
+        feed_id=str(feed_id),
+        tenant_id=tenant_id,
+    )
     return {"status": "queued", "feed_id": str(feed_id)}
 
 
@@ -250,8 +270,8 @@ async def disable_feed(feed_id: uuid.UUID, request: Request, db: AsyncSession = 
 async def list_feed_items(
     feed_id: uuid.UUID,
     request: Request,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
     db: AsyncSession = Depends(get_db),
 ):
     tenant_id = request.state.tenant_id
@@ -265,7 +285,10 @@ async def list_feed_items(
 
     result = await db.execute(
         text(
-            "SELECT * FROM items "
+            "SELECT id, source_type, source_url, title, summary, raw_content, content_chunks, "
+            "metadata, tags, categories, content_hash, idempotency_key, tenant_id, status, "
+            "deleted_at, created_at, updated_at, effective_date, effective_date_source, "
+            "effective_date_quality FROM items "
             "WHERE metadata->>'feed_id' = :feed_id AND tenant_id = :tenant_id AND status = 'ready' AND deleted_at IS NULL "
             "ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
         ),
@@ -350,7 +373,8 @@ async def import_opml(
 
     # Trigger immediate poll for newly created feeds
     for fid in feed_ids:
-        await request.app.state.arq_pool.enqueue_job(
+        await enqueue_tenant_job(
+            request.app.state.arq_pool,
             "poll_feed",
             feed_id=str(fid),
             tenant_id=tenant_id,

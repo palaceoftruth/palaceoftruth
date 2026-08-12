@@ -72,6 +72,9 @@ EXPECTED_TABLES = frozenset(
         "api_keys",
         "api_key_audit_events",
         "browser_extension_pairing_keys",
+        "browser_sessions",
+        "data_lifecycle_audit_events",
+        "tenant_erasure_states",
         "mcp_clients",
         "mcp_request_audit_events",
         "mcp_oauth_access_tokens",
@@ -90,6 +93,11 @@ EXPECTED_INDEXES = frozenset(
     {
         "idx_embeddings_halfvec_hnsw",
         "ix_embeddings_item_chunk",
+        "ix_embeddings_tenant_item_chunk",
+        "ix_embedding_profile_vectors_tenant_item",
+        "ix_item_relationships_tenant_source",
+        "ix_item_relationships_tenant_target",
+        "ix_data_lifecycle_audit_events_subject_tenant_id",
         "idx_embedding_profile_vectors_halfvec_384_hnsw",
         "idx_embedding_profile_vectors_halfvec_768_hnsw",
         "idx_embedding_profile_vectors_halfvec_1024_hnsw",
@@ -126,6 +134,11 @@ EXPECTED_CONSTRAINTS = frozenset(
         "uq_embedding_profile_vectors_item_chunk_profile",
         "ck_embedding_profile_vectors_profile_kind",
         "ck_embedding_profile_vectors_input_modality",
+        "uq_items_tenant_id_id",
+        "fk_embeddings_tenant_item",
+        "fk_embedding_profile_vectors_tenant_item",
+        "fk_item_relationships_tenant_source",
+        "fk_item_relationships_tenant_target",
     }
 )
 
@@ -191,6 +204,18 @@ MIGRATION_EXPECTATIONS = (
     MigrationExpectation(
         "soft delete readiness indexes",
         ("deleted_at", "ix_items_tenant_deleted_status", "ix_feeds_tenant_deleted"),
+    ),
+    MigrationExpectation(
+        "tenant row-level security",
+        (
+            "061_tenant_rls",
+            "ENABLE ROW LEVEL SECURITY",
+            "FORCE ROW LEVEL SECURITY",
+            "CREATE POLICY tenant_isolation",
+            "current_setting('app.tenant_id', true)",
+            "fk_embeddings_tenant_item",
+            "fk_item_relationships_tenant_source",
+        ),
     ),
     MigrationExpectation(
         "source subscription foundation",

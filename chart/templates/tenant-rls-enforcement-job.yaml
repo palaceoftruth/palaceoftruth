@@ -1,0 +1,101 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "palaceoftruth.fullname" . }}-tenant-rls-enforcement
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tenant-rls-enforcement
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.migrations.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "palaceoftruth.fullname" . }}-tenant-rls-enforcement
+        {{- include "palaceoftruth.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tenant-rls-enforcement
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ printf "%s-tenant-rls-enforcement" (include "palaceoftruth.fullname" .) | trunc 63 | trimSuffix "-" }}
+      automountServiceAccountToken: true
+      {{- include "palaceoftruth.podSecurityContext" (list . "migration") | nindent 6 }}
+      imagePullSecrets:
+        - name: {{ include "palaceoftruth.registrySecretName" . }}
+      initContainers:
+        - name: wait-for-tenant-aware-rollout
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
+          command:
+            - python
+            - -c
+            - |
+              import json, os, ssl, time, urllib.parse, urllib.request
+              token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+              ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              namespace = os.environ["POD_NAMESPACE"]
+              selector = urllib.parse.quote(os.environ["RELEASE_SELECTOR"], safe="")
+              url = (
+                  "https://kubernetes.default.svc/apis/apps/v1/namespaces/"
+                  f"{namespace}/deployments?labelSelector={selector}"
+              )
+              token = open(token_path, encoding="utf-8").read().strip()
+              context = ssl.create_default_context(cafile=ca_path)
+              for attempt in range({{ .Values.migrations.wait.maxAttempts }}):
+                  request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+                  with urllib.request.urlopen(request, context=context, timeout=10) as response:
+                      deployments = json.load(response)["items"]
+                  ready = bool(deployments)
+                  for deployment in deployments:
+                      metadata, spec, status = deployment["metadata"], deployment["spec"], deployment.get("status", {})
+                      desired = spec.get("replicas", 1)
+                      ready = ready and status.get("observedGeneration", 0) >= metadata["generation"]
+                      ready = ready and status.get("replicas", 0) == desired
+                      ready = ready and status.get("updatedReplicas", 0) == desired
+                      ready = ready and status.get("readyReplicas", 0) == desired
+                      ready = ready and status.get("availableReplicas", 0) == desired
+                  if ready:
+                      raise SystemExit(0)
+                  time.sleep({{ .Values.migrations.wait.sleepSeconds }})
+              raise SystemExit("Tenant-aware deployment rollout did not become ready")
+          env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RELEASE_SELECTOR
+              value: {{ printf "app.kubernetes.io/instance=%s" .Release.Name | quote }}
+          resources:
+            {{- toYaml .Values.migrations.readiness.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+      containers:
+        - name: enforce-tenant-rls
+          image: {{ include "palaceoftruth.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "palaceoftruth.containerSecurityContext" (list . "migration") | nindent 10 }}
+          command: ["python", "-m", "app.enforce_tenant_rls"]
+          volumeMounts:
+            {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
+          env:
+            {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
+            {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "palaceoftruth.fullname" . }}-config
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+      volumes:
+        {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}

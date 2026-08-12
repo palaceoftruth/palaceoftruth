@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
 async def rows_for_args(args: argparse.Namespace) -> tuple[list[tuple[WebSave, Item]], str | None]:
     from sqlalchemy import select, tuple_
 
-    from app.database import async_session
+    from app.database import tenant_async_session
     from app.models.item import Item
     from app.models.web_save import WebSave
 
@@ -83,7 +83,7 @@ async def rows_for_args(args: argparse.Namespace) -> tuple[list[tuple[WebSave, I
     elif args.cursor:
         saved_at, web_save_id = _decode_cursor(args.cursor)
         statement = statement.where(tuple_(WebSave.saved_at, WebSave.id) > tuple_(saved_at, web_save_id))
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         rows = (await db.execute(statement)).all()
     has_more = len(rows) > args.limit
     page = rows[: args.limit]
@@ -94,7 +94,7 @@ async def enroll(args: argparse.Namespace, rows: list[tuple[WebSave, Item]], nex
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
 
-    from app.database import async_session
+    from app.database import tenant_async_session
     from app.models.source_resource import SourceResource
     from app.services.source_resources import build_alias
     from app.services.watched_source_enrollment import candidate_from_web_save
@@ -136,7 +136,7 @@ async def enroll(args: argparse.Namespace, rows: list[tuple[WebSave, Item]], nex
     if not args.write:
         return report
 
-    async with async_session() as db:
+    async with tenant_async_session(args.tenant_id) as db:
         for web_save, candidate in candidates:
             try:
                 # A savepoint keeps an idempotency race from rolling back earlier IDs.

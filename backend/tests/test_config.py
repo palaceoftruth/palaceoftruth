@@ -469,7 +469,22 @@ def test_settings_accept_missing_credential_pepper_without_deployment_cluster() 
 
 def test_settings_accept_credential_pepper_with_deployment_cluster_set() -> None:
     settings = config.Settings(
-        **_settings_kwargs(deployment_cluster="rke2-abby", credential_pepper="a-real-pepper-value")
+        **_settings_kwargs(
+            deployment_cluster="rke2-abby",
+            credential_pepper="a-real-pepper-value",
+            database_url="postgresql+asyncpg://palace:secret@example.test/palace?sslmode=verify-full",
+            database_ssl_root_cert="/etc/palaceoftruth/database-tls/ca.crt",
+        )
     )
 
     assert settings.credential_pepper == "a-real-pepper-value"
+
+
+def test_settings_require_verified_database_tls_in_deployment_cluster() -> None:
+    with pytest.raises(ValidationError, match="sslmode=verify-full"):
+        config.Settings(
+            **_settings_kwargs(
+                deployment_cluster="rke2-abby",
+                credential_pepper="a-real-pepper-value",
+            )
+        )

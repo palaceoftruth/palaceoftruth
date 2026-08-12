@@ -36,14 +36,15 @@ def upgrade() -> None:
         "mcp_clients",
         "containment_mode IN ('standard', 'hermes_agent')",
     )
-    # Backfill every row the old prefix test would have contained, plus the
-    # separator variants that were the bypass. ``lower()`` closes the
-    # case-folded variant of the same squat.
+    # Match the runtime normalizer exactly: fold one or more non-alphanumeric
+    # separators to '-', trim separators, then reserve only 'hermes' and the
+    # 'hermes-' namespace. A key such as 'hermesprod' is not reserved.
     op.execute(
         """
         UPDATE mcp_clients
         SET containment_mode = 'hermes_agent'
-        WHERE lower(client_key) LIKE 'hermes%'
+        WHERE trim(both '-' from regexp_replace(lower(trim(client_key)), '[^a-z0-9]+', '-', 'g')) = 'hermes'
+           OR trim(both '-' from regexp_replace(lower(trim(client_key)), '[^a-z0-9]+', '-', 'g')) LIKE 'hermes-%'
         """
     )
 

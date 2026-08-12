@@ -155,9 +155,10 @@ def test_service_account_tokens_are_not_auto_mounted(
         assert "automountServiceAccountToken" in spec, name
         if spec["automountServiceAccountToken"]:
             mounted.add(name)
-    # Exactly one exception, and it is the rollout smoke Job.
-    assert len(mounted) == 1, mounted
-    assert TOKEN_MOUNTING_WORKLOAD in next(iter(mounted))
+    # Only the two rollout-verification Jobs query the Kubernetes API.
+    assert len(mounted) == 2, mounted
+    assert any(TOKEN_MOUNTING_WORKLOAD in name for name in mounted)
+    assert "palaceoftruth-tenant-rls-enforcement" in mounted
 
 
 def test_token_mounting_workload_keeps_a_minimal_role(

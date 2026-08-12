@@ -18,6 +18,13 @@ from app.database import async_session
 from app.mcp_scopes import VALID_MCP_OPERATION_SCOPES
 from app.services.mcp_containment import CONTAINMENT_STANDARD, normalize_containment_mode
 
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:  # Narrow test factories do not accept SQLAlchemy options.
+        return async_session()
+
 logger = logging.getLogger(__name__)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -439,7 +446,7 @@ async def _verify_browser_session(request: Request) -> str:
     if not session_token:
         raise _auth_exception(request, 403, "Missing API key", error="invalid_token")
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         session = await load_session(db, session_token)
         if session is None:
             raise _auth_exception(
@@ -497,7 +504,7 @@ async def verify_api_key(
 
     key_hash, legacy_key_hash = secret_hash_candidates(api_key)
 
-    async with async_session() as db:
+    async with system_async_session() as db:
         row = await db.execute(
             text(
                 "SELECT id, tenant_id, scopes, key_hash FROM api_keys "
@@ -581,7 +588,7 @@ async def verify_memory_auth(
         raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
     token_hash, legacy_token_hash = secret_hash_candidates(token.strip())
-    async with async_session() as db:
+    async with system_async_session() as db:
         row = await db.execute(
             text(
                 """
@@ -775,7 +782,7 @@ async def _verify_scoped_bearer_token(
         raise _auth_exception(request, 403, "Invalid Authorization header", error="invalid_request")
 
     token_hash, legacy_token_hash = secret_hash_candidates(token.strip())
-    async with async_session() as db:
+    async with system_async_session() as db:
         row = await db.execute(
             text(
                 """
@@ -1021,7 +1028,7 @@ async def record_oauth_client_audit_event(
     client_id = getattr(request.state, "mcp_client_id", None)
     if client_id is None:
         return
-    async with async_session() as db:
+    async with system_async_session() as db:
         await db.execute(
             text(
                 """

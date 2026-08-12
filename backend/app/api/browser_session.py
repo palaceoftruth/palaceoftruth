@@ -23,7 +23,7 @@ from app.browser_session import (
     rotate_session,
     verify_session_csrf,
 )
-from app.database import get_db
+from app.database import bind_session_to_tenant, get_credential_exchange_db
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,12 @@ async def _require_session(request: Request, db: AsyncSession):
     session = await load_session(db, token)
     if session is None:
         raise HTTPException(status_code=401, detail="Browser session is invalid or expired")
-    return session
+    tenant_id = str(session.tenant_id)
+    await bind_session_to_tenant(db, tenant_id)
+    rebound_session = await load_session(db, token)
+    if rebound_session is None:
+        raise HTTPException(status_code=401, detail="Browser session is invalid or expired")
+    return rebound_session
 
 
 async def _require_csrf(request: Request, db: AsyncSession, session) -> None:
@@ -70,7 +75,7 @@ async def create_browser_session(
     body: BrowserSessionRequest,
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_credential_exchange_db),
 ) -> BrowserSessionResponse:
     """Exchange a tenant API key for a session cookie pair."""
     issued = await issue_session(db, api_key=body.api_key, elevated=body.elevated)
@@ -94,7 +99,7 @@ async def create_browser_session(
 @router.get("/session", response_model=BrowserSessionResponse)
 async def read_browser_session(
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_credential_exchange_db),
 ) -> BrowserSessionResponse:
     """Report the live session, so the SPA can restore state on a reload."""
     session = await _require_session(request, db)
@@ -109,7 +114,7 @@ async def read_browser_session(
 async def refresh_browser_session(
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_credential_exchange_db),
 ) -> BrowserSessionResponse:
     """Rotate the session and CSRF tokens and extend the expiry."""
     session = await _require_session(request, db)
@@ -128,11 +133,15 @@ async def refresh_browser_session(
 async def delete_browser_session(
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_credential_exchange_db),
 ) -> Response:
     """Sign out: revoke the row server-side and clear both cookies."""
     token = request.cookies.get(SESSION_COOKIE_NAME)
     session = await load_session(db, token) if token else None
+    if session is not None:
+        tenant_id = str(session.tenant_id)
+        await bind_session_to_tenant(db, tenant_id)
+        session = await load_session(db, token)
     if session is not None:
         await _require_csrf(request, db, session)
         await revoke_session(db, session.id)

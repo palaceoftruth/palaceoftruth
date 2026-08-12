@@ -1,6 +1,8 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.schemas.item import _bounded_labels
 
 
 class FeedCreate(BaseModel):
@@ -9,12 +11,22 @@ class FeedCreate(BaseModel):
     auto_tags: list[str] = []
     poll_interval: int = 3600  # floor enforced in app layer at settings.feed_poll_min_interval
 
+    @field_validator("auto_tags")
+    @classmethod
+    def bounded_auto_tags(cls, values: list[str]):
+        return _bounded_labels(values, "auto_tags") or []
+
 
 class FeedUpdate(BaseModel):
     name: str | None = None
     auto_tags: list[str] | None = None
     poll_interval: int | None = None
     enabled: bool | None = None
+
+    @field_validator("auto_tags")
+    @classmethod
+    def bounded_auto_tags(cls, values: list[str] | None):
+        return _bounded_labels(values, "auto_tags")
 
 
 class FeedOut(BaseModel):

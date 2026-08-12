@@ -45,12 +45,14 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
       volumes:
         {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
 {{- if .Values.mediaWorker.enabled }}
 ---
@@ -106,12 +108,14 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.mediaWorker.resources | nindent 12 }}
       volumes:
         {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}
 {{- end }}
 ---
@@ -162,10 +166,12 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.palaceWorker.resources | nindent 12 }}
       volumes:
         {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

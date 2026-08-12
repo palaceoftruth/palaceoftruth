@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -10,6 +11,31 @@ from fastapi.testclient import TestClient
 from app import auth, browser_session
 from app.api import browser_session as browser_session_api
 from app.database import get_db
+
+
+@pytest.mark.asyncio
+async def test_require_session_reloads_after_tenant_rebind(monkeypatch) -> None:
+    stale = SimpleNamespace(tenant_id="tenant-a")
+    rebound = SimpleNamespace(tenant_id="tenant-a", scopes=["read"])
+    loaded = [stale, rebound]
+    rebound_tenants: list[str] = []
+
+    async def fake_load_session(_db, token):
+        assert token == "session-token"
+        return loaded.pop(0)
+
+    async def fake_bind(_db, tenant_id):
+        rebound_tenants.append(tenant_id)
+
+    monkeypatch.setattr(browser_session_api, "load_session", fake_load_session)
+    monkeypatch.setattr(browser_session_api, "bind_session_to_tenant", fake_bind)
+    request = SimpleNamespace(cookies={browser_session.SESSION_COOKIE_NAME: "session-token"})
+
+    result = await browser_session_api._require_session(request, object())
+
+    assert result is rebound
+    assert rebound_tenants == ["tenant-a"]
+    assert loaded == []
 
 
 class _MappingResult:

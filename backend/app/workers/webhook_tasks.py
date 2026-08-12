@@ -11,6 +11,14 @@ from app.database import async_session
 from app.models.job import Job
 from app.services.webhook_payload import build_webhook_payload
 from app.utils.outbound_http import OutboundUrlError, request_public_http_async
+from app.workers.queues import enqueue_tenant_job
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +43,22 @@ async def deliver_webhook(
     signing_key: str | None = None,
     attempt: int = 0,
     payload_snapshot: dict | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Deliver a webhook POST for the given job_id.
 
     Self-managed retry: on connection error, timeout, or HTTP 5xx, re-enqueues
     itself with attempt+1 up to _MAX_ATTEMPTS. After exhaustion logs and stops.
     """
-    async with async_session() as db:
+    async with system_async_session() as db:
         job = await db.get(Job, uuid.UUID(job_id))
 
     if not job:
         logger.warning("deliver_webhook: job %s not found, skipping", job_id)
+        return
+    tenant_id = str(tenant_id or job.tenant_id)
+    if tenant_id != str(job.tenant_id):
+        logger.warning("deliver_webhook: rejected tenant mismatch for job %s", job_id)
         return
 
     # Preserve the terminal state that originally triggered delivery so retries
@@ -95,8 +108,10 @@ async def deliver_webhook(
             "webhook retry scheduled job_id=%s url=%s attempt=%d delay=%ds error=%s",
             job_id, webhook_url, next_attempt, delay, exc,
         )
-        await ctx["redis"].enqueue_job(
+        await enqueue_tenant_job(
+            ctx["redis"],
             "deliver_webhook",
+            tenant_id=tenant_id,
             job_id=job_id,
             webhook_url=webhook_url,
             signing_key=signing_key,
