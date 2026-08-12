@@ -1,4 +1,3 @@
-{{- if .Values.migrations.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -100,4 +99,3 @@ spec:
       volumes:
         {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
         {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
-{{- end }}

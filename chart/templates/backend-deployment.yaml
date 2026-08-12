@@ -72,6 +72,10 @@ spec:
             {{- include "palaceoftruth.homeEnv" . | nindent 12 }}
             {{- include "palaceoftruth.dbEnvVars" . | nindent 12 }}
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
+            # API startup still runs Alembic when the dedicated migration Job
+            # is disabled. Always defer RLS until the post-rollout gate.
+            - name: DEFER_TENANT_RLS_ENFORCEMENT
+              value: "true"
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config

@@ -56,8 +56,12 @@ async def _require_session(request: Request, db: AsyncSession):
     session = await load_session(db, token)
     if session is None:
         raise HTTPException(status_code=401, detail="Browser session is invalid or expired")
-    await bind_session_to_tenant(db, session.tenant_id)
-    return session
+    tenant_id = str(session.tenant_id)
+    await bind_session_to_tenant(db, tenant_id)
+    rebound_session = await load_session(db, token)
+    if rebound_session is None:
+        raise HTTPException(status_code=401, detail="Browser session is invalid or expired")
+    return rebound_session
 
 
 async def _require_csrf(request: Request, db: AsyncSession, session) -> None:
@@ -135,7 +139,10 @@ async def delete_browser_session(
     token = request.cookies.get(SESSION_COOKIE_NAME)
     session = await load_session(db, token) if token else None
     if session is not None:
-        await bind_session_to_tenant(db, session.tenant_id)
+        tenant_id = str(session.tenant_id)
+        await bind_session_to_tenant(db, tenant_id)
+        session = await load_session(db, token)
+    if session is not None:
         await _require_csrf(request, db, session)
         await revoke_session(db, session.id)
         await db.commit()

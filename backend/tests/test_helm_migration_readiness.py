@@ -129,6 +129,24 @@ def test_rollout_defers_rls_until_post_rollout_hook() -> None:
     ]
 
 
+def test_disabled_migration_job_still_defers_and_enforces_rls_after_rollout() -> None:
+    manifests = _render_chart("migrations.enabled=false", is_upgrade=True)
+    backend = _backend_deployment(manifests)
+    backend_env = {
+        entry["name"]: entry
+        for entry in backend["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    enforcement = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
+        == "tenant-rls-enforcement"
+    )
+
+    assert backend_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
+    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+
+
 def test_backend_startup_probe_allows_dependency_gate_budget() -> None:
     """The probe must outlast both startup gates in app.main's lifespan.
 

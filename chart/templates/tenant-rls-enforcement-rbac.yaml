@@ -1,4 +1,3 @@
-{{- if .Values.migrations.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -35,4 +34,3 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ printf "%s-tenant-rls-enforcement" (include "palaceoftruth.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
