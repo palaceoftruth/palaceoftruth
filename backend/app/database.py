@@ -73,6 +73,20 @@ async_session = async_sessionmaker(
 )
 
 
+def tenant_async_session(tenant_id: str) -> AsyncSession:
+    """Create a fail-closed session bound to one tenant before it begins."""
+    return async_session(
+        info={"tenant_id": str(tenant_id), "system_access": False}
+    )
+
+
+def system_async_session() -> AsyncSession:
+    """Create an explicit control-plane session that may cross tenants."""
+    return async_session(
+        info={"tenant_id": "__unbound__", "system_access": True}
+    )
+
+
 class Base(DeclarativeBase):
     pass
 

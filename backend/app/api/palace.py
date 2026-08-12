@@ -905,7 +905,10 @@ async def remove_sync_source(
             triggered_by="source-delete",
         )
         if created:
-            await enqueue_palace_job(request.app.state.arq_pool, "palace_run_build", palace_run_id=str(palace_run.id))
+            await enqueue_palace_job(
+                request.app.state.arq_pool, "palace_run_build",
+                palace_run_id=str(palace_run.id), tenant_id=request.state.tenant_id,
+            )
     return SyncSourceDeleteResponse(
         deleted=True,
         items_deactivated=items_deactivated,
@@ -978,7 +981,10 @@ async def start_sync_source(
     if run_inline and run_status == "queued":
         background_tasks.add_task(_run_sync_inline, request.app, run.id)
     elif created:
-        await enqueue_palace_job(request.app.state.arq_pool, "run_sync_source", sync_run_id=str(run.id))
+        await enqueue_palace_job(
+            request.app.state.arq_pool, "run_sync_source",
+            sync_run_id=str(run.id), tenant_id=request.state.tenant_id,
+        )
     rows = await list_sync_runs(db, request.state.tenant_id, limit=20)
     return next(row for row in rows if row.id == run.id)
 
@@ -1001,7 +1007,10 @@ async def start_palace_run(request: Request, db: AsyncSession = Depends(get_db))
         triggered_by="manual",
     )
     if created:
-        await enqueue_palace_job(request.app.state.arq_pool, "palace_run_build", palace_run_id=str(run.id))
+        await enqueue_palace_job(
+            request.app.state.arq_pool, "palace_run_build",
+            palace_run_id=str(run.id), tenant_id=request.state.tenant_id,
+        )
     logger.info(
         "POST /palace/runs tenant=%s run_id=%s created=%s status=%s requested_generation=%s",
         request.state.tenant_id,
@@ -1037,7 +1046,10 @@ async def retry_palace_run(
     db.add(retry_run)
     await db.commit()
     await db.refresh(retry_run)
-    await enqueue_palace_job(request.app.state.arq_pool, "palace_run_build", palace_run_id=str(retry_run.id))
+    await enqueue_palace_job(
+        request.app.state.arq_pool, "palace_run_build",
+        palace_run_id=str(retry_run.id), tenant_id=request.state.tenant_id,
+    )
     logger.info(
         "POST /palace/runs/%s/retry tenant=%s retry_run_id=%s requested_generation=%s attempt=%s",
         run_id,
@@ -1408,7 +1420,10 @@ async def pin_item(
     await pin_room_membership(db, tenant_id=request.state.tenant_id, room_id=room_id, body=body)
     run, created = await create_or_get_palace_run(db, tenant_id=request.state.tenant_id, triggered_by="curation")
     if created:
-        await enqueue_palace_job(request.app.state.arq_pool, "palace_run_build", palace_run_id=str(run.id))
+        await enqueue_palace_job(
+            request.app.state.arq_pool, "palace_run_build",
+            palace_run_id=str(run.id), tenant_id=request.state.tenant_id,
+        )
     return Response(status_code=204)
 
 
@@ -1422,5 +1437,8 @@ async def unpin_item(
     await unpin_room_membership(db, tenant_id=request.state.tenant_id, room_id=room_id, item_id=item_id)
     run, created = await create_or_get_palace_run(db, tenant_id=request.state.tenant_id, triggered_by="curation")
     if created:
-        await enqueue_palace_job(request.app.state.arq_pool, "palace_run_build", palace_run_id=str(run.id))
+        await enqueue_palace_job(
+            request.app.state.arq_pool, "palace_run_build",
+            palace_run_id=str(run.id), tenant_id=request.state.tenant_id,
+        )
     return Response(status_code=204)

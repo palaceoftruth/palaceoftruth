@@ -18,10 +18,24 @@ from app.services.source_subscriptions import (
 logger = logging.getLogger(__name__)
 
 
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
+
 async def poll_all_source_subscriptions(ctx: dict) -> None:
     """Dispatch due active source subscriptions without doing capture inline."""
     now = datetime.now(timezone.utc)
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
             select(SourceSubscription)
             .where(SourceSubscription.status == "active")
@@ -54,7 +68,7 @@ async def poll_source_subscription_task(
     tenant_id: str,
 ) -> None:
     """Discover new source entries and enqueue newly discovered captures."""
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         subscription = await db.get(SourceSubscription, uuid.UUID(subscription_id))
         if (
             subscription is None
@@ -80,18 +94,18 @@ async def poll_source_subscription_task(
 
 async def queue_discovered_source_subscription_entries(ctx: dict, limit: int = 100) -> None:
     """Recover discovered entries left behind by earlier queue failures."""
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(
-            select(SourceSubscriptionEntry.id)
+            select(SourceSubscriptionEntry.id, SourceSubscriptionEntry.tenant_id)
             .where(SourceSubscriptionEntry.status == "discovered")
             .order_by(SourceSubscriptionEntry.discovered_at.asc())
             .limit(limit)
         )
-        entry_ids = [row[0] for row in result.fetchall()]
+        entries = [(row[0], str(row[1])) for row in result.fetchall()]
 
     queued = 0
-    for entry_id in entry_ids:
-        async with async_session() as db:
+    for entry_id, tenant_id in entries:
+        async with tenant_async_session(tenant_id) as db:
             entry = await db.get(SourceSubscriptionEntry, entry_id)
             if entry is None or entry.status != "discovered":
                 continue
@@ -111,6 +125,6 @@ async def queue_discovered_source_subscription_entries(ctx: dict, limit: int = 1
 
 async def diagnose_stale_queued_source_subscription_entries_task(ctx: dict, limit: int = 100) -> None:
     """Annotate or reconcile queued entries that did not reach a terminal capture state."""
-    async with async_session() as db:
+    async with system_async_session() as db:
         diagnosed = await diagnose_stale_queued_source_subscription_entries(db, limit=limit)
     logger.info("diagnose_stale_queued_source_subscription_entries diagnosed=%d", diagnosed)

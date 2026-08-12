@@ -63,10 +63,20 @@ def upgrade() -> None:
             "repair those rows before applying tenant RLS"
         )
 
+    # Migration 057 originally used lower(client_key) LIKE 'hermes%', which
+    # over-contained every separator-free prefix such as hermesproduction and
+    # hermes2. Repair the complete old overmatch while retaining the canonical
+    # reserved 'hermes' and 'hermes-' namespaces.
     op.execute(sa.text("""
         UPDATE mcp_clients SET containment_mode = 'standard'
         WHERE containment_mode = 'hermes_agent'
-          AND lower(trim(client_key)) = 'hermesprod'
+          AND lower(client_key) LIKE 'hermes%'
+          AND trim(both '-' from regexp_replace(
+                lower(trim(client_key)), '[^a-z0-9]+', '-', 'g'
+              )) <> 'hermes'
+          AND trim(both '-' from regexp_replace(
+                lower(trim(client_key)), '[^a-z0-9]+', '-', 'g'
+              )) NOT LIKE 'hermes-%'
     """))
 
 

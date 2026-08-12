@@ -90,8 +90,8 @@ def test_database_tls_can_be_disabled_without_rendering_verify_full() -> None:
         assert "database-tls" not in {mount["name"] for mount in container.get("volumeMounts", [])}
 
 
-def test_upgrade_defers_rls_until_post_upgrade_hook() -> None:
-    manifests = _render_chart(is_upgrade=True)
+def test_rollout_defers_rls_until_post_rollout_hook() -> None:
+    manifests = _render_chart()
     migration = _migration_job(manifests)
     migration_env = {
         entry["name"]: entry
@@ -105,7 +105,8 @@ def test_upgrade_defers_rls_until_post_upgrade_hook() -> None:
     )
 
     assert migration_env["DEFER_TENANT_RLS_ENFORCEMENT"]["value"] == "true"
-    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-upgrade"
+    assert enforcement["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    assert enforcement["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "3"
     assert enforcement["spec"]["template"]["spec"]["containers"][0]["command"] == [
         "python",
         "-m",

@@ -540,9 +540,10 @@ async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenan
     assert redis.enqueued == [
         (
             "memory_artifact",
-            {
-                "job_id": str(job_id),
-                "_job_id": f"memory-artifact:{job_id}:0",
+                {
+                    "job_id": str(job_id),
+                    "tenant_id": "tenant-a",
+                    "_job_id": f"memory-artifact:{job_id}:0",
             },
         )
     ]
@@ -1021,7 +1022,11 @@ async def test_memory_artifact_defers_relationships_when_job_policy_requests_it(
     monkeypatch.setattr(tasks, "async_session", SessionFactory(FakeMemoryArtifactSession(job, item)))
     monkeypatch.setattr(tasks, "process_prebuilt_item", fake_process_prebuilt_item)
 
-    await tasks.memory_artifact({"redis": redis, "embedder": object(), "llm": object()}, job_id=str(job_id))
+    await tasks.memory_artifact(
+        {"redis": redis, "embedder": object(), "llm": object()},
+        job_id=str(job_id),
+        tenant_id="tenant-a",
+    )
 
     assert process_calls == [
         {
@@ -1080,6 +1085,7 @@ async def test_memory_artifact_does_not_retry_terminal_embedding_validation(monk
     await tasks.memory_artifact(
         {"redis": redis, "embedder": object(), "llm": object()},
         job_id=str(job_id),
+        tenant_id="tenant-a",
     )
 
     assert redis.enqueued == []
@@ -1122,6 +1128,7 @@ async def test_memory_artifact_reraises_exhausted_transient_embedding_failure(mo
         await tasks.memory_artifact(
             {"redis": FakeArqPool(), "embedder": object(), "llm": object()},
             job_id=str(job_id),
+            tenant_id="tenant-a",
         )
 
 

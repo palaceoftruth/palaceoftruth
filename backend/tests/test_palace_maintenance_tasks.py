@@ -107,8 +107,8 @@ async def test_recover_palace_backlog_enqueues_runs_for_backlogged_tenants(monke
 
     assert [tenant_id for tenant_id, _run_id in created_runs] == ["tenant-a", "tenant-b"]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[0][1]}),
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[1][1]}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[0][1], "tenant_id": "tenant-a"}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": created_runs[1][1], "tenant_id": "tenant-b"}),
     ]
 
 
@@ -152,8 +152,9 @@ async def test_mark_items_dirty_and_schedule_coalesces_one_palace_run(monkeypatc
         (
             "palace_run_build",
             {
-                "_queue_name": PALACE_WORKER_QUEUE,
-                "palace_run_id": "00000000-0000-0000-0000-000000000123",
+                    "_queue_name": PALACE_WORKER_QUEUE,
+                    "palace_run_id": "00000000-0000-0000-0000-000000000123",
+                    "tenant_id": "tenant-a",
             },
         )
     ]
@@ -226,7 +227,7 @@ async def test_refresh_dirty_palace_rooms_marks_missing_memberships_and_enqueues
         ("tenant-a", item_b, "maintenance"),
     ]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(run_id)}),
+            ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(run_id), "tenant_id": "tenant-a"}),
     ]
 
 
@@ -272,7 +273,7 @@ async def test_poll_sync_sources_enqueues_recent_source_when_watcher_detects_cha
 
     assert triggers == ["watcher"]
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-a"})
     ]
 
 
@@ -311,7 +312,7 @@ async def test_watch_local_sync_sources_once_enqueues_changed_sources(monkeypatc
     assert enqueued == 1
     assert triggers == [("tenant-a", changed_source.id, "watcher")]
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-a"})
     ]
 
 
@@ -344,7 +345,7 @@ async def test_watch_local_sync_sources_once_continues_after_source_failure(monk
 
     assert enqueued == 1
     assert redis.enqueued == [
-        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id)})
+        ("run_sync_source", {"_queue_name": PALACE_WORKER_QUEUE, "sync_run_id": str(run_id), "tenant_id": "tenant-b"})
     ]
     assert "local sync watcher failed" in caplog.text
 
@@ -655,11 +656,20 @@ async def test_palace_run_build_enqueues_follow_on_run_when_backlog_remains(monk
     monkeypatch.setattr("app.workers.palace_tasks.create_or_get_palace_run", fake_create_or_get_palace_run)
     monkeypatch.setattr("app.workers.palace_tasks.generate_wakeup_briefs", fail_generate_wakeup_briefs)
 
-    await palace_run_build({"redis": redis}, palace_run_id=str(run_id))
+    await palace_run_build(
+        {"redis": redis}, palace_run_id=str(run_id), tenant_id="tenant-a"
+    )
 
     assert created_runs == [("tenant-a", str(next_run_id))]
     assert redis.enqueued == [
-        ("palace_run_build", {"_queue_name": PALACE_WORKER_QUEUE, "palace_run_id": str(next_run_id)}),
+        (
+            "palace_run_build",
+            {
+                "_queue_name": PALACE_WORKER_QUEUE,
+                "palace_run_id": str(next_run_id),
+                "tenant_id": "tenant-a",
+            },
+        ),
     ]
 
 
@@ -699,6 +709,7 @@ async def test_palace_run_build_skips_follow_on_when_backlog_is_clear(monkeypatc
     await palace_run_build(
         {"redis": redis, "embedder": embedder_obj, "llm": llm_obj},
         palace_run_id=str(run_id),
+        tenant_id="tenant-a",
     )
 
     assert refreshed == ["tenant-a"]

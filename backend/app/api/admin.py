@@ -1302,7 +1302,9 @@ async def import_bundle(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     job = await create_restore_job(db, tenant_id=tenant_id, payload=payload)
-    await request.app.state.arq_pool.enqueue_job("restore_bundle", job_id=str(job.id))
+    await request.app.state.arq_pool.enqueue_job(
+        "restore_bundle", job_id=str(job.id), tenant_id=str(job.tenant_id)
+    )
     return AdminImportResponse(job_id=job.id, tenant_id=tenant_id, status=job.status)
 
 
@@ -1334,7 +1336,9 @@ async def retry_admin_job(
     if job.status not in ("failed", "cancelled"):
         raise HTTPException(status_code=409, detail=f"Job is {job.status}; only failed or cancelled jobs can be retried")
     job = await retry_restore_job(db, job)
-    await request.app.state.arq_pool.enqueue_job("restore_bundle", job_id=str(job.id))
+    await request.app.state.arq_pool.enqueue_job(
+        "restore_bundle", job_id=str(job.id), tenant_id=str(job.tenant_id)
+    )
     return serialize_admin_job(job)
 
 

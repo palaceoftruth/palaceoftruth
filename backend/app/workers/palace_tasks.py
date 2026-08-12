@@ -29,6 +29,13 @@ from app.services.palace import (
 from app.workers.queues import enqueue_palace_job
 
 logger = logging.getLogger(__name__)
+
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
 DIARY_ROLLUP_REPLAY_DAYS = 2
 TUNNEL_RECOMPUTE_BATCH_SIZE = 50
 DIRTY_ROOM_REFRESH_BATCH_SIZE = 50
@@ -222,7 +229,10 @@ async def _enqueue_follow_on_palace_run(
             palace_run.id,
             palace_run.requested_generation,
         )
-        await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+        await enqueue_palace_job(
+            ctx["redis"], "palace_run_build",
+            palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+        )
     else:
         logger.info(
             "follow-on palace run coalesced for tenant %s trigger=%s active_run_id=%s status=%s generation=%s",
@@ -274,9 +284,9 @@ async def _refresh_wakeup_briefs_for_caught_up_palace(
         logger.exception("wake-up brief refresh after Palace build failed for tenant %s", tenant_id)
 
 
-async def palace_run_build(ctx: dict, palace_run_id: str) -> None:
+async def palace_run_build(ctx: dict, palace_run_id: str, *, tenant_id: str) -> None:
     logger.info("palace_run_build worker executing run_id=%s", palace_run_id)
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         status, _error = await run_palace_run(db, run_id=uuid.UUID(palace_run_id))
         logger.info("palace_run_build worker finished run_id=%s status=%s", palace_run_id, status)
         if status == "completed":
@@ -296,8 +306,8 @@ async def palace_run_build(ctx: dict, palace_run_id: str) -> None:
                     )
 
 
-async def run_sync_source(ctx: dict, sync_run_id: str) -> None:
-    async with async_session() as db:
+async def run_sync_source(ctx: dict, sync_run_id: str, *, tenant_id: str) -> None:
+    async with tenant_async_session(tenant_id) as db:
         status, _error = await run_sync_run(
             db,
             run_id=uuid.UUID(sync_run_id),
@@ -317,7 +327,10 @@ async def run_sync_source(ctx: dict, sync_run_id: str) -> None:
                     source_sync_run_id=sync_run.id,
                 )
                 if created:
-                    await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                    await enqueue_palace_job(
+                        ctx["redis"], "palace_run_build",
+                        palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+                    )
 
 
 async def _enqueue_sync_source_run(ctx: dict, db, *, source: SyncSource, triggered_by: str) -> bool:
@@ -328,7 +341,10 @@ async def _enqueue_sync_source_run(ctx: dict, db, *, source: SyncSource, trigger
         triggered_by=triggered_by,
     )
     if created:
-        await enqueue_palace_job(ctx["redis"], "run_sync_source", sync_run_id=str(sync_run.id))
+        await enqueue_palace_job(
+            ctx["redis"], "run_sync_source",
+            sync_run_id=str(sync_run.id), tenant_id=str(source.tenant_id),
+        )
     return created
 
 
@@ -516,7 +532,10 @@ async def refresh_dirty_palace_rooms(ctx: dict) -> None:
                 triggered_by="maintenance",
             )
             if created:
-                await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                await enqueue_palace_job(
+                    ctx["redis"], "palace_run_build",
+                    palace_run_id=str(palace_run.id), tenant_id=str(state.tenant_id),
+                )
             logger.info(
                 "refresh_dirty_palace_rooms tenant=%s items=%d generation=%d",
                 state.tenant_id,
@@ -679,7 +698,10 @@ async def sweep_palace_index_integrity(ctx: dict) -> None:
                     triggered_by="maintenance",
                 )
                 if created:
-                    await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+                    await enqueue_palace_job(
+                        ctx["redis"], "palace_run_build",
+                        palace_run_id=str(palace_run.id), tenant_id=str(state.tenant_id),
+                    )
 
             repaired_embeddings = await _enqueue_missing_embedding_repairs(
                 ctx,
@@ -756,4 +778,7 @@ async def mark_items_dirty_and_schedule(
         )
         await db.commit()
         if created:
-            await enqueue_palace_job(ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+            await enqueue_palace_job(
+                ctx["redis"], "palace_run_build",
+                palace_run_id=str(palace_run.id), tenant_id=tenant_id,
+            )

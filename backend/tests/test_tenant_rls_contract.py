@@ -144,11 +144,17 @@ def test_containment_derivation_handles_adversarial_client_names() -> None:
         " hermes prod ": CONTAINMENT_HERMES_AGENT,
         "hermes--prod": CONTAINMENT_HERMES_AGENT,
         "hermesprod": CONTAINMENT_STANDARD,
+        "hermesproduction": CONTAINMENT_STANDARD,
+        "hermes2": CONTAINMENT_STANDARD,
         "not-hermes": CONTAINMENT_STANDARD,
     }
 
     for client_key, expected in expectations.items():
         assert derive_containment_mode(client_key=client_key) == expected
+
+    backfill = (ROOT / "alembic" / "versions" / "062_tenant_backfill.py").read_text()
+    assert "lower(client_key) LIKE 'hermes%'" in backfill
+    assert "NOT LIKE 'hermes-%'" in backfill
 
 
 @pytest.mark.asyncio

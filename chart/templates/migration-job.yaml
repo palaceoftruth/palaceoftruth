@@ -73,10 +73,8 @@ spec:
             {{- include "palaceoftruth.redisAuthEnvVars" . | nindent 12 }}
             - name: REDIS_URL
               value: {{ include "palaceoftruth.redisUrl" . | quote }}
-            {{- if .Release.IsUpgrade }}
             - name: DEFER_TENANT_RLS_ENFORCEMENT
               value: "true"
-            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config

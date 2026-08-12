@@ -22,6 +22,20 @@ from app.utils.webhook import maybe_dispatch_webhook
 
 logger = logging.getLogger(__name__)
 
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
 _JOB_TYPE_TO_TASK = {
     "media": "process_media",
     "video": "process_media",
@@ -93,7 +107,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
     stuck in 'processing' or 'queued' forever. This cron runs every 15 minutes
     and resets + re-enqueues any job that has been in those states too long.
     """
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(text(f"""
             SELECT j.id, j.job_type, j.status, j.item_id, j.tenant_id, j.payload,
                    i.source_url, i.title, i.raw_content
@@ -134,7 +148,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
         is_url_job = row.job_type in ("media", "video", "youtube", "webpage")
         if is_url_job and not row.source_url:
             logger.warning("requeue_stale_jobs: job %s has no source_url, marking failed", job_id)
-            async with async_session() as db:
+            async with system_async_session() as db:
                 job = await db.get(Job, row.id)
                 if job:
                     job.status = "failed"
@@ -168,7 +182,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
                     task_kwargs["pdf_metadata"] = {}
                 elif not os.path.exists(file_path):
                     logger.warning("requeue_stale_jobs: PDF file gone for job %s, marking failed", job_id)
-                    async with async_session() as db:
+                    async with system_async_session() as db:
                         job = await db.get(Job, row.id)
                         if job:
                             job.status = "failed"
@@ -182,7 +196,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
                         extracted_text, pdf_metadata = _extract_pdf_retry_payload(file_path)
                     except Exception as exc:
                         logger.warning("requeue_stale_jobs: PDF retry extraction failed for job %s: %s", job_id, exc)
-                        async with async_session() as db:
+                        async with system_async_session() as db:
                             job = await db.get(Job, row.id)
                             if job:
                                 job.status = "failed"
@@ -198,7 +212,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
                 # doc/image: temp file is gone after background task; retry from raw_content if available
                 if not row.raw_content:
                     logger.warning("requeue_stale_jobs: job %s (%s) has no raw_content, marking failed", job_id, row.job_type)
-                    async with async_session() as db:
+                    async with system_async_session() as db:
                         job = await db.get(Job, row.id)
                         if job:
                             job.status = "failed"
@@ -216,7 +230,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
 
             elif row.job_type == "note":
                 if not row.raw_content:
-                    async with async_session() as db:
+                    async with system_async_session() as db:
                         job = await db.get(Job, row.id)
                         if job:
                             job.status = "failed"
@@ -229,7 +243,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
                 task_kwargs["content"] = row.raw_content
 
         # Reset job state and re-enqueue
-        async with async_session() as db:
+        async with system_async_session() as db:
             job = await db.get(Job, row.id)
             if job:
                 requeued_at = datetime.now(timezone.utc)
@@ -255,7 +269,7 @@ async def requeue_stale_jobs(ctx: dict) -> None:
 
 async def poll_all_feeds(ctx: dict) -> None:
     """Cron dispatcher: query feeds due for polling and enqueue poll_feed for each."""
-    async with async_session() as db:
+    async with system_async_session() as db:
         result = await db.execute(text("""
             SELECT id, tenant_id FROM feeds
             WHERE enabled = true
@@ -278,7 +292,7 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str) -> None:
     import feedparser
     from app.utils.outbound_http import fetch_public_http_bytes
 
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
         if not feed or not feed.enabled or feed.deleted_at is not None:
             logger.info("poll_feed: skipping feed %s (missing or disabled)", feed_id)
@@ -390,7 +404,7 @@ async def process_feed_item(
     entry_guid: str | None = None,
 ) -> None:
     """Run FeedPipeline for one article; enqueue relationship extraction on success."""
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
         if not feed:
             logger.warning("process_feed_item: feed %s not found", feed_id)

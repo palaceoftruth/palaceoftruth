@@ -277,6 +277,7 @@ async def _enqueue_memory_job_or_raise(request: Request, db: AsyncSession, *, jo
         enqueued = await request.app.state.arq_pool.enqueue_job(
             "memory_artifact",
             job_id=str(job.id),
+            tenant_id=str(job.tenant_id),
             _job_id=arq_job_id,
         )
         if enqueued is None:

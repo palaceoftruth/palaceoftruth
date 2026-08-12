@@ -47,6 +47,20 @@ from app.workers.queues import enqueue_palace_job
 
 logger = logging.getLogger(__name__)
 
+
+def tenant_async_session(tenant_id: str):
+    try:
+        return async_session(info={"tenant_id": tenant_id, "system_access": False})
+    except TypeError:
+        return async_session()
+
+
+def system_async_session():
+    try:
+        return async_session(info={"tenant_id": "__unbound__", "system_access": True})
+    except TypeError:
+        return async_session()
+
 _host_fairness = HostFairness()
 _ROBOTS_CACHE_TTL = timedelta(hours=1)
 _MAX_REDIRECTS = 5
@@ -163,7 +177,7 @@ async def dispatch_due_source_resources(ctx: dict) -> int:
         return 0
 
     now = datetime.now(timezone.utc)
-    async with async_session() as db:
+    async with system_async_session() as db:
         leases = await claim_due_source_resources(
             db,
             now=now,
@@ -199,7 +213,7 @@ async def refresh_source_resource(
     parsed_resource_id = uuid.UUID(resource_id)
     parsed_lease_token = uuid.UUID(lease_token)
     now = datetime.now(timezone.utc)
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         resource = await db.scalar(
             select(SourceResource)
             .where(SourceResource.id == parsed_resource_id)
@@ -242,7 +256,7 @@ async def refresh_source_resource(
     )
 
     schedule_palace_run = False
-    async with async_session() as db:
+    async with tenant_async_session(tenant_id) as db:
         # Do not reuse the pre-fetch timestamp here: a slow robots or document
         # request may outlive the durable lease, in which case another worker
         # is entitled to retry the resource and this result must be discarded.
@@ -364,14 +378,19 @@ async def refresh_source_resource(
         # The activation transaction already committed its dirty marker.  The
         # run helper owns its own commit, so invoke it only afterwards rather
         # than allowing it to split the resource/audit activation transaction.
-        async with async_session() as db:
+        async with tenant_async_session(tenant_id) as db:
             palace_run, created = await create_or_get_palace_run(
                 db,
                 tenant_id=tenant_id,
                 triggered_by="auto",
             )
         if created:
-            await enqueue_palace_job(_ctx["redis"], "palace_run_build", palace_run_id=str(palace_run.id))
+            await enqueue_palace_job(
+                _ctx["redis"],
+                "palace_run_build",
+                palace_run_id=str(palace_run.id),
+                tenant_id=tenant_id,
+            )
 
     logger.info(
         "source_refresh_committed resource_id=%s outcome=%s change=%s source_record_id=%s",
