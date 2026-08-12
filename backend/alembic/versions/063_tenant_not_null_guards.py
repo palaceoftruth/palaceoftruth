@@ -30,6 +30,7 @@ def upgrade() -> None:
     for table, columns in NOT_NULL_COLUMNS.items():
         for column in columns:
             name = guard_name(table, column)
+            op.execute("SET LOCAL lock_timeout = '5s'")
             op.execute(
                 f'ALTER TABLE "{table}" ADD CONSTRAINT "{name}" '
                 f'CHECK ("{column}" IS NOT NULL) NOT VALID'
@@ -39,6 +40,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     for table, columns in reversed(tuple(NOT_NULL_COLUMNS.items())):
         for column in reversed(columns):
+            op.execute("SET LOCAL lock_timeout = '5s'")
             op.execute(
                 f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS '
                 f'"{guard_name(table, column)}"'

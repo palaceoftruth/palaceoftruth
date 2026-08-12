@@ -16,6 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
         "data_lifecycle_audit_events",
         sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
@@ -77,6 +78,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("DROP TRIGGER IF EXISTS trg_item_relationships_fill_tenant ON item_relationships")
     op.execute("DROP FUNCTION IF EXISTS palace_fill_relationship_tenant_id()")
     for table in reversed(("embeddings", "embedding_profile_vectors")):

@@ -138,6 +138,8 @@ def _payload_references_tenant(
         for key, value in payload.items():
             if key == "tenant_id":
                 continue
+            if key == "args" and _positional_identifiers(value) & tenant_identifiers:
+                return True
             if key.endswith("_id") and isinstance(value, str) and value in tenant_identifiers:
                 return True
             if key.endswith("_ids") and isinstance(value, (list, tuple)):
@@ -150,6 +152,62 @@ def _payload_references_tenant(
             ):
                 return True
     return False
+
+
+def _positional_identifiers(value: object) -> set[str]:
+    """Extract only UUID-shaped legacy positional IDs, never free-form text."""
+    identifiers: set[str] = set()
+    if isinstance(value, (list, tuple)):
+        for entry in value:
+            identifiers.update(_positional_identifiers(entry))
+    elif isinstance(value, dict):
+        identifiers.update(_typed_payload_identifiers(value))
+    elif isinstance(value, str):
+        try:
+            identifiers.add(str(uuid.UUID(value)))
+        except ValueError:
+            pass
+    return identifiers
+
+
+def _typed_payload_identifiers(payload: object) -> set[str]:
+    """Collect bounded ID candidates from typed payload fields and legacy args."""
+    identifiers: set[str] = set()
+    if not isinstance(payload, dict):
+        return identifiers
+    for key, value in payload.items():
+        if key == "args":
+            identifiers.update(_positional_identifiers(value))
+        elif key.endswith("_id") and key != "tenant_id" and isinstance(value, str):
+            identifiers.add(value)
+        elif key.endswith("_ids") and isinstance(value, (list, tuple)):
+            identifiers.update(str(entry) for entry in value if isinstance(entry, str))
+        elif isinstance(value, dict):
+            identifiers.update(_typed_payload_identifiers(value))
+    return identifiers
+
+
+async def _queued_identifier_candidates(arq_pool: Any) -> set[str]:
+    """Validate queued payloads and collect only their possible durable IDs."""
+    deserializer = getattr(arq_pool, "job_deserializer", None)
+    candidates: set[str] = set()
+    async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
+        key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+        payload = await arq_pool.get(raw_key)
+        if not payload:
+            continue
+        try:
+            definition = deserialize_job(payload, deserializer=deserializer)
+        except (DeserializationError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Could not inspect ARQ payload during tenant erasure: {key}"
+            ) from exc
+        candidates.update(
+            _typed_payload_identifiers(
+                {"args": definition.args, "kwargs": definition.kwargs}
+            )
+        )
+    return candidates
 
 
 async def _find_tenant_arq_jobs(
@@ -245,15 +303,37 @@ async def _finalize_committed_tenant_erasure(
         _purge_staged_paths(staged_paths)
 
 
-async def _tenant_identifiers(db: AsyncSession, tenant_id: str) -> set[str]:
+async def _tenant_identifiers(
+    db: AsyncSession,
+    tenant_id: str,
+    candidates: set[str],
+) -> set[str]:
+    """Resolve only IDs present in queued payloads, in bounded query batches."""
     identifiers: set[str] = set()
+    if not candidates:
+        return identifiers
+    candidate_ids: list[uuid.UUID] = []
+    for candidate in candidates:
+        try:
+            candidate_ids.append(uuid.UUID(candidate))
+        except ValueError:
+            continue
+    if not candidate_ids:
+        return identifiers
     for table in _tenant_tables():
         if "id" not in table.c:
             continue
-        values = (
-            await db.execute(select(table.c.id).where(table.c.tenant_id == tenant_id))
-        ).scalars()
-        identifiers.update(str(value) for value in values)
+        for offset in range(0, len(candidate_ids), 500):
+            batch = candidate_ids[offset : offset + 500]
+            values = (
+                await db.execute(
+                    select(table.c.id).where(
+                        table.c.tenant_id == tenant_id,
+                        table.c.id.in_(batch),
+                    )
+                )
+            ).scalars()
+            identifiers.update(str(value) for value in values)
     return identifiers
 
 
@@ -298,7 +378,12 @@ async def erase_tenant_data(
         # Validate every queue payload before the transaction becomes
         # irreversible. Do not remove jobs yet: a database rollback must leave
         # the active tenant's queued work intact.
-        tenant_identifiers = await _tenant_identifiers(db, tenant_id)
+        queued_candidates = await _queued_identifier_candidates(arq_pool)
+        tenant_identifiers = await _tenant_identifiers(
+            db,
+            tenant_id,
+            queued_candidates,
+        )
         tenant_arq_jobs = await _find_tenant_arq_jobs(
             arq_pool,
             tenant_id=tenant_id,

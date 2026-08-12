@@ -26,6 +26,7 @@ def upgrade() -> None:
     for table, columns in NOT_NULL_COLUMNS.items():
         for column in columns:
             name = f"ck_{table}_{column}_not_null_063"
+            op.execute("SET LOCAL lock_timeout = '5s'")
             op.execute(f'ALTER TABLE "{table}" VALIDATE CONSTRAINT "{name}"')
 
 

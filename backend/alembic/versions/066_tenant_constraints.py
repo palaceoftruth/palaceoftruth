@@ -22,11 +22,13 @@ FOREIGN_KEYS = (
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute(
         "ALTER TABLE items ADD CONSTRAINT uq_items_tenant_id_id "
         "UNIQUE USING INDEX ix_items_tenant_id_id_unique"
     )
     for name, table, item_column in FOREIGN_KEYS:
+        op.execute("SET LOCAL lock_timeout = '5s'")
         op.execute(
             f'ALTER TABLE "{table}" ADD CONSTRAINT "{name}" '
             f'FOREIGN KEY (tenant_id, "{item_column}") '
@@ -36,7 +38,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for name, table, _item_column in reversed(FOREIGN_KEYS):
+        op.execute("SET LOCAL lock_timeout = '5s'")
         op.drop_constraint(name, table, type_="foreignkey")
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.drop_constraint("uq_items_tenant_id_id", "items", type_="unique")
     # UNIQUE USING INDEX transfers index ownership to the constraint. Restore
     # revision 065's standalone index so a later upgrade can attach it again.

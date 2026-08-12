@@ -85,15 +85,19 @@ def _enable_rls(table: str) -> None:
 def upgrade() -> None:
     # These scans use ShareUpdateExclusive locks, which permit normal DML.
     for name, table in FOREIGN_KEYS:
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(f'ALTER TABLE "{table}" VALIDATE CONSTRAINT "{name}"')
 
     # Validated guards let PostgreSQL change nullability without rescanning.
     # These final metadata and RLS operations are kept together and are brief.
     for table, columns in NOT_NULL_COLUMNS.items():
         for column in columns:
+            op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
             op.alter_column(table, column, nullable=False)
+            op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
             op.drop_constraint(f"ck_{table}_{column}_not_null_063", table, type_="check")
     for table in TENANT_TABLES:
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(sa.text(f'ALTER TABLE "{table}" ALTER COLUMN tenant_id DROP DEFAULT'))
     # A Helm pre-upgrade hook runs while old replicas are still serving. Those
     # replicas do not set the new transaction context, so the chart defers only
@@ -111,10 +115,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in reversed(TENANT_TABLES):
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(sa.text(f'DROP POLICY IF EXISTS tenant_isolation ON "{table}"'))
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(sa.text(f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY'))
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(sa.text(f'ALTER TABLE "{table}" NO FORCE ROW LEVEL SECURITY'))
     for table in LEGACY_DEFAULT_TABLES:
+        op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         op.execute(
             sa.text(
                 f'ALTER TABLE "{table}" ALTER COLUMN tenant_id SET DEFAULT \'default\''
@@ -125,5 +133,7 @@ def downgrade() -> None:
     for table, columns in NOT_NULL_COLUMNS.items():
         for column in columns:
             name = f"ck_{table}_{column}_not_null_063"
+            op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
             op.create_check_constraint(name, table, f'"{column}" IS NOT NULL')
+            op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
             op.alter_column(table, column, nullable=True)

@@ -24,6 +24,7 @@ from app.workers.worker import MediaWorkerSettings, PalaceWorkerSettings, Worker
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "alembic" / "versions" / "067_tenant_rls_enforcement.py"
 PREPARATION_MIGRATION = ROOT / "alembic" / "versions" / "061_tenant_rls.py"
+BACKFILL_MIGRATION = ROOT / "alembic" / "versions" / "062_tenant_backfill.py"
 GUARD_MIGRATION = ROOT / "alembic" / "versions" / "063_tenant_not_null_guards.py"
 VALIDATION_MIGRATION = ROOT / "alembic" / "versions" / "064_tenant_not_null_validation.py"
 INDEX_MIGRATION = ROOT / "alembic" / "versions" / "065_tenant_indexes_online.py"
@@ -64,6 +65,7 @@ def test_rls_policy_is_forced_and_transaction_context_bound() -> None:
 
 def test_tenant_constraints_use_online_safe_build_phases() -> None:
     preparation = PREPARATION_MIGRATION.read_text()
+    backfill = BACKFILL_MIGRATION.read_text()
     guards = GUARD_MIGRATION.read_text()
     validation = VALIDATION_MIGRATION.read_text()
     indexes = INDEX_MIGRATION.read_text()
@@ -71,10 +73,15 @@ def test_tenant_constraints_use_online_safe_build_phases() -> None:
     enforcement = MIGRATION.read_text()
 
     assert "CREATE TRIGGER" in preparation
+    assert backfill.count("WHERE") >= 7
+    assert "UPDATE items SET" in backfill and "metadata IS NULL" in backfill
+    assert "UPDATE jobs SET" in backfill and "status IS NULL" in backfill
     assert "NOT VALID" in guards
+    assert "SET LOCAL lock_timeout" in guards
     assert "VALIDATE CONSTRAINT" in validation
     assert "postgresql_concurrently=True" in indexes
     assert "UNIQUE USING INDEX" in constraints
+    assert "SET LOCAL lock_timeout" in constraints
     assert '"ix_items_tenant_id_id_unique"' in constraints.split("def downgrade", 1)[1]
     assert "postgresql_concurrently=True" in constraints.split("def downgrade", 1)[1]
     assert "NOT VALID" in constraints
@@ -166,6 +173,17 @@ def test_tenant_erasure_keeps_external_io_outside_atomic_lock_window() -> None:
     assert first_queue_scan < lock < marker
     assert "SET LOCAL statement_timeout = 0" in function
     assert "SET LOCAL idle_in_transaction_session_timeout = 0" in function
+
+
+def test_tenant_erasure_resolves_only_queued_identifier_candidates() -> None:
+    source = (ROOT / "app" / "services" / "data_lifecycle.py").read_text()
+    resolver = source.split("async def _tenant_identifiers", 1)[1].split(
+        "async def tenant_row_counts", 1
+    )[0]
+
+    assert "if not candidates" in resolver
+    assert "range(0, len(candidate_ids), 500)" in resolver
+    assert "table.c.id.in_(batch)" in resolver
 
 
 def test_every_worker_honors_tenant_erasure_abort_requests() -> None:

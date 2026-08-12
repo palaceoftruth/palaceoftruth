@@ -171,6 +171,35 @@ async def test_tenant_erasure_does_not_match_arbitrary_payload_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tenant_erasure_matches_uuid_shaped_legacy_positional_ids() -> None:
+    item_id = str(uuid.uuid4())
+    key = b"arq:job:legacy-positional"
+    pool = _FakeArqPool(
+        {
+            key: serialize_job(
+                "extract_relationships",
+                (item_id,),
+                {},
+                None,
+                0,
+                serializer=job_serializer,
+            )
+        }
+    )
+
+    candidates = await data_lifecycle._queued_identifier_candidates(pool)
+    purged = await _purge_tenant_arq_jobs(
+        pool,
+        tenant_id="tenant-a",
+        tenant_identifiers={item_id},
+    )
+
+    assert candidates == {item_id}
+    assert purged == 1
+    assert key not in pool.payloads
+
+
+@pytest.mark.asyncio
 async def test_tenant_erasure_fails_closed_on_uninspectable_arq_payload() -> None:
     pool = _FakeArqPool({b"arq:job:corrupt": b"not-a-job"})
 

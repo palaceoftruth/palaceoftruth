@@ -23,19 +23,27 @@ def upgrade() -> None:
             status = COALESCE(status, 'processing'),
             created_at = COALESCE(created_at, now()),
             updated_at = COALESCE(updated_at, created_at, now())
+        WHERE metadata IS NULL OR tags IS NULL OR categories IS NULL
+           OR status IS NULL OR created_at IS NULL OR updated_at IS NULL
     """))
     op.execute(sa.text("""
         UPDATE jobs SET
             status = COALESCE(status, 'queued'),
             progress = COALESCE(progress, 0),
             created_at = COALESCE(created_at, now())
+        WHERE status IS NULL OR progress IS NULL OR created_at IS NULL
     """))
-    op.execute(sa.text("UPDATE embeddings SET created_at = COALESCE(created_at, now())"))
-    op.execute(sa.text("UPDATE embedding_profile_vectors SET created_at = COALESCE(created_at, now())"))
+    op.execute(sa.text(
+        "UPDATE embeddings SET created_at = now() WHERE created_at IS NULL"
+    ))
+    op.execute(sa.text(
+        "UPDATE embedding_profile_vectors SET created_at = now() WHERE created_at IS NULL"
+    ))
     op.execute(sa.text("""
         UPDATE item_relationships SET
             confidence = COALESCE(confidence, 0.0),
             created_at = COALESCE(created_at, now())
+        WHERE confidence IS NULL OR created_at IS NULL
     """))
 
     for table in ("embeddings", "embedding_profile_vectors"):
