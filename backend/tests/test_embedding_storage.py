@@ -12,6 +12,7 @@ def test_embedding_profile_vector_stores_native_profile_metadata_separately() ->
     )
 
     record = embedding_record_for_profile(
+        tenant_id="tenant-a",
         item_id=uuid.uuid4(),
         chunk_index=0,
         chunk_text="native image vector placeholder",
@@ -39,6 +40,7 @@ def test_multilingual_profile_uses_side_by_side_profile_metadata() -> None:
     )
 
     record = embedding_record_for_profile(
+        tenant_id="tenant-a",
         item_id=uuid.uuid4(),
         chunk_index=0,
         chunk_text="contrato en espanol",

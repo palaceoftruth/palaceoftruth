@@ -691,12 +691,39 @@ When postgres.enabled=false: reads DATABASE_URL directly from existingSecret.
       name: {{ include "palaceoftruth.postgresSecretName" . }}
       key: dbname
 - name: DATABASE_URL
-  value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+  value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=verify-full"
 {{- else }}
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
       name: {{ include "palaceoftruth.appSecretName" . }}
       key: DATABASE_URL
+{{- end }}
+{{- if .Values.databaseTls.enabled }}
+- name: DATABASE_SSL_ROOT_CERT
+  value: /etc/palaceoftruth/database-tls/ca.crt
+{{- end }}
+{{- end }}
+
+{{- define "palaceoftruth.databaseTlsSecretName" -}}
+{{- default (printf "%s-ca" (include "palaceoftruth.postgresClusterName" .)) .Values.databaseTls.caSecretName -}}
+{{- end }}
+
+{{- define "palaceoftruth.databaseTlsVolumeMount" -}}
+{{- if .Values.databaseTls.enabled }}
+- name: database-tls
+  mountPath: /etc/palaceoftruth/database-tls
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "palaceoftruth.databaseTlsVolume" -}}
+{{- if .Values.databaseTls.enabled }}
+- name: database-tls
+  secret:
+    secretName: {{ include "palaceoftruth.databaseTlsSecretName" . }}
+    items:
+      - key: {{ .Values.databaseTls.caKey | quote }}
+        path: ca.crt
 {{- end }}
 {{- end }}

@@ -13,6 +13,8 @@ router = APIRouter(prefix="/tags", tags=["tags"], dependencies=[Depends(require_
 async def list_tags(
     request: Request,
     q: str | None = Query(None, description="Optional prefix filter"),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
     db: AsyncSession = Depends(get_db),
 ):
     sql = sa_text("""
@@ -22,9 +24,21 @@ async def list_tags(
           AND deleted_at IS NULL
           AND tenant_id = :tenant_id
           AND cardinality(tags) > 0
-          AND (CAST(:q AS text) IS NULL OR tag ILIKE CAST(:q AS text) || '%')
+          AND (CAST(:q AS text) IS NULL OR tag ILIKE CAST(:q AS text) || '%' ESCAPE '\\')
         ORDER BY tag
+        LIMIT :limit OFFSET :offset
     """)
-    rows = (await db.execute(sql, {"q": q, "tenant_id": request.state.tenant_id})).fetchall()
+    escaped_q = None if q is None else q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = (
+        await db.execute(
+            sql,
+            {
+                "q": escaped_q,
+                "tenant_id": request.state.tenant_id,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+    ).fetchall()
     tags = [row.tag for row in rows]
     return TagListResponse(tags=tags, total=len(tags))

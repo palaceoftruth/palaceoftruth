@@ -59,6 +59,7 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
       {{- end }}
       containers:
         - name: backend
@@ -78,6 +79,7 @@ spec:
                 name: {{ include "palaceoftruth.appSecretName" . }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
+            {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.runtimeVolumeMount" . | nindent 12 }}
             {{- include "palaceoftruth.uploadArtifactVolumeMount" . | nindent 12 }}
           startupProbe:
@@ -113,4 +115,5 @@ spec:
             {{- toYaml .Values.backend.resources | nindent 12 }}
       volumes:
         {{- include "palaceoftruth.scratchVolumes" . | nindent 8 }}
+        {{- include "palaceoftruth.databaseTlsVolume" . | nindent 8 }}
         {{- include "palaceoftruth.runtimeVolume" . | nindent 8 }}

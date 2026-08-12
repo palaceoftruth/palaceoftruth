@@ -2450,6 +2450,7 @@ async def _build_relationship_doctor_state(
             JOIN items s ON s.id = r.source_item_id
             JOIN items t ON t.id = r.target_item_id
             WHERE s.tenant_id = :tenant_id
+              AND r.tenant_id = :tenant_id
               AND t.tenant_id = :tenant_id
               AND s.status = 'ready'
               AND t.status = 'ready'
@@ -2469,7 +2470,8 @@ async def _build_relationship_doctor_state(
               AND i.deleted_at IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM item_relationships r
-                  WHERE r.source_item_id = i.id OR r.target_item_id = i.id
+                  WHERE r.tenant_id = :tenant_id
+                    AND (r.source_item_id = i.id OR r.target_item_id = i.id)
               )
             """
         ),
@@ -2491,7 +2493,8 @@ async def _build_relationship_doctor_state(
               )
               AND NOT EXISTS (
                   SELECT 1 FROM item_relationships r
-                  WHERE r.source_item_id = i.id OR r.target_item_id = i.id
+                  WHERE r.tenant_id = :tenant_id
+                    AND (r.source_item_id = i.id OR r.target_item_id = i.id)
               )
             """
         ),

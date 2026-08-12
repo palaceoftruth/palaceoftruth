@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 from pydantic import model_validator
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.embedding_profile import (
     DEFAULT_LOCAL_HTTP_EMBEDDING_PATH,
@@ -38,6 +38,13 @@ def _is_placeholder_credential(value: str) -> bool:
 class Settings(BaseSettings):
     # Database
     database_url: str
+    database_ssl_root_cert: str = ""
+    database_pool_size: int = 10
+    database_max_overflow: int = 10
+    database_pool_timeout_seconds: float = 30.0
+    database_pool_recycle_seconds: int = 1800
+    database_statement_timeout_ms: int = 30_000
+    database_idle_transaction_timeout_ms: int = 60_000
 
     # Redis — standard connection
     redis_url: str = "redis://localhost:6379"
@@ -155,6 +162,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 50
     search_limit: int = 10
     upload_artifact_dir: str = "/tmp/palaceoftruth/upload-artifacts"
+    doc_extraction_per_tenant_concurrency: int = 1
     app_version: str = ""
     deployment_cluster: str = ""
     deployment_namespace: str = ""
@@ -331,6 +339,33 @@ class Settings(BaseSettings):
         # field, so this checks the whole DSN for the shipped placeholder.
         if "change_me_secure_password" in self.database_url:
             raise ValueError("DATABASE_URL still contains the .env.example placeholder password")
+        if self.database_pool_size < 1:
+            raise ValueError("DATABASE_POOL_SIZE must be at least 1")
+        if self.database_max_overflow < 0:
+            raise ValueError("DATABASE_MAX_OVERFLOW must not be negative")
+        if self.database_pool_timeout_seconds <= 0:
+            raise ValueError("DATABASE_POOL_TIMEOUT_SECONDS must be greater than 0")
+        if self.database_pool_recycle_seconds < 1:
+            raise ValueError("DATABASE_POOL_RECYCLE_SECONDS must be at least 1")
+        if self.database_statement_timeout_ms < 1:
+            raise ValueError("DATABASE_STATEMENT_TIMEOUT_MS must be at least 1")
+        if self.database_idle_transaction_timeout_ms < 1:
+            raise ValueError("DATABASE_IDLE_TRANSACTION_TIMEOUT_MS must be at least 1")
+        if self.doc_extraction_per_tenant_concurrency < 1:
+            raise ValueError("DOC_EXTRACTION_PER_TENANT_CONCURRENCY must be at least 1")
+        if self.deployment_cluster and not self.credential_pepper.strip():
+            raise ValueError(
+                "CREDENTIAL_PEPPER must be set when DEPLOYMENT_CLUSTER is configured; "
+                "generate one and provide it as a real secret before deploying"
+            )
+        if self.deployment_cluster:
+            # Parse with urllib rather than accepting asyncpg's opportunistic
+            # TLS behavior. Cluster traffic must authenticate the server.
+            sslmode = parse_qs(urlparse(self.database_url).query).get("sslmode", [""])[0]
+            if sslmode != "verify-full":
+                raise ValueError("DATABASE_URL must use sslmode=verify-full when DEPLOYMENT_CLUSTER is configured")
+            if not self.database_ssl_root_cert.strip():
+                raise ValueError("DATABASE_SSL_ROOT_CERT is required when DEPLOYMENT_CLUSTER is configured")
         # PALACEOFTRUTH_ADMIN_SECRET is read directly from the environment by
         # app.api.admin rather than modeled on Settings; check it here too so
         # every placeholder in .env.example is covered by one gate.
@@ -344,11 +379,6 @@ class Settings(BaseSettings):
         # Chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
         # dev and the test suite never do, so this gate only applies to real
         # clusters and never breaks `docker compose up` or `pytest`.
-        if self.deployment_cluster and not self.credential_pepper.strip():
-            raise ValueError(
-                "CREDENTIAL_PEPPER must be set when DEPLOYMENT_CLUSTER is configured; "
-                "generate one and provide it as a real secret before deploying"
-            )
         return self
 
 

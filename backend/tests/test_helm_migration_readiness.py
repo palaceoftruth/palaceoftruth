@@ -54,8 +54,10 @@ def test_migration_job_waits_for_writable_database_before_alembic() -> None:
     env = {entry["name"]: entry for entry in readiness["env"]}
     assert env["DATABASE_URL"] == {
         "name": "DATABASE_URL",
-        "value": "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)",
+        "value": "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=verify-full",
     }
+    assert env["DATABASE_SSL_ROOT_CERT"]["value"] == "/etc/palaceoftruth/database-tls/ca.crt"
+    assert {mount["name"] for mount in readiness["volumeMounts"]} >= {"database-tls"}
     assert env["MIGRATION_DB_WAIT_TIMEOUT_SECONDS"]["value"] == "30"
     assert env["MIGRATION_DB_WAIT_INTERVAL_SECONDS"]["value"] == "2"
     assert env["MIGRATION_DB_CONNECT_TIMEOUT_SECONDS"]["value"] == "3"

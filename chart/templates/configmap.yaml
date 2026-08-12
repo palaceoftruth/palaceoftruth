@@ -71,6 +71,13 @@ data:
   CHUNK_SIZE: {{ .Values.config.chunkSize | quote }}
   CHUNK_OVERLAP: {{ .Values.config.chunkOverlap | quote }}
   SEARCH_LIMIT: {{ .Values.config.searchLimit | quote }}
+  DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
+  DATABASE_MAX_OVERFLOW: {{ .Values.config.databaseMaxOverflow | quote }}
+  DATABASE_POOL_TIMEOUT_SECONDS: {{ .Values.config.databasePoolTimeoutSeconds | quote }}
+  DATABASE_POOL_RECYCLE_SECONDS: {{ .Values.config.databasePoolRecycleSeconds | quote }}
+  DATABASE_STATEMENT_TIMEOUT_MS: {{ .Values.config.databaseStatementTimeoutMs | quote }}
+  DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: {{ .Values.config.databaseIdleTransactionTimeoutMs | quote }}
+  DOC_EXTRACTION_PER_TENANT_CONCURRENCY: {{ .Values.config.docExtractionPerTenantConcurrency | quote }}
   APP_VERSION: {{ .Chart.AppVersion | quote }}
   DEPLOYMENT_CLUSTER: {{ .Values.config.deploymentCluster | quote }}
   DEPLOYMENT_NAMESPACE: {{ .Values.config.deploymentNamespace | quote }}

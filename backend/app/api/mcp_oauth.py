@@ -214,9 +214,12 @@ async def _authenticate_oauth_client(
             {"client_key": client_key, "tenant_id": tenant_id},
         )
         rows = list(result.mappings().all())
-    if tenant_id is None and len(rows) > 1:
+    # A client key must resolve to exactly one row. This also rejects a
+    # same-tenant collision between one row's client_key and another row's
+    # generated oauth_client_id.
+    if len(rows) != 1:
         raise HTTPException(status_code=401, detail="invalid_client")
-    row = rows[0] if rows else None
+    row = rows[0]
     if row is None or row["oauth_revoked_at"] is not None:
         raise HTTPException(status_code=401, detail="invalid_client")
     if row.get("client_type") == "public":

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector, HALFVEC
-from sqlalchemy import CheckConstraint, Index, Integer, Text, ForeignKey, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, ForeignKey, ForeignKeyConstraint, Index, Integer, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,7 +17,16 @@ from app.embedding_profile import (
 
 class Embedding(Base):
     __tablename__ = "embeddings"
-    __table_args__ = (Index("ix_embeddings_item_chunk", "item_id", "chunk_index"),)
+    __table_args__ = (
+        Index("ix_embeddings_item_chunk", "item_id", "chunk_index"),
+        Index("ix_embeddings_tenant_item_chunk", "tenant_id", "item_id", "chunk_index"),
+        ForeignKeyConstraint(
+            ["tenant_id", "item_id"],
+            ["items.tenant_id", "items.id"],
+            name="fk_embeddings_tenant_item",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -25,6 +34,7 @@ class Embedding(Base):
     item_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("items.id", ondelete="CASCADE"), nullable=False
     )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
     # Full-precision embedding retained for relationship and rebuild flows.
@@ -36,7 +46,7 @@ class Embedding(Base):
     model: Mapped[str] = mapped_column(Text, nullable=False, default=DEFAULT_EMBEDDING_MODEL)
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False, default=EMBEDDING_DIMENSIONS)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now()
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -73,6 +83,18 @@ class EmbeddingProfileVector(Base):
             "input_modality IN ('text', 'image', 'multilingual_text')",
             name="ck_embedding_profile_vectors_input_modality",
         ),
+        Index(
+            "ix_embedding_profile_vectors_tenant_item",
+            "tenant_id",
+            "item_id",
+            "profile_name",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "item_id"],
+            ["items.tenant_id", "items.id"],
+            name="fk_embedding_profile_vectors_tenant_item",
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -81,6 +103,7 @@ class EmbeddingProfileVector(Base):
     item_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("items.id", ondelete="CASCADE"), nullable=False
     )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
     profile_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -99,5 +122,5 @@ class EmbeddingProfileVector(Base):
     embedding_1536: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     embedding_half_1536: Mapped[list[float] | None] = mapped_column(HALFVEC(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now()
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

@@ -51,7 +51,7 @@ async def poll_all_source_subscriptions(ctx: dict) -> None:
 async def poll_source_subscription_task(
     ctx: dict,
     subscription_id: str,
-    tenant_id: str = "default",
+    tenant_id: str,
 ) -> None:
     """Discover new source entries and enqueue newly discovered captures."""
     async with async_session() as db:

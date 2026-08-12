@@ -7,6 +7,7 @@ Create Date: 2026-03-20
 from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
 
 revision: str = "004"
 down_revision: Union[str, None] = "003"
@@ -15,22 +16,25 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Step 1a: Deduplicate existing items by source_url — keep the most recent row per URL
-    # (safe: only removes duplicate older rows for sources ingested multiple times)
-    op.execute(
-        """
-        DELETE FROM items
-        WHERE id IN (
-            SELECT id FROM (
-                SELECT id,
-                       ROW_NUMBER() OVER (PARTITION BY source_url ORDER BY created_at DESC) AS rn
-                FROM items
-                WHERE source_url IS NOT NULL
-            ) dupes
-            WHERE rn > 1
+    # Historical upgrades must never discard tenant data automatically. Stop
+    # with a repairable error and let an operator resolve duplicates explicitly.
+    duplicate_count = op.get_bind().execute(
+        sa.text("""
+        SELECT COUNT(*)
+        FROM (
+            SELECT source_url
+            FROM items
+            WHERE source_url IS NOT NULL
+            GROUP BY source_url
+            HAVING COUNT(*) > 1
+        ) duplicates
+        """)
+    ).scalar_one()
+    if duplicate_count:
+        raise RuntimeError(
+            "Migration 004 found duplicate item source_url values; resolve them "
+            "explicitly before retrying the migration"
         )
-        """
-    )
 
     # Step 1b: Partial unique index on items.source_url (non-NULL only)
     op.execute(

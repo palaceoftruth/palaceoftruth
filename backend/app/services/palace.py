@@ -1714,7 +1714,10 @@ async def build_control_tower(db: AsyncSession, tenant_id: str, arq_pool=None) -
                 max_profile_rooms=CONTROL_TOWER_CONSOLIDATION_ROOM_LIMIT,
             ),
         ),
-        worker_backpressure=await timed_section("worker_backpressure", build_worker_backpressure(arq_pool, db=db)),
+        worker_backpressure=await timed_section(
+            "worker_backpressure",
+            build_worker_backpressure(arq_pool, db=db, tenant_id=tenant_id),
+        ),
         mcp_activity=await timed_section("mcp_activity", _build_mcp_activity(db, tenant_id)),
         memory_health=await timed_section("memory_health", _build_memory_health(db, tenant_id)),
         webhook_health=await timed_section("webhook_health", _build_webhook_health(db, tenant_id)),
@@ -4599,7 +4602,12 @@ async def run_sync_run(
                 db.add(item)
                 await db.flush()
             else:
-                await db.execute(delete(Embedding).where(Embedding.item_id == item.id))
+                await db.execute(
+                    delete(Embedding).where(
+                        Embedding.item_id == item.id,
+                        Embedding.tenant_id == run.tenant_id,
+                    )
+                )
                 item.source_type = _file_source_type(Path(relative_path))
                 item.source_url = candidate.source_url
                 item.title = _sync_file_title(Path(relative_path))

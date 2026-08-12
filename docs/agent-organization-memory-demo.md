@@ -28,6 +28,17 @@ The point is not that the orchestrator is omniscient. The point is that the
 server decides which specialist memory may be used and leaves an auditable trace
 that does not record raw memory bodies or secrets.
 
+## Security Boundary
+
+The tenant is always the primary database and authorization boundary. Agent
+scopes are an additional server-enforced boundary for MCP OAuth clients that
+have an `agent_scope_key`: those clients can write only to their bound scope,
+and cross-agent reads are deny-by-default unless a delegated policy permits
+them. A tenant API key is a tenant administrator credential and can organize
+memory across that tenant's scopes; agent scope names are not a sandbox against
+that credential. Do not describe an agent scope as protection from the tenant
+administrator.
+
 ## Copy
 
 Use this landing-copy language when positioning the feature:

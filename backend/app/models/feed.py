@@ -22,7 +22,7 @@ class Feed(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_failures: Mapped[int] = mapped_column(Integer, server_default="0")
     feed_metadata: Mapped[dict] = mapped_column(JSONB, server_default="{}")
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())

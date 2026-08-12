@@ -35,6 +35,8 @@ from app.services.bundle import (
     tenant_has_state,
 )
 from app.services.mcp_client_registration import PublicClientDriftError, ensure_public_mcp_client
+from app.services.mcp_containment import derive_containment_mode
+from app.services.data_lifecycle import erase_tenant_data
 from app.services.relationship_canary import (
     FIXTURE_SHA256,
     RelationshipCanaryContractError,
@@ -118,6 +120,17 @@ class RegisterTenantResponse(BaseModel):
     api_key: str | None = None  # raw key — returned once only, never stored
     active_key: TenantApiKeySummary
     active_key_count: int
+
+
+class TenantErasureRequest(BaseModel):
+    confirmation: str
+    dry_run: bool = True
+
+
+class TenantErasureResponse(BaseModel):
+    tenant_id: str
+    dry_run: bool
+    row_counts: dict[str, int]
 
 
 class TenantApiKeyListResponse(BaseModel):
@@ -637,6 +650,34 @@ async def register_tenant(
     )
 
 
+@router.post(
+    "/tenants/{tenant_id}/erase",
+    response_model=TenantErasureResponse,
+    dependencies=[Depends(_verify_admin)],
+)
+async def erase_tenant(
+    tenant_id: str,
+    body: TenantErasureRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TenantErasureResponse:
+    """Preview or perform a transaction-scoped tenant erasure."""
+    tenant_id = _tenant_id_from_path(tenant_id)
+    expected = f"ERASE {tenant_id}"
+    if body.confirmation != expected:
+        raise HTTPException(status_code=422, detail=f'confirmation must equal "{expected}"')
+    counts = await erase_tenant_data(
+        db,
+        tenant_id=tenant_id,
+        actor_id="admin-secret",
+        dry_run=body.dry_run,
+    )
+    return TenantErasureResponse(
+        tenant_id=tenant_id,
+        dry_run=body.dry_run,
+        row_counts=counts,
+    )
+
+
 @router.get(
     "/tenants/{tenant_id}/api-keys",
     response_model=TenantApiKeyListResponse,
@@ -923,16 +964,16 @@ async def register_mcp_oauth_client(
         text(
             """
             INSERT INTO mcp_clients
-                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+                (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
                  client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                  token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at, oauth_token_ttl_seconds)
             VALUES
                 (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
-                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :allow_tenant_shared_reads,
+                 CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads, :allow_tenant_shared_reads, :containment_mode,
                  :client_type, CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), :authorization_code_enabled, :oauth_client_id,
                  :token_endpoint_auth_method, :secret_hash, NULL, :token_ttl_seconds)
             ON CONFLICT (tenant_id, client_key) DO NOTHING
-            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
                       client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
                       token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds
             """
@@ -946,6 +987,10 @@ async def register_mcp_oauth_client(
             "agent_scope_key": body.agent_scope_key,
             "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
             "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
+            "containment_mode": derive_containment_mode(
+                client_key=body.client_key,
+                requested_mode=body.containment_mode,
+            ),
             "client_type": body.client_type,
             "redirect_uris": json.dumps(body.redirect_uris),
             "allowed_resources": json.dumps(body.allowed_resources),

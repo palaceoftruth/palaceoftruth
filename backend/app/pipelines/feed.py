@@ -35,11 +35,12 @@ class FeedPipeline(BasePipeline):
         feed: Feed,
         entry_url: str,
         entry_title: str,
+        *,
+        tenant_id: str,
         entry_summary: str = "",
         entry_author: str | None = None,
         entry_published: str | None = None,
         entry_guid: str | None = None,
-        tenant_id: str = "default",
     ) -> uuid.UUID | None:
         """Process a single feed entry. Returns item.id on success, None if skipped/failed."""
 
@@ -102,7 +103,12 @@ class FeedPipeline(BasePipeline):
             self.db.add(item)
             await self.db.flush()  # populate item.id
         else:
-            await self.db.execute(delete(Embedding).where(Embedding.item_id == item.id))
+            await self.db.execute(
+                delete(Embedding).where(
+                    Embedding.item_id == item.id,
+                    Embedding.tenant_id == tenant_id,
+                )
+            )
 
         # Deduplication by content still protects the corpus, but never treats
         # the item being refreshed as its own duplicate.
@@ -177,6 +183,7 @@ class FeedPipeline(BasePipeline):
         # 6. Store embeddings
         for chunk, vector in zip(chunks, embeddings_data):
             emb = embedding_record_for_profile(
+                tenant_id=tenant_id,
                 item_id=item.id,
                 chunk_index=chunk["index"],
                 chunk_text=chunk["text"],

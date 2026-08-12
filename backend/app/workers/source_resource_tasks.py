@@ -452,7 +452,10 @@ async def _activate_resource_content(
             (row.chunk_index, row.chunk_text)
             for row in (
                 await db.execute(
-                    select(Embedding.chunk_index, Embedding.chunk_text).where(Embedding.item_id == item.id)
+                    select(Embedding.chunk_index, Embedding.chunk_text).where(
+                        Embedding.item_id == item.id,
+                        Embedding.tenant_id == resource.tenant_id,
+                    )
                 )
             ).all()
         } if item.id else set()
@@ -463,6 +466,7 @@ async def _activate_resource_content(
                 await db.execute(
                     select(EmbeddingProfileVector.chunk_index, EmbeddingProfileVector.chunk_text)
                     .where(EmbeddingProfileVector.item_id == item.id)
+                    .where(EmbeddingProfileVector.tenant_id == resource.tenant_id)
                     .where(EmbeddingProfileVector.profile_name == profile.profile_name)
                 )
             ).all()
@@ -491,18 +495,21 @@ async def _activate_resource_content(
         await db.execute(
             delete(Embedding)
             .where(Embedding.item_id == item.id)
+            .where(Embedding.tenant_id == resource.tenant_id)
             .where(Embedding.chunk_index.not_in(reusable_indices))
         )
     else:
         await db.execute(
             delete(EmbeddingProfileVector)
             .where(EmbeddingProfileVector.item_id == item.id)
+            .where(EmbeddingProfileVector.tenant_id == resource.tenant_id)
             .where(EmbeddingProfileVector.profile_name == profile.profile_name)
             .where(EmbeddingProfileVector.chunk_index.not_in(reusable_indices))
         )
     for chunk, vector in zip(changed_chunks, vectors):
         db.add(
             embedding_record_for_profile(
+                tenant_id=resource.tenant_id,
                 item_id=item.id,
                 chunk_index=chunk["index"],
                 chunk_text=chunk["text"],

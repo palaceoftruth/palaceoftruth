@@ -129,7 +129,7 @@ async def persist_streamed_messages_background(
 
 
 class ChatService:
-    def __init__(self, db: AsyncSession, embedder: EmbeddingService, llm: LLMService, tenant_id: str = "default"):
+    def __init__(self, db: AsyncSession, embedder: EmbeddingService, llm: LLMService, tenant_id: str):
         self.db = db
         self.embedder = embedder
         self.llm = llm

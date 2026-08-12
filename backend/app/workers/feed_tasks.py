@@ -273,7 +273,7 @@ async def poll_all_feeds(ctx: dict) -> None:
     logger.info("poll_all_feeds: dispatched %d jobs", len(feeds_due))
 
 
-async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None:
+async def poll_feed(ctx: dict, feed_id: str, tenant_id: str) -> None:
     """Fetch feed XML, parse entries, enqueue per-article jobs."""
     import feedparser
     from app.utils.outbound_http import fetch_public_http_bytes
@@ -282,6 +282,14 @@ async def poll_feed(ctx: dict, feed_id: str, tenant_id: str = "default") -> None
         feed = await db.get(Feed, uuid.UUID(feed_id))
         if not feed or not feed.enabled or feed.deleted_at is not None:
             logger.info("poll_feed: skipping feed %s (missing or disabled)", feed_id)
+            return
+        if tenant_id != feed.tenant_id:
+            logger.warning(
+                "poll_feed: rejected tenant mismatch for feed %s (job=%s, database=%s)",
+                feed_id,
+                tenant_id,
+                feed.tenant_id,
+            )
             return
 
         headers = {}
@@ -373,18 +381,27 @@ async def process_feed_item(
     ctx: dict,
     feed_id: str,
     entry_url: str,
+    *,
+    tenant_id: str,
     entry_title: str = "",
     entry_summary: str = "",
     entry_author: str | None = None,
     entry_published: str | None = None,
     entry_guid: str | None = None,
-    tenant_id: str = "default",
 ) -> None:
     """Run FeedPipeline for one article; enqueue relationship extraction on success."""
     async with async_session() as db:
         feed = await db.get(Feed, uuid.UUID(feed_id))
         if not feed:
             logger.warning("process_feed_item: feed %s not found", feed_id)
+            return
+        if tenant_id != feed.tenant_id:
+            logger.warning(
+                "process_feed_item: rejected tenant mismatch for feed %s (job=%s, database=%s)",
+                feed_id,
+                tenant_id,
+                feed.tenant_id,
+            )
             return
 
         pipeline = FeedPipeline(db, ctx["embedder"], ctx["llm"])

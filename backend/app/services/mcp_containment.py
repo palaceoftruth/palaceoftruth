@@ -54,9 +54,13 @@ def derive_containment_mode(*, client_key: str, requested_mode: str | None = Non
 
 def normalize_containment_mode(value: Any) -> str:
     """Coerce a stored or transported value, failing closed on anything unknown."""
+    # No MCP identity is the normal REST/API-key path, not a malformed MCP
+    # mode. Authenticated MCP requests always attach a concrete value.
+    if value is None:
+        return CONTAINMENT_STANDARD
     if isinstance(value, str) and value in VALID_CONTAINMENT_MODES:
         return value
-    return CONTAINMENT_STANDARD
+    return CONTAINMENT_HERMES_AGENT
 
 
 def is_contained_agent_client(containment_mode: Any) -> bool:

@@ -481,7 +481,12 @@ async def reset_tenant_restore_state(
     )
     if item_ids:
         for batch in _batch(item_ids, 500):
-            await db.execute(delete(Embedding).where(Embedding.item_id.in_(batch)))
+            await db.execute(
+                delete(Embedding).where(
+                    Embedding.item_id.in_(batch),
+                    Embedding.tenant_id == tenant_id,
+                )
+            )
     await db.execute(
         delete(ConversationMessage).where(ConversationMessage.tenant_id == tenant_id)
     )
@@ -584,11 +589,13 @@ async def run_restore_job(
                 await db.execute(
                     delete(EmbeddingProfileVector)
                     .where(EmbeddingProfileVector.item_id == restored_item.id)
+                    .where(EmbeddingProfileVector.tenant_id == tenant_id)
                     .where(EmbeddingProfileVector.profile_name == embedding_profile.profile_name)
                 )
             for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 db.add(
                     embedding_record_for_profile(
+                        tenant_id=tenant_id,
                         item_id=restored_item.id,
                         chunk_index=chunk.get("index", chunk_index),
                         chunk_text=chunk["text"],

@@ -131,7 +131,7 @@ def test_list_tags_uses_authenticated_tenant_and_prefix_filter() -> None:
     assert response.json() == {"tags": ["alpha", "beta"], "total": 2}
     sql, params = session.execute_calls[0]
     assert "tenant_id = :tenant_id" in sql
-    assert params == {"q": "a", "tenant_id": "tenant-a"}
+    assert params == {"q": "a", "tenant_id": "tenant-a", "limit": 100, "offset": 0}
 
 
 def test_list_tags_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
@@ -142,7 +142,12 @@ def test_list_tags_accepts_oauth_bearer_read_scope(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["total"] == 2
-    assert session.execute_calls[0][1] == {"q": None, "tenant_id": "tenant-a"}
+    assert session.execute_calls[0][1] == {
+        "q": None,
+        "tenant_id": "tenant-a",
+        "limit": 100,
+        "offset": 0,
+    }
 
 
 def test_list_tags_rejects_oauth_bearer_missing_read_scope(monkeypatch) -> None:

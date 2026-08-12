@@ -64,7 +64,7 @@ async def _list_diary_rollup_tenants(db) -> tuple[str, ...]:
     return tuple(tenant_ids)
 
 
-async def run_fact_registry_extraction(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_fact_registry_extraction(ctx: dict) -> None:
     async with async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
@@ -84,7 +84,7 @@ async def run_fact_registry_extraction(ctx: dict, **_ignored_future_kwargs) -> N
             )
 
 
-async def run_wakeup_story_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_wakeup_story_refresh(ctx: dict) -> None:
     async with async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
@@ -108,7 +108,7 @@ async def run_wakeup_story_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
             )
 
 
-async def run_memory_dream_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_memory_dream_refresh(ctx: dict) -> None:
     target_days = memory_dream_target_days()
     if not target_days:
         return
@@ -146,7 +146,7 @@ async def run_memory_dream_refresh(ctx: dict, **_ignored_future_kwargs) -> None:
                     )
 
 
-async def run_fact_registry_contradiction_sweep(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_fact_registry_contradiction_sweep(ctx: dict) -> None:
     async with async_session() as db:
         tenant_ids = await list_fact_registry_tenants(db)
         if not tenant_ids:
@@ -274,7 +274,7 @@ async def _refresh_wakeup_briefs_for_caught_up_palace(
         logger.exception("wake-up brief refresh after Palace build failed for tenant %s", tenant_id)
 
 
-async def palace_run_build(ctx: dict, palace_run_id: str, **_ignored_future_kwargs) -> None:
+async def palace_run_build(ctx: dict, palace_run_id: str) -> None:
     logger.info("palace_run_build worker executing run_id=%s", palace_run_id)
     async with async_session() as db:
         status, _error = await run_palace_run(db, run_id=uuid.UUID(palace_run_id))
@@ -296,7 +296,7 @@ async def palace_run_build(ctx: dict, palace_run_id: str, **_ignored_future_kwar
                     )
 
 
-async def run_sync_source(ctx: dict, sync_run_id: str, **_ignored_future_kwargs) -> None:
+async def run_sync_source(ctx: dict, sync_run_id: str) -> None:
     async with async_session() as db:
         status, _error = await run_sync_run(
             db,
@@ -406,7 +406,7 @@ async def watch_local_sync_sources(ctx: dict) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-async def run_diary_rollup_maintenance(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_diary_rollup_maintenance(ctx: dict) -> None:
     target_days = _diary_rollup_target_days()
     if not target_days:
         return
@@ -525,7 +525,7 @@ async def refresh_dirty_palace_rooms(ctx: dict) -> None:
             )
 
 
-async def run_palace_maintenance(ctx: dict, **_ignored_future_kwargs) -> None:
+async def run_palace_maintenance(ctx: dict) -> None:
     """Run the bounded Palace upkeep phases without letting one failure starve the rest."""
     for phase_name, task_name in PALACE_MAINTENANCE_PHASES:
         task = globals()[task_name]
@@ -570,7 +570,7 @@ async def repair_palace_artifacts(ctx: dict) -> None:
                 )
 
 
-async def refresh_palace_consolidation_candidates(ctx: dict, **_ignored_future_kwargs) -> None:
+async def refresh_palace_consolidation_candidates(ctx: dict) -> None:
     async with async_session() as db:
         states = (
             await db.execute(
@@ -595,7 +595,7 @@ async def refresh_palace_consolidation_candidates(ctx: dict, **_ignored_future_k
                 )
 
 
-async def recompute_palace_tunnel_strengths(ctx: dict, **_ignored_future_kwargs) -> None:
+async def recompute_palace_tunnel_strengths(ctx: dict) -> None:
     async with async_session() as db:
         states = (
             await db.execute(
@@ -623,7 +623,7 @@ async def recompute_palace_tunnel_strengths(ctx: dict, **_ignored_future_kwargs)
                 )
 
 
-async def refresh_caught_up_wakeup_briefs(ctx: dict, **_ignored_future_kwargs) -> None:
+async def refresh_caught_up_wakeup_briefs(ctx: dict) -> None:
     async with async_session() as db:
         states = (
             await db.execute(
@@ -715,14 +715,14 @@ async def sweep_palace_index_integrity(ctx: dict) -> None:
                 )
 
 
-async def mark_item_dirty_and_schedule(ctx: dict, item_id: str, tenant_id: str = "default", reason: str = "ingest") -> None:
+async def mark_item_dirty_and_schedule(ctx: dict, item_id: str, tenant_id: str, reason: str = "ingest") -> None:
     await mark_items_dirty_and_schedule(ctx, item_ids=[item_id], tenant_id=tenant_id, reason=reason)
 
 
 async def mark_items_dirty_and_schedule(
     ctx: dict,
     item_ids: list[str],
-    tenant_id: str = "default",
+    tenant_id: str,
     reason: str = "ingest",
 ) -> None:
     try:

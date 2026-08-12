@@ -17,6 +17,7 @@ from app.auth import (
     verify_capture_write_auth,
 )
 from app.database import get_db
+from app.config import settings
 from app.ingest_sanitize import sanitize_filename
 from app.models.item import Item
 from app.models.job import Job
@@ -55,6 +56,8 @@ _DOC_EXTRACTION_TIMEOUT = 110.0  # seconds — just under the 120s proxy timeout
 # pod even though each individual extraction is limited.
 _DOC_EXTRACTION_QUEUE_TIMEOUT = 15.0
 _doc_extraction_semaphore: asyncio.Semaphore | None = None
+_doc_extraction_tenant_semaphores: dict[str, asyncio.Semaphore] = {}
+_doc_extraction_tenant_refcounts: dict[str, int] = {}
 _doc_extraction_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
 logger = logging.getLogger(__name__)
@@ -160,29 +163,59 @@ def _build_upload_provenance(
 
 
 @asynccontextmanager
-async def _doc_extraction_slot():
-    """Hold one of a bounded number of concurrent extraction slots."""
+async def _doc_extraction_slot(tenant_id: str):
+    """Hold per-tenant and global extraction slots without tenant starvation."""
 
     global _doc_extraction_semaphore, _doc_extraction_semaphore_loop
+    global _doc_extraction_tenant_semaphores, _doc_extraction_tenant_refcounts
     loop = asyncio.get_running_loop()
     # Test clients create a fresh loop per case, so rebind rather than reuse a
     # semaphore that belongs to a loop that is already closed.
     if _doc_extraction_semaphore is None or _doc_extraction_semaphore_loop is not loop:
         _doc_extraction_semaphore = concurrency_limiter(default_max_concurrent_extractions())
+        _doc_extraction_tenant_semaphores = {}
+        _doc_extraction_tenant_refcounts = {}
         _doc_extraction_semaphore_loop = loop
 
-    semaphore = _doc_extraction_semaphore
+    global_semaphore = _doc_extraction_semaphore
+    tenant_semaphore = _doc_extraction_tenant_semaphores.setdefault(
+        tenant_id,
+        concurrency_limiter(settings.doc_extraction_per_tenant_concurrency),
+    )
+    _doc_extraction_tenant_refcounts[tenant_id] = (
+        _doc_extraction_tenant_refcounts.get(tenant_id, 0) + 1
+    )
+    tenant_acquired = False
+    global_acquired = False
     try:
-        await asyncio.wait_for(semaphore.acquire(), timeout=_DOC_EXTRACTION_QUEUE_TIMEOUT)
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=503,
-            detail="Document extraction is busy. Retry shortly.",
-        ) from None
-    try:
+        try:
+            # Take the tenant slot first. Requests waiting behind the same tenant
+            # never consume a global slot needed by another tenant.
+            await asyncio.wait_for(
+                tenant_semaphore.acquire(), timeout=_DOC_EXTRACTION_QUEUE_TIMEOUT
+            )
+            tenant_acquired = True
+            await asyncio.wait_for(
+                global_semaphore.acquire(), timeout=_DOC_EXTRACTION_QUEUE_TIMEOUT
+            )
+            global_acquired = True
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Document extraction is busy. Retry shortly.",
+            ) from exc
         yield
     finally:
-        semaphore.release()
+        if global_acquired:
+            global_semaphore.release()
+        if tenant_acquired:
+            tenant_semaphore.release()
+        remaining = _doc_extraction_tenant_refcounts[tenant_id] - 1
+        if remaining:
+            _doc_extraction_tenant_refcounts[tenant_id] = remaining
+        else:
+            _doc_extraction_tenant_refcounts.pop(tenant_id, None)
+            _doc_extraction_tenant_semaphores.pop(tenant_id, None)
 
 
 async def _stream_to_tmp(file: UploadFile, suffix: str, size_limit: int) -> str:
@@ -465,7 +498,7 @@ async def ingest_doc(
         # if extraction fails or times out. The work runs in a killable child
         # process with its own memory and CPU limits, and the number of children
         # is bounded, so one tenant's malicious upload cannot exhaust the pod.
-        async with _doc_extraction_slot():
+        async with _doc_extraction_slot(request.state.tenant_id):
             try:
                 extracted_text, doc_metadata = await extract_document_bounded(
                     tmp_path,

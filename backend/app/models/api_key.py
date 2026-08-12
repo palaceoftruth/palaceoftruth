@@ -85,6 +85,9 @@ class McpClient(Base):
     client_key: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     allowed_scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
+    agent_scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allow_all_agent_scope_reads: Mapped[bool] = mapped_column(server_default="false", nullable=False)
+    allow_tenant_shared_reads: Mapped[bool] = mapped_column(server_default="false", nullable=False)
     oauth_client_secret_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_token_ttl_seconds: Mapped[int] = mapped_column(Integer, server_default="3600", nullable=False)
@@ -136,7 +139,7 @@ class McpOAuthAccessToken(Base):
     )
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     scopes: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
-    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resource: Mapped[str] = mapped_column(Text, nullable=False)
     delegated_grant_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("mcp_oauth_delegated_grants.id", ondelete="SET NULL"),
@@ -176,6 +179,7 @@ class McpOAuthAuthorizationInteraction(Base):
     decided_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     expires_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     consumed_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
 
 class McpOAuthDelegatedGrant(Base):
@@ -190,6 +194,7 @@ class McpOAuthDelegatedGrant(Base):
     workspace_scope_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]", nullable=False)
     authorized_by: Mapped[str] = mapped_column(Text, nullable=False)
     revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
 
 class McpOAuthAuthorizationCode(Base):
