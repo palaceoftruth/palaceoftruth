@@ -490,6 +490,7 @@ async def hard_delete_item_route(
         raise HTTPException(status_code=422, detail="confirmation must equal item_id")
     deleted = await hard_delete_item(
         db,
+        arq_pool=request.app.state.arq_pool,
         tenant_id=request.state.tenant_id,
         item_id=item_id,
         actor_id=get_auth_context(request).subject_id or "unknown",

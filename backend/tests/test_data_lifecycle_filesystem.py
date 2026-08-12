@@ -199,6 +199,19 @@ async def test_tenant_erasure_matches_uuid_shaped_legacy_positional_ids() -> Non
     assert key not in pool.payloads
 
 
+def test_item_erasure_identifier_match_does_not_match_tenant_id_alone() -> None:
+    item_id = str(uuid.uuid4())
+
+    assert data_lifecycle._payload_references_identifiers(
+        {"kwargs": {"tenant_id": "tenant-a", "item_id": item_id}},
+        {item_id},
+    )
+    assert not data_lifecycle._payload_references_identifiers(
+        {"kwargs": {"tenant_id": "tenant-a", "item_id": str(uuid.uuid4())}},
+        {item_id},
+    )
+
+
 @pytest.mark.asyncio
 async def test_tenant_erasure_fails_closed_on_uninspectable_arq_payload() -> None:
     pool = _FakeArqPool({b"arq:job:corrupt": b"not-a-job"})

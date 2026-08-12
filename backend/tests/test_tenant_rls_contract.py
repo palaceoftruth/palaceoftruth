@@ -186,6 +186,29 @@ def test_tenant_erasure_resolves_only_queued_identifier_candidates() -> None:
     assert "table.c.id.in_(batch)" in resolver
 
 
+def test_destructive_deletion_paths_fail_closed_across_external_state() -> None:
+    source = (ROOT / "app" / "services" / "data_lifecycle.py").read_text()
+    tenant_erasure = source.split("async def erase_tenant_data", 1)[1].split(
+        "async def hard_delete_item", 1
+    )[0]
+    item_erasure = source.split("async def hard_delete_item", 1)[1]
+
+    commit = tenant_erasure.index("await db.commit()")
+    verify = tenant_erasure.index("_audit_event_was_committed", commit)
+    restore = tenant_erasure.index("_restore_staged_paths", verify)
+    assert commit < verify < restore
+    assert "leaving artifacts quarantined and queue closed" in tenant_erasure
+    assert "if not commit_attempted" in tenant_erasure
+
+    find_jobs = item_erasure.index("_find_identifier_arq_jobs")
+    purge_jobs = item_erasure.index("_purge_arq_jobs", find_jobs)
+    delete_jobs = item_erasure.index("delete(Job)", purge_jobs)
+    delete_item = item_erasure.index("delete(Item)", delete_jobs)
+    assert find_jobs < purge_jobs < delete_jobs < delete_item
+    assert "_audit_event_was_committed" in item_erasure
+    assert "leaving artifacts quarantined" in item_erasure
+
+
 def test_every_worker_honors_tenant_erasure_abort_requests() -> None:
     assert WorkerSettings.allow_abort_jobs is True
     assert MediaWorkerSettings.allow_abort_jobs is True

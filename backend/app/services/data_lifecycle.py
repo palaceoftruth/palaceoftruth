@@ -17,9 +17,10 @@ from arq.utils import timestamp_ms
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import Base
+from app.database import Base, system_async_session
 from app.models.data_lifecycle import DataLifecycleAuditEvent, TenantErasureState
 from app.models.item import Item
+from app.models.job import Job
 from app.services.bundle import acquire_item_artifact_lock, item_artifact_tombstone
 from app.config import settings
 from app.workers.queues import (
@@ -154,6 +155,27 @@ def _payload_references_tenant(
     return False
 
 
+def _payload_references_identifiers(
+    payload: object,
+    identifiers: set[str],
+) -> bool:
+    """Match typed durable identifiers without matching every job for a tenant."""
+    if not isinstance(payload, dict):
+        return False
+    for key, value in payload.items():
+        if key == "args" and _positional_identifiers(value) & identifiers:
+            return True
+        if key.endswith("_id") and key != "tenant_id":
+            if isinstance(value, str) and value in identifiers:
+                return True
+        if key.endswith("_ids") and isinstance(value, (list, tuple)):
+            if any(isinstance(entry, str) and entry in identifiers for entry in value):
+                return True
+        if isinstance(value, dict) and _payload_references_identifiers(value, identifiers):
+            return True
+    return False
+
+
 def _positional_identifiers(value: object) -> set[str]:
     """Extract only UUID-shaped legacy positional IDs, never free-form text."""
     identifiers: set[str] = set()
@@ -239,33 +261,48 @@ async def _find_tenant_arq_jobs(
     return matching_jobs
 
 
-async def _purge_tenant_arq_jobs(
+async def _find_identifier_arq_jobs(
     arq_pool: Any,
     *,
-    tenant_id: str,
-    tenant_identifiers: set[str],
+    identifiers: set[str],
+) -> list[tuple[str, object]]:
+    """Validate queue payloads and match only the supplied durable IDs."""
+    deserializer = getattr(arq_pool, "job_deserializer", None)
+    matching_jobs: list[tuple[str, object]] = []
+    async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
+        key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+        payload = await arq_pool.get(raw_key)
+        if not payload:
+            continue
+        try:
+            definition = deserialize_job(payload, deserializer=deserializer)
+        except (DeserializationError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Could not inspect ARQ payload during item erasure: {key}"
+            ) from exc
+        if _payload_references_identifiers(
+            {"args": definition.args, "kwargs": definition.kwargs}, identifiers
+        ):
+            matching_jobs.append((key.removeprefix(job_key_prefix), raw_key))
+    return matching_jobs
+
+
+async def _purge_arq_jobs(
+    arq_pool: Any,
+    matching_jobs: list[tuple[str, object]],
 ) -> int:
-    """Abort queued/running tenant work and remove serialized job payloads."""
+    """Abort and remove an already validated set of ARQ jobs."""
     queue_names = {
         DEFAULT_WORKER_QUEUE,
         MEDIA_WORKER_QUEUE,
         PALACE_WORKER_QUEUE,
         getattr(arq_pool, "default_queue_name", DEFAULT_WORKER_QUEUE),
     }
-    matching_jobs = await _find_tenant_arq_jobs(
-        arq_pool,
-        tenant_id=tenant_id,
-        tenant_identifiers=tenant_identifiers,
-    )
-
     for job_id, _raw_key in matching_jobs:
         await arq_pool.zadd(abort_jobs_ss, {job_id: timestamp_ms()})
         for queue_name in queue_names:
             await arq_pool.zrem(queue_name, job_id)
 
-    # ARQ workers poll the abort set and remove their in-progress key after the
-    # task accepts cancellation. Do not claim erasure while tenant code is still
-    # running. A timeout fails closed and leaves the permanent marker uncommitted.
     if matching_jobs:
         async with asyncio.timeout(30):
             while any([
@@ -281,6 +318,33 @@ async def _purge_tenant_arq_jobs(
             f"{retry_key_prefix}{job_id}",
         )
     return len(matching_jobs)
+
+
+async def _purge_tenant_arq_jobs(
+    arq_pool: Any,
+    *,
+    tenant_id: str,
+    tenant_identifiers: set[str],
+) -> int:
+    """Abort queued/running tenant work and remove serialized job payloads."""
+    matching_jobs = await _find_tenant_arq_jobs(
+        arq_pool,
+        tenant_id=tenant_id,
+        tenant_identifiers=tenant_identifiers,
+    )
+
+    return await _purge_arq_jobs(arq_pool, matching_jobs)
+
+
+async def _audit_event_was_committed(audit_id: uuid.UUID) -> bool:
+    """Resolve an uncertain commit through a new control-plane connection."""
+    async with system_async_session() as verification_db:
+        committed_id = await verification_db.scalar(
+            select(DataLifecycleAuditEvent.id).where(
+                DataLifecycleAuditEvent.id == audit_id
+            )
+        )
+        return committed_id is not None
 
 
 async def _finalize_committed_tenant_erasure(
@@ -372,6 +436,8 @@ async def erase_tenant_data(
         return counts
 
     staged_paths: list[tuple[Path, Path]] = []
+    audit_id = uuid.uuid4()
+    commit_attempted = False
     await close_tenant_queue(arq_pool, tenant_id)
     try:
         tables = tuple(_tenant_tables())
@@ -414,6 +480,7 @@ async def erase_tenant_data(
             await db.execute(delete(table).where(table.c.tenant_id == tenant_id))
         await db.execute(
             insert(DataLifecycleAuditEvent).values(
+                id=audit_id,
                 subject_tenant_id=tenant_id,
                 subject_item_id=None,
                 action="tenant_erasure",
@@ -430,15 +497,40 @@ async def erase_tenant_data(
             .where(TenantErasureState.subject_tenant_id == tenant_id)
             .values(completed_at=func.now())
         )
+        commit_attempted = True
         await db.commit()
     except Exception:
         await db.rollback()
-        _restore_staged_paths(staged_paths)
-        artifact_tombstone = _tenant_artifact_directory(tenant_id)
-        if artifact_tombstone.is_file() or artifact_tombstone.is_symlink():
-            artifact_tombstone.unlink()
-        await reopen_tenant_queue(arq_pool, tenant_id)
-        raise
+        if not commit_attempted:
+            _restore_staged_paths(staged_paths)
+            artifact_tombstone = _tenant_artifact_directory(tenant_id)
+            if artifact_tombstone.is_file() or artifact_tombstone.is_symlink():
+                artifact_tombstone.unlink()
+            await reopen_tenant_queue(arq_pool, tenant_id)
+            raise
+        try:
+            committed = await _audit_event_was_committed(audit_id)
+        except Exception:
+            logger.critical(
+                "Could not resolve tenant erasure commit outcome for %s; "
+                "leaving artifacts quarantined and queue closed",
+                tenant_id,
+                exc_info=True,
+            )
+            raise
+        if committed:
+            logger.warning(
+                "Tenant erasure commit acknowledgment failed for %s, but the "
+                "committed audit event was confirmed",
+                tenant_id,
+            )
+        else:
+            _restore_staged_paths(staged_paths)
+            artifact_tombstone = _tenant_artifact_directory(tenant_id)
+            if artifact_tombstone.is_file() or artifact_tombstone.is_symlink():
+                artifact_tombstone.unlink()
+            await reopen_tenant_queue(arq_pool, tenant_id)
+            raise
     # Catch an enqueue that was already between its database commit and Redis
     # write when the table locks were acquired.
     await _finalize_committed_tenant_erasure(
@@ -453,18 +545,46 @@ async def erase_tenant_data(
 async def hard_delete_item(
     db: AsyncSession,
     *,
+    arq_pool: Any,
     tenant_id: str,
     item_id: uuid.UUID,
     actor_id: str,
 ) -> bool:
     artifact_lock = acquire_item_artifact_lock(tenant_id, item_id)
     try:
+        audit_id = uuid.uuid4()
+        commit_attempted = False
         tombstone = item_artifact_tombstone(tenant_id, item_id)
         tombstone.parent.mkdir(parents=True, exist_ok=True)
         tombstone_created = not tombstone.exists()
         tombstone.touch(exist_ok=True)
         staged_paths = _stage_item_artifacts(tenant_id, item_id)
         try:
+            job_ids = set(
+                str(value)
+                for value in (
+                    await db.execute(
+                        select(Job.id).where(
+                            Job.item_id == item_id,
+                            Job.tenant_id == tenant_id,
+                        )
+                    )
+                ).scalars()
+            )
+            identifiers = {str(item_id), *job_ids}
+            matching_arq_jobs = await _find_identifier_arq_jobs(
+                arq_pool,
+                identifiers=identifiers,
+            )
+            # Queue removal is irreversible, so do it only after every payload
+            # has been validated. It must finish before the source rows vanish.
+            await _purge_arq_jobs(arq_pool, matching_arq_jobs)
+            await db.execute(
+                delete(Job).where(
+                    Job.item_id == item_id,
+                    Job.tenant_id == tenant_id,
+                )
+            )
             result = await db.execute(
                 delete(Item)
                 .where(Item.id == item_id, Item.tenant_id == tenant_id)
@@ -479,6 +599,7 @@ async def hard_delete_item(
                 return False
             await db.execute(
                 insert(DataLifecycleAuditEvent).values(
+                    id=audit_id,
                     subject_tenant_id=tenant_id,
                     subject_item_id=item_id,
                     action="item_hard_delete",
@@ -486,13 +607,37 @@ async def hard_delete_item(
                     details={"artifact_paths_staged": len(staged_paths)},
                 )
             )
+            commit_attempted = True
             await db.commit()
         except Exception:
             await db.rollback()
-            _restore_staged_paths(staged_paths)
-            if tombstone_created:
-                tombstone.unlink(missing_ok=True)
-            raise
+            if commit_attempted:
+                try:
+                    committed = await _audit_event_was_committed(audit_id)
+                except Exception:
+                    logger.critical(
+                        "Could not resolve item erasure commit outcome for %s; "
+                        "leaving artifacts quarantined",
+                        item_id,
+                        exc_info=True,
+                    )
+                    raise
+                if committed:
+                    logger.warning(
+                        "Item erasure commit acknowledgment failed for %s, but "
+                        "the committed audit event was confirmed",
+                        item_id,
+                    )
+                else:
+                    _restore_staged_paths(staged_paths)
+                    if tombstone_created:
+                        tombstone.unlink(missing_ok=True)
+                    raise
+            else:
+                _restore_staged_paths(staged_paths)
+                if tombstone_created:
+                    tombstone.unlink(missing_ok=True)
+                raise
         _purge_staged_paths(staged_paths)
         quarantine_directories = {staged.parent for _original, staged in staged_paths}
         for quarantine in quarantine_directories:
