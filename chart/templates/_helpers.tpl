@@ -537,11 +537,11 @@ MCP service name.
 
 {{/*
 Migration Job name.
-The suffix changes when the chart version or image tag changes, so GitOps and
-plain Helm installs get one immutable Job per rendered app release.
+The suffix changes when the chart version or effective backend image changes,
+so GitOps and plain Helm installs get one immutable Job per rendered app release.
 */}}
 {{- define "palaceoftruth.migrationJobName" -}}
-{{- $suffix := printf "%s-%s" .Chart.Version (include "palaceoftruth.imageTag" .) | sha256sum | trunc 10 -}}
+{{- $suffix := printf "%s-%s" .Chart.Version (include "palaceoftruth.backendImage" .) | sha256sum | trunc 10 -}}
 {{- printf "%s-migrate-%s" (include "palaceoftruth.fullname" . | trunc 44 | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" }}
 {{- end }}
 

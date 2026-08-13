@@ -62,3 +62,17 @@ test("routes render without waiting for a session request when no legacy key exi
     page.getByRole("heading", { name: "Search the memory graph", exact: true }),
   ).toBeVisible();
 });
+
+test("legacy migration cannot leave the application blank indefinitely", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("sb:browser_api_key", "legacy-secret"));
+  await page.route("**/api/v1/browser/session", async () => {
+    await new Promise(() => undefined);
+  });
+
+  await page.goto("/search");
+
+  await expect(
+    page.getByRole("heading", { name: "Search the memory graph", exact: true }),
+  ).toBeVisible({ timeout: 4_000 });
+  expect(await page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBeNull();
+});

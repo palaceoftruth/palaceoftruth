@@ -25,6 +25,10 @@ def _client(*, hsts: bool = True) -> TestClient:
     def docs() -> PlainTextResponse:
         return PlainTextResponse("swagger")
 
+    @app.get("/docs/oauth2-redirect")
+    def docs_oauth_redirect() -> PlainTextResponse:
+        return PlainTextResponse("oauth callback")
+
     @app.get("/api/v1/denied")
     def denied() -> dict:
         raise HTTPException(status_code=403, detail="Missing API key")
@@ -65,9 +69,11 @@ def test_docs_get_only_the_cdn_policy_required_by_fastapi() -> None:
     client = _client()
 
     docs = client.get("/docs")
+    docs_oauth_redirect = client.get("/docs/oauth2-redirect")
     api = client.get("/api/v1/health")
 
     assert docs.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
+    assert docs_oauth_redirect.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
     assert api.headers["Content-Security-Policy"] == API_CONTENT_SECURITY_POLICY
     assert "https://cdn.jsdelivr.net" in docs.headers["Content-Security-Policy"]
     assert "connect-src 'self'" in docs.headers["Content-Security-Policy"]

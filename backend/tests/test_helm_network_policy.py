@@ -286,6 +286,24 @@ def test_explicit_image_tag_overrides_published_release_digests() -> None:
     assert "ghcr.io/palaceoftruth/palaceoftruth/frontend:operator-build" in images
 
 
+def test_backend_digest_changes_migration_job_identity() -> None:
+    def migration_name(digest: str) -> str:
+        manifests = _render_chart(f"image.backendDigest={digest}")
+        return next(
+            manifest["metadata"]["name"]
+            for manifest in manifests
+            if manifest.get("kind") == "Job"
+            and manifest.get("metadata", {}).get("labels", {}).get(
+                "app.kubernetes.io/component"
+            )
+            == "migration"
+        )
+
+    assert migration_name("sha256:" + "a" * 64) != migration_name(
+        "sha256:" + "b" * 64
+    )
+
+
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:
     manifests = _render_chart(
         "config.palaceSyncS3AllowedEndpointHosts=minio.example.com",

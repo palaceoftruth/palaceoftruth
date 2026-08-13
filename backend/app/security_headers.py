@@ -35,6 +35,7 @@ PERMISSIONS_POLICY = (
 )
 
 STRICT_TRANSPORT_SECURITY = "max-age=63072000; includeSubDomains; preload"
+DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc"})
 
 
 def apply_security_headers(
@@ -73,7 +74,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         policy = (
             DOCS_CONTENT_SECURITY_POLICY
-            if request.url.path in {"/docs", "/redoc"}
+            if request.url.path in DOCS_PATHS
             else API_CONTENT_SECURITY_POLICY
         )
         return apply_security_headers(
