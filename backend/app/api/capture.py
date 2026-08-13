@@ -28,6 +28,8 @@ from app.api.ingest import (
     _enqueue_ingest_job,
     _record_extension_capture_audit,
 )
+from app.services.bundle import persist_upload_artifact_bytes
+from app.utils.file_type import SNIFF_BYTES, matches_extension
 
 router = APIRouter(prefix="/capture", tags=["capture"])
 
@@ -79,6 +81,12 @@ _CANDIDATE_IMAGE_SIZE_LIMIT = 8 * 1024 * 1024
 _CANDIDATE_REDIRECT_LIMIT = 3
 _CANDIDATE_HTTP_TIMEOUT = 10.0
 _IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,7 @@ class _DownloadedImageCandidate:
     normalized_url: str
     final_url: str
     media_type: str
+    extension: str
     byte_hash: str
     byte_size: int
     content: bytes
@@ -248,12 +257,16 @@ async def _download_image_candidate(
                 image_bytes = bytes(content)
         except (httpx.HTTPError, OutboundUrlError) as exc:
             raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
+        extension = _IMAGE_EXTENSIONS[media_type]
+        if not matches_extension(image_bytes[:SNIFF_BYTES], extension):
+            raise HTTPException(status_code=422, detail="image candidate bytes do not match content type")
         byte_hash = hashlib.sha256(image_bytes).hexdigest()
         return _DownloadedImageCandidate(
             candidate=candidate,
             normalized_url=normalized_candidate_url,
             final_url=final_url,
             media_type=media_type,
+            extension=extension,
             byte_hash=byte_hash,
             byte_size=len(image_bytes),
             content=image_bytes,
@@ -424,6 +437,19 @@ async def _create_browser_image_items(
         )
         db.add(child_item)
         await db.flush()
+        storage_path = persist_upload_artifact_bytes(
+            downloaded.content,
+            tenant_id=tenant_id,
+            item_id=child_item.id,
+            extension=downloaded.extension,
+        )
+        browser_image = dict(child_item.metadata_["browser_capture_image"])
+        browser_image["artifact"] = {
+            "filename": f"{child_item.id}{downloaded.extension}",
+            "media_type": downloaded.media_type,
+            "storage_path": storage_path,
+        }
+        child_item.metadata_ = {"browser_capture_image": browser_image}
         child_items.append(child_item)
         linked_candidates.append(
             _linked_image_candidate_metadata(

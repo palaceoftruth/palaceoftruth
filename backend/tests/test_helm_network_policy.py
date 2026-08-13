@@ -266,6 +266,26 @@ def test_same_namespace_ingress_controller_uses_narrow_pod_selector() -> None:
     ]
 
 
+def test_explicit_image_tag_overrides_published_release_digests() -> None:
+    digest = "sha256:" + "a" * 64
+    manifests = _render_chart(
+        "image.tag=operator-build",
+        f"image.backendDigest={digest}",
+        f"image.workerDigest={digest}",
+        f"image.frontendDigest={digest}",
+    )
+    images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend:operator-build" in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/frontend:operator-build" in images
+
+
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:
     manifests = _render_chart(
         "config.palaceSyncS3AllowedEndpointHosts=minio.example.com",

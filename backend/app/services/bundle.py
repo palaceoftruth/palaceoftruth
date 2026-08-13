@@ -123,6 +123,20 @@ def persist_upload_artifact(
     return str(destination)
 
 
+def persist_upload_artifact_bytes(
+    content: bytes,
+    *,
+    tenant_id: str,
+    item_id: uuid.UUID,
+    extension: str,
+) -> str:
+    """Atomically persist trusted, size-bounded artifact bytes."""
+    destination = artifact_storage_path(tenant_id, item_id, extension)
+    with io.BytesIO(content) as source:
+        _publish_upload_artifact(source, destination, tenant_id=tenant_id, item_id=item_id)
+    return str(destination)
+
+
 async def build_bundle_archive(
     db: AsyncSession,
     tenant_id: str,

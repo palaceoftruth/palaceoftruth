@@ -459,15 +459,16 @@ def test_browser_capture_routes_social_post_to_webpage_ingest() -> None:
     assert arq_pool.enqueued[0][0] == "process_webpage"
 
 
-def test_browser_capture_social_post_accepts_valid_image_candidates(monkeypatch) -> None:
+def test_browser_capture_social_post_accepts_valid_image_candidates(tmp_path: Path, monkeypatch) -> None:
     _allow_public_image_candidate_dns(monkeypatch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "https://93.184.216.34/media/post-image.jpg"
         assert request.headers["Host"] == "pbs.twimg.com"
         return httpx.Response(
             200,
-            headers={"content-type": "image/jpeg", "content-length": str(len(PNG_1X1_BYTES))},
+            headers={"content-type": "image/png", "content-length": str(len(PNG_1X1_BYTES))},
             content=PNG_1X1_BYTES,
             request=request,
         )
@@ -506,7 +507,7 @@ def test_browser_capture_social_post_accepts_valid_image_candidates(monkeypatch)
             "item_id": str(child_item.id),
             "candidate_url": "https://pbs.twimg.com/media/post-image.jpg",
             "final_url": "https://pbs.twimg.com/media/post-image.jpg",
-            "media_type": "image/jpeg",
+            "media_type": "image/png",
             "byte_hash": image_hash,
             "byte_size": len(PNG_1X1_BYTES),
             "order": 0,
@@ -517,6 +518,8 @@ def test_browser_capture_social_post_accepts_valid_image_candidates(monkeypatch)
     assert child_item.title == "diagram from the post"
     assert child_item.status == "captured"
     assert child_item.content_hash is None
+    artifact = child_item.metadata_["browser_capture_image"]["artifact"]
+    assert Path(artifact["storage_path"]).read_bytes() == PNG_1X1_BYTES
     assert child_item.metadata_["browser_capture_image"] == {
         "source": "browser_image_candidate",
         "status": "captured_not_processed",
@@ -524,13 +527,18 @@ def test_browser_capture_social_post_accepts_valid_image_candidates(monkeypatch)
         "source_post_url": "https://x.com/Zephyr_hg/status/2051708305819435445",
         "candidate_url": "https://pbs.twimg.com/media/post-image.jpg",
         "final_url": "https://pbs.twimg.com/media/post-image.jpg",
-        "media_type": "image/jpeg",
+        "media_type": "image/png",
         "byte_hash": image_hash,
         "byte_size": len(PNG_1X1_BYTES),
         "order": 0,
         "alt_text": "diagram from the post",
         "role": "post_image",
         "dimensions": {"width": 1200, "height": 675},
+        "artifact": {
+            "filename": f"{child_item.id}.png",
+            "media_type": "image/png",
+            "storage_path": artifact["storage_path"],
+        },
     }
     assert session.added_web_saves[0].metadata_["browser_capture"]["preview_media"] == linked_candidates
     assert arq_pool.enqueued[0][0] == "process_webpage"
@@ -677,13 +685,14 @@ def test_browser_capture_rejects_oversized_streamed_image_candidate(monkeypatch)
     assert arq_pool.enqueued == []
 
 
-def test_browser_capture_dedupes_duplicate_image_candidates_before_insert(monkeypatch) -> None:
+def test_browser_capture_dedupes_duplicate_image_candidates_before_insert(tmp_path: Path, monkeypatch) -> None:
     _allow_public_image_candidate_dns(monkeypatch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            headers={"content-type": "image/jpeg"},
+            headers={"content-type": "image/png"},
             content=PNG_1X1_BYTES,
             request=request,
         )
@@ -737,13 +746,14 @@ def test_browser_capture_rejects_too_many_image_candidates() -> None:
     assert arq_pool.enqueued == []
 
 
-def test_browser_capture_marks_linked_image_candidates_failed_when_enqueue_fails(monkeypatch) -> None:
+def test_browser_capture_marks_linked_image_candidates_failed_when_enqueue_fails(tmp_path: Path, monkeypatch) -> None:
     _allow_public_image_candidate_dns(monkeypatch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            headers={"content-type": "image/jpeg"},
+            headers={"content-type": "image/png"},
             content=PNG_1X1_BYTES,
             request=request,
         )

@@ -94,23 +94,24 @@ def _restore_item(row: Item) -> None:
 
 def _image_artifact_storage_path(row: Item) -> Path | None:
     metadata = row.metadata_ or {}
-    image_analysis = metadata.get("image_analysis")
-    if not isinstance(image_analysis, dict):
-        return None
-    artifact = image_analysis.get("artifact")
-    if not isinstance(artifact, dict):
-        return None
-    storage_path = artifact.get("storage_path")
-    if not isinstance(storage_path, str) or not storage_path.strip():
-        return None
-
-    resolved = Path(storage_path).expanduser().resolve()
     allowed_root = Path(settings.upload_artifact_dir).expanduser().resolve()
-    try:
-        resolved.relative_to(allowed_root)
-    except ValueError:
-        return None
-    return resolved
+    for owner_key in ("image_analysis", "browser_capture_image"):
+        artifact_owner = metadata.get(owner_key)
+        if not isinstance(artifact_owner, dict):
+            continue
+        artifact = artifact_owner.get("artifact")
+        if not isinstance(artifact, dict):
+            continue
+        storage_path = artifact.get("storage_path")
+        if not isinstance(storage_path, str) or not storage_path.strip():
+            continue
+        resolved = Path(storage_path).expanduser().resolve()
+        try:
+            resolved.relative_to(allowed_root)
+        except ValueError:
+            continue
+        return resolved
+    return None
 
 
 async def _schedule_palace_dirty(request: Request, item_ids: list[uuid.UUID], reason: str) -> None:
@@ -355,6 +356,22 @@ async def get_item_artifact(
             image_url=image_url,
             source_url=source_url,
         )
+        from app.services.bundle import persist_upload_artifact_bytes
+
+        storage_path_value = persist_upload_artifact_bytes(
+            downloaded.content,
+            tenant_id=str(row.tenant_id),
+            item_id=row.id,
+            extension=downloaded.extension,
+        )
+        browser_image = dict(browser_image)
+        browser_image["artifact"] = {
+            "filename": f"{row.id}{downloaded.extension}",
+            "media_type": downloaded.media_type,
+            "storage_path": storage_path_value,
+        }
+        row.metadata_ = {**metadata, "browser_capture_image": browser_image}
+        await db.commit()
         return Response(
             content=downloaded.content,
             media_type=downloaded.media_type,
