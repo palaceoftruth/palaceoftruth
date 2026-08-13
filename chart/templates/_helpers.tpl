@@ -508,7 +508,26 @@ each published chart revision renders immutable image tags.
 Backend image reference.
 */}}
 {{- define "palaceoftruth.backendImage" -}}
+{{- if .Values.image.tag -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.image.backendRepository .Values.image.tag }}
+{{- else if .Values.image.backendDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.backendRepository .Values.image.backendDigest }}
+{{- else -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.backendRepository (include "palaceoftruth.imageTag" .) }}
+{{- end -}}
+{{- end }}
+
+{{/* Worker image reference. */}}
+{{- define "palaceoftruth.workerImage" -}}
+{{- if .Values.image.workerTag -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.image.workerRepository .Values.image.workerTag }}
+{{- else if .Values.image.tag -}}
+{{- include "palaceoftruth.backendImage" . }}
+{{- else if .Values.image.workerDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.workerRepository .Values.image.workerDigest }}
+{{- else -}}
+{{- include "palaceoftruth.backendImage" . }}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -520,11 +539,11 @@ MCP service name.
 
 {{/*
 Migration Job name.
-The suffix changes when the chart version or image tag changes, so GitOps and
-plain Helm installs get one immutable Job per rendered app release.
+The suffix changes when the chart version or effective backend image changes,
+so GitOps and plain Helm installs get one immutable Job per rendered app release.
 */}}
 {{- define "palaceoftruth.migrationJobName" -}}
-{{- $suffix := printf "%s-%s" .Chart.Version (include "palaceoftruth.imageTag" .) | sha256sum | trunc 10 -}}
+{{- $suffix := printf "%s-%s" .Chart.Version (include "palaceoftruth.backendImage" .) | sha256sum | trunc 10 -}}
 {{- printf "%s-migrate-%s" (include "palaceoftruth.fullname" . | trunc 44 | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -587,7 +606,13 @@ Effective local embedding HTTP URL.
 Frontend image reference.
 */}}
 {{- define "palaceoftruth.frontendImage" -}}
+{{- if .Values.image.tag -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendRepository .Values.image.tag }}
+{{- else if .Values.image.frontendDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.frontendRepository .Values.image.frontendDigest }}
+{{- else -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendRepository (include "palaceoftruth.imageTag" .) }}
+{{- end -}}
 {{- end }}
 
 {{/*

@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     # API auth
     api_key: str
     api_key_ttl_days: int = 90
+    expose_api_docs: bool = False
     # Server-side pepper for stored credential verifiers (API keys, OAuth
     # secrets, access and refresh tokens, extension tokens, pairing keys).
     # When set, verifiers are stored as HMAC-SHA256 under this value, so a

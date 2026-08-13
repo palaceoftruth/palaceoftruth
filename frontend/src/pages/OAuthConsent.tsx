@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, api, hasBrowserSession } from "../api/client";
 import type { McpOAuthAuthorizationInteraction } from "../api/types";
+import { safeOAuthRedirect } from "../lib/safeUrl";
 
 function ScopeList({ label, values, empty }: { label: string; values: string[]; empty: string }) {
   return (
@@ -96,8 +97,9 @@ export default function OAuthConsent() {
     setError(null);
     try {
       const result = await api.decideMcpAuthorizationInteraction(interactionId, decision, csrfToken, consentBinding.session);
-      // Only the validated server response determines the external callback location.
-      window.location.assign(result.redirect_uri);
+      const callback = safeOAuthRedirect(result.redirect_uri);
+      if (!callback) throw new Error("Palace returned an unsafe authorization callback.");
+      window.location.assign(callback);
     } catch (reason) {
       setSubmitting(null);
       setError(reason instanceof ApiError ? reason.message : "The consent decision could not be completed.");

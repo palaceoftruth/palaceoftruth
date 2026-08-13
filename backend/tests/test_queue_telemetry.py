@@ -8,6 +8,7 @@ from arq.jobs import serialize_job, serialize_result
 
 from app.services.queue_telemetry import build_memory_queue_hint, build_worker_backpressure
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_WORKER_QUEUE, PALACE_WORKER_QUEUE, worker_health_check_key
+from app.workers.serialization import job_serializer
 
 
 class FakeArqPool:
@@ -33,6 +34,7 @@ class FakeArqPool:
                 {"job_id": "job-1"},
                 None,
                 now_ms - 120_000,
+                serializer=job_serializer,
             ),
             f"{job_key_prefix}relationship-1": serialize_job(
                 "extract_relationships",
@@ -40,6 +42,7 @@ class FakeArqPool:
                 {"item_id": "item-1"},
                 None,
                 now_ms + 60_000,
+                serializer=job_serializer,
             ),
             f"{job_key_prefix}media-1": serialize_job(
                 "process_media",
@@ -47,6 +50,7 @@ class FakeArqPool:
                 {"job_id": "job-media"},
                 None,
                 now_ms - 90_000,
+                serializer=job_serializer,
             ),
             f"{job_key_prefix}wrong-media-queue-1": serialize_job(
                 "extract_relationships",
@@ -54,6 +58,7 @@ class FakeArqPool:
                 {"item_id": "item-1"},
                 None,
                 now_ms - 30_000,
+                serializer=job_serializer,
             ),
             f"{job_key_prefix}palace-1": serialize_job(
                 "palace_run_build",
@@ -61,6 +66,7 @@ class FakeArqPool:
                 {"palace_run_id": "run-1"},
                 None,
                 now_ms - 30_000,
+                serializer=job_serializer,
             ),
             f"{result_key_prefix}memory-result": serialize_result(
                 "memory_artifact",
@@ -75,6 +81,7 @@ class FakeArqPool:
                 "memory-result",
                 DEFAULT_WORKER_QUEUE,
                 "memory-result",
+                serializer=job_serializer,
             ),
             worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-0"): b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=3 queued=2",
             worker_health_check_key(MEDIA_WORKER_QUEUE, "media-0"): b"Apr-26 12:00:00 j_complete=2 j_failed=0 j_retried=0 j_ongoing=1 queued=1",
@@ -306,6 +313,7 @@ class SaturatedMemoryArqPool(FakeArqPool):
                 {"job_id": job_id},
                 None,
                 score,
+                serializer=job_serializer,
             )
         self.values[worker_health_check_key(DEFAULT_WORKER_QUEUE, "worker-0")] = (
             b"Apr-26 12:00:00 j_complete=4 j_failed=1 j_retried=0 j_ongoing=8 queued=101"

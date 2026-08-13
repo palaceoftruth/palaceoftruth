@@ -43,38 +43,6 @@ async function mockDashboard(page: Parameters<typeof test>[0]["page"]) {
   });
 }
 
-async function mockApiDocs(page: Parameters<typeof test>[0]["page"]) {
-  let requested = false;
-  await page.route("**/api/openapi.json", async (route) => {
-    requested = true;
-    await route.fulfill({
-      json: {
-        openapi: "3.1.0",
-        info: {
-          title: "Palace of Truth",
-          version: "0.1.0",
-        },
-        paths: {
-          "/api/v1/health": {
-            get: {
-              tags: ["system"],
-              summary: "Health check",
-              responses: {
-                "200": {
-                  description: "OK",
-                },
-              },
-            },
-          },
-        },
-      },
-    });
-  });
-  return {
-    wasRequested: () => requested,
-  };
-}
-
 async function mockGraph(
   page: Parameters<typeof test>[0]["page"],
   options:
@@ -138,7 +106,9 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("QuietFirm Staging", { exact: true })).toBeVisible();
     await expect(page.getByText("default", { exact: true })).toBeVisible();
     await expect(page.getByText("destructive_prohibited", { exact: true })).toBeVisible();
-    expect(sessionRequests).toEqual([{ method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: true }) }]);
+    expect(sessionRequests).toEqual([
+      { method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: true }) },
+    ]);
     expect(interactionRequests).toBe(1);
 
     const screenshotDir = process.env.SAR1321_SCREENSHOT_DIR;
@@ -266,22 +236,6 @@ test.describe("Route smoke", () => {
     await expect.poll(() => seenKeys.some(({ endpoint }) => endpoint === "export")).toBe(true);
     expect(seenKeys.length).toBeGreaterThanOrEqual(3);
     expect(seenKeys.every(({ key }) => key === "")).toBe(true);
-  });
-
-  test("api docs route requests and renders the OpenAPI document", async ({ page }) => {
-    const docs = await mockApiDocs(page);
-
-    await page.goto(`/api-docs?e2e=${Date.now()}`);
-
-    // Scalar loads a large lazy bundle before it requests the schema. Give
-    // that bundle time to initialize when the full suite runs in parallel.
-    await expect.poll(docs.wasRequested, { timeout: 15_000 }).toBe(true);
-    await expect(page.getByRole("heading", { name: "API Docs" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Open raw spec" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Reference surface" })).toContainText("/api/openapi.json");
-    await expect(page.getByRole("region", { name: "Contract explorer" })).toContainText("Tenant-aware backend");
-    await expect(page.getByRole("heading", { name: "Palace of Truth" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Health check/ })).toBeVisible();
   });
 
   test("graph route keeps Palace shell chrome around the empty state", async ({ page }) => {
@@ -422,6 +376,10 @@ test.describe("Route smoke", () => {
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("tenant-browser-key");
     expect(await page.evaluate(() => document.cookie)).not.toContain("tenant-browser-key");
     expect(sessionRequests.some(({ method }) => method === "POST")).toBe(true);
+
+    await page.getByRole("link", { name: "Home", exact: true }).click();
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
+    await expect(page.getByText("Signed in as tenant-a", { exact: false })).toBeVisible();
 
     await page.getByRole("button", { name: "Generate pairing key" }).click();
     await expect(page.getByTestId("pairing-key-reveal")).toBeVisible();

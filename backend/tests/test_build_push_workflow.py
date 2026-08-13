@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "build-push.yml"
 GH_SETUP_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "setup-gh" / "action.yml"
 TRUSTED_RUNNER = "palace-trusted-amd64"
-HOSTED_RUNNER = "ubuntu-24.04"
+PR_RUNNER = "ubuntu-24.04"
 GH_SETUP_ACTION = "./.github/actions/setup-gh"
 CHECKOUT_ACTION = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
 COMMIT_PINNED_ACTION = re.compile(r"^[^./][^@]*@[0-9a-f]{40}$")
@@ -27,8 +27,8 @@ def _normalize_expression(value: str) -> str:
 
 
 def _expected_validation_runner(event_name: str, head_repository: str | None) -> str:
-    if event_name == "pull_request" and head_repository != "palaceoftruth/palaceoftruth":
-        return HOSTED_RUNNER
+    if event_name == "pull_request":
+        return PR_RUNNER
     return TRUSTED_RUNNER
 
 
@@ -38,21 +38,35 @@ def test_validation_preserves_one_job_name_and_routes_by_pr_trust() -> None:
     validate = workflow["jobs"]["ci-gate"]
 
     assert _normalize_expression(classify["runs-on"]) == (
-        "${{ github.event_name == 'pull_request' && "
-        "github.event.pull_request.head.repo.full_name != github.repository && "
-        "'ubuntu-24.04' || 'palace-trusted-amd64' }}"
+        "${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}"
     )
     assert _normalize_expression(validate["runs-on"]) == (
-        "${{ github.event_name == 'pull_request' && "
-        "github.event.pull_request.head.repo.full_name != github.repository && "
-        "'ubuntu-24.04' || 'palace-trusted-amd64' }}"
+        "${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}"
     )
     assert validate["name"] == "validate"
     assert validate["if"] == "always()"
-    assert _expected_validation_runner("pull_request", "palaceoftruth/palaceoftruth") == TRUSTED_RUNNER
-    assert _expected_validation_runner("pull_request", "contributor/palaceoftruth") == HOSTED_RUNNER
+    assert _expected_validation_runner("pull_request", "palaceoftruth/palaceoftruth") == PR_RUNNER
+    assert _expected_validation_runner("pull_request", "contributor/palaceoftruth") == PR_RUNNER
     assert _expected_validation_runner("push", None) == TRUSTED_RUNNER
     assert _expected_validation_runner("workflow_dispatch", None) == TRUSTED_RUNNER
+
+
+def test_chart_release_classifier_matches_digest_coordinate_commit() -> None:
+    jobs = _load_workflow()["jobs"]
+    run = jobs["classify"]["steps"][1]["run"]
+
+    assert '"${#CHANGED_FILES[@]}" -eq 2' in run
+    assert '"${CHANGED_FILES[0]}" = "chart/Chart.yaml"' in run
+    assert '"${CHANGED_FILES[1]}" = "chart/values.yaml"' in run
+
+    release_scope = next(
+        step
+        for step in jobs["publish-chart"]["steps"]
+        if step.get("name") == "Detect chart-only release bump"
+    )["run"]
+    assert '"${#CHANGED_FILES[@]}" -eq 2' in release_scope
+    assert '"${CHANGED_FILES[0]}" = "chart/Chart.yaml"' in release_scope
+    assert '"${CHANGED_FILES[1]}" = "chart/values.yaml"' in release_scope
 
 
 def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:
@@ -79,10 +93,12 @@ def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:
     )
     assert jobs["build-backend"]["permissions"] == {
         "contents": "write",
+        "id-token": "write",
         "packages": "write",
     }
     assert jobs["build-frontend"]["permissions"] == {
         "contents": "read",
+        "id-token": "write",
         "packages": "write",
     }
     assert jobs["publish-agent-plugin"]["permissions"] == {"contents": "write"}
@@ -148,7 +164,7 @@ def test_every_trusted_job_using_gh_provisions_the_pinned_cli_first() -> None:
     assert jobs_using_gh == {"build-backend", "publish-agent-plugin", "publish-chart"}
 
 
-def test_image_builds_are_parallel_cached_and_digest_bound() -> None:
+def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
     jobs = _load_workflow()["jobs"]
     backend = jobs["build-backend"]
     frontend = jobs["build-frontend"]
@@ -162,6 +178,7 @@ def test_image_builds_are_parallel_cached_and_digest_bound() -> None:
     assert backend_steps["backend_runtime"]["with"]["target"] == "backend-runtime"
     assert backend_steps["backend_ci"]["with"]["target"] == "backend-ci"
     assert backend_steps["backend"]["with"]["target"] == "app"
+    assert backend_steps["worker"]["with"]["target"] == "worker"
     assert backend["outputs"]["backend_digest"] == "${{ steps.backend.outputs.digest }}"
     assert backend["outputs"]["backend_runtime_digest"] == (
         "${{ steps.backend_runtime.outputs.digest }}"
@@ -179,7 +196,10 @@ def test_image_builds_are_parallel_cached_and_digest_bound() -> None:
             if not step.get("uses", "").startswith("docker/build-push-action@"):
                 continue
             assert "cache-to" not in step["with"]
-            assert "type=registry" in step["with"]["cache-from"]
+            assert "cache-from" not in step["with"]
+            assert step["with"]["provenance"] == "true"
+            assert step["with"]["sbom"] == "true"
+            assert ":latest" not in step["with"]["tags"]
 
     digest_step = next(
         step for step in publish_chart["steps"] if step.get("name") == "Record published image digests"
@@ -313,7 +333,13 @@ def test_backend_dockerfile_uses_pinned_locked_image_targets() -> None:
     # The chart sets runAsNonRoot with runAsUser 10001, so the image must
     # already own its runtime paths at that uid.
     assert "USER 10001:10001" in dockerfile
-    assert "ENV HOME=/home/palace" in dockerfile
+    assert "HOME=/home/palace" in dockerfile
+    backend_runtime = dockerfile.split("FROM runtime-base AS backend-runtime", 1)[1].split(
+        "FROM runtime-base AS worker-runtime", 1
+    )[0]
+    assert "git openssh-client" in backend_runtime
+    assert "ffmpeg" not in backend_runtime
+    assert "playwright" not in backend_runtime
     # Chromium must live outside root's 0700 cache to stay executable.
     assert "ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in dockerfile
     assert dockerfile.index("playwright install") < dockerfile.index("USER 10001")
@@ -347,7 +373,8 @@ def test_chart_publisher_reserves_every_published_oci_version_before_bump() -> N
     script = publish_step["run"]
 
     assert publish_step["env"]["OCI_REGISTRY_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    assert 'OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${{ steps.chart.outputs.name }}"' in script
+    assert publish_step["env"]["CHART_NAME"] == "${{ steps.chart.outputs.name }}"
+    assert 'OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${CHART_NAME}"' in script
     assert "curl --config -" in script
     assert '--user "${GITHUB_ACTOR}:${OCI_REGISTRY_TOKEN}"' not in script
     assert "python3 scripts/list_oci_tags.py" in script

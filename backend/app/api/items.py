@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import ARRAY, Text, bindparam, delete, select, func, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,23 +94,24 @@ def _restore_item(row: Item) -> None:
 
 def _image_artifact_storage_path(row: Item) -> Path | None:
     metadata = row.metadata_ or {}
-    image_analysis = metadata.get("image_analysis")
-    if not isinstance(image_analysis, dict):
-        return None
-    artifact = image_analysis.get("artifact")
-    if not isinstance(artifact, dict):
-        return None
-    storage_path = artifact.get("storage_path")
-    if not isinstance(storage_path, str) or not storage_path.strip():
-        return None
-
-    resolved = Path(storage_path).expanduser().resolve()
     allowed_root = Path(settings.upload_artifact_dir).expanduser().resolve()
-    try:
-        resolved.relative_to(allowed_root)
-    except ValueError:
-        return None
-    return resolved
+    for owner_key in ("image_analysis", "browser_capture_image"):
+        artifact_owner = metadata.get(owner_key)
+        if not isinstance(artifact_owner, dict):
+            continue
+        artifact = artifact_owner.get("artifact")
+        if not isinstance(artifact, dict):
+            continue
+        storage_path = artifact.get("storage_path")
+        if not isinstance(storage_path, str) or not storage_path.strip():
+            continue
+        resolved = Path(storage_path).expanduser().resolve()
+        try:
+            resolved.relative_to(allowed_root)
+        except ValueError:
+            continue
+        return resolved
+    return None
 
 
 async def _schedule_palace_dirty(request: Request, item_ids: list[uuid.UUID], reason: str) -> None:
@@ -338,7 +339,50 @@ async def get_item_artifact(
 
     storage_path = _image_artifact_storage_path(row)
     if storage_path is None or not storage_path.is_file():
-        raise HTTPException(status_code=404, detail="Item artifact not found")
+        metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+        browser_image = metadata.get("browser_capture_image")
+        if not isinstance(browser_image, dict):
+            raise HTTPException(status_code=404, detail="Item artifact not found")
+        image_url = browser_image.get("final_url") or browser_image.get("candidate_url")
+        source_url = browser_image.get("source_post_url")
+        if not isinstance(image_url, str) or not isinstance(source_url, str):
+            raise HTTPException(status_code=404, detail="Item artifact not found")
+
+        # Reuse the capture path's host relationship, DNS, redirect, media-type,
+        # timeout, and size checks. The browser sees only this same-origin URL.
+        from app.api.capture import download_browser_image_for_proxy
+
+        downloaded = await download_browser_image_for_proxy(
+            image_url=image_url,
+            source_url=source_url,
+        )
+        expected_hash = browser_image.get("byte_hash")
+        if isinstance(expected_hash, str) and expected_hash and downloaded.byte_hash != expected_hash:
+            raise HTTPException(status_code=409, detail="Captured image bytes no longer match stored evidence")
+        from app.services.bundle import persist_upload_artifact_bytes
+
+        storage_path_value = persist_upload_artifact_bytes(
+            downloaded.content,
+            tenant_id=str(row.tenant_id),
+            item_id=row.id,
+            extension=downloaded.extension,
+        )
+        browser_image = dict(browser_image)
+        browser_image["artifact"] = {
+            "filename": f"{row.id}{downloaded.extension}",
+            "media_type": downloaded.media_type,
+            "storage_path": storage_path_value,
+        }
+        row.metadata_ = {**metadata, "browser_capture_image": browser_image}
+        await db.commit()
+        return Response(
+            content=downloaded.content,
+            media_type=downloaded.media_type,
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     image_analysis = row.metadata_.get("image_analysis") if isinstance(row.metadata_, dict) else {}
     artifact = image_analysis.get("artifact") if isinstance(image_analysis, dict) else {}

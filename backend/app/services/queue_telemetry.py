@@ -17,6 +17,7 @@ from app.workers.queues import (
     PALACE_WORKER_QUEUE,
     WORKER_HEALTH_CHECK_TTL_SECONDS,
 )
+from app.workers.serialization import job_deserializer
 
 
 _HEALTH_RE = re.compile(r"\bj_ongoing=(?P<ongoing>\d+)\s+queued=(?P<queued>\d+)\b")
@@ -84,14 +85,13 @@ async def _queue_entries(arq_pool: Any, queue_name: str) -> list[tuple[str, floa
 async def _job_functions(arq_pool: Any, job_ids: list[str]) -> dict[str, str]:
     if not job_ids:
         return {}
-    deserializer = getattr(arq_pool, "job_deserializer", None)
     payloads = await arq_pool.mget([f"{job_key_prefix}{job_id}" for job_id in job_ids])
     functions: dict[str, str] = {}
     for job_id, payload in zip(job_ids, payloads, strict=False):
         if payload is None:
             continue
         try:
-            functions[job_id] = deserialize_job(payload, deserializer=deserializer).function
+            functions[job_id] = deserialize_job(payload, deserializer=job_deserializer).function
         except DeserializationError:
             continue
     return functions
@@ -132,7 +132,6 @@ async def _health_by_queue(
 
 
 async def _recent_result_latencies(arq_pool: Any) -> dict[str, list[tuple[datetime, bool, float]]]:
-    deserializer = getattr(arq_pool, "job_deserializer", None)
     by_function: dict[str, list[tuple[datetime, bool, float]]] = {}
     scanned = 0
     async for key in arq_pool.scan_iter(match=f"{result_key_prefix}*", count=100):
@@ -143,7 +142,7 @@ async def _recent_result_latencies(arq_pool: Any) -> dict[str, list[tuple[dateti
         if raw is None:
             continue
         try:
-            result = deserialize_result(raw, deserializer=deserializer)
+            result = deserialize_result(raw, deserializer=job_deserializer)
         except DeserializationError:
             continue
         latency = max((result.finish_time - result.enqueue_time).total_seconds(), 0.0)

@@ -168,13 +168,14 @@ export interface BrowserSession {
 
 export const api = {
   /** Exchange an API key for a session cookie. The key is never stored. */
-  createBrowserSession: (apiKey: string, elevated: boolean) =>
+  createBrowserSession: (apiKey: string, elevated: boolean, signal?: AbortSignal) =>
     req<BrowserSession>("/browser/session", {
       method: "POST",
       body: JSON.stringify({ api_key: apiKey, elevated }),
+      signal,
     }),
 
-  getBrowserSession: () => req<BrowserSession>("/browser/session"),
+  getBrowserSession: (signal?: AbortSignal) => req<BrowserSession>("/browser/session", { signal }),
 
   refreshBrowserSession: () => req<BrowserSession>("/browser/session/refresh", { method: "POST" }),
 

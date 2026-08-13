@@ -183,14 +183,17 @@ def test_postgres_ingress_allows_the_cnpg_operator_and_replication() -> None:
         for rule in rules
         for peer in rule.get("from", [])
     )
-    assert any(
-        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
-            "kubernetes.io/metadata.name"
-        )
-        == "cnpg-system"
+    operator_rule = next(
+        rule
         for rule in rules
-        for peer in rule.get("from", [])
+        if any(
+            peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+                "kubernetes.io/metadata.name"
+            ) == "cnpg-system"
+            for peer in rule.get("from", [])
+        )
     )
+    assert _ports(operator_rule) == {5432, 8000}
 
 
 def test_app_ingress_covers_backend_and_mcp_ports() -> None:
@@ -227,12 +230,122 @@ def test_data_tier_ingress_policies_follow_the_bundled_components() -> None:
     assert "palaceoftruth-postgres-ingress" not in policies
 
 
-def test_frontend_stays_reachable_when_no_ingress_namespace_is_configured() -> None:
+def test_frontend_fails_closed_when_no_ingress_namespace_is_configured() -> None:
+    policy = _policies(
+        _render_chart(
+            "networkPolicy.ingress.ingressControllerNamespace=",
+            "networkPolicy.ingress.ingressControllerPodSelector=null",
+        )
+    )["palaceoftruth-frontend-ingress"]
+
+    assert policy["spec"]["ingress"] == []
+
+
+def test_namespace_default_deny_selects_every_pod() -> None:
+    policies = _policies(_render_chart())
+    assert "palaceoftruth-default-deny-ingress" not in policies
+
+    policy = _policies(
+        _render_chart("networkPolicy.ingress.namespaceDefaultDeny=true")
+    )["palaceoftruth-default-deny-ingress"]
+
+    assert policy["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress"],
+        "ingress": [],
+    }
+
+
+def test_same_namespace_ingress_controller_uses_narrow_pod_selector() -> None:
     policy = _policies(
         _render_chart("networkPolicy.ingress.ingressControllerNamespace=")
     )["palaceoftruth-frontend-ingress"]
 
-    assert policy["spec"]["ingress"] == [{}]
+    assert policy["spec"]["ingress"][0]["from"] == [
+        {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}}}
+    ]
+
+
+def test_explicit_split_image_tags_override_published_release_digests() -> None:
+    digest = "sha256:" + "a" * 64
+    manifests = _render_chart(
+        "image.tag=operator-build",
+        "image.workerTag=operator-build",
+        f"image.backendDigest={digest}",
+        f"image.workerDigest={digest}",
+        f"image.frontendDigest={digest}",
+    )
+    images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend:operator-build" in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/frontend:operator-build" in images
+
+
+def test_legacy_backend_image_override_still_controls_workers() -> None:
+    manifests = _render_chart(
+        "image.registry=mirror.example.test",
+        "image.backendRepository=team/custom-palace",
+        "image.tag=operator-build",
+    )
+    worker_images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        and manifest.get("metadata", {}).get("name") in {
+            "palaceoftruth-worker",
+            "palaceoftruth-media-worker",
+            "palaceoftruth-palace-worker",
+        }
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert worker_images == {"mirror.example.test/team/custom-palace:operator-build"}
+
+
+def test_legacy_default_backend_tag_still_controls_workers() -> None:
+    manifests = _render_chart(
+        "image.tag=legacy-build",
+        f"image.workerDigest=sha256:{'a' * 64}",
+    )
+    worker_images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        and manifest.get("metadata", {}).get("name") in {
+            "palaceoftruth-worker",
+            "palaceoftruth-media-worker",
+            "palaceoftruth-palace-worker",
+        }
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert worker_images == {
+        "ghcr.io/palaceoftruth/palaceoftruth/backend:legacy-build"
+    }
+
+
+def test_backend_digest_changes_migration_job_identity() -> None:
+    def migration_name(digest: str) -> str:
+        manifests = _render_chart(f"image.backendDigest={digest}")
+        return next(
+            manifest["metadata"]["name"]
+            for manifest in manifests
+            if manifest.get("kind") == "Job"
+            and manifest.get("metadata", {}).get("labels", {}).get(
+                "app.kubernetes.io/component"
+            )
+            == "migration"
+        )
+
+    assert migration_name("sha256:" + "a" * 64) != migration_name(
+        "sha256:" + "b" * 64
+    )
 
 
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:

@@ -11,7 +11,6 @@ const SavedWeb = lazy(() => import("./pages/SavedWeb"));
 const Graph = lazy(() => import("./pages/Graph"));
 const Settings = lazy(() => import("./pages/Settings"));
 const ItemDetail = lazy(() => import("./pages/ItemDetail"));
-const ApiDocs = lazy(() => import("./pages/ApiDocs"));
 const Feeds = lazy(() => import("./pages/Feeds"));
 const Sources = lazy(() => import("./pages/Sources"));
 const Palace = lazy(() => import("./pages/Palace"));
@@ -39,7 +38,6 @@ export default function App() {
           <Route path="palace/review-inbox" element={<PalaceReviewInbox />} />
           <Route path="graph" element={<Graph />} />
           <Route path="settings" element={<Settings />} />
-          <Route path="api-docs" element={<ApiDocs />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

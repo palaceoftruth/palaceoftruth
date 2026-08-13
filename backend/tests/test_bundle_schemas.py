@@ -13,6 +13,8 @@ from app.models.item import Item
 from app.schemas.bundle import BUNDLE_VERSION
 from app.services.bundle import (
     BundleValidationError,
+    _restore_upload_artifact_metadata,
+    _restored_item_status,
     build_bundle_archive,
     materialize_bundle_upload_artifacts,
     parse_bundle_archive,
@@ -250,6 +252,55 @@ def test_build_bundle_archive_writes_upload_artifact_bytes(tmp_path: Path) -> No
     }
     assert "storage_path" not in items[0]["upload_artifact"]
     assert artifact_bytes == b"%PDF-1.7 original bytes"
+
+
+def test_browser_image_artifact_round_trips_through_bundle(tmp_path: Path, monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    artifact_path = tmp_path / "captured-image.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\n captured evidence")
+    item = Item(
+        id=uuid.uuid4(),
+        source_type="image_candidate",
+        title="Captured evidence",
+        metadata_={
+            "browser_capture_image": {
+                "candidate_url": "https://cdn.example.test/evidence.png",
+                "byte_hash": "abc123",
+                "artifact": {
+                    "filename": "evidence.png",
+                    "media_type": "image/png",
+                    "storage_path": str(artifact_path),
+                },
+            }
+        },
+        tenant_id="tenant-a",
+        status="captured",
+        created_at=now,
+        updated_at=now,
+    )
+    out_path = tmp_path / "browser-image-bundle.zip"
+
+    asyncio.run(build_bundle_archive(_BundleSession(items=[item]), "tenant-a", str(out_path)))
+
+    with zipfile.ZipFile(out_path) as zf:
+        items = json.loads(zf.read("items.json"))
+        assert zf.read(f"artifacts/{item.id}.png") == artifact_path.read_bytes()
+    exported = items[0]
+    assert exported["upload_artifact"]["source"] == "browser_image_candidate"
+    assert "storage_path" not in exported["metadata"]["browser_capture_image"]["artifact"]
+
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "restored"))
+    bundle_bytes = out_path.read_bytes()
+    payload = parse_bundle_archive(bundle_bytes)
+    materialize_bundle_upload_artifacts(bundle_bytes, payload, tenant_id="tenant-b")
+    restored_metadata = _restore_upload_artifact_metadata(payload.items[0])
+    restored_artifact = restored_metadata["browser_capture_image"]["artifact"]
+
+    assert restored_artifact["filename"] == "evidence.png"
+    assert restored_artifact["media_type"] == "image/png"
+    assert Path(restored_artifact["storage_path"]).read_bytes() == artifact_path.read_bytes()
+    assert "upload_artifact" not in restored_metadata
+    assert _restored_item_status(payload.items[0]) == "captured"
 
 
 def test_materialize_bundle_upload_artifacts_persists_imported_bytes(tmp_path: Path, monkeypatch) -> None:

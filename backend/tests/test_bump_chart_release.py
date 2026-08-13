@@ -34,6 +34,28 @@ def test_bump_chart_release_updates_chart(tmp_path: Path) -> None:
     assert 'appVersion: "abc12345"\n' in chart.read_text(encoding="utf-8")
 
 
+def test_bump_chart_release_records_all_deployable_image_digests(tmp_path: Path) -> None:
+    chart = tmp_path / "Chart.yaml"
+    chart.write_text('version: 0.1.1\nappVersion: "old"\n', encoding="utf-8")
+    values = tmp_path / "values.yaml"
+    values.write_text(
+        'image:\n  backendDigest: ""\n  workerDigest: ""\n  frontendDigest: ""\n',
+        encoding="utf-8",
+    )
+    digest = "sha256:" + "a" * 64
+
+    bump_chart_release(
+        chart,
+        "abc12345",
+        values_path=values,
+        backend_digest=digest,
+        worker_digest=digest,
+        frontend_digest=digest,
+    )
+
+    assert values.read_text(encoding="utf-8").count(f'"{digest}"') == 3
+
+
 def test_bump_chart_release_exceeds_open_and_published_versions(tmp_path: Path) -> None:
     chart = tmp_path / "Chart.yaml"
     chart.write_text(

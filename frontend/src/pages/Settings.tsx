@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, ClipboardCopy, Key, Loader2, LogOut, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 
-import { api, clearLegacyBrowserApiKey, readLegacyBrowserApiKey } from "../api/client";
+import { api, clearLegacyBrowserApiKey } from "../api/client";
 import type { BrowserSession } from "../api/client";
 import type { BrowserExtensionPairingKey } from "../api/types";
 import PageHeader from "../components/PageHeader";
@@ -53,29 +53,9 @@ export default function Settings() {
       try {
         const current = await api.getBrowserSession();
         if (!cancelled) setSession(current);
-        // A live session makes any leftover key redundant. Drop it either way.
-        clearLegacyBrowserApiKey();
-        return;
       } catch {
-        // No live session. Fall through to the one-time migration below.
+        if (!cancelled) setSession(null);
       }
-
-      // One-time migration off the old localStorage key (H-20): exchange it for
-      // a session, then delete it so no copy of the key is left in the browser.
-      const legacyKey = readLegacyBrowserApiKey();
-      if (legacyKey) {
-        try {
-          const migrated = await api.createBrowserSession(legacyKey, false);
-          if (!cancelled) setSession(migrated);
-        } catch {
-          if (!cancelled) {
-            setApiKeyError("The stored API key is no longer valid. Sign in again with a current key.");
-          }
-        } finally {
-          clearLegacyBrowserApiKey();
-        }
-      }
-      if (!cancelled) setSessionLoading(false);
     };
 
     void restore().finally(() => {

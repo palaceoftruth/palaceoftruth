@@ -10,6 +10,7 @@ from pathlib import Path
 
 VERSION_RE = re.compile(r"^(version:\s*)(\"?)(\d+)\.(\d+)\.(\d+)(\"?)(\s*)$")
 APP_VERSION_RE = re.compile(r"^(appVersion:\s*).*$")
+IMAGE_DIGEST_RE = re.compile(r"^(\s{2})(backendDigest|workerDigest|frontendDigest):\s*.*$")
 SEMVER_RE = re.compile(
     r"^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:[+_][0-9A-Za-z.-]+)?$"
 )
@@ -42,6 +43,10 @@ def bump_chart_release(
     app_version: str,
     *,
     reserved_versions: set[str] | None = None,
+    values_path: Path | None = None,
+    backend_digest: str | None = None,
+    worker_digest: str | None = None,
+    frontend_digest: str | None = None,
 ) -> str:
     if not chart_path.is_file():
         raise ValueError(f"Chart file does not exist: {chart_path}")
@@ -76,6 +81,28 @@ def bump_chart_release(
     )
 
     chart_path.write_text("\n".join(chart_lines) + "\n", encoding="utf-8")
+    digests = {
+        "backendDigest": backend_digest,
+        "workerDigest": worker_digest,
+        "frontendDigest": frontend_digest,
+    }
+    if any(digests.values()):
+        if not values_path or not values_path.is_file() or not all(digests.values()):
+            raise ValueError("values path and all three image digests are required together")
+        for value in digests.values():
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)):
+                raise ValueError(f"Invalid OCI image digest: {value}")
+        values_lines = values_path.read_text(encoding="utf-8").splitlines()
+        updated_keys: set[str] = set()
+        for index, line in enumerate(values_lines):
+            match = IMAGE_DIGEST_RE.match(line)
+            if match and match.group(2) in digests:
+                key = match.group(2)
+                values_lines[index] = f'{match.group(1)}{key}: "{digests[key]}"'
+                updated_keys.add(key)
+        if updated_keys != set(digests):
+            raise ValueError("Failed to find all image digest keys in chart values")
+        values_path.write_text("\n".join(values_lines) + "\n", encoding="utf-8")
     return new_version
 
 
@@ -83,6 +110,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chart", default="chart/Chart.yaml", type=Path)
     parser.add_argument("--app-version", required=True)
+    parser.add_argument("--values", type=Path)
+    parser.add_argument("--backend-digest")
+    parser.add_argument("--worker-digest")
+    parser.add_argument("--frontend-digest")
     parser.add_argument(
         "--reserved-version",
         action="append",
@@ -97,6 +128,10 @@ def main() -> None:
                 args.chart,
                 args.app_version,
                 reserved_versions=set(args.reserved_version),
+                values_path=args.values,
+                backend_digest=args.backend_digest,
+                worker_digest=args.worker_digest,
+                frontend_digest=args.frontend_digest,
             )
         )
     except ValueError as exc:

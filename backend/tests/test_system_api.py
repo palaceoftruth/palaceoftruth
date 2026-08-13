@@ -223,7 +223,7 @@ def _metrics_client(session) -> TestClient:
         yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer test-api-key"})
 
 
 async def _async_ping():
@@ -435,6 +435,15 @@ def test_metrics_exports_low_cardinality_operational_telemetry() -> None:
     assert "private.example" not in body
     assert "customer-123" not in body
     assert "raw user query" not in body
+
+
+def test_metrics_rejects_public_unauthenticated_requests() -> None:
+    client = _metrics_client(MetricsSession())
+
+    response = client.get("/api/v1/metrics", headers={"Authorization": ""})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
 
 
 def test_metrics_degrades_to_error_gauge_when_database_scrape_fails() -> None:

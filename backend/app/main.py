@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from arq import create_pool
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import select
 
@@ -37,7 +38,7 @@ from app.database import async_session
 from app.logging_config import configure_logging
 from app.models.palace import SyncSource
 from app.schemas.palace import SyncSourceCreate
-from app.security_headers import SecurityHeadersMiddleware
+from app.security_headers import SecurityHeadersMiddleware, apply_security_headers
 from app.security_rate_limit import SecurityRateLimitMiddleware
 from app.services.embedder import EmbeddingService
 from app.services.llm import LLMService
@@ -230,7 +231,9 @@ app = FastAPI(
     title="Palace of Truth",
     version="0.1.0",
     lifespan=lifespan,
-    openapi_url="/api/openapi.json",  # reachable through nginx /api/ proxy
+    docs_url="/docs" if settings.expose_api_docs else None,
+    redoc_url="/redoc" if settings.expose_api_docs else None,
+    openapi_url="/api/openapi.json" if settings.expose_api_docs else None,
 )
 
 def _cors_allowed_origins() -> list[str]:
@@ -286,6 +289,14 @@ async def record_http_metrics(request, call_next):
 
 
 app.state.prometheus_http_metrics = _HTTP_METRICS
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logger.exception("Unhandled request exception", exc_info=exc)
+    return apply_security_headers(
+        JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    )
 
 app.include_router(system.router, prefix="/api/v1")
 app.include_router(browser_session.router, prefix="/api/v1")

@@ -14,7 +14,11 @@ def build_artifact_citation(
 
     browser_image = metadata.get("browser_capture_image")
     if isinstance(browser_image, dict):
-        return _browser_image_citation(browser_image, source_url=source_url)
+        return _browser_image_citation(
+            browser_image,
+            source_url=source_url,
+            artifact_url=original_artifact_url,
+        )
 
     image_analysis = metadata.get("image_analysis")
     if isinstance(image_analysis, dict):
@@ -52,13 +56,20 @@ def _dimensions(value: Any) -> dict[str, int | None] | None:
     }
 
 
-def _browser_image_citation(data: dict[str, Any], *, source_url: str | None) -> ArtifactCitation:
+def _browser_image_citation(
+    data: dict[str, Any],
+    *,
+    source_url: str | None,
+    artifact_url: str | None,
+) -> ArtifactCitation:
     source_post_url = _string(data.get("source_post_url"))
     candidate_url = _string(data.get("candidate_url"))
     final_url = _string(data.get("final_url"))
     return ArtifactCitation(
         kind="browser_image_candidate",
-        thumbnail_url=final_url or candidate_url,
+        # Search and chat pass the tenant-authenticated Palace artifact route.
+        # Never make a viewer's browser fetch the third-party image directly.
+        thumbnail_url=artifact_url,
         caption=_string(data.get("alt_text")),
         source_url=source_post_url or source_url,
         source_label="Parent social post" if source_post_url else "Source",

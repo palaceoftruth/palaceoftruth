@@ -1,6 +1,5 @@
 import {
   Compass,
-  FileCode2,
   Inbox,
   LayoutDashboard,
   Library,
@@ -40,7 +39,6 @@ export const CAPTURE_NAV: NavItem[] = [
 export const UTILITY_NAV: NavItem[] = [
   { to: "/search", label: "Search", shortLabel: "Search", icon: Search },
   { to: "/graph", label: "Graph", shortLabel: "Graph", icon: Network },
-  { to: "/api-docs", label: "API", shortLabel: "API", icon: FileCode2 },
   { to: "/settings", label: "Settings", shortLabel: "Settings", icon: Settings },
 ];
 

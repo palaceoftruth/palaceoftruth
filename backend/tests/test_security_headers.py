@@ -25,6 +25,10 @@ def _client(*, hsts: bool = True) -> TestClient:
     def docs() -> PlainTextResponse:
         return PlainTextResponse("swagger")
 
+    @app.get("/docs/oauth2-redirect")
+    def docs_oauth_redirect() -> PlainTextResponse:
+        return PlainTextResponse("oauth callback")
+
     @app.get("/api/v1/denied")
     def denied() -> dict:
         raise HTTPException(status_code=403, detail="Missing API key")
@@ -61,15 +65,18 @@ def test_api_responses_deny_framing_and_loading() -> None:
     assert "Permissions-Policy" in response.headers
 
 
-def test_docs_get_the_cdn_policy_and_nothing_else_does() -> None:
+def test_docs_get_only_the_cdn_policy_required_by_fastapi() -> None:
     client = _client()
 
     docs = client.get("/docs")
+    docs_oauth_redirect = client.get("/docs/oauth2-redirect")
     api = client.get("/api/v1/health")
 
     assert docs.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
-    assert "cdn.jsdelivr.net" in docs.headers["Content-Security-Policy"]
-    assert "cdn.jsdelivr.net" not in api.headers["Content-Security-Policy"]
+    assert docs_oauth_redirect.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
+    assert api.headers["Content-Security-Policy"] == API_CONTENT_SECURITY_POLICY
+    assert "https://cdn.jsdelivr.net" in docs.headers["Content-Security-Policy"]
+    assert "connect-src 'self'" in docs.headers["Content-Security-Policy"]
 
 
 def test_headers_reach_error_responses_too() -> None:

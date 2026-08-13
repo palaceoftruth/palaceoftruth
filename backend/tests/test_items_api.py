@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import AsyncMock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ class FakeSession:
     def __init__(self, item) -> None:
         self.item = item
         self.execute_calls: list[tuple[str, dict]] = []
+        self.commits = 0
 
     async def get(self, model, key):
         if model is Item and key == self.item.id:
@@ -50,6 +52,9 @@ class FakeSession:
                 )
             ]
         )
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 class _ScalarResult:
@@ -318,6 +323,96 @@ def test_get_item_artifact_serves_image_analysis_upload(tmp_path: Path, monkeypa
     assert response.content == _PNG_BYTES
     assert response.headers["content-type"] == "image/png"
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_get_item_artifact_proxies_and_persists_legacy_browser_image(tmp_path: Path, monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    session = FakeSession(
+        Item(
+            id=item_id,
+            source_type="image_candidate",
+            title="Diagram",
+            tenant_id="tenant-a",
+            status="ready",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata_={
+                "browser_capture_image": {
+                    "source_post_url": "https://x.com/example/status/123",
+                    "final_url": "https://pbs.twimg.com/media/diagram.jpg",
+                }
+            },
+        )
+    )
+    fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            content=_PNG_BYTES,
+            media_type="image/png",
+            extension=".png",
+            byte_hash="matching-hash",
+        )
+    )
+    monkeypatch.setattr("app.api.capture.download_browser_image_for_proxy", fetch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+
+    response = _client(session).get(f"/api/v1/items/{item_id}/artifact")
+
+    assert response.status_code == 200
+    assert response.content == _PNG_BYTES
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "private, max-age=300"
+    assert session.commits == 1
+    artifact = session.item.metadata_["browser_capture_image"]["artifact"]
+    assert Path(artifact["storage_path"]).read_bytes() == _PNG_BYTES
+    fetch.assert_awaited_once_with(
+        image_url="https://pbs.twimg.com/media/diagram.jpg",
+        source_url="https://x.com/example/status/123",
+    )
+
+    session.item.metadata_["image_analysis"] = {"summary": "A diagram"}
+    second = _client(session).get(f"/api/v1/items/{item_id}/artifact")
+    assert second.status_code == 200
+    assert second.content == _PNG_BYTES
+    fetch.assert_awaited_once()
+
+
+def test_get_item_artifact_rejects_changed_legacy_browser_image(tmp_path: Path, monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    session = FakeSession(
+        Item(
+            id=item_id,
+            source_type="image_candidate",
+            title="Captured evidence",
+            tenant_id="tenant-a",
+            status="ready",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata_={
+                "browser_capture_image": {
+                    "source_post_url": "https://x.com/example/status/123",
+                    "final_url": "https://pbs.twimg.com/media/evidence.jpg",
+                    "byte_hash": "original-hash",
+                }
+            },
+        )
+    )
+    fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            content=_PNG_BYTES,
+            media_type="image/png",
+            extension=".png",
+            byte_hash="changed-hash",
+        )
+    )
+    monkeypatch.setattr("app.api.capture.download_browser_image_for_proxy", fetch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+
+    response = _client(session).get(f"/api/v1/items/{item_id}/artifact")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Captured image bytes no longer match stored evidence"
+    assert session.commits == 0
+    assert not (tmp_path / "uploads").exists()
 
 
 def test_get_item_artifact_refuses_a_media_type_the_bytes_do_not_support(

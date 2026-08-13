@@ -123,6 +123,20 @@ def persist_upload_artifact(
     return str(destination)
 
 
+def persist_upload_artifact_bytes(
+    content: bytes,
+    *,
+    tenant_id: str,
+    item_id: uuid.UUID,
+    extension: str,
+) -> str:
+    """Atomically persist trusted, size-bounded artifact bytes."""
+    destination = artifact_storage_path(tenant_id, item_id, extension)
+    with io.BytesIO(content) as source:
+        _publish_upload_artifact(source, destination, tenant_id=tenant_id, item_id=item_id)
+    return str(destination)
+
+
 async def build_bundle_archive(
     db: AsyncSession,
     tenant_id: str,
@@ -157,7 +171,9 @@ async def _collect_bundle_items(
                 await db.execute(
                     select(Item)
                     .where(Item.tenant_id == tenant_id)
-                    .where(Item.status == "ready")
+                    # Evidence-only browser image items stop at "captured";
+                    # they have no worker pipeline but must still be backed up.
+                    .where(Item.status.in_(("ready", "captured")))
                     .where(Item.deleted_at.is_(None))
                     .order_by(Item.created_at.asc())
                     .offset(offset)
@@ -239,6 +255,19 @@ def _extract_upload_artifact_reference(
 ) -> tuple[dict[str, object], BundleUploadArtifactReference | None]:
     item_metadata = dict(metadata or {})
     raw_upload_artifact = item_metadata.pop("upload_artifact", None)
+    artifact_owner_key: str | None = None
+    if not isinstance(raw_upload_artifact, dict):
+        browser_image = item_metadata.get("browser_capture_image")
+        browser_artifact = (
+            browser_image.get("artifact") if isinstance(browser_image, dict) else None
+        )
+        if isinstance(browser_artifact, dict):
+            raw_upload_artifact = {
+                **browser_artifact,
+                "source": "browser_image_candidate",
+                "extension": Path(str(browser_artifact.get("filename") or "")).suffix,
+            }
+            artifact_owner_key = "browser_capture_image"
     if not isinstance(raw_upload_artifact, dict):
         if raw_upload_artifact is not None:
             item_metadata["upload_artifact"] = raw_upload_artifact
@@ -268,6 +297,14 @@ def _extract_upload_artifact_reference(
         if storage_path and os.path.isfile(storage_path)
         else None
     )
+    if artifact_owner_key is not None:
+        # Keep useful browser evidence metadata but never export a path that is
+        # valid only on the source instance. Restore inserts the new local path.
+        browser_image = dict(item_metadata[artifact_owner_key])
+        browser_artifact = dict(browser_image.get("artifact") or {})
+        browser_artifact.pop("storage_path", None)
+        browser_image["artifact"] = browser_artifact
+        item_metadata[artifact_owner_key] = browser_image
     return item_metadata, BundleUploadArtifactReference(
         source=source if isinstance(source, str) and source else "user_upload",
         filename=filename,
@@ -283,6 +320,19 @@ def _restore_upload_artifact_metadata(item: BundleItemRecord) -> dict[str, objec
     if item.upload_artifact is None:
         return metadata
 
+    if item.upload_artifact.source == "browser_image_candidate":
+        browser_image = dict(metadata.get("browser_capture_image") or {})
+        browser_artifact = dict(browser_image.get("artifact") or {})
+        browser_artifact.update(
+            item.upload_artifact.model_dump(
+                exclude_none=True,
+                include={"filename", "media_type", "storage_path"},
+            )
+        )
+        browser_image["artifact"] = browser_artifact
+        metadata["browser_capture_image"] = browser_image
+        return metadata
+
     # Preserve user-facing upload provenance on restored items without persisting
     # bundle-internal archive paths in generic item metadata.
     metadata["upload_artifact"] = item.upload_artifact.model_dump(
@@ -290,6 +340,17 @@ def _restore_upload_artifact_metadata(item: BundleItemRecord) -> dict[str, objec
         exclude={"bundle_path"},
     )
     return metadata
+
+
+def _restored_item_status(item: BundleItemRecord) -> str:
+    if item.raw_content:
+        return "processing"
+    if (
+        item.upload_artifact is not None
+        and item.upload_artifact.source == "browser_image_candidate"
+    ):
+        return "captured"
+    return "ready"
 
 
 async def _write_conversations_json(zf: zipfile.ZipFile, db: AsyncSession, tenant_id: str) -> None:
@@ -605,7 +666,7 @@ async def run_restore_job(
                     categories=item.categories,
                     content_hash=item.content_hash,
                     tenant_id=tenant_id,
-                    status="processing" if item.raw_content else "ready",
+                    status=_restored_item_status(item),
                     created_at=item.created_at,
                     updated_at=item.updated_at or item.created_at,
                 )

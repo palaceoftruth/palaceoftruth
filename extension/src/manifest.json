@@ -13,5 +13,5 @@
     "type": "module"
   },
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://*/*", "https://*/*"]
+  "optional_host_permissions": ["https://*/*"]
 }

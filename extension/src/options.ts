@@ -13,6 +13,21 @@ function setMessage(text: string, tone: "default" | "error" | "success" = "defau
   message.className = `message ${tone === "default" ? "" : tone}`.trim();
 }
 
+function palaceOriginPattern(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:") {
+    throw new Error("Palace URL must use HTTPS.");
+  }
+  return `${url.origin}/*`;
+}
+
+async function requestPalaceOrigin(value: string): Promise<void> {
+  const origin = palaceOriginPattern(value);
+  if (typeof chrome === "undefined" || !chrome.permissions?.request) return;
+  const granted = await chrome.permissions.request({ origins: [origin] });
+  if (!granted) throw new Error("Palace access was not granted.");
+}
+
 async function hydrate(): Promise<void> {
   const credentials = await getCredentials();
   if (apiBaseUrl) apiBaseUrl.value = credentials?.apiBaseUrl ?? "https://palaceoftruth.test";
@@ -37,7 +52,8 @@ form?.addEventListener("submit", (event) => {
   const version =
     typeof chrome !== "undefined" && chrome.runtime?.getManifest ? chrome.runtime.getManifest().version : "0.1.0";
   setMessage("Requesting scoped capture token...");
-  void issueExtensionToken(baseUrl, key, version)
+  void requestPalaceOrigin(baseUrl)
+    .then(() => issueExtensionToken(baseUrl, key, version))
     .then((credentials) => saveCredentials(credentials))
     .then(() => {
       if (apiKey) apiKey.value = "";

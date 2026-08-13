@@ -1,6 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -11,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import generate_webhook_signing_key, verify_capture_write_auth
+from app.config import settings
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -28,6 +30,8 @@ from app.api.ingest import (
     _enqueue_ingest_job,
     _record_extension_capture_audit,
 )
+from app.services.bundle import BundleValidationError, persist_upload_artifact_bytes
+from app.utils.file_type import SNIFF_BYTES, matches_extension
 
 router = APIRouter(prefix="/capture", tags=["capture"])
 
@@ -50,6 +54,24 @@ _MEDIA_EXTENSIONS = frozenset(
         ".webm",
     }
 )
+
+
+def _remove_browser_image_artifact(item: Item) -> None:
+    """Remove one server-created capture artifact without trusting metadata paths."""
+
+    metadata = item.metadata_ if isinstance(item.metadata_, dict) else {}
+    browser_image = metadata.get("browser_capture_image")
+    artifact = browser_image.get("artifact") if isinstance(browser_image, dict) else None
+    storage_path = artifact.get("storage_path") if isinstance(artifact, dict) else None
+    if not isinstance(storage_path, str) or not storage_path:
+        return
+    allowed_root = Path(settings.upload_artifact_dir).expanduser().resolve()
+    resolved = Path(storage_path).expanduser().resolve()
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        return
+    resolved.unlink(missing_ok=True)
 
 _SOCIAL_HOST_SUFFIXES = (
     "x.com",
@@ -79,6 +101,12 @@ _CANDIDATE_IMAGE_SIZE_LIMIT = 8 * 1024 * 1024
 _CANDIDATE_REDIRECT_LIMIT = 3
 _CANDIDATE_HTTP_TIMEOUT = 10.0
 _IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 
 @dataclass(frozen=True)
@@ -87,8 +115,10 @@ class _DownloadedImageCandidate:
     normalized_url: str
     final_url: str
     media_type: str
+    extension: str
     byte_hash: str
     byte_size: int
+    content: bytes
 
 
 def _normalize_http_url(value: str | None) -> str | None:
@@ -247,16 +277,38 @@ async def _download_image_candidate(
                 image_bytes = bytes(content)
         except (httpx.HTTPError, OutboundUrlError) as exc:
             raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
+        extension = _IMAGE_EXTENSIONS[media_type]
+        if not matches_extension(image_bytes[:SNIFF_BYTES], extension):
+            raise HTTPException(status_code=422, detail="image candidate bytes do not match content type")
         byte_hash = hashlib.sha256(image_bytes).hexdigest()
         return _DownloadedImageCandidate(
             candidate=candidate,
             normalized_url=normalized_candidate_url,
             final_url=final_url,
             media_type=media_type,
+            extension=extension,
             byte_hash=byte_hash,
             byte_size=len(image_bytes),
+            content=image_bytes,
         )
     raise HTTPException(status_code=422, detail="image candidate redirected too many times")
+
+
+async def download_browser_image_for_proxy(*, image_url: str, source_url: str) -> _DownloadedImageCandidate:
+    """Fetch a stored browser image through the capture SSRF controls."""
+    candidate = BrowserImageCandidate(url=image_url, source_post_url=source_url)
+    normalized_url = _validate_candidate_relationship(
+        candidate=candidate,
+        normalized_url=source_url,
+        resolved_kind="social_post",
+    )
+    async with httpx.AsyncClient(timeout=_CANDIDATE_HTTP_TIMEOUT) as client:
+        return await _download_image_candidate(
+            client=client,
+            candidate=candidate,
+            normalized_candidate_url=normalized_url,
+            source_url=source_url,
+        )
 
 
 async def _validate_and_download_image_candidates(
@@ -362,57 +414,81 @@ async def _create_browser_image_items(
 ) -> tuple[list[dict[str, Any]], list[Item]]:
     linked_candidates: list[dict[str, Any]] = []
     child_items: list[Item] = []
+    artifact_paths: list[Path] = []
     seen_candidate_keys: set[tuple[str, str]] = set()
-    for index, downloaded in enumerate(downloaded_candidates):
-        candidate_key = (downloaded.byte_hash, downloaded.final_url)
-        if candidate_key in seen_candidate_keys:
-            continue
-        seen_candidate_keys.add(candidate_key)
-        candidate = downloaded.candidate
-        order = candidate.order if candidate.order is not None else index
-        title = (
-            candidate.alt_text.strip()
-            if candidate.alt_text and candidate.alt_text.strip()
-            else f"Image from {parent_item.title}"
-        )
-        child_item = Item(
-            source_type="image_candidate",
-            source_url=None,
-            title=title,
-            status="captured",
-            tenant_id=tenant_id,
-            content_hash=None,
-            metadata_={
-                "browser_capture_image": {
-                    "source": "browser_image_candidate",
-                    "status": "captured_not_processed",
-                    "parent_item_id": str(parent_item.id),
-                    "source_post_url": normalized_url,
-                    "candidate_url": downloaded.normalized_url,
-                    "final_url": downloaded.final_url,
-                    "media_type": downloaded.media_type,
-                    "byte_hash": downloaded.byte_hash,
-                    "byte_size": downloaded.byte_size,
-                    "order": order,
-                    "alt_text": candidate.alt_text,
-                    "role": candidate.role,
-                    "dimensions": {
-                        "width": candidate.width,
-                        "height": candidate.height,
+    try:
+        # Keep the parent item, job, and web save in the outer transaction. A
+        # failed child artifact then rolls back only the child rows, so the
+        # caller can persist truthful failure and retry state.
+        async with db.begin_nested():
+            for index, downloaded in enumerate(downloaded_candidates):
+                candidate_key = (downloaded.byte_hash, downloaded.final_url)
+                if candidate_key in seen_candidate_keys:
+                    continue
+                seen_candidate_keys.add(candidate_key)
+                candidate = downloaded.candidate
+                order = candidate.order if candidate.order is not None else index
+                title = (
+                    candidate.alt_text.strip()
+                    if candidate.alt_text and candidate.alt_text.strip()
+                    else f"Image from {parent_item.title}"
+                )
+                child_item = Item(
+                    source_type="image_candidate",
+                    source_url=None,
+                    title=title,
+                    status="captured",
+                    tenant_id=tenant_id,
+                    content_hash=None,
+                    metadata_={
+                        "browser_capture_image": {
+                            "source": "browser_image_candidate",
+                            "status": "captured_not_processed",
+                            "parent_item_id": str(parent_item.id),
+                            "source_post_url": normalized_url,
+                            "candidate_url": downloaded.normalized_url,
+                            "final_url": downloaded.final_url,
+                            "media_type": downloaded.media_type,
+                            "byte_hash": downloaded.byte_hash,
+                            "byte_size": downloaded.byte_size,
+                            "order": order,
+                            "alt_text": candidate.alt_text,
+                            "role": candidate.role,
+                            "dimensions": {
+                                "width": candidate.width,
+                                "height": candidate.height,
+                            },
+                        },
                     },
+                )
+                db.add(child_item)
+                await db.flush()
+                storage_path = persist_upload_artifact_bytes(
+                    downloaded.content,
+                    tenant_id=tenant_id,
+                    item_id=child_item.id,
+                    extension=downloaded.extension,
+                )
+                artifact_paths.append(Path(storage_path))
+                browser_image = dict(child_item.metadata_["browser_capture_image"])
+                browser_image["artifact"] = {
+                    "filename": f"{child_item.id}{downloaded.extension}",
+                    "media_type": downloaded.media_type,
+                    "storage_path": storage_path,
                 }
-            },
-        )
-        db.add(child_item)
-        await db.flush()
-        child_items.append(child_item)
-        linked_candidates.append(
-            _linked_image_candidate_metadata(
-                item_id=child_item.id,
-                downloaded=downloaded,
-                order=order,
-            )
-        )
+                child_item.metadata_ = {"browser_capture_image": browser_image}
+                child_items.append(child_item)
+                linked_candidates.append(
+                    _linked_image_candidate_metadata(
+                        item_id=child_item.id,
+                        downloaded=downloaded,
+                        order=order,
+                    )
+                )
+    except (OSError, BundleValidationError):
+        for artifact_path in artifact_paths:
+            artifact_path.unlink(missing_ok=True)
+        raise
     if linked_candidates:
         parent_item.metadata_ = {
             **(parent_item.metadata_ or {}),
@@ -679,13 +755,26 @@ async def capture_browser(
     linked_image_candidates = []
     linked_image_items: list[Item] = []
     if downloaded_image_candidates and normalized_url is not None:
-        linked_image_candidates, linked_image_items = await _create_browser_image_items(
-            db,
-            parent_item=item,
-            tenant_id=request.state.tenant_id,
-            normalized_url=normalized_url,
-            downloaded_candidates=downloaded_image_candidates,
-        )
+        try:
+            linked_image_candidates, linked_image_items = await _create_browser_image_items(
+                db,
+                parent_item=item,
+                tenant_id=request.state.tenant_id,
+                normalized_url=normalized_url,
+                downloaded_candidates=downloaded_image_candidates,
+            )
+        except (OSError, BundleValidationError) as exc:
+            item.status = "failed"
+            job.status = "failed"
+            job.error_message = f"Failed to persist browser image artifact: {exc}"
+            job.completed_at = datetime.now(timezone.utc)
+            if web_save is not None:
+                web_save.archived_at = datetime.now(timezone.utc)
+            await db.commit()
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to persist browser image artifact; capture can be retried",
+            ) from exc
         if web_save is not None:
             web_save.metadata_ = {
                 **(web_save.metadata_ or {}),
@@ -708,6 +797,7 @@ async def capture_browser(
         if web_save is not None:
             web_save.archived_at = datetime.now(timezone.utc)
         for linked_image_item in linked_image_items:
+            _remove_browser_image_artifact(linked_image_item)
             linked_image_item.status = "failed"
         await db.commit()
         raise HTTPException(status_code=503, detail="Capture enqueue failed; job marked failed for retry")

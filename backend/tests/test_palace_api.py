@@ -9,7 +9,7 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from app.api.palace import router
+from app.api.palace import _config_snippets, router
 from app.auth import AuthContext, verify_memory_auth
 from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
@@ -1050,7 +1050,28 @@ def test_register_palace_mcp_client_returns_secret_once_and_config() -> None:
     assert payload["client_secret"] not in payload["config_snippets"]["http_oauth_toml"]
     assert "PALACEOFTRUTH_MCP_BEARER_TOKEN" in payload["config_snippets"]["http_oauth_toml"]
     assert "PALACEOFTRUTH_API_BEARER_TOKEN" in payload["config_snippets"]["oauth_api_token_command"]
-    assert "resource='https://testserver/api/v1'" in payload["config_snippets"]["oauth_api_token_command"]
+    assert "resource=https://testserver/api/v1" in payload["config_snippets"]["oauth_api_token_command"]
+
+
+def test_mcp_config_shell_quotes_untrusted_client_key() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "scheme": "https",
+            "server": ("testserver", 443),
+            "path": "/",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [],
+        }
+    )
+
+    command = _config_snippets(
+        request,
+        client_key="client'$(touch /tmp/palace-shell-injection)",
+    ).oauth_token_command
+
+    assert "client_id='client'\"'\"'$(touch /tmp/palace-shell-injection)'" in command
 
 
 def test_register_palace_public_client_omits_secret_and_config_snippets() -> None:

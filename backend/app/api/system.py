@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, Request, Response
+import secrets
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy import text
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +68,17 @@ async def readiness(request: Request, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/metrics", include_in_schema=False)
+def _require_metrics_credential(authorization: str | None = Header(default=None)) -> None:
+    scheme, _, credential = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not credential or not secrets.compare_digest(credential, settings.api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Metrics credentials are required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@router.get("/metrics", include_in_schema=False, dependencies=[Depends(_require_metrics_credential)])
 async def prometheus_metrics(request: Request, db: AsyncSession = Depends(get_db)):
     body = await build_prometheus_metrics(
         db=db,
