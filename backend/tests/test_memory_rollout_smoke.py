@@ -9,10 +9,22 @@ from typing import Any
 
 import pytest
 
+from app.services.codex_memory_privacy import scan_codex_memory_privacy
 from scripts import check_memory_rollout_smoke as rollout_smoke
 
 
 _MASTER_NOT_FOUND_LINE = "redis.exceptions.MasterNotFoundError: No master found for 'mymaster'"
+
+
+def test_rollout_memory_fixture_passes_secret_quarantine() -> None:
+    entry = rollout_smoke._memory_entry(
+        tenant_id="default",
+        target_name="palace-sarvent",
+        run_id="20260813T093037Z",
+        scope_key="rollout-smoke",
+    )
+
+    assert scan_codex_memory_privacy(entry["body"]).findings == []
 
 
 def _ready_sentinel_pods(count: int = 3) -> list[dict[str, Any]]:
