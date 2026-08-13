@@ -226,6 +226,15 @@ def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
         assert job["permissions"]["attestations"] == "write"
         assert job["permissions"]["id-token"] == "write"
 
+        signing_steps = [
+            step
+            for step in job["steps"]
+            if step.get("name", "").startswith("Sign ")
+        ]
+        assert signing_steps
+        for step in signing_steps:
+            assert "cosign sign --yes --registry-referrers-mode legacy" in step["run"]
+
     digest_step = next(
         step for step in publish_chart["steps"] if step.get("name") == "Record published image digests"
     )
