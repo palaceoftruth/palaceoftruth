@@ -1,0 +1,7 @@
+secrets:
+  - id: aws-access-key-id
+    paths:
+      - "/opt/venv/lib/python3.12/site-packages/yt_dlp/extractor/shahid.py"
+    statement: >-
+      yt-dlp publishes this Shahid service credential in its upstream extractor.
+      Keep this exception limited to that installed dependency file.

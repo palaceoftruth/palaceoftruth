@@ -642,6 +642,7 @@ jobs:
           image-ref: ${{ steps.release.outputs.backend_image }}@${{ steps.backend.outputs.digest }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
           exit-code: "1"
 
       - name: Scan worker image
@@ -650,6 +651,7 @@ jobs:
           image-ref: ${{ steps.release.outputs.worker_image }}@${{ steps.worker.outputs.digest }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
           exit-code: "1"
 
       - name: Package Hermes plugin release assets
