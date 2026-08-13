@@ -624,17 +624,20 @@ jobs:
           BACKEND_CI_IMAGE: ${{ steps.release.outputs.backend_ci_image }}
           BACKEND_CI_DIGEST: ${{ steps.backend_ci.outputs.digest }}
         run: |
-          cosign sign --yes "${BACKEND_IMAGE}@${BACKEND_DIGEST}"
-          cosign sign --yes "${WORKER_IMAGE}@${WORKER_DIGEST}"
-          cosign sign --yes "${BACKEND_RUNTIME_IMAGE}@${BACKEND_RUNTIME_DIGEST}"
-          cosign sign --yes "${BACKEND_CI_IMAGE}@${BACKEND_CI_DIGEST}"
+          # Kyverno's verifyImages controller reads Cosign's digest-tag
+          # signature layout. Cosign v3 defaults to OCI 1.1 referrers, so keep
+          # the admission signature in the compatible legacy location.
+          cosign sign --yes --registry-referrers-mode legacy "${BACKEND_IMAGE}@${BACKEND_DIGEST}"
+          cosign sign --yes --registry-referrers-mode legacy "${WORKER_IMAGE}@${WORKER_DIGEST}"
+          cosign sign --yes --registry-referrers-mode legacy "${BACKEND_RUNTIME_IMAGE}@${BACKEND_RUNTIME_DIGEST}"
+          cosign sign --yes --registry-referrers-mode legacy "${BACKEND_CI_IMAGE}@${BACKEND_CI_DIGEST}"
 
       - name: Sign Hermes plugin image by digest
         if: steps.hermes_plugin.outputs.changed == 'true'
         env:
           IMAGE: ${{ steps.release.outputs.hermes_plugin_image }}
           DIGEST: ${{ steps.hermes_plugin_image.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        run: cosign sign --yes --registry-referrers-mode legacy "${IMAGE}@${DIGEST}"
 
       - name: Scan backend image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
@@ -771,7 +774,7 @@ jobs:
         env:
           IMAGE: ${{ steps.release.outputs.frontend_image }}
           DIGEST: ${{ steps.frontend.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        run: cosign sign --yes --registry-referrers-mode legacy "${IMAGE}@${DIGEST}"
 
       - name: Scan frontend image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
