@@ -4,7 +4,13 @@ fullnameOverride: ""
 image:
   registry: ghcr.io
   backendRepository: palaceoftruth/palaceoftruth/backend
+  workerRepository: palaceoftruth/palaceoftruth/backend-worker
   frontendRepository: palaceoftruth/palaceoftruth/frontend
+  # Published releases set these to exact OCI manifest digests. Blank values
+  # preserve tag-based local chart development only.
+  backendDigest: ""
+  workerDigest: ""
+  frontendDigest: ""
   # Leave blank to default both app images to Chart.appVersion.
   # CI publishes a new chart with appVersion set to the immutable image SHA.
   tag: ""
@@ -293,7 +299,7 @@ postgres:
   # clusterName defaults to <fullname>-postgres when empty
   clusterName: ""
   instances: 1
-  image: ghcr.io/cloudnative-pg/postgresql:16.4
+  image: ghcr.io/cloudnative-pg/postgresql:16.4@sha256:99be063781d171d3971089b49c992706bdab9ccbd2b57cdf126c7542773aedfe
   storage:
     size: 5Gi
   # An empty resources block puts the database in BestEffort QoS, which makes
@@ -370,7 +376,7 @@ postgres:
 # Bundled Valkey (Redis-compatible) deployment
 valkey:
   enabled: true
-  image: valkey/valkey:8-alpine
+  image: valkey/valkey:8-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
 
   # Password authentication on the Valkey data port. Keep this on: ARQ job
   # payloads are executable work items, so an unauthenticated 6379 lets any pod
@@ -418,7 +424,7 @@ valkey:
     # Opt in to redis_exporter sidecars for standalone Valkey and every
     # primary, replica, and Sentinel pod in Sentinel mode.
     enabled: false
-    image: oliver006/redis_exporter:v1.77.0
+    image: oliver006/redis_exporter:v1.77.0@sha256:4c8000eb3525e0f6ed1327499861e272fcce358a9e7a87dd9db74c44607e6d8e
     imagePullPolicy: IfNotPresent
     port: 9121
     # Optional password-file wiring. Both fields are required when either is
@@ -517,6 +523,7 @@ localEmbeddingService:
   image:
     repository: ghcr.io/huggingface/text-embeddings-inference
     tag: cpu-1.9
+    digest: sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
     pullPolicy: IfNotPresent
   modelId: Alibaba-NLP/gte-modernbert-base
   embeddingDimensions: "768"

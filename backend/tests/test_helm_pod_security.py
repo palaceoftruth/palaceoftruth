@@ -283,6 +283,7 @@ def test_frontend_port_stays_consistent_across_resources() -> None:
 
     config = by_kind_name[("ConfigMap", "palaceoftruth-frontend-nginx")]
     assert f"listen {port};" in config["data"]["default.conf"]
+    assert "api-docs|docs|redoc|api/openapi\\.json" in config["data"]["default.conf"]
 
     policy = by_kind_name[
         ("NetworkPolicy", "palaceoftruth-frontend-ingress")

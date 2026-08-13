@@ -26,7 +26,7 @@ spec:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: worker
-          image: {{ include "palaceoftruth.backendImage" . }}
+          image: {{ include "palaceoftruth.workerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "worker") | nindent 10 }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.WorkerSettings"]
@@ -84,7 +84,7 @@ spec:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: media-worker
-          image: {{ include "palaceoftruth.backendImage" . }}
+          image: {{ include "palaceoftruth.workerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "mediaWorker") | nindent 10 }}
           command:
@@ -147,7 +147,7 @@ spec:
         - name: {{ include "palaceoftruth.registrySecretName" . }}
       containers:
         - name: palace-worker
-          image: {{ include "palaceoftruth.backendImage" . }}
+          image: {{ include "palaceoftruth.workerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "palaceWorker") | nindent 10 }}
           command: ["python", "scripts/wait_for_worker_dependencies.py", "--", "arq", "app.workers.worker.PalaceWorkerSettings"]

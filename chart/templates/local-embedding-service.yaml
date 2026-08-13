@@ -42,7 +42,7 @@ spec:
       {{- include "palaceoftruth.podSecurityContext" (list . "localEmbedding") | nindent 6 }}
       containers:
         - name: local-embedding
-          image: "{{ .Values.localEmbeddingService.image.repository }}:{{ .Values.localEmbeddingService.image.tag }}"
+          image: '{{ .Values.localEmbeddingService.image.repository }}@{{ required "localEmbeddingService.image.digest is required" .Values.localEmbeddingService.image.digest }}'
           imagePullPolicy: {{ .Values.localEmbeddingService.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "localEmbedding") | nindent 10 }}
           {{- if .Values.localEmbeddingService.command }}

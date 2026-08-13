@@ -18,12 +18,11 @@ from app.services.data_lifecycle import (
     _stage_tenant_artifacts,
     _tenant_artifact_directory,
 )
-from app.workers.serialization import job_deserializer, job_serializer
+from app.workers.serialization import job_serializer
 
 
 class _FakeArqPool:
     default_queue_name = "arq:queue"
-    job_deserializer = staticmethod(job_deserializer)
 
     def __init__(self, payloads: dict[bytes, bytes]) -> None:
         self.payloads = payloads

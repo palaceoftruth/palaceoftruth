@@ -6,6 +6,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
+import shlex
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response
 from sqlalchemy import select, text
@@ -260,10 +261,10 @@ def _config_snippets(request: Request, *, client_key: str = "<client_key>", scop
             "export PALACEOFTRUTH_MCP_BEARER_TOKEN=$(curl -fsS -X POST "
             f"{token_url} "
             "-d grant_type=client_credentials "
-            f"--data-urlencode client_id={client_key!r} "
+            f"--data-urlencode client_id={shlex.quote(client_key)} "
             '"--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" '
-            f"--data-urlencode scope={scope_arg!r} "
-            f"--data-urlencode resource={mcp_url!r} "
+            f"--data-urlencode scope={shlex.quote(scope_arg)} "
+            f"--data-urlencode resource={shlex.quote(mcp_url)} "
             "| python3 -c 'import json,sys; print(json.load(sys.stdin)[\"access_token\"])')"
         ),
         oauth_api_token_command=(
@@ -271,10 +272,10 @@ def _config_snippets(request: Request, *, client_key: str = "<client_key>", scop
             "export PALACEOFTRUTH_API_BEARER_TOKEN=$(curl -fsS -X POST "
             f"{token_url} "
             "-d grant_type=client_credentials "
-            f"--data-urlencode client_id={client_key!r} "
+            f"--data-urlencode client_id={shlex.quote(client_key)} "
             '"--data-urlencode client_secret=${PALACEOFTRUTH_MCP_CLIENT_SECRET}" '
-            f"--data-urlencode scope={scope_arg!r} "
-            f"--data-urlencode resource={api_base!r} "
+            f"--data-urlencode scope={shlex.quote(scope_arg)} "
+            f"--data-urlencode resource={shlex.quote(api_base)} "
             "| python3 -c 'import json,sys; print(json.load(sys.stdin)[\"access_token\"])')"
         ),
         legacy_api_key_toml=(

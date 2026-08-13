@@ -29,3 +29,18 @@ export function safeExternalUrl(value: unknown): string | undefined {
   if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) return undefined;
   return trimmed;
 }
+
+/** Accept OAuth callbacks only over HTTPS or loopback HTTP. */
+export function safeOAuthRedirect(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return undefined;
+  }
+  if (parsed.username || parsed.password) return undefined;
+  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "localhost";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) return undefined;
+  return parsed.toString();
+}

@@ -508,7 +508,20 @@ each published chart revision renders immutable image tags.
 Backend image reference.
 */}}
 {{- define "palaceoftruth.backendImage" -}}
+{{- if .Values.image.backendDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.backendRepository .Values.image.backendDigest }}
+{{- else -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.backendRepository (include "palaceoftruth.imageTag" .) }}
+{{- end -}}
+{{- end }}
+
+{{/* Worker image reference. */}}
+{{- define "palaceoftruth.workerImage" -}}
+{{- if .Values.image.workerDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.workerRepository .Values.image.workerDigest }}
+{{- else -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.image.workerRepository (include "palaceoftruth.imageTag" .) }}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -587,7 +600,11 @@ Effective local embedding HTTP URL.
 Frontend image reference.
 */}}
 {{- define "palaceoftruth.frontendImage" -}}
+{{- if .Values.image.frontendDigest -}}
+{{- printf "%s/%s@%s" .Values.image.registry .Values.image.frontendRepository .Values.image.frontendDigest }}
+{{- else -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendRepository (include "palaceoftruth.imageTag" .) }}
+{{- end -}}
 {{- end }}
 
 {{/*

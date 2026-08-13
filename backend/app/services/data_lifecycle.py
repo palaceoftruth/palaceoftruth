@@ -30,6 +30,7 @@ from app.workers.queues import (
     close_tenant_queue,
     reopen_tenant_queue,
 )
+from app.workers.serialization import job_deserializer
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,6 @@ def _typed_payload_identifiers(payload: object) -> set[str]:
 
 async def _queued_identifier_candidates(arq_pool: Any) -> set[str]:
     """Validate queued payloads and collect only their possible durable IDs."""
-    deserializer = getattr(arq_pool, "job_deserializer", None)
     candidates: set[str] = set()
     async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
         key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
@@ -238,7 +238,7 @@ async def _queued_identifier_candidates(arq_pool: Any) -> set[str]:
         if not payload:
             continue
         try:
-            definition = deserialize_job(payload, deserializer=deserializer)
+            definition = deserialize_job(payload, deserializer=job_deserializer)
         except (DeserializationError, ValueError, TypeError) as exc:
             raise RuntimeError(
                 f"Could not inspect ARQ payload during tenant erasure: {key}"
@@ -258,7 +258,6 @@ async def _find_tenant_arq_jobs(
     tenant_identifiers: set[str],
 ) -> list[tuple[str, object]]:
     """Validate queue payloads and return only typed tenant references."""
-    deserializer = getattr(arq_pool, "job_deserializer", None)
     matching_jobs: list[tuple[str, object]] = []
     async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
         key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
@@ -266,7 +265,7 @@ async def _find_tenant_arq_jobs(
         if not payload:
             continue
         try:
-            definition = deserialize_job(payload, deserializer=deserializer)
+            definition = deserialize_job(payload, deserializer=job_deserializer)
         except (DeserializationError, ValueError, TypeError) as exc:
             raise RuntimeError(
                 f"Could not inspect ARQ payload during tenant erasure: {key}"
@@ -286,7 +285,6 @@ async def _find_identifier_arq_jobs(
     identifiers: set[str],
 ) -> list[tuple[str, object]]:
     """Validate queue payloads and match only the supplied durable IDs."""
-    deserializer = getattr(arq_pool, "job_deserializer", None)
     matching_jobs: list[tuple[str, object]] = []
     async for raw_key in arq_pool.scan_iter(match=f"{job_key_prefix}*"):
         key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
@@ -294,7 +292,7 @@ async def _find_identifier_arq_jobs(
         if not payload:
             continue
         try:
-            definition = deserialize_job(payload, deserializer=deserializer)
+            definition = deserialize_job(payload, deserializer=job_deserializer)
         except (DeserializationError, ValueError, TypeError) as exc:
             raise RuntimeError(
                 f"Could not inspect ARQ payload during item erasure: {key}"

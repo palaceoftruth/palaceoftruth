@@ -97,10 +97,20 @@ function Confidence({ confidence }: { confidence: number | null | undefined }) {
 
 function ArtifactThumbnail({ url }: { url: string | null | undefined }) {
   const [failed, setFailed] = useState(false);
-  if (!url || failed) {
+  const safeUrl = typeof url === "string" && url.startsWith("/") && !url.startsWith("//") ? url : null;
+  if (!safeUrl || failed) {
     return <ImageIcon className="h-5 w-5 text-zinc-500" />;
   }
-  return <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" onError={() => setFailed(true)} />;
+  return (
+    <img
+      src={safeUrl}
+      alt=""
+      className="h-full w-full object-cover"
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 export default function ArtifactCitation({ citation, compact = false }: ArtifactCitationProps) {

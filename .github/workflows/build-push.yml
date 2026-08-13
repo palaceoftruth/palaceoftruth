@@ -25,12 +25,10 @@ env:
 jobs:
   classify:
     name: Classify changes
-    # Untrusted fork code stays on GitHub-hosted infrastructure. Trusted events
-    # use the repository-scoped ephemeral ARC scale set.
+    # All pull requests are unreviewed code and stay on GitHub-hosted runners.
+    # Trusted release events use the repository-scoped ephemeral ARC scale set.
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 5
@@ -63,8 +61,9 @@ jobs:
             && [ "$BEFORE_SHA" != "$ZERO_SHA" ] \
             && git cat-file -e "${BEFORE_SHA}^{commit}"; then
             mapfile -t CHANGED_FILES < <(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")
-            if [ "${#CHANGED_FILES[@]}" -eq 1 ] \
-              && [ "${CHANGED_FILES[0]}" = "chart/Chart.yaml" ]; then
+            if [ "${#CHANGED_FILES[@]}" -eq 2 ] \
+              && [ "${CHANGED_FILES[0]}" = "chart/Chart.yaml" ] \
+              && [ "${CHANGED_FILES[1]}" = "chart/values.yaml" ]; then
               CHART_RELEASE_ONLY=true
             fi
           fi
@@ -78,12 +77,9 @@ jobs:
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-    # Untrusted fork code stays on GitHub-hosted infrastructure. Trusted events
-    # use the repository-scoped ephemeral ARC scale set.
+    # Pull requests use disposable GitHub-hosted runners; trusted releases use ARC.
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 30
@@ -155,15 +151,13 @@ jobs:
       needs.classify.outputs.chart_release_only != 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 20
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg16@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
         env:
           POSTGRES_USER: palace
           POSTGRES_PASSWORD: palace
@@ -205,9 +199,7 @@ jobs:
       needs.classify.outputs.chart_release_only != 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 15
@@ -225,7 +217,7 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm run build
 
   helm-policy:
@@ -235,9 +227,7 @@ jobs:
     # workflow validation required by the stable branch-protection gate.
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 15
@@ -277,9 +267,7 @@ jobs:
       needs.classify.outputs.chart_release_only != 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
       contents: read
     timeout-minutes: 10
@@ -297,7 +285,7 @@ jobs:
       - name: Build and test extension
         working-directory: extension
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm test
 
   browser:
@@ -307,9 +295,7 @@ jobs:
       needs.classify.outputs.chart_release_only != 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     container:
       image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
       options: --ipc=host
@@ -328,7 +314,7 @@ jobs:
           # The pinned Playwright image already supplies its matching Node and
           # browser runtimes. setup-node is intentionally omitted here because
           # its cache restore can stall inside ARC job containers.
-          npm ci
+          npm ci --ignore-scripts
           # The specs are internally mocked but share a Vite process. One
           # browser worker avoids request-count and screenshot contention.
           npm run test:e2e -- --workers=1
@@ -365,9 +351,7 @@ jobs:
       - browser
     if: always()
     runs-on: >-
-      ${{ github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository &&
-          'ubuntu-24.04' || 'palace-trusted-amd64' }}
+      ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions: {}
     timeout-minutes: 5
     steps:
@@ -437,10 +421,13 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+      id-token: write
       packages: write
     outputs:
       backend_image: ${{ steps.release.outputs.backend_image }}
       backend_digest: ${{ steps.backend.outputs.digest }}
+      worker_image: ${{ steps.release.outputs.worker_image }}
+      worker_digest: ${{ steps.worker.outputs.digest }}
       backend_runtime_image: ${{ steps.release.outputs.backend_runtime_image }}
       backend_runtime_digest: ${{ steps.backend_runtime.outputs.digest }}
       backend_ci_image: ${{ steps.release.outputs.backend_ci_image }}
@@ -502,6 +489,7 @@ jobs:
           BACKEND_IMAGE="${{ env.REGISTRY_HOST }}/${BACKEND_REPO}"
           {
             echo "backend_image=${BACKEND_IMAGE}"
+            echo "worker_image=${BACKEND_IMAGE}-worker"
             echo "backend_runtime_image=${BACKEND_IMAGE}-runtime"
             echo "backend_ci_image=${BACKEND_IMAGE}-ci"
             echo "hermes_plugin_image=${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}/hermes-memory-plugin"
@@ -524,6 +512,9 @@ jobs:
           # cannot export them without the containerd image store.
           driver: docker
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+
       - name: Build and push backend runtime
         id: backend_runtime
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
@@ -532,10 +523,9 @@ jobs:
           target: backend-runtime
           platforms: linux/amd64
           push: true
-          provenance: false
-          sbom: false
+          provenance: true
+          sbom: true
           tags: ${{ steps.release.outputs.backend_runtime_image }}:${{ steps.dependencies.outputs.key }}
-          cache-from: type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
 
       - name: Build and push backend CI image
         id: backend_ci
@@ -545,12 +535,9 @@ jobs:
           target: backend-ci
           platforms: linux/amd64
           push: true
-          provenance: false
-          sbom: false
+          provenance: true
+          sbom: true
           tags: ${{ steps.release.outputs.backend_ci_image }}:${{ steps.dependencies.outputs.key }}
-          cache-from: |
-            type=registry,ref=${{ steps.release.outputs.backend_ci_image }}:buildcache
-            type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
 
       - name: Build and push backend application
         id: backend
@@ -560,14 +547,21 @@ jobs:
           target: app
           platforms: linux/amd64
           push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ steps.release.outputs.backend_image }}:${{ steps.tag.outputs.sha }}
-            ${{ steps.release.outputs.backend_image }}:latest
-          cache-from: |
-            type=registry,ref=${{ steps.release.outputs.backend_image }}:buildcache
-            type=registry,ref=${{ steps.release.outputs.backend_runtime_image }}:buildcache
+          provenance: true
+          sbom: true
+          tags: ${{ steps.release.outputs.backend_image }}:${{ steps.tag.outputs.sha }}
+
+      - name: Build and push worker application
+        id: worker
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./backend
+          target: worker
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.release.outputs.worker_image }}:${{ steps.tag.outputs.sha }}
 
       - name: Build and push Hermes plugin artifact
         if: steps.hermes_plugin.outputs.changed == 'true'
@@ -578,12 +572,48 @@ jobs:
           file: ./third_party_plugins/hermes/memory/palaceoftruth/Dockerfile
           platforms: linux/amd64
           push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ steps.release.outputs.hermes_plugin_image }}:${{ steps.tag.outputs.sha }}
-            ${{ steps.release.outputs.hermes_plugin_image }}:latest
-          cache-from: type=registry,ref=${{ steps.release.outputs.hermes_plugin_image }}:buildcache
+          provenance: true
+          sbom: true
+          tags: ${{ steps.release.outputs.hermes_plugin_image }}:${{ steps.tag.outputs.sha }}
+
+      - name: Sign backend images by digest
+        env:
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          WORKER_IMAGE: ${{ steps.release.outputs.worker_image }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          BACKEND_RUNTIME_IMAGE: ${{ steps.release.outputs.backend_runtime_image }}
+          BACKEND_RUNTIME_DIGEST: ${{ steps.backend_runtime.outputs.digest }}
+          BACKEND_CI_IMAGE: ${{ steps.release.outputs.backend_ci_image }}
+          BACKEND_CI_DIGEST: ${{ steps.backend_ci.outputs.digest }}
+        run: |
+          cosign sign --yes "${BACKEND_IMAGE}@${BACKEND_DIGEST}"
+          cosign sign --yes "${WORKER_IMAGE}@${WORKER_DIGEST}"
+          cosign sign --yes "${BACKEND_RUNTIME_IMAGE}@${BACKEND_RUNTIME_DIGEST}"
+          cosign sign --yes "${BACKEND_CI_IMAGE}@${BACKEND_CI_DIGEST}"
+
+      - name: Sign Hermes plugin image by digest
+        if: steps.hermes_plugin.outputs.changed == 'true'
+        env:
+          IMAGE: ${{ steps.release.outputs.hermes_plugin_image }}
+          DIGEST: ${{ steps.hermes_plugin_image.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.release.outputs.backend_image }}@${{ steps.backend.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan worker image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.release.outputs.worker_image }}@${{ steps.worker.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
       - name: Package Hermes plugin release assets
         if: steps.hermes_plugin.outputs.changed == 'true'
@@ -637,6 +667,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      id-token: write
       packages: write
     outputs:
       frontend_image: ${{ steps.release.outputs.frontend_image }}
@@ -675,6 +706,9 @@ jobs:
           # intentionally omitted because this driver cannot support it here.
           driver: docker
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+
       - name: Build and push frontend application
         id: frontend
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
@@ -682,12 +716,23 @@ jobs:
           context: ./frontend
           platforms: linux/amd64
           push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ steps.release.outputs.frontend_image }}:${{ steps.tag.outputs.sha }}
-            ${{ steps.release.outputs.frontend_image }}:latest
-          cache-from: type=registry,ref=${{ steps.release.outputs.frontend_image }}:buildcache
+          provenance: true
+          sbom: true
+          tags: ${{ steps.release.outputs.frontend_image }}:${{ steps.tag.outputs.sha }}
+
+      - name: Sign frontend image by digest
+        env:
+          IMAGE: ${{ steps.release.outputs.frontend_image }}
+          DIGEST: ${{ steps.frontend.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.release.outputs.frontend_image }}@${{ steps.frontend.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
   publish-agent-plugin:
     needs:
@@ -788,6 +833,8 @@ jobs:
         env:
           BACKEND_IMAGE: ${{ needs.build-backend.outputs.backend_image }}
           BACKEND_DIGEST: ${{ needs.build-backend.outputs.backend_digest }}
+          WORKER_IMAGE: ${{ needs.build-backend.outputs.worker_image }}
+          WORKER_DIGEST: ${{ needs.build-backend.outputs.worker_digest }}
           BACKEND_RUNTIME_IMAGE: ${{ needs.build-backend.outputs.backend_runtime_image }}
           BACKEND_RUNTIME_DIGEST: ${{ needs.build-backend.outputs.backend_runtime_digest }}
           BACKEND_CI_IMAGE: ${{ needs.build-backend.outputs.backend_ci_image }}
@@ -800,6 +847,7 @@ jobs:
             echo "## Published image digests"
             echo
             echo "- Backend: \`${BACKEND_IMAGE}@${BACKEND_DIGEST}\`"
+            echo "- Worker: \`${WORKER_IMAGE}@${WORKER_DIGEST}\`"
             echo "- Frontend: \`${FRONTEND_IMAGE}@${FRONTEND_DIGEST}\`"
             echo "- Backend runtime (${BACKEND_DEPENDENCY_KEY}): \`${BACKEND_RUNTIME_IMAGE}@${BACKEND_RUNTIME_DIGEST}\`"
             echo "- Backend CI (${BACKEND_DEPENDENCY_KEY}): \`${BACKEND_CI_IMAGE}@${BACKEND_CI_DIGEST}\`"
@@ -860,6 +908,10 @@ jobs:
           RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
           GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
           OCI_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART_NAME: ${{ steps.chart.outputs.name }}
+          BACKEND_DIGEST: ${{ needs.build-backend.outputs.backend_digest }}
+          WORKER_DIGEST: ${{ needs.build-backend.outputs.worker_digest }}
+          FRONTEND_DIGEST: ${{ needs.build-frontend.outputs.frontend_digest }}
         run: |
           if [ -z "$RELEASE_PR_TOKEN" ]; then
             echo "RELEASE_PR_TOKEN is required to push a chart release branch and open a PR." >&2
@@ -884,7 +936,7 @@ jobs:
               --jq '.[] | select(.headRefName | startswith("ci/chart-release-")) | .headRefName')
             RESERVED_VERSION_ARGS=()
 
-            OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${{ steps.chart.outputs.name }}"
+            OCI_REPOSITORY="${REGISTRY_NAMESPACE}/${CHART_NAME}"
             OCI_TOKEN=$(printf 'user = "%s:%s"\n' "$GITHUB_ACTOR" "$OCI_REGISTRY_TOKEN" \
               | curl --config - --fail --silent --show-error --retry 3 \
                 --get "https://${REGISTRY_HOST}/token" \
@@ -915,8 +967,14 @@ jobs:
               fi
             done <<< "$CHART_RELEASE_BRANCHES"
 
-            VERSION=$(python3 scripts/bump_chart_release.py --app-version "${GITHUB_SHA::8}" "${RESERVED_VERSION_ARGS[@]}")
-            git add chart/Chart.yaml
+            VERSION=$(python3 scripts/bump_chart_release.py \
+              --app-version "${GITHUB_SHA::8}" \
+              --values chart/values.yaml \
+              --backend-digest "$BACKEND_DIGEST" \
+              --worker-digest "$WORKER_DIGEST" \
+              --frontend-digest "$FRONTEND_DIGEST" \
+              "${RESERVED_VERSION_ARGS[@]}")
+            git add chart/Chart.yaml chart/values.yaml
             git commit -m "chore(ci): bump chart to ${VERSION}"
 
             git fetch origin main
@@ -928,7 +986,7 @@ jobs:
             fi
 
             helm package chart/ --destination /tmp/charts
-            helm push "/tmp/charts/${{ steps.chart.outputs.name }}-${VERSION}.tgz" \
+            helm push "/tmp/charts/${CHART_NAME}-${VERSION}.tgz" \
               oci://${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAMESPACE }}
 
             if git ls-remote --exit-code --heads origin "$RELEASE_BRANCH" >/dev/null 2>&1; then

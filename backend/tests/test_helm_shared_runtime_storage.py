@@ -628,6 +628,13 @@ def test_backend_servicemonitor_renders_when_enabled() -> None:
             "honorLabels": True,
             "interval": "15s",
             "scrapeTimeout": "5s",
+            "authorization": {
+                "type": "Bearer",
+                "credentials": {
+                    "name": "palaceoftruth-app-secrets",
+                    "key": "API_KEY",
+                },
+            },
         }
     ]
 
@@ -662,7 +669,10 @@ def test_standalone_valkey_exporter_renders_hardened_sidecar_and_metrics_service
     exporter = next(container for container in containers if container["name"] == "valkey-exporter")
     env = _container_env(exporter)
 
-    assert exporter["image"] == "oliver006/redis_exporter:v1.77.0"
+    assert exporter["image"] == (
+        "oliver006/redis_exporter:v1.77.0@"
+        "sha256:4c8000eb3525e0f6ed1327499861e272fcce358a9e7a87dd9db74c44607e6d8e"
+    )
     assert env["REDIS_ADDR"] == {"name": "REDIS_ADDR", "value": "redis://127.0.0.1:6379"}
     # Valkey requires a password by default, so the exporter must authenticate.
     assert env["REDIS_PASSWORD"]["valueFrom"]["secretKeyRef"] == {

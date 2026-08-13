@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from app.security_headers import (
     API_CONTENT_SECURITY_POLICY,
-    DOCS_CONTENT_SECURITY_POLICY,
     STRICT_TRANSPORT_SECURITY,
     SecurityHeadersMiddleware,
 )
@@ -61,15 +60,15 @@ def test_api_responses_deny_framing_and_loading() -> None:
     assert "Permissions-Policy" in response.headers
 
 
-def test_docs_get_the_cdn_policy_and_nothing_else_does() -> None:
+def test_docs_do_not_get_a_relaxed_cdn_policy() -> None:
     client = _client()
 
     docs = client.get("/docs")
     api = client.get("/api/v1/health")
 
-    assert docs.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
-    assert "cdn.jsdelivr.net" in docs.headers["Content-Security-Policy"]
-    assert "cdn.jsdelivr.net" not in api.headers["Content-Security-Policy"]
+    assert docs.headers["Content-Security-Policy"] == API_CONTENT_SECURITY_POLICY
+    assert api.headers["Content-Security-Policy"] == API_CONTENT_SECURITY_POLICY
+    assert "cdn.jsdelivr.net" not in docs.headers["Content-Security-Policy"]
 
 
 def test_headers_reach_error_responses_too() -> None:

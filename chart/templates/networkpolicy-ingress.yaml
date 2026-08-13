@@ -21,6 +21,21 @@ holds no database or queue credentials.
 {{- $appPeers := append $dataPeers (include "palaceoftruth.mcpServiceName" .) }}
 {{- $monitoringNamespace := .Values.networkPolicy.ingress.monitoringNamespace }}
 {{- $ingressNamespace := .Values.networkPolicy.ingress.ingressControllerNamespace }}
+---
+# Select every pod first. The policies below then open only the required ports
+# and peers. A newly added workload is denied until its ingress is reviewed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress: []
 {{- if .Values.valkey.enabled }}
 ---
 # Valkey holds the ARQ queues. A write to a queue is a work item some worker
@@ -134,6 +149,11 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingress.cnpgOperatorNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 5432
     {{- end }}
     {{- if $monitoringNamespace }}
     - from:
@@ -232,8 +252,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.frontend.containerPort }}
     {{- else }}
-    # No ingress-controller namespace configured; leave the tier reachable
-    # rather than rendering a policy that black-holes all web traffic.
-    - {}
+    # Fail closed until the ingress-controller namespace is explicit.
+    []
     {{- end }}
 {{- end }}

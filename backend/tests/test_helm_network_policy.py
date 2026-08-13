@@ -130,6 +130,7 @@ def test_ingress_policies_are_enabled_by_default() -> None:
     policies = _policies(_render_chart())
 
     assert {
+        "palaceoftruth-default-deny-ingress",
         "palaceoftruth-valkey-ingress",
         "palaceoftruth-postgres-ingress",
         "palaceoftruth-app-ingress",
@@ -183,14 +184,17 @@ def test_postgres_ingress_allows_the_cnpg_operator_and_replication() -> None:
         for rule in rules
         for peer in rule.get("from", [])
     )
-    assert any(
-        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
-            "kubernetes.io/metadata.name"
-        )
-        == "cnpg-system"
+    operator_rule = next(
+        rule
         for rule in rules
-        for peer in rule.get("from", [])
+        if any(
+            peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+                "kubernetes.io/metadata.name"
+            ) == "cnpg-system"
+            for peer in rule.get("from", [])
+        )
     )
+    assert _ports(operator_rule) == {5432, 8000}
 
 
 def test_app_ingress_covers_backend_and_mcp_ports() -> None:
@@ -227,12 +231,22 @@ def test_data_tier_ingress_policies_follow_the_bundled_components() -> None:
     assert "palaceoftruth-postgres-ingress" not in policies
 
 
-def test_frontend_stays_reachable_when_no_ingress_namespace_is_configured() -> None:
+def test_frontend_fails_closed_when_no_ingress_namespace_is_configured() -> None:
     policy = _policies(
         _render_chart("networkPolicy.ingress.ingressControllerNamespace=")
     )["palaceoftruth-frontend-ingress"]
 
-    assert policy["spec"]["ingress"] == [{}]
+    assert policy["spec"]["ingress"] == []
+
+
+def test_namespace_default_deny_selects_every_pod() -> None:
+    policy = _policies(_render_chart())["palaceoftruth-default-deny-ingress"]
+
+    assert policy["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress"],
+        "ingress": [],
+    }
 
 
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:

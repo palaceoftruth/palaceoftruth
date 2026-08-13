@@ -27,6 +27,9 @@ declare const chrome: {
       args?: Args;
     }): Promise<Array<{ result?: T }>>;
   };
+  permissions: {
+    request(permissions: { origins: string[] }): Promise<boolean>;
+  };
   runtime: {
     getManifest(): { version: string };
     openOptionsPage(): Promise<void>;

@@ -22,4 +22,9 @@ spec:
       honorLabels: {{ .Values.metrics.serviceMonitor.honorLabels }}
       interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout | quote }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "palaceoftruth.appSecretName" . }}
+          key: API_KEY
 {{- end }}
