@@ -309,7 +309,10 @@ def test_legacy_backend_image_override_still_controls_workers() -> None:
 
 
 def test_legacy_default_backend_tag_still_controls_workers() -> None:
-    manifests = _render_chart("image.tag=legacy-build")
+    manifests = _render_chart(
+        "image.tag=legacy-build",
+        f"image.workerDigest=sha256:{'a' * 64}",
+    )
     worker_images = {
         container["image"]
         for manifest in manifests
