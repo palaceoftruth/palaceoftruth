@@ -334,6 +334,12 @@ def test_backend_dockerfile_uses_pinned_locked_image_targets() -> None:
     # already own its runtime paths at that uid.
     assert "USER 10001:10001" in dockerfile
     assert "HOME=/home/palace" in dockerfile
+    backend_runtime = dockerfile.split("FROM runtime-base AS backend-runtime", 1)[1].split(
+        "FROM runtime-base AS worker-runtime", 1
+    )[0]
+    assert "git openssh-client" in backend_runtime
+    assert "ffmpeg" not in backend_runtime
+    assert "playwright" not in backend_runtime
     # Chromium must live outside root's 0700 cache to stay executable.
     assert "ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in dockerfile
     assert dockerfile.index("playwright install") < dockerfile.index("USER 10001")

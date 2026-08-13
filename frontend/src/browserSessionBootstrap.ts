@@ -5,10 +5,7 @@ import type { BrowserSession } from "./api/client";
  * Remove the legacy tenant API key before React renders. If no cookie session
  * exists, exchange the key once after it has been removed from localStorage.
  */
-async function migrateLegacyBrowserSession(): Promise<BrowserSession | null> {
-  const legacyKey = readLegacyBrowserApiKey();
-  clearLegacyBrowserApiKey();
-
+async function migrateLegacyBrowserSession(legacyKey: string): Promise<BrowserSession | null> {
   try {
     return await api.getBrowserSession();
   } catch {
@@ -22,4 +19,10 @@ async function migrateLegacyBrowserSession(): Promise<BrowserSession | null> {
   }
 }
 
-export const browserSessionBootstrap = migrateLegacyBrowserSession();
+const legacyBrowserApiKey = readLegacyBrowserApiKey();
+clearLegacyBrowserApiKey();
+
+export const browserSessionMigrationPending = Boolean(legacyBrowserApiKey);
+export const browserSessionBootstrap = legacyBrowserApiKey
+  ? migrateLegacyBrowserSession(legacyBrowserApiKey)
+  : Promise.resolve(null);

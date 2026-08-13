@@ -50,3 +50,15 @@ test("routes wait for legacy session exchange before rendering", async ({ page }
     page.getByRole("heading", { name: "Search the memory graph", exact: true }),
   ).toBeVisible();
 });
+
+test("routes render without waiting for a session request when no legacy key exists", async ({ page }) => {
+  await page.route("**/api/v1/browser/session", async () => {
+    await new Promise(() => undefined);
+  });
+
+  await page.goto("/search");
+
+  await expect(
+    page.getByRole("heading", { name: "Search the memory graph", exact: true }),
+  ).toBeVisible();
+});

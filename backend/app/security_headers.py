@@ -21,10 +21,12 @@ API_CONTENT_SECURITY_POLICY = (
     "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 DOCS_CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+    "default-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-    "img-src 'self' data: https://fastapi.tiangolo.com"
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; "
+    "img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; "
+    "connect-src 'self'; worker-src 'self' blob:"
 )
 
 PERMISSIONS_POLICY = (

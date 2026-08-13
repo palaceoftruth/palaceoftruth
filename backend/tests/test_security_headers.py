@@ -70,6 +70,7 @@ def test_docs_get_only_the_cdn_policy_required_by_fastapi() -> None:
     assert docs.headers["Content-Security-Policy"] == DOCS_CONTENT_SECURITY_POLICY
     assert api.headers["Content-Security-Policy"] == API_CONTENT_SECURITY_POLICY
     assert "https://cdn.jsdelivr.net" in docs.headers["Content-Security-Policy"]
+    assert "connect-src 'self'" in docs.headers["Content-Security-Policy"]
 
 
 def test_headers_reach_error_responses_too() -> None:

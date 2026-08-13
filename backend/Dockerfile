@@ -32,9 +32,13 @@ RUN groupadd --gid 10001 palace \
     && mkdir -p /tmp/palaceoftruth \
     && chown palace:palace /tmp/palaceoftruth /home/palace
 
-# The API, MCP adapter, migrations, and release hooks use this lean stage. It
-# does not contain uv, git, ssh, ffmpeg, Chromium, or build tools.
+# The API, MCP adapter, migrations, and release hooks use this lean stage.
+# Inline repository sync is an API contract, so it keeps the Git and SSH
+# clients. Media tools, Chromium, uv, and build tools remain worker-only.
 FROM runtime-base AS backend-runtime
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git openssh-client \
+    && rm -rf /var/lib/apt/lists/*
 
 # Only queue workers process media and browser-backed captures. Keep those
 # feature tools in the worker image instead of every public API pod.
