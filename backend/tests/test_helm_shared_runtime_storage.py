@@ -572,17 +572,13 @@ def test_firecrawl_api_key_can_be_sourced_from_external_secret() -> None:
     } in external_secret["spec"]["data"]
 
 
-def test_backend_service_exposes_prometheus_scrape_metadata_without_servicemonitor_by_default() -> None:
+def test_backend_service_does_not_advertise_unauthenticated_metrics_by_default() -> None:
     manifests = _render_chart()
 
     backend_service = _manifest_by_kind_name(manifests, "Service", "palaceoftruth-backend")
 
     assert backend_service["metadata"]["labels"]["app"] == "palaceoftruth-backend"
-    assert backend_service["metadata"]["annotations"] == {
-        "prometheus.io/scrape": "true",
-        "prometheus.io/path": "/api/v1/metrics",
-        "prometheus.io/port": "8000",
-    }
+    assert "annotations" not in backend_service["metadata"]
     assert backend_service["spec"]["ports"][0]["name"] == "http"
     assert not any(manifest.get("kind") == "ServiceMonitor" for manifest in manifests)
 

@@ -520,11 +520,11 @@ Backend image reference.
 {{/* Worker image reference. */}}
 {{- define "palaceoftruth.workerImage" -}}
 {{- if .Values.image.tag -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.workerRepository .Values.image.tag }}
+{{- include "palaceoftruth.backendImage" . }}
 {{- else if .Values.image.workerDigest -}}
 {{- printf "%s/%s@%s" .Values.image.registry .Values.image.workerRepository .Values.image.workerDigest }}
 {{- else -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.workerRepository (include "palaceoftruth.imageTag" .) }}
+{{- include "palaceoftruth.backendImage" . }}
 {{- end -}}
 {{- end }}
 

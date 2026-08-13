@@ -732,10 +732,9 @@ backend:
 
 metrics:
   path: /api/v1/metrics
-  serviceAnnotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/path: /api/v1/metrics
-    prometheus.io/port: "8000"
+  # The metrics endpoint requires the API key. Annotation-based discovery has
+  # no portable way to attach it, so use the authenticated ServiceMonitor.
+  serviceAnnotations: {}
   serviceMonitor:
     # Enable in clusters with the Prometheus Operator ServiceMonitor CRD.
     enabled: false

@@ -398,72 +398,75 @@ async def _create_browser_image_items(
     artifact_paths: list[Path] = []
     seen_candidate_keys: set[tuple[str, str]] = set()
     try:
-        for index, downloaded in enumerate(downloaded_candidates):
-            candidate_key = (downloaded.byte_hash, downloaded.final_url)
-            if candidate_key in seen_candidate_keys:
-                continue
-            seen_candidate_keys.add(candidate_key)
-            candidate = downloaded.candidate
-            order = candidate.order if candidate.order is not None else index
-            title = (
-                candidate.alt_text.strip()
-                if candidate.alt_text and candidate.alt_text.strip()
-                else f"Image from {parent_item.title}"
-            )
-            child_item = Item(
-                source_type="image_candidate",
-                source_url=None,
-                title=title,
-                status="captured",
-                tenant_id=tenant_id,
-                content_hash=None,
-                metadata_={
-                    "browser_capture_image": {
-                        "source": "browser_image_candidate",
-                        "status": "captured_not_processed",
-                        "parent_item_id": str(parent_item.id),
-                        "source_post_url": normalized_url,
-                        "candidate_url": downloaded.normalized_url,
-                        "final_url": downloaded.final_url,
-                        "media_type": downloaded.media_type,
-                        "byte_hash": downloaded.byte_hash,
-                        "byte_size": downloaded.byte_size,
-                        "order": order,
-                        "alt_text": candidate.alt_text,
-                        "role": candidate.role,
-                        "dimensions": {
-                            "width": candidate.width,
-                            "height": candidate.height,
+        # Keep the parent item, job, and web save in the outer transaction. A
+        # failed child artifact then rolls back only the child rows, so the
+        # caller can persist truthful failure and retry state.
+        async with db.begin_nested():
+            for index, downloaded in enumerate(downloaded_candidates):
+                candidate_key = (downloaded.byte_hash, downloaded.final_url)
+                if candidate_key in seen_candidate_keys:
+                    continue
+                seen_candidate_keys.add(candidate_key)
+                candidate = downloaded.candidate
+                order = candidate.order if candidate.order is not None else index
+                title = (
+                    candidate.alt_text.strip()
+                    if candidate.alt_text and candidate.alt_text.strip()
+                    else f"Image from {parent_item.title}"
+                )
+                child_item = Item(
+                    source_type="image_candidate",
+                    source_url=None,
+                    title=title,
+                    status="captured",
+                    tenant_id=tenant_id,
+                    content_hash=None,
+                    metadata_={
+                        "browser_capture_image": {
+                            "source": "browser_image_candidate",
+                            "status": "captured_not_processed",
+                            "parent_item_id": str(parent_item.id),
+                            "source_post_url": normalized_url,
+                            "candidate_url": downloaded.normalized_url,
+                            "final_url": downloaded.final_url,
+                            "media_type": downloaded.media_type,
+                            "byte_hash": downloaded.byte_hash,
+                            "byte_size": downloaded.byte_size,
+                            "order": order,
+                            "alt_text": candidate.alt_text,
+                            "role": candidate.role,
+                            "dimensions": {
+                                "width": candidate.width,
+                                "height": candidate.height,
+                            },
                         },
                     },
-                },
-            )
-            db.add(child_item)
-            await db.flush()
-            storage_path = persist_upload_artifact_bytes(
-                downloaded.content,
-                tenant_id=tenant_id,
-                item_id=child_item.id,
-                extension=downloaded.extension,
-            )
-            artifact_paths.append(Path(storage_path))
-            browser_image = dict(child_item.metadata_["browser_capture_image"])
-            browser_image["artifact"] = {
-                "filename": f"{child_item.id}{downloaded.extension}",
-                "media_type": downloaded.media_type,
-                "storage_path": storage_path,
-            }
-            child_item.metadata_ = {"browser_capture_image": browser_image}
-            child_items.append(child_item)
-            linked_candidates.append(
-                _linked_image_candidate_metadata(
-                    item_id=child_item.id,
-                    downloaded=downloaded,
-                    order=order,
                 )
-            )
+                db.add(child_item)
+                await db.flush()
+                storage_path = persist_upload_artifact_bytes(
+                    downloaded.content,
+                    tenant_id=tenant_id,
+                    item_id=child_item.id,
+                    extension=downloaded.extension,
+                )
+                artifact_paths.append(Path(storage_path))
+                browser_image = dict(child_item.metadata_["browser_capture_image"])
+                browser_image["artifact"] = {
+                    "filename": f"{child_item.id}{downloaded.extension}",
+                    "media_type": downloaded.media_type,
+                    "storage_path": storage_path,
+                }
+                child_item.metadata_ = {"browser_capture_image": browser_image}
+                child_items.append(child_item)
+                linked_candidates.append(
+                    _linked_image_candidate_metadata(
+                        item_id=child_item.id,
+                        downloaded=downloaded,
+                        order=order,
+                    )
+                )
     except (OSError, BundleValidationError):
-        await db.rollback()
         for artifact_path in artifact_paths:
             artifact_path.unlink(missing_ok=True)
         raise

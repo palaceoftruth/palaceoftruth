@@ -77,6 +77,7 @@ class FakeSession:
         self.commits = 0
         self.flushes = 0
         self.rollbacks = 0
+        self.nested_transactions = 0
         self.scalar_values: list[object | None] = []
 
     def _assign_missing_ids(self) -> None:
@@ -140,6 +141,18 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rollbacks += 1
+
+    def begin_nested(self):
+        session = self
+
+        class _NestedTransaction:
+            async def __aenter__(self):
+                session.nested_transactions += 1
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        return _NestedTransaction()
 
 
 class FakeArqPool:
@@ -594,7 +607,8 @@ def test_browser_capture_artifact_failure_archives_retry_blocking_state(
 
     assert response.status_code == 500
     assert response.json()["detail"].endswith("capture can be retried")
-    assert session.rollbacks == 1
+    assert session.rollbacks == 0
+    assert session.nested_transactions == 1
     assert session.added_items[0].status == "failed"
     assert session.added_jobs[0].status == "failed"
     assert "artifact volume is full" in session.added_jobs[0].error_message

@@ -282,8 +282,29 @@ def test_explicit_image_tag_overrides_published_release_digests() -> None:
     }
 
     assert "ghcr.io/palaceoftruth/palaceoftruth/backend:operator-build" in images
-    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" not in images
     assert "ghcr.io/palaceoftruth/palaceoftruth/frontend:operator-build" in images
+
+
+def test_legacy_backend_image_override_still_controls_workers() -> None:
+    manifests = _render_chart(
+        "image.registry=mirror.example.test",
+        "image.backendRepository=team/custom-palace",
+        "image.tag=operator-build",
+    )
+    worker_images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        and manifest.get("metadata", {}).get("name") in {
+            "palaceoftruth-worker",
+            "palaceoftruth-media-worker",
+            "palaceoftruth-palace-worker",
+        }
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert worker_images == {"mirror.example.test/team/custom-palace:operator-build"}
 
 
 def test_backend_digest_changes_migration_job_identity() -> None:
