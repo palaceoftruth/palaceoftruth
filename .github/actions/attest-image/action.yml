@@ -40,9 +40,47 @@ runs:
         push-to-registry: true
 
     - name: Publish SBOM attestation
+      id: github-sbom
+      continue-on-error: true
       uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
       with:
         subject-name: ${{ inputs.image }}
         subject-digest: ${{ inputs.digest }}
         sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
         push-to-registry: true
+
+    - name: Publish registry SBOM fallback
+      if: steps.github-sbom.outcome == 'failure'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+        SBOM_PATH: /tmp/${{ inputs.sbom-name }}.spdx.json
+      run: |
+        for attempt in 1 2 3; do
+          if cosign attest --yes \
+            --predicate "$SBOM_PATH" \
+            --type https://spdx.dev/Document/v2.3 \
+            "${IMAGE}@${DIGEST}"; then
+            exit 0
+          fi
+
+          if [ "$attempt" -eq 3 ]; then
+            echo "Failed to publish the SBOM attestation after ${attempt} attempts." >&2
+            exit 1
+          fi
+
+          sleep $((attempt * 10))
+        done
+
+    - name: Verify registry SBOM attestation
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        cosign verify-attestation \
+          --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          --type https://spdx.dev/Document/v2.3 \
+          "${IMAGE}@${DIGEST}" >/dev/null
