@@ -1,0 +1,48 @@
+name: Attest container image
+description: Generate and publish provenance and an SPDX SBOM for one pushed image digest.
+
+inputs:
+  image:
+    description: Fully qualified image repository.
+    required: true
+  digest:
+    description: Published sha256 image digest.
+    required: true
+  sbom-name:
+    description: Filesystem-safe SBOM base name.
+    required: true
+  registry-username:
+    description: Registry username used to read the private image.
+    required: true
+  registry-password:
+    description: Registry token used to read the private image.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Generate SPDX SBOM
+      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      with:
+        image: ${{ inputs.image }}@${{ inputs.digest }}
+        registry-username: ${{ inputs.registry-username }}
+        registry-password: ${{ inputs.registry-password }}
+        format: spdx-json
+        output-file: /tmp/${{ inputs.sbom-name }}.spdx.json
+        upload-artifact: false
+        upload-release-assets: false
+
+    - name: Publish build provenance
+      uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        push-to-registry: true
+
+    - name: Publish SBOM attestation
+      uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
+        push-to-registry: true

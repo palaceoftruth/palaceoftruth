@@ -92,11 +92,13 @@ def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:
         "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     )
     assert jobs["build-backend"]["permissions"] == {
+        "attestations": "write",
         "contents": "write",
         "id-token": "write",
         "packages": "write",
     }
     assert jobs["build-frontend"]["permissions"] == {
+        "attestations": "write",
         "contents": "read",
         "id-token": "write",
         "packages": "write",
@@ -197,9 +199,26 @@ def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
                 continue
             assert "cache-to" not in step["with"]
             assert "cache-from" not in step["with"]
-            assert step["with"]["provenance"] == "true"
-            assert step["with"]["sbom"] == "true"
+            # The ARC DinD docker driver cannot emit BuildKit attestations.
+            # Each digest is attested after push by the local attest-image action.
+            assert "provenance" not in step["with"]
+            assert "sbom" not in step["with"]
             assert ":latest" not in step["with"]["tags"]
+
+        attestation_steps = [
+            step
+            for step in job["steps"]
+            if step.get("uses") == "./.github/actions/attest-image"
+        ]
+        expected_attestations = 5 if job is backend else 1
+        assert len(attestation_steps) == expected_attestations
+        for step in attestation_steps:
+            assert step["with"]["image"]
+            assert step["with"]["digest"]
+            assert step["with"]["sbom-name"]
+
+        assert job["permissions"]["attestations"] == "write"
+        assert job["permissions"]["id-token"] == "write"
 
     digest_step = next(
         step for step in publish_chart["steps"] if step.get("name") == "Record published image digests"
