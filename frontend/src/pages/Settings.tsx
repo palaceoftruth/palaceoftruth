@@ -3,7 +3,6 @@ import { CheckCircle2, ClipboardCopy, Key, Loader2, LogOut, ShieldCheck, Sliders
 
 import { api, clearLegacyBrowserApiKey } from "../api/client";
 import type { BrowserSession } from "../api/client";
-import { browserSessionBootstrap } from "../browserSessionBootstrap";
 import type { BrowserExtensionPairingKey } from "../api/types";
 import PageHeader from "../components/PageHeader";
 
@@ -51,8 +50,12 @@ export default function Settings() {
     let cancelled = false;
 
     const restore = async () => {
-      const current = await browserSessionBootstrap;
-      if (!cancelled) setSession(current);
+      try {
+        const current = await api.getBrowserSession();
+        if (!cancelled) setSession(current);
+      } catch {
+        if (!cancelled) setSession(null);
+      }
     };
 
     void restore().finally(() => {

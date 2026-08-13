@@ -544,6 +544,65 @@ def test_browser_capture_social_post_accepts_valid_image_candidates(tmp_path: Pa
     assert arq_pool.enqueued[0][0] == "process_webpage"
 
 
+def test_browser_capture_artifact_failure_archives_retry_blocking_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _allow_public_image_candidate_dns(monkeypatch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/png"},
+            content=PNG_1X1_BYTES,
+            request=request,
+        )
+
+    _mock_image_candidate_downloads(monkeypatch, handler)
+
+    real_persist = capture_api.persist_upload_artifact_bytes
+    persisted_paths: list[Path] = []
+
+    def fail_second_persist(*args, **kwargs):
+        if persisted_paths:
+            raise OSError("artifact volume is full")
+        path = Path(real_persist(*args, **kwargs))
+        persisted_paths.append(path)
+        return str(path)
+
+    monkeypatch.setattr("app.api.capture.persist_upload_artifact_bytes", fail_second_persist)
+    session = FakeSession()
+    arq_pool = FakeArqPool()
+
+    response = _client(session, arq_pool=arq_pool).post(
+        "/api/v1/capture/browser",
+        json={
+            "url": "https://x.com/example/status/123",
+            "detected_kind": "social_post",
+            "image_candidates": [
+                {
+                    "url": "https://pbs.twimg.com/media/evidence-1.png",
+                    "source_post_url": "https://x.com/example/status/123",
+                },
+                {
+                    "url": "https://pbs.twimg.com/media/evidence-2.png",
+                    "source_post_url": "https://x.com/example/status/123",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"].endswith("capture can be retried")
+    assert session.rollbacks == 1
+    assert session.added_items[0].status == "failed"
+    assert session.added_jobs[0].status == "failed"
+    assert "artifact volume is full" in session.added_jobs[0].error_message
+    assert session.added_web_saves[0].archived_at is not None
+    assert arq_pool.enqueued == []
+    assert persisted_paths and not persisted_paths[0].exists()
+
+
 def test_browser_capture_rejects_private_network_image_candidate_without_creating_item() -> None:
     session = FakeSession()
     arq_pool = FakeArqPool()

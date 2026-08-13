@@ -1,6 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -28,7 +29,7 @@ from app.api.ingest import (
     _enqueue_ingest_job,
     _record_extension_capture_audit,
 )
-from app.services.bundle import persist_upload_artifact_bytes
+from app.services.bundle import BundleValidationError, persist_upload_artifact_bytes
 from app.utils.file_type import SNIFF_BYTES, matches_extension
 
 router = APIRouter(prefix="/capture", tags=["capture"])
@@ -394,70 +395,78 @@ async def _create_browser_image_items(
 ) -> tuple[list[dict[str, Any]], list[Item]]:
     linked_candidates: list[dict[str, Any]] = []
     child_items: list[Item] = []
+    artifact_paths: list[Path] = []
     seen_candidate_keys: set[tuple[str, str]] = set()
-    for index, downloaded in enumerate(downloaded_candidates):
-        candidate_key = (downloaded.byte_hash, downloaded.final_url)
-        if candidate_key in seen_candidate_keys:
-            continue
-        seen_candidate_keys.add(candidate_key)
-        candidate = downloaded.candidate
-        order = candidate.order if candidate.order is not None else index
-        title = (
-            candidate.alt_text.strip()
-            if candidate.alt_text and candidate.alt_text.strip()
-            else f"Image from {parent_item.title}"
-        )
-        child_item = Item(
-            source_type="image_candidate",
-            source_url=None,
-            title=title,
-            status="captured",
-            tenant_id=tenant_id,
-            content_hash=None,
-            metadata_={
-                "browser_capture_image": {
-                    "source": "browser_image_candidate",
-                    "status": "captured_not_processed",
-                    "parent_item_id": str(parent_item.id),
-                    "source_post_url": normalized_url,
-                    "candidate_url": downloaded.normalized_url,
-                    "final_url": downloaded.final_url,
-                    "media_type": downloaded.media_type,
-                    "byte_hash": downloaded.byte_hash,
-                    "byte_size": downloaded.byte_size,
-                    "order": order,
-                    "alt_text": candidate.alt_text,
-                    "role": candidate.role,
-                    "dimensions": {
-                        "width": candidate.width,
-                        "height": candidate.height,
-                    },
-                }
-            },
-        )
-        db.add(child_item)
-        await db.flush()
-        storage_path = persist_upload_artifact_bytes(
-            downloaded.content,
-            tenant_id=tenant_id,
-            item_id=child_item.id,
-            extension=downloaded.extension,
-        )
-        browser_image = dict(child_item.metadata_["browser_capture_image"])
-        browser_image["artifact"] = {
-            "filename": f"{child_item.id}{downloaded.extension}",
-            "media_type": downloaded.media_type,
-            "storage_path": storage_path,
-        }
-        child_item.metadata_ = {"browser_capture_image": browser_image}
-        child_items.append(child_item)
-        linked_candidates.append(
-            _linked_image_candidate_metadata(
-                item_id=child_item.id,
-                downloaded=downloaded,
-                order=order,
+    try:
+        for index, downloaded in enumerate(downloaded_candidates):
+            candidate_key = (downloaded.byte_hash, downloaded.final_url)
+            if candidate_key in seen_candidate_keys:
+                continue
+            seen_candidate_keys.add(candidate_key)
+            candidate = downloaded.candidate
+            order = candidate.order if candidate.order is not None else index
+            title = (
+                candidate.alt_text.strip()
+                if candidate.alt_text and candidate.alt_text.strip()
+                else f"Image from {parent_item.title}"
             )
-        )
+            child_item = Item(
+                source_type="image_candidate",
+                source_url=None,
+                title=title,
+                status="captured",
+                tenant_id=tenant_id,
+                content_hash=None,
+                metadata_={
+                    "browser_capture_image": {
+                        "source": "browser_image_candidate",
+                        "status": "captured_not_processed",
+                        "parent_item_id": str(parent_item.id),
+                        "source_post_url": normalized_url,
+                        "candidate_url": downloaded.normalized_url,
+                        "final_url": downloaded.final_url,
+                        "media_type": downloaded.media_type,
+                        "byte_hash": downloaded.byte_hash,
+                        "byte_size": downloaded.byte_size,
+                        "order": order,
+                        "alt_text": candidate.alt_text,
+                        "role": candidate.role,
+                        "dimensions": {
+                            "width": candidate.width,
+                            "height": candidate.height,
+                        },
+                    },
+                },
+            )
+            db.add(child_item)
+            await db.flush()
+            storage_path = persist_upload_artifact_bytes(
+                downloaded.content,
+                tenant_id=tenant_id,
+                item_id=child_item.id,
+                extension=downloaded.extension,
+            )
+            artifact_paths.append(Path(storage_path))
+            browser_image = dict(child_item.metadata_["browser_capture_image"])
+            browser_image["artifact"] = {
+                "filename": f"{child_item.id}{downloaded.extension}",
+                "media_type": downloaded.media_type,
+                "storage_path": storage_path,
+            }
+            child_item.metadata_ = {"browser_capture_image": browser_image}
+            child_items.append(child_item)
+            linked_candidates.append(
+                _linked_image_candidate_metadata(
+                    item_id=child_item.id,
+                    downloaded=downloaded,
+                    order=order,
+                )
+            )
+    except (OSError, BundleValidationError):
+        await db.rollback()
+        for artifact_path in artifact_paths:
+            artifact_path.unlink(missing_ok=True)
+        raise
     if linked_candidates:
         parent_item.metadata_ = {
             **(parent_item.metadata_ or {}),
@@ -724,13 +733,26 @@ async def capture_browser(
     linked_image_candidates = []
     linked_image_items: list[Item] = []
     if downloaded_image_candidates and normalized_url is not None:
-        linked_image_candidates, linked_image_items = await _create_browser_image_items(
-            db,
-            parent_item=item,
-            tenant_id=request.state.tenant_id,
-            normalized_url=normalized_url,
-            downloaded_candidates=downloaded_image_candidates,
-        )
+        try:
+            linked_image_candidates, linked_image_items = await _create_browser_image_items(
+                db,
+                parent_item=item,
+                tenant_id=request.state.tenant_id,
+                normalized_url=normalized_url,
+                downloaded_candidates=downloaded_image_candidates,
+            )
+        except (OSError, BundleValidationError) as exc:
+            item.status = "failed"
+            job.status = "failed"
+            job.error_message = f"Failed to persist browser image artifact: {exc}"
+            job.completed_at = datetime.now(timezone.utc)
+            if web_save is not None:
+                web_save.archived_at = datetime.now(timezone.utc)
+            await db.commit()
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to persist browser image artifact; capture can be retried",
+            ) from exc
         if web_save is not None:
             web_save.metadata_ = {
                 **(web_save.metadata_ or {}),

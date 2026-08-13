@@ -52,11 +52,21 @@ def test_validation_preserves_one_job_name_and_routes_by_pr_trust() -> None:
 
 
 def test_chart_release_classifier_matches_digest_coordinate_commit() -> None:
-    run = _load_workflow()["jobs"]["classify"]["steps"][1]["run"]
+    jobs = _load_workflow()["jobs"]
+    run = jobs["classify"]["steps"][1]["run"]
 
     assert '"${#CHANGED_FILES[@]}" -eq 2' in run
     assert '"${CHANGED_FILES[0]}" = "chart/Chart.yaml"' in run
     assert '"${CHANGED_FILES[1]}" = "chart/values.yaml"' in run
+
+    release_scope = next(
+        step
+        for step in jobs["publish-chart"]["steps"]
+        if step.get("name") == "Detect chart-only release bump"
+    )["run"]
+    assert '"${#CHANGED_FILES[@]}" -eq 2' in release_scope
+    assert '"${CHANGED_FILES[0]}" = "chart/Chart.yaml"' in release_scope
+    assert '"${CHANGED_FILES[1]}" = "chart/values.yaml"' in release_scope
 
 
 def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:

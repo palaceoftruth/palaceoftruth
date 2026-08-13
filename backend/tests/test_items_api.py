@@ -345,7 +345,12 @@ def test_get_item_artifact_proxies_and_persists_legacy_browser_image(tmp_path: P
         )
     )
     fetch = AsyncMock(
-        return_value=SimpleNamespace(content=_PNG_BYTES, media_type="image/png", extension=".png")
+        return_value=SimpleNamespace(
+            content=_PNG_BYTES,
+            media_type="image/png",
+            extension=".png",
+            byte_hash="matching-hash",
+        )
     )
     monkeypatch.setattr("app.api.capture.download_browser_image_for_proxy", fetch)
     monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
@@ -369,6 +374,45 @@ def test_get_item_artifact_proxies_and_persists_legacy_browser_image(tmp_path: P
     assert second.status_code == 200
     assert second.content == _PNG_BYTES
     fetch.assert_awaited_once()
+
+
+def test_get_item_artifact_rejects_changed_legacy_browser_image(tmp_path: Path, monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    session = FakeSession(
+        Item(
+            id=item_id,
+            source_type="image_candidate",
+            title="Captured evidence",
+            tenant_id="tenant-a",
+            status="ready",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata_={
+                "browser_capture_image": {
+                    "source_post_url": "https://x.com/example/status/123",
+                    "final_url": "https://pbs.twimg.com/media/evidence.jpg",
+                    "byte_hash": "original-hash",
+                }
+            },
+        )
+    )
+    fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            content=_PNG_BYTES,
+            media_type="image/png",
+            extension=".png",
+            byte_hash="changed-hash",
+        )
+    )
+    monkeypatch.setattr("app.api.capture.download_browser_image_for_proxy", fetch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+
+    response = _client(session).get(f"/api/v1/items/{item_id}/artifact")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Captured image bytes no longer match stored evidence"
+    assert session.commits == 0
+    assert not (tmp_path / "uploads").exists()
 
 
 def test_get_item_artifact_refuses_a_media_type_the_bytes_do_not_support(

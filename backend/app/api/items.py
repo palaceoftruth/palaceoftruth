@@ -356,6 +356,9 @@ async def get_item_artifact(
             image_url=image_url,
             source_url=source_url,
         )
+        expected_hash = browser_image.get("byte_hash")
+        if isinstance(expected_hash, str) and expected_hash and downloaded.byte_hash != expected_hash:
+            raise HTTPException(status_code=409, detail="Captured image bytes no longer match stored evidence")
         from app.services.bundle import persist_upload_artifact_bytes
 
         storage_path_value = persist_upload_artifact_bytes(

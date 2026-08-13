@@ -378,6 +378,10 @@ test.describe("Route smoke", () => {
     expect(await page.evaluate(() => document.cookie)).not.toContain("tenant-browser-key");
     expect(sessionRequests.some(({ method }) => method === "POST")).toBe(true);
 
+    await page.getByRole("link", { name: "Home", exact: true }).click();
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
+    await expect(page.getByText("Signed in as tenant-a", { exact: false })).toBeVisible();
+
     await page.getByRole("button", { name: "Generate pairing key" }).click();
     await expect(page.getByTestId("pairing-key-reveal")).toBeVisible();
     await expect(page.getByLabel("One-time pairing key")).toHaveValue("palpair_one-time-secret-not-persisted");

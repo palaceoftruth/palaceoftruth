@@ -867,8 +867,10 @@ jobs:
             exit 0
           fi
 
-          CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
-          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vx 'chart/Chart.yaml' >/dev/null; then
+          mapfile -t CHANGED_FILES < <(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+          if [ "${#CHANGED_FILES[@]}" -eq 2 ] \
+            && [ "${CHANGED_FILES[0]}" = "chart/Chart.yaml" ] \
+            && [ "${CHANGED_FILES[1]}" = "chart/values.yaml" ]; then
             echo "Skipping chart publish for chart-only release-coordinate update."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -1017,6 +1019,8 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           BACKEND_IMAGE: ${{ needs.build-backend.outputs.backend_image }}
           BACKEND_DIGEST: ${{ needs.build-backend.outputs.backend_digest }}
+          WORKER_IMAGE: ${{ needs.build-backend.outputs.worker_image }}
+          WORKER_DIGEST: ${{ needs.build-backend.outputs.worker_digest }}
           FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.frontend_image }}
           FRONTEND_DIGEST: ${{ needs.build-frontend.outputs.frontend_digest }}
           BACKEND_RUNTIME_IMAGE: ${{ needs.build-backend.outputs.backend_runtime_image }}
@@ -1045,6 +1049,7 @@ jobs:
           ## Published images
 
           - Backend: ${BACKEND_IMAGE}@${BACKEND_DIGEST}
+          - Worker: ${WORKER_IMAGE}@${WORKER_DIGEST}
           - Frontend: ${FRONTEND_IMAGE}@${FRONTEND_DIGEST}
           - Backend runtime (${BACKEND_DEPENDENCY_KEY}): ${BACKEND_RUNTIME_IMAGE}@${BACKEND_RUNTIME_DIGEST}
           - Backend CI (${BACKEND_DEPENDENCY_KEY}): ${BACKEND_CI_IMAGE}@${BACKEND_CI_DIGEST}
