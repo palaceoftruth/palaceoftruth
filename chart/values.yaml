@@ -14,6 +14,9 @@ image:
   # Leave blank to default both app images to Chart.appVersion.
   # CI publishes a new chart with appVersion set to the immutable image SHA.
   tag: ""
+  # Set with tag for a tag-based split-runtime deployment. Blank preserves the
+  # legacy contract in which workers use the all-in-one backend image.
+  workerTag: ""
   pullPolicy: Always
 
 # ConfigMap environment variables

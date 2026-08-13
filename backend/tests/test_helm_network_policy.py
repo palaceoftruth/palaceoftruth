@@ -266,10 +266,11 @@ def test_same_namespace_ingress_controller_uses_narrow_pod_selector() -> None:
     ]
 
 
-def test_explicit_image_tag_overrides_published_release_digests() -> None:
+def test_explicit_split_image_tags_override_published_release_digests() -> None:
     digest = "sha256:" + "a" * 64
     manifests = _render_chart(
         "image.tag=operator-build",
+        "image.workerTag=operator-build",
         f"image.backendDigest={digest}",
         f"image.workerDigest={digest}",
         f"image.frontendDigest={digest}",
@@ -305,6 +306,25 @@ def test_legacy_backend_image_override_still_controls_workers() -> None:
     }
 
     assert worker_images == {"mirror.example.test/team/custom-palace:operator-build"}
+
+
+def test_legacy_default_backend_tag_still_controls_workers() -> None:
+    manifests = _render_chart("image.tag=legacy-build")
+    worker_images = {
+        container["image"]
+        for manifest in manifests
+        if manifest.get("kind") == "Deployment"
+        and manifest.get("metadata", {}).get("name") in {
+            "palaceoftruth-worker",
+            "palaceoftruth-media-worker",
+            "palaceoftruth-palace-worker",
+        }
+        for container in manifest["spec"]["template"]["spec"].get("containers", [])
+    }
+
+    assert worker_images == {
+        "ghcr.io/palaceoftruth/palaceoftruth/backend:legacy-build"
+    }
 
 
 def test_backend_digest_changes_migration_job_identity() -> None:
