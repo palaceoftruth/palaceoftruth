@@ -420,6 +420,7 @@ jobs:
     runs-on: palace-trusted-amd64
     timeout-minutes: 45
     permissions:
+      attestations: write
       contents: write
       id-token: write
       packages: write
@@ -523,8 +524,6 @@ jobs:
           target: backend-runtime
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.backend_runtime_image }}:${{ steps.dependencies.outputs.key }}
 
       - name: Build and push backend CI image
@@ -535,8 +534,6 @@ jobs:
           target: backend-ci
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.backend_ci_image }}:${{ steps.dependencies.outputs.key }}
 
       - name: Build and push backend application
@@ -547,8 +544,6 @@ jobs:
           target: app
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.backend_image }}:${{ steps.tag.outputs.sha }}
 
       - name: Build and push worker application
@@ -559,8 +554,6 @@ jobs:
           target: worker
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.worker_image }}:${{ steps.tag.outputs.sha }}
 
       - name: Build and push Hermes plugin artifact
@@ -572,9 +565,53 @@ jobs:
           file: ./third_party_plugins/hermes/memory/palaceoftruth/Dockerfile
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.hermes_plugin_image }}:${{ steps.tag.outputs.sha }}
+
+      - name: Attest backend runtime image
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.backend_runtime_image }}
+          digest: ${{ steps.backend_runtime.outputs.digest }}
+          sbom-name: backend-runtime
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest backend CI image
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.backend_ci_image }}
+          digest: ${{ steps.backend_ci.outputs.digest }}
+          sbom-name: backend-ci
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest backend application image
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.backend_image }}
+          digest: ${{ steps.backend.outputs.digest }}
+          sbom-name: backend
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest worker image
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.worker_image }}
+          digest: ${{ steps.worker.outputs.digest }}
+          sbom-name: worker
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest Hermes plugin image
+        if: steps.hermes_plugin.outputs.changed == 'true'
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.hermes_plugin_image }}
+          digest: ${{ steps.hermes_plugin_image.outputs.digest }}
+          sbom-name: hermes-memory-plugin
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign backend images by digest
         env:
@@ -666,6 +703,7 @@ jobs:
     runs-on: palace-trusted-amd64
     timeout-minutes: 20
     permissions:
+      attestations: write
       contents: read
       id-token: write
       packages: write
@@ -716,9 +754,16 @@ jobs:
           context: ./frontend
           platforms: linux/amd64
           push: true
-          provenance: true
-          sbom: true
           tags: ${{ steps.release.outputs.frontend_image }}:${{ steps.tag.outputs.sha }}
+
+      - name: Attest frontend image
+        uses: ./.github/actions/attest-image
+        with:
+          image: ${{ steps.release.outputs.frontend_image }}
+          digest: ${{ steps.frontend.outputs.digest }}
+          sbom-name: frontend
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign frontend image by digest
         env:
