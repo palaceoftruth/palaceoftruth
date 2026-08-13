@@ -280,7 +280,7 @@ def _memory_entry(*, tenant_id: str, target_name: str, run_id: str, scope_key: s
         "title": f"Rollout memory smoke {target_name} {run_id}",
         "summary": "Post-sync Palace memory dependency smoke.",
         "body": (
-            f"PALACE-ROLLOUT-SMOKE-{run_id}\n\n"
+            f"Palace rollout smoke run: {run_id}\n\n"
             "This non-sensitive memory verifies post-sync write, queue, worker, and retrieval dependencies."
         ),
         "source": "palace-rollout-smoke",
