@@ -282,7 +282,7 @@ def test_explicit_image_tag_overrides_published_release_digests() -> None:
     }
 
     assert "ghcr.io/palaceoftruth/palaceoftruth/backend:operator-build" in images
-    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" not in images
+    assert "ghcr.io/palaceoftruth/palaceoftruth/backend-worker:operator-build" in images
     assert "ghcr.io/palaceoftruth/palaceoftruth/frontend:operator-build" in images
 
 
