@@ -7,6 +7,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "build-push.yml"
 GH_SETUP_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "setup-gh" / "action.yml"
+ATTEST_IMAGE_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "attest-image" / "action.yml"
 TRUSTED_RUNNER = "palace-trusted-amd64"
 PR_RUNNER = "ubuntu-24.04"
 GH_SETUP_ACTION = "./.github/actions/setup-gh"
@@ -20,6 +21,11 @@ def _load_workflow() -> dict:
     # YAML 1.1 boolean coercion.
     with WORKFLOW_PATH.open(encoding="utf-8") as workflow_file:
         return yaml.load(workflow_file, Loader=yaml.BaseLoader)
+
+
+def _load_attest_image_action() -> dict:
+    with ATTEST_IMAGE_ACTION_PATH.open(encoding="utf-8") as action_file:
+        return yaml.load(action_file, Loader=yaml.BaseLoader)
 
 
 def _normalize_expression(value: str) -> str:
@@ -229,6 +235,24 @@ def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
     assert digest_step["env"]["FRONTEND_DIGEST"] == (
         "${{ needs.build-frontend.outputs.frontend_digest }}"
     )
+
+
+def test_sbom_attestation_has_a_bounded_registry_fallback_and_readback() -> None:
+    steps = _load_attest_image_action()["runs"]["steps"]
+    github_sbom = next(step for step in steps if step.get("id") == "github-sbom")
+    fallback = next(step for step in steps if step.get("name") == "Publish registry SBOM fallback")
+    readback = next(step for step in steps if step.get("name") == "Verify registry SBOM attestation")
+
+    assert github_sbom["uses"] == "actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f"
+    assert github_sbom["continue-on-error"] == "true"
+    assert fallback["if"] == "steps.github-sbom.outcome == 'failure'"
+    assert "for attempt in 1 2 3" in fallback["run"]
+    assert "cosign attest --yes" in fallback["run"]
+    assert "--type https://spdx.dev/Document/v2.3" in fallback["run"]
+    assert "cosign verify-attestation" in readback["run"]
+    assert '"https://github.com/${GITHUB_WORKFLOW_REF}"' in readback["run"]
+    assert "--certificate-oidc-issuer https://token.actions.githubusercontent.com" in readback["run"]
+    assert "--type https://spdx.dev/Document/v2.3" in readback["run"]
 
 
 def test_validation_fans_out_to_required_lanes_and_aggregates_one_gate() -> None:
