@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import AsyncMock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -318,6 +319,42 @@ def test_get_item_artifact_serves_image_analysis_upload(tmp_path: Path, monkeypa
     assert response.content == _PNG_BYTES
     assert response.headers["content-type"] == "image/png"
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_get_item_artifact_proxies_browser_image_through_capture_guards(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    session = FakeSession(
+        Item(
+            id=item_id,
+            source_type="image_candidate",
+            title="Diagram",
+            tenant_id="tenant-a",
+            status="ready",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata_={
+                "browser_capture_image": {
+                    "source_post_url": "https://x.com/example/status/123",
+                    "final_url": "https://pbs.twimg.com/media/diagram.jpg",
+                }
+            },
+        )
+    )
+    fetch = AsyncMock(
+        return_value=SimpleNamespace(content=_PNG_BYTES, media_type="image/png")
+    )
+    monkeypatch.setattr("app.api.capture.download_browser_image_for_proxy", fetch)
+
+    response = _client(session).get(f"/api/v1/items/{item_id}/artifact")
+
+    assert response.status_code == 200
+    assert response.content == _PNG_BYTES
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "private, max-age=300"
+    fetch.assert_awaited_once_with(
+        image_url="https://pbs.twimg.com/media/diagram.jpg",
+        source_url="https://x.com/example/status/123",
+    )
 
 
 def test_get_item_artifact_refuses_a_media_type_the_bytes_do_not_support(

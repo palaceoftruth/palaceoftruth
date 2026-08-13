@@ -653,10 +653,15 @@ networkPolicy:
   # write is a work item a worker will execute.
   ingress:
     enabled: true
+    # Enable only for a namespace dedicated to Palace. This policy selects all
+    # pods in the namespace, including workloads not created by this chart.
+    namespaceDefaultDeny: false
     # Namespace hosting the ingress controller that fronts backend and MCP.
     # Matched on the standard kubernetes.io/metadata.name label. Set to "" to
-    # skip the rule (e.g. when the controller runs in this namespace).
+    # use ingressControllerPodSelector for a controller in this namespace.
     ingressControllerNamespace: ingress-nginx
+    ingressControllerPodSelector:
+      app.kubernetes.io/name: ingress-nginx
     # Namespace running Prometheus. Permitted to scrape the exporter and
     # application metrics ports only. Set to "" to skip.
     monitoringNamespace: monitoring

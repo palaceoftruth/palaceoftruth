@@ -47,7 +47,7 @@ export function artifactCitationFromItem(item: Item): ArtifactCitationType | nul
     const finalUrl = asString(browserImage.final_url);
     return {
       kind: "browser_image_candidate",
-      thumbnail_url: finalUrl ?? candidateUrl,
+      thumbnail_url: `/api/v1/items/${item.id}/artifact`,
       caption: asString(browserImage.alt_text),
       source_url: sourcePostUrl ?? item.source_url,
       source_label: sourcePostUrl ? "Parent social post" : "Source",

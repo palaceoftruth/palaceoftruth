@@ -89,6 +89,7 @@ class _DownloadedImageCandidate:
     media_type: str
     byte_hash: str
     byte_size: int
+    content: bytes
 
 
 def _normalize_http_url(value: str | None) -> str | None:
@@ -255,8 +256,26 @@ async def _download_image_candidate(
             media_type=media_type,
             byte_hash=byte_hash,
             byte_size=len(image_bytes),
+            content=image_bytes,
         )
     raise HTTPException(status_code=422, detail="image candidate redirected too many times")
+
+
+async def download_browser_image_for_proxy(*, image_url: str, source_url: str) -> _DownloadedImageCandidate:
+    """Fetch a stored browser image through the capture SSRF controls."""
+    candidate = BrowserImageCandidate(url=image_url, source_post_url=source_url)
+    normalized_url = _validate_candidate_relationship(
+        candidate=candidate,
+        normalized_url=source_url,
+        resolved_kind="social_post",
+    )
+    async with httpx.AsyncClient(timeout=_CANDIDATE_HTTP_TIMEOUT) as client:
+        return await _download_image_candidate(
+            client=client,
+            candidate=candidate,
+            normalized_candidate_url=normalized_url,
+            source_url=source_url,
+        )
 
 
 async def _validate_and_download_image_candidates(

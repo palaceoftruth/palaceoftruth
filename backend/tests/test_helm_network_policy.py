@@ -130,7 +130,6 @@ def test_ingress_policies_are_enabled_by_default() -> None:
     policies = _policies(_render_chart())
 
     assert {
-        "palaceoftruth-default-deny-ingress",
         "palaceoftruth-valkey-ingress",
         "palaceoftruth-postgres-ingress",
         "palaceoftruth-app-ingress",
@@ -233,20 +232,38 @@ def test_data_tier_ingress_policies_follow_the_bundled_components() -> None:
 
 def test_frontend_fails_closed_when_no_ingress_namespace_is_configured() -> None:
     policy = _policies(
-        _render_chart("networkPolicy.ingress.ingressControllerNamespace=")
+        _render_chart(
+            "networkPolicy.ingress.ingressControllerNamespace=",
+            "networkPolicy.ingress.ingressControllerPodSelector=null",
+        )
     )["palaceoftruth-frontend-ingress"]
 
     assert policy["spec"]["ingress"] == []
 
 
 def test_namespace_default_deny_selects_every_pod() -> None:
-    policy = _policies(_render_chart())["palaceoftruth-default-deny-ingress"]
+    policies = _policies(_render_chart())
+    assert "palaceoftruth-default-deny-ingress" not in policies
+
+    policy = _policies(
+        _render_chart("networkPolicy.ingress.namespaceDefaultDeny=true")
+    )["palaceoftruth-default-deny-ingress"]
 
     assert policy["spec"] == {
         "podSelector": {},
         "policyTypes": ["Ingress"],
         "ingress": [],
     }
+
+
+def test_same_namespace_ingress_controller_uses_narrow_pod_selector() -> None:
+    policy = _policies(
+        _render_chart("networkPolicy.ingress.ingressControllerNamespace=")
+    )["palaceoftruth-frontend-ingress"]
+
+    assert policy["spec"]["ingress"][0]["from"] == [
+        {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}}}
+    ]
 
 
 def test_s3_endpoint_allowlist_is_wired_into_runtime_config() -> None:

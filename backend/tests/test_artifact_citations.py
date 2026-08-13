@@ -52,11 +52,12 @@ def test_build_artifact_citation_exposes_browser_image_candidate_provenance() ->
             }
         },
         source_url=None,
+        original_artifact_url="/api/v1/items/00000000-0000-0000-0000-000000000002/artifact",
     )
 
     assert citation is not None
     assert citation.kind == "browser_image_candidate"
-    assert citation.thumbnail_url == "https://pbs.twimg.com/media/diagram-large.jpg"
+    assert citation.thumbnail_url == "/api/v1/items/00000000-0000-0000-0000-000000000002/artifact"
     assert citation.caption == "Architecture diagram"
     assert citation.source_url == "https://x.com/example/status/123"
     assert citation.source_label == "Parent social post"

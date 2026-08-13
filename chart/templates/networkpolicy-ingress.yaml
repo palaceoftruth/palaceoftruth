@@ -21,9 +21,11 @@ holds no database or queue credentials.
 {{- $appPeers := append $dataPeers (include "palaceoftruth.mcpServiceName" .) }}
 {{- $monitoringNamespace := .Values.networkPolicy.ingress.monitoringNamespace }}
 {{- $ingressNamespace := .Values.networkPolicy.ingress.ingressControllerNamespace }}
+{{- $ingressPodSelector := .Values.networkPolicy.ingress.ingressControllerPodSelector }}
+{{- if .Values.networkPolicy.ingress.namespaceDefaultDeny }}
 ---
-# Select every pod first. The policies below then open only the required ports
-# and peers. A newly added workload is denied until its ingress is reviewed.
+# This opt-in policy is for a namespace dedicated to Palace. The portable chart
+# leaves it disabled so a shared namespace cannot isolate unrelated workloads.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -36,6 +38,7 @@ spec:
   policyTypes:
     - Ingress
   ingress: []
+{{- end }}
 {{- if .Values.valkey.enabled }}
 ---
 # Valkey holds the ARQ queues. A write to a queue is a work item some worker
@@ -203,11 +206,17 @@ spec:
           port: 8000
         - protocol: TCP
           port: {{ .Values.mcp.port }}
-    {{- if $ingressNamespace }}
+    {{- if or $ingressNamespace $ingressPodSelector }}
     - from:
+        {{- if $ingressNamespace }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ingressNamespace }}
+        {{- else }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $ingressPodSelector | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: 8000
@@ -243,16 +252,22 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    {{- if $ingressNamespace }}
+    {{- if or $ingressNamespace $ingressPodSelector }}
     - from:
+        {{- if $ingressNamespace }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ingressNamespace }}
+        {{- else }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $ingressPodSelector | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.frontend.containerPort }}
     {{- else }}
-    # Fail closed until the ingress-controller namespace is explicit.
+    # Fail closed until a controller namespace or same-namespace selector is explicit.
     []
     {{- end }}
 {{- end }}

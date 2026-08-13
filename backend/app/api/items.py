@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import ARRAY, Text, bindparam, delete, select, func, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -338,7 +338,31 @@ async def get_item_artifact(
 
     storage_path = _image_artifact_storage_path(row)
     if storage_path is None or not storage_path.is_file():
-        raise HTTPException(status_code=404, detail="Item artifact not found")
+        metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+        browser_image = metadata.get("browser_capture_image")
+        if not isinstance(browser_image, dict):
+            raise HTTPException(status_code=404, detail="Item artifact not found")
+        image_url = browser_image.get("final_url") or browser_image.get("candidate_url")
+        source_url = browser_image.get("source_post_url")
+        if not isinstance(image_url, str) or not isinstance(source_url, str):
+            raise HTTPException(status_code=404, detail="Item artifact not found")
+
+        # Reuse the capture path's host relationship, DNS, redirect, media-type,
+        # timeout, and size checks. The browser sees only this same-origin URL.
+        from app.api.capture import download_browser_image_for_proxy
+
+        downloaded = await download_browser_image_for_proxy(
+            image_url=image_url,
+            source_url=source_url,
+        )
+        return Response(
+            content=downloaded.content,
+            media_type=downloaded.media_type,
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     image_analysis = row.metadata_.get("image_analysis") if isinstance(row.metadata_, dict) else {}
     artifact = image_analysis.get("artifact") if isinstance(image_analysis, dict) else {}

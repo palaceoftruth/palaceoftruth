@@ -20,6 +20,12 @@ from starlette.types import ASGIApp
 API_CONTENT_SECURITY_POLICY = (
     "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
+DOCS_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "img-src 'self' data: https://fastapi.tiangolo.com"
+)
 
 PERMISSIONS_POLICY = (
     "accelerometer=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), "
@@ -29,9 +35,14 @@ PERMISSIONS_POLICY = (
 STRICT_TRANSPORT_SECURITY = "max-age=63072000; includeSubDomains; preload"
 
 
-def apply_security_headers(response: Response, *, hsts: bool = True) -> Response:
+def apply_security_headers(
+    response: Response,
+    *,
+    hsts: bool = True,
+    content_security_policy: str = API_CONTENT_SECURITY_POLICY,
+) -> Response:
     headers = {
-        "Content-Security-Policy": API_CONTENT_SECURITY_POLICY,
+        "Content-Security-Policy": content_security_policy,
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
         "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -58,4 +69,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
-        return apply_security_headers(response, hsts=self._hsts)
+        policy = (
+            DOCS_CONTENT_SECURITY_POLICY
+            if request.url.path in {"/docs", "/redoc"}
+            else API_CONTENT_SECURITY_POLICY
+        )
+        return apply_security_headers(
+            response,
+            hsts=self._hsts,
+            content_security_policy=policy,
+        )
