@@ -14,6 +14,7 @@ from app.schemas.bundle import BUNDLE_VERSION
 from app.services.bundle import (
     BundleValidationError,
     _restore_upload_artifact_metadata,
+    _restored_item_status,
     build_bundle_archive,
     materialize_bundle_upload_artifacts,
     parse_bundle_archive,
@@ -299,6 +300,7 @@ def test_browser_image_artifact_round_trips_through_bundle(tmp_path: Path, monke
     assert restored_artifact["media_type"] == "image/png"
     assert Path(restored_artifact["storage_path"]).read_bytes() == artifact_path.read_bytes()
     assert "upload_artifact" not in restored_metadata
+    assert _restored_item_status(payload.items[0]) == "captured"
 
 
 def test_materialize_bundle_upload_artifacts_persists_imported_bytes(tmp_path: Path, monkeypatch) -> None:

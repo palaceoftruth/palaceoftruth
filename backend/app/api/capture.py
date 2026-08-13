@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import generate_webhook_signing_key, verify_capture_write_auth
+from app.config import settings
 from app.database import get_db
 from app.models.item import Item
 from app.models.web_save import WebSave
@@ -53,6 +54,24 @@ _MEDIA_EXTENSIONS = frozenset(
         ".webm",
     }
 )
+
+
+def _remove_browser_image_artifact(item: Item) -> None:
+    """Remove one server-created capture artifact without trusting metadata paths."""
+
+    metadata = item.metadata_ if isinstance(item.metadata_, dict) else {}
+    browser_image = metadata.get("browser_capture_image")
+    artifact = browser_image.get("artifact") if isinstance(browser_image, dict) else None
+    storage_path = artifact.get("storage_path") if isinstance(artifact, dict) else None
+    if not isinstance(storage_path, str) or not storage_path:
+        return
+    allowed_root = Path(settings.upload_artifact_dir).expanduser().resolve()
+    resolved = Path(storage_path).expanduser().resolve()
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        return
+    resolved.unlink(missing_ok=True)
 
 _SOCIAL_HOST_SUFFIXES = (
     "x.com",
@@ -778,6 +797,7 @@ async def capture_browser(
         if web_save is not None:
             web_save.archived_at = datetime.now(timezone.utc)
         for linked_image_item in linked_image_items:
+            _remove_browser_image_artifact(linked_image_item)
             linked_image_item.status = "failed"
         await db.commit()
         raise HTTPException(status_code=503, detail="Capture enqueue failed; job marked failed for retry")

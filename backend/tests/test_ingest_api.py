@@ -847,8 +847,10 @@ def test_browser_capture_marks_linked_image_candidates_failed_when_enqueue_fails
 
     assert response.status_code == 503
     parent_item, child_item = session.added_items
+    artifact_path = Path(child_item.metadata_["browser_capture_image"]["artifact"]["storage_path"])
     assert parent_item.status == "failed"
     assert child_item.status == "failed"
+    assert not artifact_path.exists()
     assert session.added_web_saves[0].archived_at is not None
     assert arq_pool.enqueued == []
 

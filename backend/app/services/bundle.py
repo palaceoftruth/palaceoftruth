@@ -342,6 +342,17 @@ def _restore_upload_artifact_metadata(item: BundleItemRecord) -> dict[str, objec
     return metadata
 
 
+def _restored_item_status(item: BundleItemRecord) -> str:
+    if item.raw_content:
+        return "processing"
+    if (
+        item.upload_artifact is not None
+        and item.upload_artifact.source == "browser_image_candidate"
+    ):
+        return "captured"
+    return "ready"
+
+
 async def _write_conversations_json(zf: zipfile.ZipFile, db: AsyncSession, tenant_id: str) -> None:
     conversations = (
         (
@@ -655,7 +666,7 @@ async def run_restore_job(
                     categories=item.categories,
                     content_hash=item.content_hash,
                     tenant_id=tenant_id,
-                    status="processing" if item.raw_content else "ready",
+                    status=_restored_item_status(item),
                     created_at=item.created_at,
                     updated_at=item.updated_at or item.created_at,
                 )
