@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _TEMP_DIR = "/tmp/palaceoftruth"
 _MIN_CHUNK_SECONDS = 30
+_YOUTUBE_HTTP_403_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,11 @@ def _pending_youtube_availability_error(exc: BaseException) -> MediaPendingAvail
             "Palace will retry after the premiere window."
         ),
     )
+
+
+def _is_youtube_http_403(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "http error 403" in message or "http status 403" in message
 
 
 def _build_media_metadata(info: dict[str, Any]) -> dict[str, Any]:
@@ -972,7 +978,6 @@ class MediaPipeline(BasePipeline):
             # or high-bitrate source consumes capacity for every tenant, and a
             # live stream never stops on its own at all.
             "max_filesize": _effective_media_artifact_limit(),
-            "max_downloads": 1,
             "noplaylist": True,
             "progress_hooks": [_download_size_hook(_effective_media_artifact_limit())],
         }
@@ -982,15 +987,29 @@ class MediaPipeline(BasePipeline):
 
         meta: dict[str, Any] = {}
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if not isinstance(info, dict):
-                    raise MediaTranscriptionLimitError(
-                        "Media metadata is required before download."
+            for attempt in range(_YOUTUBE_HTTP_403_RETRIES + 1):
+                try:
+                    # A fresh instance performs a fresh extraction and obtains
+                    # new signed media URLs after a transient YouTube 403.
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        if not isinstance(info, dict):
+                            raise MediaTranscriptionLimitError(
+                                "Media metadata is required before download."
+                            )
+                        meta = _build_media_metadata(info)
+                        _reject_unbounded_media(info)
+                        ydl.download([url])
+                    break
+                except yt_dlp.utils.DownloadError as exc:
+                    if attempt >= _YOUTUBE_HTTP_403_RETRIES or not _is_youtube_http_403(exc):
+                        raise
+                    _cleanup_media_temp_files(job_id=job_id, audio_path=None, chunks=[])
+                    logger.warning(
+                        "YouTube download returned HTTP 403 for ingest job %s; "
+                        "retrying once with a fresh extractor",
+                        job_id,
                     )
-                meta = _build_media_metadata(info)
-                _reject_unbounded_media(info)
-                ydl.download([url])
         except MediaTranscriptionLimitError:
             raise
         except Exception as exc:

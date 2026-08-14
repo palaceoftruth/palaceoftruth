@@ -853,7 +853,8 @@ mediaWorker:
   readinessProbe:
     initialDelaySeconds: 5
     periodSeconds: 10
-    timeoutSeconds: 5
+    # The deployed media-worker ARQ check can take about six seconds.
+    timeoutSeconds: 10
     failureThreshold: 3
   resources:
     requests:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yt_dlp
 
 from app.config import settings
 from app.embedding_profile import resolve_embedding_profile
@@ -403,13 +404,138 @@ def test_download_audio_applies_byte_and_playlist_ceilings(monkeypatch, tmp_path
     MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
 
     assert factory.opts["max_filesize"] == int(settings.media_max_download_bytes)
-    assert factory.opts["max_downloads"] == 1
+    # One URL is already enforced by noplaylist and the one-element download
+    # call. yt-dlp raises MaxDownloadsReached after the first successful file
+    # when max_downloads is 1, which turns successful ingests into failures.
+    assert "max_downloads" not in factory.opts
     assert factory.opts["noplaylist"] is True
     assert len(factory.opts["progress_hooks"]) == 1
     # The live-stream guard is on by default and must be expressed to yt-dlp
     # itself, not only in the pre-download metadata check.
     assert factory.opts["live_from_start"] is False
     assert "match_filter" in factory.opts
+
+
+def test_download_audio_does_not_fail_after_the_one_successful_download(monkeypatch, tmp_path: Path) -> None:
+    class CountingYoutubeDL(FakeYoutubeDL):
+        def __init__(self, info: dict, opts: dict) -> None:
+            super().__init__(info)
+            self.opts = opts
+
+        def download(self, urls: list[str]) -> None:
+            self.download_calls.append(urls)
+            (tmp_path / "job-123.m4a").write_bytes(b"audio")
+            if self.opts.get("max_downloads") == 1:
+                raise yt_dlp.utils.MaxDownloadsReached()
+
+    class CountingFactory:
+        def __init__(self) -> None:
+            self.instance: CountingYoutubeDL | None = None
+
+        def __call__(self, opts: dict):
+            self.instance = CountingYoutubeDL(
+                {"id": "video-1", "title": "Short", "duration": 30.0, "uploader": "Hermes", "description": ""},
+                opts,
+            )
+            return self.instance
+
+    factory = CountingFactory()
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    downloaded_path, _metadata = MediaPipeline._download_audio(
+        "https://example.com/watch?v=too-long", "job-123"
+    )
+
+    assert downloaded_path == str(tmp_path / "job-123.m4a")
+    assert factory.instance is not None
+    assert factory.instance.download_calls == [["https://example.com/watch?v=too-long"]]
+
+
+def test_download_audio_retries_one_http_403_with_a_fresh_extractor(monkeypatch, tmp_path: Path) -> None:
+    instances: list[FakeYoutubeDL] = []
+
+    class TransientYoutubeDL(FakeYoutubeDL):
+        def __init__(self, info: dict, attempt: int) -> None:
+            super().__init__(info)
+            self.attempt = attempt
+
+        def download(self, urls: list[str]) -> None:
+            self.download_calls.append(urls)
+            if self.attempt == 1:
+                raise yt_dlp.utils.DownloadError(
+                    "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+                )
+            (tmp_path / "job-123.m4a").write_bytes(b"audio")
+
+    def factory(_opts: dict):
+        instance = TransientYoutubeDL(
+            {"id": "video-1", "title": "Short", "duration": 30.0, "uploader": "Hermes", "description": ""},
+            len(instances) + 1,
+        )
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    downloaded_path, _metadata = MediaPipeline._download_audio(
+        "https://example.com/watch?v=too-long", "job-123"
+    )
+
+    assert downloaded_path == str(tmp_path / "job-123.m4a")
+    assert len(instances) == 2
+    assert all(instance.download_calls for instance in instances)
+
+
+def test_download_audio_does_not_retry_a_non_403_download_error(monkeypatch, tmp_path: Path) -> None:
+    calls = 0
+
+    class FailedYoutubeDL(FakeYoutubeDL):
+        def download(self, urls: list[str]) -> None:
+            self.download_calls.append(urls)
+            raise yt_dlp.utils.DownloadError("ERROR: video is unavailable")
+
+    def factory(_opts: dict):
+        nonlocal calls
+        calls += 1
+        return FailedYoutubeDL(
+            {"id": "video-1", "title": "Short", "duration": 30.0, "uploader": "Hermes", "description": ""}
+        )
+
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    with pytest.raises(yt_dlp.utils.DownloadError, match="unavailable"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert calls == 1
+
+
+def test_download_audio_stops_after_one_http_403_retry(monkeypatch, tmp_path: Path) -> None:
+    calls = 0
+
+    class ForbiddenYoutubeDL(FakeYoutubeDL):
+        def download(self, urls: list[str]) -> None:
+            self.download_calls.append(urls)
+            raise yt_dlp.utils.DownloadError(
+                "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+            )
+
+    def factory(_opts: dict):
+        nonlocal calls
+        calls += 1
+        return ForbiddenYoutubeDL(
+            {"id": "video-1", "title": "Short", "duration": 30.0, "uploader": "Hermes", "description": ""}
+        )
+
+    monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
+    monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+
+    with pytest.raises(yt_dlp.utils.DownloadError, match="403"):
+        MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
+
+    assert calls == 2
 
 
 def test_download_progress_hook_aborts_and_removes_partial_file(monkeypatch, tmp_path: Path) -> None:

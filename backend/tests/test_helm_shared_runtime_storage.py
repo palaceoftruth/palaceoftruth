@@ -365,11 +365,12 @@ def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
         container = _deployment_by_name(manifests, name)["spec"]["template"]["spec"]["containers"][0]
         command = container["command"]
         assert command[:3] == ["python", "scripts/wait_for_worker_dependencies.py", "--"]
+        expected_timeout = 10 if name == "palaceoftruth-media-worker" else 5
         assert container["readinessProbe"] == {
             "exec": {"command": ["arq", settings_path, "--check"]},
             "initialDelaySeconds": 5,
             "periodSeconds": 10,
-            "timeoutSeconds": 5,
+            "timeoutSeconds": expected_timeout,
             "failureThreshold": 3,
         }
         assert "livenessProbe" not in container
