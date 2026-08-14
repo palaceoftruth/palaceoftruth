@@ -114,6 +114,13 @@ def test_settings_keep_openai_embedding_profile_defaults() -> None:
     assert settings.embedding_profile_name == "openai-text-embedding-3-small-1536"
 
 
+def test_browser_sessions_default_to_thirty_days_for_all_scopes() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.browser_session_ttl_seconds == 2_592_000
+    assert settings.elevated_browser_session_ttl_seconds == 2_592_000
+
+
 def test_settings_validation_errors_do_not_disclose_secret_inputs() -> None:
     secret_values = {
         "database_url": "postgresql+asyncpg://palace:database-secret@example.test/palace",

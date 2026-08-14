@@ -151,11 +151,10 @@ class Settings(BaseSettings):
     admin_allowed_hosts: str = "admin.palace.sarvent.cloud,admin.palaceoftruth.test,localhost,127.0.0.1,testserver"
 
     # Browser (SPA) sessions. The web app exchanges an API key for one of these
-    # once and never stores the key; see app/browser_session.py. Keep the TTL
-    # short - the SPA refreshes silently while the tab is in use, so a long TTL
-    # buys nothing and only widens the window on a stolen cookie.
-    browser_session_ttl_seconds: int = 43200  # 12 hours
-    elevated_browser_session_ttl_seconds: int = 300
+    # once and never stores the key; see app/browser_session.py. Both normal and
+    # elevated sessions use the approved rolling 30-day trusted-browser period.
+    browser_session_ttl_seconds: int = 2592000  # 30 days
+    elevated_browser_session_ttl_seconds: int = 2592000
     browser_session_max_per_tenant: int = 20
     # Force the Secure cookie attribute on. Leave True in every deployment; it
     # is only relaxed automatically for a plain-HTTP localhost dev origin, which

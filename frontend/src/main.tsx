@@ -2,7 +2,11 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
-import { browserSessionBootstrap, browserSessionMigrationPending } from "./browserSessionBootstrap";
+import {
+  browserSessionBootstrap,
+  browserSessionMigrationPending,
+  startBrowserSessionMaintenance,
+} from "./browserSessionBootstrap";
 
 const render = () => {
   createRoot(document.getElementById("root")!).render(
@@ -10,6 +14,7 @@ const render = () => {
       <App />
     </StrictMode>,
   );
+  startBrowserSessionMaintenance();
 };
 
 if (browserSessionMigrationPending) {

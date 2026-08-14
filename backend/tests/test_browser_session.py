@@ -47,8 +47,9 @@ class _MappingResult:
 
 
 class _Result:
-    def __init__(self, row=None) -> None:
+    def __init__(self, row=None, *, rowcount: int = 0) -> None:
         self._row = row
+        self.rowcount = rowcount
 
     def mappings(self):
         return _MappingResult(self._row)
@@ -129,11 +130,16 @@ class FakeSession:
 
         if sql.startswith("update browser_sessions set session_token_hash"):
             row = self.sessions.get(params["id"])
-            if row is not None and row["revoked_at"] is None:
+            if (
+                row is not None
+                and row["revoked_at"] is None
+                and row["session_token_hash"] == params["current_session_token_hash"]
+            ):
                 row["session_token_hash"] = params["session_token_hash"]
                 row["csrf_token_hash"] = params["csrf_token_hash"]
                 row["expires_at"] = params["expires_at"]
-            return _Result(None)
+                return _Result(None, rowcount=1)
+            return _Result(None, rowcount=0)
 
         if sql.startswith("update browser_sessions set last_used_at"):
             return _Result(None)
@@ -273,18 +279,19 @@ def test_session_cap_is_serialized_and_enforced(monkeypatch) -> None:
     assert db.advisory_locks == 6
 
 
-def test_elevated_cookie_max_age_matches_short_server_expiry() -> None:
+@pytest.mark.parametrize("elevated", [False, True])
+def test_cookie_max_age_matches_persistent_server_expiry(elevated: bool) -> None:
     client = _client(FakeSession(_key_row(scopes=["read", "write", "admin"])))
     response = client.post(
         "/api/v1/browser/session",
-        json={"api_key": "raw-key-value", "elevated": True},
+        json={"api_key": "raw-key-value", "elevated": elevated},
     )
     assert response.status_code == 201
     cookies = response.headers.get_list("set-cookie")
     assert cookies
     for cookie in cookies:
         max_age = int(next(part.split("=", 1)[1] for part in cookie.split("; ") if part.startswith("Max-Age=")))
-        assert 0 < max_age <= 300
+        assert 2_591_990 <= max_age <= 2_592_000
 
 
 def test_sign_in_rejects_a_key_with_no_stored_scopes() -> None:
@@ -347,6 +354,23 @@ def test_refresh_rejects_a_wrong_csrf_token() -> None:
     assert response.status_code == 403
 
 
+def test_refresh_reports_a_concurrent_rotation_conflict(monkeypatch) -> None:
+    client = _client(FakeSession(_key_row()))
+    _sign_in(client)
+
+    async def conflict(*_args, **_kwargs):
+        raise browser_session.BrowserSessionRotationConflict
+
+    monkeypatch.setattr(browser_session_api, "rotate_session", conflict)
+    response = client.post(
+        "/api/v1/browser/session/refresh",
+        headers={browser_session.CSRF_HEADER_NAME: client.cookies[browser_session.CSRF_COOKIE_NAME]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Browser session was refreshed by another request"
+
+
 def test_refresh_rotates_both_tokens() -> None:
     client = _client(FakeSession(_key_row()))
     _sign_in(client)
@@ -361,6 +385,20 @@ def test_refresh_rotates_both_tokens() -> None:
     assert response.status_code == 200
     assert client.cookies[browser_session.SESSION_COOKIE_NAME] != old_session
     assert client.cookies[browser_session.CSRF_COOKIE_NAME] != old_csrf
+
+
+@pytest.mark.asyncio
+async def test_only_one_concurrent_refresh_can_rotate_a_session() -> None:
+    db = FakeSession(_key_row())
+    issued = await browser_session.issue_session(db, api_key="raw-key-value", elevated=True)
+    assert issued is not None
+    loaded = await browser_session.load_session(db, issued.session_token)
+    assert loaded is not None
+
+    await browser_session.rotate_session(db, loaded)
+
+    with pytest.raises(browser_session.BrowserSessionRotationConflict):
+        await browser_session.rotate_session(db, loaded)
 
 
 def test_the_old_session_token_stops_working_after_a_refresh() -> None:

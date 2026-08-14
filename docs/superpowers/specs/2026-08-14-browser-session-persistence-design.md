@@ -43,7 +43,8 @@ controller that:
 Only one maintenance operation may run at a time in each tab. If another tab
 rotates the shared cookie first, a failed refresh will perform one session
 readback. A valid readback is treated as success and uses the new shared-cookie
-expiry.
+expiry. The backend rotation uses the current token hash as a compare-and-swap
+guard, so two concurrent refresh requests cannot both replace the same session.
 
 ## Failure Behavior
 
