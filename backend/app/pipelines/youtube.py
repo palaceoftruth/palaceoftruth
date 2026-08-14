@@ -5,6 +5,7 @@ import math
 import os
 import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 _TEMP_DIR = "/tmp/palaceoftruth"
 _MIN_CHUNK_SECONDS = 30
-_YOUTUBE_HTTP_403_RETRIES = 1
+_YOUTUBE_HTTP_403_RETRIES = 3
+_YOUTUBE_HTTP_403_RETRY_BASE_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -1005,11 +1007,16 @@ class MediaPipeline(BasePipeline):
                     if attempt >= _YOUTUBE_HTTP_403_RETRIES or not _is_youtube_http_403(exc):
                         raise
                     _cleanup_media_temp_files(job_id=job_id, audio_path=None, chunks=[])
+                    retry_delay = _YOUTUBE_HTTP_403_RETRY_BASE_DELAY_SECONDS * (2**attempt)
                     logger.warning(
                         "YouTube download returned HTTP 403 for ingest job %s; "
-                        "retrying once with a fresh extractor",
+                        "retrying with a fresh extractor in %.1fs (attempt %d/%d)",
                         job_id,
+                        retry_delay,
+                        attempt + 1,
+                        _YOUTUBE_HTTP_403_RETRIES,
                     )
+                    time.sleep(retry_delay)
         except MediaTranscriptionLimitError:
             raise
         except Exception as exc:
