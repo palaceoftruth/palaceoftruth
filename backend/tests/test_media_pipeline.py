@@ -452,8 +452,9 @@ def test_download_audio_does_not_fail_after_the_one_successful_download(monkeypa
     assert factory.instance.download_calls == [["https://example.com/watch?v=too-long"]]
 
 
-def test_download_audio_retries_one_http_403_with_a_fresh_extractor(monkeypatch, tmp_path: Path) -> None:
+def test_download_audio_retries_http_403_with_a_fresh_extractor(monkeypatch, tmp_path: Path) -> None:
     instances: list[FakeYoutubeDL] = []
+    delays: list[float] = []
 
     class TransientYoutubeDL(FakeYoutubeDL):
         def __init__(self, info: dict, attempt: int) -> None:
@@ -478,6 +479,7 @@ def test_download_audio_retries_one_http_403_with_a_fresh_extractor(monkeypatch,
 
     monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
     monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr("app.pipelines.youtube.time.sleep", delays.append)
 
     downloaded_path, _metadata = MediaPipeline._download_audio(
         "https://example.com/watch?v=too-long", "job-123"
@@ -486,6 +488,7 @@ def test_download_audio_retries_one_http_403_with_a_fresh_extractor(monkeypatch,
     assert downloaded_path == str(tmp_path / "job-123.m4a")
     assert len(instances) == 2
     assert all(instance.download_calls for instance in instances)
+    assert delays == [1.0]
 
 
 def test_download_audio_does_not_retry_a_non_403_download_error(monkeypatch, tmp_path: Path) -> None:
@@ -512,8 +515,9 @@ def test_download_audio_does_not_retry_a_non_403_download_error(monkeypatch, tmp
     assert calls == 1
 
 
-def test_download_audio_stops_after_one_http_403_retry(monkeypatch, tmp_path: Path) -> None:
+def test_download_audio_stops_after_three_http_403_retries(monkeypatch, tmp_path: Path) -> None:
     calls = 0
+    delays: list[float] = []
 
     class ForbiddenYoutubeDL(FakeYoutubeDL):
         def download(self, urls: list[str]) -> None:
@@ -531,11 +535,13 @@ def test_download_audio_stops_after_one_http_403_retry(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr("app.pipelines.youtube.yt_dlp.YoutubeDL", factory)
     monkeypatch.setattr("app.pipelines.youtube._TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr("app.pipelines.youtube.time.sleep", delays.append)
 
     with pytest.raises(yt_dlp.utils.DownloadError, match="403"):
         MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
 
-    assert calls == 2
+    assert calls == 4
+    assert delays == [1.0, 2.0, 4.0]
 
 
 def test_download_progress_hook_aborts_and_removes_partial_file(monkeypatch, tmp_path: Path) -> None:
