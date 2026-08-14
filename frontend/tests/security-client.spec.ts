@@ -76,3 +76,59 @@ test("legacy migration cannot leave the application blank indefinitely", async (
   ).toBeVisible({ timeout: 4_000 });
   expect(await page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBeNull();
 });
+
+test("a restored session near expiry renews without another API key", async ({ page }) => {
+  let refreshes = 0;
+  const now = Date.now();
+  await page.route("**/api/v1/browser/session**", async (route, request) => {
+    if (request.method() === "POST" && request.url().endsWith("/refresh")) {
+      refreshes += 1;
+      await route.fulfill({
+        status: 200,
+        json: {
+          tenant_id: "default",
+          scopes: ["read", "write", "admin"],
+          expires_at: new Date(now + 30 * 24 * 60 * 60 * 1_000).toISOString(),
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        tenant_id: "default",
+        scopes: ["read", "write", "admin"],
+        expires_at: new Date(now + 6 * 24 * 60 * 60 * 1_000).toISOString(),
+      },
+    });
+  });
+
+  await page.goto("/search");
+
+  await expect(page.getByRole("heading", { name: "Search the memory graph", exact: true })).toBeVisible();
+  await expect.poll(() => refreshes).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("sb:browser_api_key"))).toBeNull();
+});
+
+test("a fresh 30-day session is restored without unnecessary renewal", async ({ page }) => {
+  let refreshes = 0;
+  await page.route("**/api/v1/browser/session**", async (route, request) => {
+    if (request.method() === "POST" && request.url().endsWith("/refresh")) {
+      refreshes += 1;
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        tenant_id: "default",
+        scopes: ["read", "write", "admin"],
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1_000).toISOString(),
+      },
+    });
+  });
+
+  await page.goto("/search");
+
+  await expect(page.getByRole("heading", { name: "Search the memory graph", exact: true })).toBeVisible();
+  await page.waitForTimeout(100);
+  expect(refreshes).toBe(0);
+});

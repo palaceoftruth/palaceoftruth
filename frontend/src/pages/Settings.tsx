@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, ClipboardCopy, Key, Loader2, LogOut, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 
 import { api, clearLegacyBrowserApiKey } from "../api/client";
+import { checkBrowserSessionMaintenance } from "../browserSessionBootstrap";
 import type { BrowserSession } from "../api/client";
 import type { BrowserExtensionPairingKey } from "../api/types";
 import PageHeader from "../components/PageHeader";
@@ -82,6 +83,7 @@ export default function Settings() {
       // The key itself is never kept: the session cookie replaces it.
       setBrowserApiKey("");
       clearLegacyBrowserApiKey();
+      checkBrowserSessionMaintenance();
       setTimeout(() => setApiKeySaved(false), 2000);
     } catch (error) {
       setSession(null);
@@ -93,6 +95,7 @@ export default function Settings() {
   const handleSignOut = async () => {
     try {
       await api.deleteBrowserSession();
+      checkBrowserSessionMaintenance();
       setSession(null);
       setBrowserApiKey("");
       setApiKeySaved(false);
@@ -170,8 +173,8 @@ export default function Settings() {
             </p>
             <p className="mt-2 text-sm text-zinc-500">
               The key is sent once and is never stored in the browser. The session it returns is held in a cookie that
-              page scripts cannot read, and it expires on its own. Agent and service integrations should use MCP OAuth
-              or server-side credentials.
+              page scripts cannot read and renews for a rolling 30 days. Agent and service integrations should use MCP
+              OAuth or server-side credentials.
             </p>
           </div>
         </div>

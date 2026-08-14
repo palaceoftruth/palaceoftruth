@@ -1,5 +1,6 @@
-import { api, clearLegacyBrowserApiKey, readLegacyBrowserApiKey } from "./api/client";
+import { ApiError, api, clearLegacyBrowserApiKey, readLegacyBrowserApiKey } from "./api/client";
 import type { BrowserSession } from "./api/client";
+import { createBrowserSessionMaintenance } from "./browserSessionMaintenance";
 
 const LEGACY_SESSION_MIGRATION_TIMEOUT_MS = 2_000;
 
@@ -36,3 +37,37 @@ export const browserSessionMigrationPending = Boolean(legacyBrowserApiKey);
 export const browserSessionBootstrap = legacyBrowserApiKey
   ? migrateLegacyBrowserSession(legacyBrowserApiKey)
   : Promise.resolve(null);
+
+let activeMaintenance: ReturnType<typeof createBrowserSessionMaintenance> | null = null;
+
+export function checkBrowserSessionMaintenance(): void {
+  void activeMaintenance?.check();
+}
+
+export function startBrowserSessionMaintenance(): () => void {
+  const maintenance = createBrowserSessionMaintenance({
+    readSession: () => api.getBrowserSession(),
+    refreshSession: () => api.refreshBrowserSession(),
+    isTerminalError: (error) => error instanceof ApiError && (error.status === 401 || error.status === 403),
+    now: () => Date.now(),
+    setTimer: (callback, delay) => window.setTimeout(callback, delay),
+    clearTimer: (timer) => window.clearTimeout(timer as number),
+  });
+  activeMaintenance?.stop();
+  activeMaintenance = maintenance;
+
+  const check = () => checkBrowserSessionMaintenance();
+  const checkWhenVisible = () => {
+    if (document.visibilityState === "visible") check();
+  };
+  window.addEventListener("focus", check);
+  document.addEventListener("visibilitychange", checkWhenVisible);
+  void maintenance.start();
+
+  return () => {
+    window.removeEventListener("focus", check);
+    document.removeEventListener("visibilitychange", checkWhenVisible);
+    maintenance.stop();
+    if (activeMaintenance === maintenance) activeMaintenance = null;
+  };
+}

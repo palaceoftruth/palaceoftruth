@@ -80,6 +80,10 @@ class BrowserSessionRecord:
     session_token_hash: str
 
 
+class BrowserSessionRotationConflict(RuntimeError):
+    """Another request rotated the session before this one could commit."""
+
+
 def session_ttl(*, elevated: bool = False) -> timedelta:
     seconds = settings.elevated_browser_session_ttl_seconds if elevated else settings.browser_session_ttl_seconds
     return timedelta(seconds=seconds)
@@ -249,20 +253,24 @@ async def rotate_session(db, session: "BrowserSessionRecord") -> IssuedBrowserSe
     session_token = f"palses_{secrets.token_urlsafe(40)}"
     csrf_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + session_ttl(elevated="admin" in session.scopes)
-    await db.execute(
+    result = await db.execute(
         text(
             "UPDATE browser_sessions SET session_token_hash = :session_token_hash, "
             "csrf_token_hash = :csrf_token_hash, expires_at = :expires_at, "
             "last_used_at = CURRENT_TIMESTAMP "
-            "WHERE id = :id AND revoked_at IS NULL"
+            "WHERE id = :id AND session_token_hash = :current_session_token_hash "
+            "AND revoked_at IS NULL"
         ),
         {
             "session_token_hash": hash_secret(session_token),
+            "current_session_token_hash": session.session_token_hash,
             "csrf_token_hash": hash_secret(csrf_token),
             "expires_at": expires_at,
             "id": session.id,
         },
     )
+    if result.rowcount != 1:
+        raise BrowserSessionRotationConflict
     return IssuedBrowserSession(
         session_token=session_token,
         csrf_token=csrf_token,

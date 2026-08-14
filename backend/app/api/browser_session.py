@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser_session import (
+    BrowserSessionRotationConflict,
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
     attach_session_cookies,
@@ -119,7 +120,12 @@ async def refresh_browser_session(
     """Rotate the session and CSRF tokens and extend the expiry."""
     session = await _require_session(request, db)
     await _require_csrf(request, db, session)
-    issued = await rotate_session(db, session)
+    try:
+        issued = await rotate_session(db, session)
+    except BrowserSessionRotationConflict as error:
+        # The shared browser cookie may already contain the winning token. A
+        # 409 lets the SPA read it back without treating the user as signed out.
+        raise HTTPException(status_code=409, detail="Browser session was refreshed by another request") from error
     await db.commit()
     attach_session_cookies(response, request, issued)
     return BrowserSessionResponse(

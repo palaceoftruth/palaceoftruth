@@ -107,6 +107,7 @@ test.describe("Route smoke", () => {
     await expect(page.getByText("default", { exact: true })).toBeVisible();
     await expect(page.getByText("destructive_prohibited", { exact: true })).toBeVisible();
     expect(sessionRequests).toEqual([
+      { method: "GET", body: null },
       { method: "POST", body: JSON.stringify({ api_key: "tenant-browser-key", elevated: true }) },
     ]);
     expect(interactionRequests).toBe(1);
