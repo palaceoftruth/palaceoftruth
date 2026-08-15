@@ -64,3 +64,9 @@ logs/
 /tmp/
 .gstack/
 pixel-audit/
+
+# Local design, research, and environment-specific operator evidence
+docs/superpowers/
+docs/research/
+docs/monitoring/
+docs/watched-source-canary.md

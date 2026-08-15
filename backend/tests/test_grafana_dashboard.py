@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DASHBOARD_PATH = REPO_ROOT / "docs/monitoring/grafana/palace-operations.json"
+DASHBOARD_PATH = REPO_ROOT / "backend/tests/fixtures/grafana/palace-operations.json"
 
 
 def test_operations_dashboard_covers_retrieval_freshness_and_remote_write() -> None:

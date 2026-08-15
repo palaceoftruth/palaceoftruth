@@ -7,7 +7,7 @@ const baseURL = configuredBaseURL || `http://127.0.0.1:${localPort}`;
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
-  retries: process.env.CI ? 2 : 0,
+  retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI
     ? [["dot"], ["html", { open: "never" }], ["github"]]
     : "list",

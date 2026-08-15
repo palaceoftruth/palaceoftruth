@@ -21,7 +21,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Classify dependency inputs
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          RUN_SCAN=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            RUN_SCAN=false
+            mapfile -t CHANGED_FILES < <(git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA")
+            for changed_file in "${CHANGED_FILES[@]}"; do
+              case "$changed_file" in
+                package.json|package-lock.json|*/package.json|*/package-lock.json|pyproject.toml|uv.lock|*/pyproject.toml|*/uv.lock|requirements*.txt|*/requirements*.txt|Dockerfile*|*/Dockerfile*|docker-compose*.yml|docker-compose*.yaml|chart/*|.github/workflows/dependency-scan.yml|.trivyignore.yaml)
+                  RUN_SCAN=true
+                  break
+                  ;;
+              esac
+            done
+          fi
+          echo "scan=${RUN_SCAN}" >> "$GITHUB_OUTPUT"
+          echo "Dependency vulnerability scan required: ${RUN_SCAN}"
       - name: Fail on known exploitable dependency vulnerabilities
+        if: steps.changes.outputs.scan == 'true'
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           scan-type: fs

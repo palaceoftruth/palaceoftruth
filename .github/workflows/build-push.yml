@@ -34,9 +34,14 @@ jobs:
     timeout-minutes: 5
     outputs:
       chart_release_only: ${{ steps.changes.outputs.chart_release_only }}
+      backend_fast: ${{ steps.changes.outputs.backend_fast }}
+      backend_database: ${{ steps.changes.outputs.backend_database }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      helm_policy: ${{ steps.changes.outputs.helm_policy }}
+      extension: ${{ steps.changes.outputs.extension }}
+      browser: ${{ steps.changes.outputs.browser }}
     steps:
-      - name: Checkout push history
-        if: github.event_name == 'push'
+      - name: Checkout change history
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # A push can contain more than one commit. Full history makes the
@@ -50,11 +55,30 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
           CHART_RELEASE_ONLY=false
+          BACKEND_FAST=false
+          BACKEND_DATABASE=false
+          FRONTEND=false
+          HELM_POLICY=false
+          EXTENSION=false
+          BROWSER=false
           ZERO_SHA=0000000000000000000000000000000000000000
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            mapfile -t CHANGED_FILES < <(git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA")
+          elif [ "$EVENT_NAME" = "push" ] \
+            && [ -n "$BEFORE_SHA" ] \
+            && [ "$BEFORE_SHA" != "$ZERO_SHA" ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}"; then
+            mapfile -t CHANGED_FILES < <(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")
+          else
+            mapfile -t CHANGED_FILES < <(git ls-files)
+          fi
 
           if [ "$EVENT_NAME" = "push" ] \
             && [ -n "$BEFORE_SHA" ] \
@@ -68,14 +92,64 @@ jobs:
             fi
           fi
 
-          echo "chart_release_only=${CHART_RELEASE_ONLY}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$CHART_RELEASE_ONLY" != "true" ]; then
+            BACKEND_FAST=true
+            BACKEND_DATABASE=true
+            FRONTEND=true
+            HELM_POLICY=true
+            EXTENSION=true
+            BROWSER=true
+          else
+            for changed_file in "${CHANGED_FILES[@]}"; do
+              case "$changed_file" in
+                backend/tests/test_helm_*.py|backend/tests/test_build_push_workflow.py)
+                  ;;
+                backend/*|scripts/*)
+                  BACKEND_FAST=true
+                  ;;
+              esac
+              case "$changed_file" in
+                backend/alembic/*|backend/app/database.py|backend/app/models/*|backend/app/services/search.py|backend/app/api/search.py|backend/tests/test_retrieval_query_plans.py|scripts/verify_migration_roundtrip.py|backend/pyproject.toml|backend/uv.lock)
+                  BACKEND_DATABASE=true
+                  ;;
+              esac
+              case "$changed_file" in
+                frontend/*)
+                  FRONTEND=true
+                  BROWSER=true
+                  ;;
+              esac
+              case "$changed_file" in
+                chart/*|.github/*|backend/tests/test_helm_*.py|backend/tests/test_build_push_workflow.py|backend/pyproject.toml|backend/uv.lock)
+                  HELM_POLICY=true
+                  ;;
+              esac
+              case "$changed_file" in
+                extension/*)
+                  EXTENSION=true
+                  ;;
+              esac
+            done
+          fi
+
+          {
+            echo "chart_release_only=${CHART_RELEASE_ONLY}"
+            echo "backend_fast=${BACKEND_FAST}"
+            echo "backend_database=${BACKEND_DATABASE}"
+            echo "frontend=${FRONTEND}"
+            echo "helm_policy=${HELM_POLICY}"
+            echo "extension=${EXTENSION}"
+            echo "browser=${BROWSER}"
+          } >> "$GITHUB_OUTPUT"
           echo "Chart release coordinate only: ${CHART_RELEASE_ONLY}"
+          echo "Validation lanes: backend_fast=${BACKEND_FAST} backend_database=${BACKEND_DATABASE} frontend=${FRONTEND} helm_policy=${HELM_POLICY} extension=${EXTENSION} browser=${BROWSER}"
 
   backend-fast:
     name: Backend fast
     needs: classify
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
+      needs.classify.outputs.backend_fast == 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     # Pull requests use disposable GitHub-hosted runners; trusted releases use ARC.
     runs-on: >-
@@ -100,6 +174,7 @@ jobs:
           # Everything else is required here instead of the former 19-file smoke list.
           uv run --frozen --python 3.12 python -m pytest tests \
             --ignore=tests/test_retrieval_query_plans.py \
+            --ignore=tests/test_build_push_workflow.py \
             --ignore-glob='tests/test_helm_*.py' \
             -q
           uv run --frozen --python 3.12 python ../scripts/check_database_health.py
@@ -135,7 +210,7 @@ jobs:
             --output ../artifacts/agent-memory/scorecard-dry-run.json
 
       - name: Upload agent memory reports
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: agent-memory-ci-reports
@@ -149,6 +224,7 @@ jobs:
     needs: classify
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
+      needs.classify.outputs.backend_database == 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
       ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
@@ -197,6 +273,7 @@ jobs:
     needs: classify
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
+      needs.classify.outputs.frontend == 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
       ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
@@ -218,6 +295,7 @@ jobs:
         working-directory: frontend
         run: |
           npm ci --ignore-scripts
+          npm test
           npm run build
 
   helm-policy:
@@ -225,7 +303,9 @@ jobs:
     needs: classify
     # Chart-coordinate-only commits still receive the inexpensive chart and
     # workflow validation required by the stable branch-protection gate.
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: >-
+      needs.classify.outputs.helm_policy == 'true' &&
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
       ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
     permissions:
@@ -258,13 +338,16 @@ jobs:
 
       - name: Verify Helm network policy
         working-directory: backend
-        run: uv run --frozen --python 3.12 python -m pytest tests/test_helm_*.py -q
+        run: >-
+          uv run --frozen --python 3.12 python -m pytest
+          tests/test_helm_*.py tests/test_build_push_workflow.py -q
 
   extension:
     name: Browser extension
     needs: classify
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
+      needs.classify.outputs.extension == 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
       ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
@@ -293,6 +376,7 @@ jobs:
     needs: classify
     if: >-
       needs.classify.outputs.chart_release_only != 'true' &&
+      needs.classify.outputs.browser == 'true' &&
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: >-
       ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'palace-trusted-amd64' }}
@@ -320,7 +404,7 @@ jobs:
           npm run test:e2e -- --workers=1
 
       - name: Upload Playwright report
-        if: ${{ !cancelled() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: playwright-report
@@ -361,6 +445,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GIT_REF: ${{ github.ref }}
           CHART_RELEASE_ONLY: ${{ needs.classify.outputs.chart_release_only }}
+          BACKEND_FAST_REQUIRED: ${{ needs.classify.outputs.backend_fast }}
+          BACKEND_DATABASE_REQUIRED: ${{ needs.classify.outputs.backend_database }}
+          FRONTEND_REQUIRED: ${{ needs.classify.outputs.frontend }}
+          HELM_POLICY_REQUIRED: ${{ needs.classify.outputs.helm_policy }}
+          EXTENSION_REQUIRED: ${{ needs.classify.outputs.extension }}
+          BROWSER_REQUIRED: ${{ needs.classify.outputs.browser }}
           CLASSIFY_RESULT: ${{ needs.classify.result }}
           BACKEND_FAST_RESULT: ${{ needs.backend-fast.result }}
           BACKEND_DATABASE_RESULT: ${{ needs.backend-database.result }}
@@ -381,33 +471,33 @@ jobs:
             exit 0
           fi
 
-          if [ "$HELM_POLICY_RESULT" != "success" ]; then
-            echo "Helm/workflow policy lane did not succeed: ${HELM_POLICY_RESULT}" >&2
-            exit 1
-          fi
-
-          if [ "$CHART_RELEASE_ONLY" = "true" ]; then
-            echo "Chart release coordinate validated; application lanes were intentionally skipped."
-            exit 0
-          fi
-
           failures=0
-          for lane_result in \
-            "$BACKEND_FAST_RESULT" \
-            "$BACKEND_DATABASE_RESULT" \
-            "$FRONTEND_RESULT" \
-            "$EXTENSION_RESULT" \
-            "$BROWSER_RESULT"; do
-            if [ "$lane_result" != "success" ]; then
+          while IFS='|' read -r lane_name required lane_result; do
+            if [ "$required" = "true" ] && [ "$lane_result" != "success" ]; then
+              echo "Required ${lane_name} lane did not succeed: ${lane_result}" >&2
+              failures=$((failures + 1))
+            elif [ "$required" != "true" ] && [ "$lane_result" != "skipped" ]; then
+              echo "Optional ${lane_name} lane had unexpected result: ${lane_result}" >&2
               failures=$((failures + 1))
             fi
-          done
+          done <<EOF
+          backend-fast|${BACKEND_FAST_REQUIRED}|${BACKEND_FAST_RESULT}
+          backend-database|${BACKEND_DATABASE_REQUIRED}|${BACKEND_DATABASE_RESULT}
+          frontend|${FRONTEND_REQUIRED}|${FRONTEND_RESULT}
+          helm-policy|${HELM_POLICY_REQUIRED}|${HELM_POLICY_RESULT}
+          extension|${EXTENSION_REQUIRED}|${EXTENSION_RESULT}
+          browser|${BROWSER_REQUIRED}|${BROWSER_RESULT}
+          EOF
 
           if [ "$failures" -ne 0 ]; then
             echo "${failures} required validation lane(s) did not succeed." >&2
             exit 1
           fi
-          echo "All required validation lanes succeeded."
+          if [ "$CHART_RELEASE_ONLY" = "true" ]; then
+            echo "Chart release coordinate validated; application lanes were intentionally skipped."
+          else
+            echo "All selected validation lanes succeeded."
+          fi
 
   build-backend:
     needs:
