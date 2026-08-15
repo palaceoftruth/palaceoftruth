@@ -57,6 +57,10 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}

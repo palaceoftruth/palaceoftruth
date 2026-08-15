@@ -116,6 +116,10 @@ spec:
                 name: {{ include "palaceoftruth.fullname" . }}-config
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
       volumes:

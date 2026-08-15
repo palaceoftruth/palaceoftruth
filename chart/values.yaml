@@ -895,6 +895,8 @@ frontend:
   containerPort: 8080
   command: []
   args: []
+  # Used only when the image runs the Vite development server.
+  viteApiProxyTarget: ""
   nginxConfigEnabled: true
   rollingUpdate:
     maxUnavailable: 0

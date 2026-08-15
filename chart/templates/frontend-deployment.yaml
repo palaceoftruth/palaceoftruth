@@ -42,6 +42,11 @@ spec:
           {{- end }}
           ports:
             - containerPort: {{ .Values.frontend.containerPort }}
+          {{- if .Values.frontend.viteApiProxyTarget }}
+          env:
+            - name: VITE_API_PROXY_TARGET
+              value: {{ .Values.frontend.viteApiProxyTarget | quote }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /
