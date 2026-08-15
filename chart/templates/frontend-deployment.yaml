@@ -42,10 +42,16 @@ spec:
           {{- end }}
           ports:
             - containerPort: {{ .Values.frontend.containerPort }}
-          {{- if .Values.frontend.viteApiProxyTarget }}
+          {{- if or .Values.frontend.viteApiProxyTarget .Values.frontend.viteAllowedHosts }}
           env:
+            {{- if .Values.frontend.viteApiProxyTarget }}
             - name: VITE_API_PROXY_TARGET
               value: {{ .Values.frontend.viteApiProxyTarget | quote }}
+            {{- end }}
+            {{- if .Values.frontend.viteAllowedHosts }}
+            - name: VITE_ALLOWED_HOSTS
+              value: {{ .Values.frontend.viteAllowedHosts | quote }}
+            {{- end }}
           {{- end }}
           readinessProbe:
             httpGet:

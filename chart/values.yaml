@@ -897,6 +897,8 @@ frontend:
   args: []
   # Used only when the image runs the Vite development server.
   viteApiProxyTarget: ""
+  # Exact comma-separated hostnames accepted by the Vite development server.
+  viteAllowedHosts: ""
   nginxConfigEnabled: true
   rollingUpdate:
     maxUnavailable: 0

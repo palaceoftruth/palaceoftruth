@@ -22,6 +22,7 @@ helm template "$VCDEV_PROJECT_SLUG" ./chart \
   --set-string "existingRegistrySecret=$VCDEV_REGISTRY_PULL_SECRET" \
   --set-string "additionalEnvFromSecrets[0]=$VCDEV_SHARED_PROVIDER_SECRET" \
   --set-string "frontend.viteApiProxyTarget=http://$VCDEV_PROJECT_SLUG-palaceoftruth-backend:8000" \
+  --set-string "frontend.viteAllowedHosts=$frontend_host" \
   --set-string "ingress.baseDomain=$frontend_host" \
   --set-string "ingress.frontendHost=$frontend_host" \
   --set-string "ingress.apiHost=api.$frontend_host" \
