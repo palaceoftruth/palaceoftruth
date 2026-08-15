@@ -6,6 +6,7 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: {{ include "palaceoftruth.postgresClusterName" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
   annotations:
