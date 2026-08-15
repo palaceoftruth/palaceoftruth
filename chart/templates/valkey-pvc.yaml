@@ -3,6 +3,7 @@ kind: PersistentVolumeClaim
 apiVersion: v1
 metadata:
   name: {{ include "palaceoftruth.valkeyServiceName" . }}-data
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
 spec:
