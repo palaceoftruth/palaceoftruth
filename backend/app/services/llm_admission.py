@@ -147,12 +147,13 @@ async def consume_tenant_token_budget(tenant_id: str, estimated_tokens: int) -> 
             result = await session.execute(
                 text(
                     "INSERT INTO tenant_llm_daily_usage (tenant_id, usage_day, used_tokens) "
-                    "SELECT :tenant_id, CURRENT_DATE, :tokens "
-                    "WHERE :tokens <= :limit "
+                    "SELECT :tenant_id, CURRENT_DATE, CAST(:tokens AS BIGINT) "
+                    "WHERE CAST(:tokens AS BIGINT) <= CAST(:limit AS BIGINT) "
                     "ON CONFLICT (tenant_id, usage_day) DO UPDATE "
                     "SET used_tokens = tenant_llm_daily_usage.used_tokens + EXCLUDED.used_tokens, "
                     "updated_at = now() "
-                    "WHERE tenant_llm_daily_usage.used_tokens + EXCLUDED.used_tokens <= :limit "
+                    "WHERE tenant_llm_daily_usage.used_tokens + EXCLUDED.used_tokens "
+                    "<= CAST(:limit AS BIGINT) "
                     "RETURNING used_tokens"
                 ),
                 {

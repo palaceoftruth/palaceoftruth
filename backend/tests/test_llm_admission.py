@@ -96,7 +96,11 @@ def test_first_daily_budget_write_cannot_exceed_limit(
         asyncio.run(consume_tenant_token_budget("tenant-a", 101))
 
     normalized = " ".join(statements[0].split())
-    assert "SELECT :tenant_id, CURRENT_DATE, :tokens WHERE :tokens <= :limit" in normalized
+    assert (
+        "SELECT :tenant_id, CURRENT_DATE, CAST(:tokens AS BIGINT) "
+        "WHERE CAST(:tokens AS BIGINT) <= CAST(:limit AS BIGINT)"
+    ) in normalized
+    assert "EXCLUDED.used_tokens <= CAST(:limit AS BIGINT)" in normalized
 
 
 def test_distributed_gate_holds_and_releases_postgres_slot(
