@@ -823,9 +823,8 @@ def test_documented_password_map_keys_match_rendered_exporter_targets() -> None:
         for container in manifest.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
         if container.get("name") == "valkey-exporter"
     }
-    monitoring_docs = (REPO_ROOT / "docs" / "monitoring" / "grafana" / "README.md").read_text()
-    password_map_block = monitoring_docs.split("```json", 1)[1].split("```", 1)[0]
-    documented_password_map = json.loads(password_map_block)
+    example_path = REPO_ROOT / "backend" / "tests" / "fixtures" / "grafana" / "valkey-password-map.example.json"
+    documented_password_map = json.loads(example_path.read_text())
 
     assert rendered_targets == {"redis://127.0.0.1:6379", "redis://127.0.0.1:26379"}
     assert set(documented_password_map) == rendered_targets
