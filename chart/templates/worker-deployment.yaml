@@ -43,6 +43,10 @@ spec:
                 name: {{ include "palaceoftruth.fullname" . }}-config
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
@@ -106,6 +110,10 @@ spec:
                 name: {{ include "palaceoftruth.fullname" . }}-config
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}
@@ -164,6 +172,10 @@ spec:
                 name: {{ include "palaceoftruth.fullname" . }}-config
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}

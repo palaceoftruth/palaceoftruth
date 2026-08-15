@@ -66,6 +66,14 @@ spec:
           image: {{ include "palaceoftruth.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "backend") | nindent 10 }}
+          {{- with .Values.backend.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backend.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: 8000
           env:
@@ -81,6 +89,10 @@ spec:
                 name: {{ include "palaceoftruth.fullname" . }}-config
             - secretRef:
                 name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             {{- include "palaceoftruth.scratchVolumeMounts" . | nindent 12 }}
             {{- include "palaceoftruth.databaseTlsVolumeMount" . | nindent 12 }}

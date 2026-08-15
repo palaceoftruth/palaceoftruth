@@ -126,6 +126,9 @@ spec:
         name: data
       spec:
         accessModes: [ReadWriteOnce]
+        {{- if .Values.valkey.storage.storageClassName }}
+        storageClassName: {{ .Values.valkey.storage.storageClassName | quote }}
+        {{- end }}
         resources:
           requests:
             storage: {{ .Values.valkey.storage.size }}

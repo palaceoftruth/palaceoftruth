@@ -32,6 +32,14 @@ spec:
           image: {{ include "palaceoftruth.frontendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "frontend") | nindent 10 }}
+          {{- with .Values.frontend.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.frontend.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.frontend.containerPort }}
           readinessProbe:
@@ -41,6 +49,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
+            {{- if .Values.frontend.nginxConfigEnabled }}
             # Mounted straight into conf.d, not into templates/. The entrypoint
             # would otherwise have to render templates/ into a writable
             # conf.d, and the config holds no envsubst variables.
@@ -51,15 +60,18 @@ spec:
             # /tmp, so both stay writable while the root filesystem does not.
             - name: nginx-cache
               mountPath: /var/cache/nginx
+            {{- end }}
             - name: scratch-tmp
               mountPath: /tmp
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
       volumes:
+        {{- if .Values.frontend.nginxConfigEnabled }}
         - name: nginx-config
           configMap:
             name: {{ include "palaceoftruth.fullname" . }}-frontend-nginx
         - name: nginx-cache
           emptyDir: {}
+        {{- end }}
         - name: scratch-tmp
           emptyDir: {}
