@@ -61,6 +61,13 @@ function shouldVerifyProxyTls(target: string, allowInsecure: string | undefined)
   return true;
 }
 
+function parseAllowedHosts(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean);
+}
+
 export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, "..", "");
   const apiProxyTarget = command === "serve"
@@ -75,6 +82,7 @@ export default defineConfig(async ({ command, mode }) => {
     plugins: [react()],
     server: {
       port: 3000,
+      allowedHosts: parseAllowedHosts(env.VITE_ALLOWED_HOSTS),
       proxy: {
         "/docs": {
           target: apiProxyTarget,

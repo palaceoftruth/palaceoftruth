@@ -274,6 +274,18 @@ def test_frontend_proxy_does_not_inject_backend_api_key() -> None:
     assert container.get("env", []) == []
 
 
+def test_vite_development_settings_render_as_explicit_environment_variables() -> None:
+    manifests = _render_chart(
+        "frontend.viteApiProxyTarget=http://palace-backend:8000",
+        "frontend.viteAllowedHosts=palace.andrew.sarvent.dev",
+    )
+    frontend = _deployment_by_name(manifests, "palaceoftruth-frontend")
+    env = _container_env(frontend["spec"]["template"]["spec"]["containers"][0])
+
+    assert env["VITE_API_PROXY_TARGET"]["value"] == "http://palace-backend:8000"
+    assert env["VITE_ALLOWED_HOSTS"]["value"] == "palace.andrew.sarvent.dev"
+
+
 def test_backend_cors_uses_explicit_allowlist() -> None:
     manifests = _render_chart("config.corsAllowedOrigins=https://palace.example.com\\,https://api.palace.example.com")
     config_map = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-config")
