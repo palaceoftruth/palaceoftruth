@@ -21,7 +21,7 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 # under /tmp, and listens on 8080, so the pod needs neither uid 0 nor
 # NET_BIND_SERVICE. Keep the mutable tag visible for maintainability but bind
 # the build to the reviewed digest.
-FROM nginxinc/nginx-unprivileged:alpine@sha256:a6c3ec0c0d249d68b0682df854d4a9e222b90fb607dc3fcf2f1d2fcbc85d347e
+FROM nginxinc/nginx-unprivileged:alpine@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Land the config directly in conf.d rather than in templates/. The entrypoint
 # renders templates/ into conf.d at startup, which needs a writable conf.d; the
