@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.embedding_profile import EMBEDDING_DIMENSIONS, resolve_embedding_profile
+from app.services.llm_admission import TenantLlmBudgetExceeded, consume_tenant_token_budget
 from app.services.search import SearchService
 
 
@@ -337,3 +338,48 @@ async def test_production_query_preserves_strict_scope_filter(plan_session: Asyn
     plan_text = json.dumps(explain_session.plan, sort_keys=True)
     assert "memory_entry" in plan_text
     assert "codex" in plan_text
+
+
+@pytest.mark.asyncio
+async def test_daily_llm_budget_statement_executes_with_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep asyncpg bind inference aligned with the BIGINT usage columns."""
+
+    assert DATABASE_URL is not None
+    async_url = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    engine = create_async_engine(async_url)
+    async with engine.connect() as connection:
+        await connection.execute(text("""
+            CREATE TEMP TABLE tenant_llm_daily_usage (
+                tenant_id text NOT NULL,
+                usage_day date NOT NULL,
+                used_tokens bigint NOT NULL DEFAULT 0,
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (tenant_id, usage_day)
+            )
+        """))
+        await connection.commit()
+
+        monkeypatch.setattr(
+            "app.services.llm_admission.settings.tenant_llm_daily_token_limit",
+            100,
+        )
+        monkeypatch.setattr(
+            "app.database.async_session",
+            lambda **_kwargs: AsyncSession(bind=connection, expire_on_commit=False),
+        )
+
+        await consume_tenant_token_budget("tenant-a", 1)
+        await consume_tenant_token_budget("tenant-a", 41)
+        with pytest.raises(TenantLlmBudgetExceeded):
+            await consume_tenant_token_budget("tenant-a", 59)
+
+        used_tokens = await connection.scalar(text("""
+            SELECT used_tokens
+            FROM tenant_llm_daily_usage
+            WHERE tenant_id = 'tenant-a' AND usage_day = CURRENT_DATE
+        """))
+        assert used_tokens == 42
+
+    await engine.dispose()
