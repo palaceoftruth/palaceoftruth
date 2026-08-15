@@ -8,7 +8,6 @@ from app.services.agent_memory_eval import evaluate_eval_pack, read_eval_pack
 
 FIXTURE = Path(__file__).parent / "fixtures" / "semantic_memory_v1_eval_plan.json"
 EVAL_PACK = Path(__file__).parent / "fixtures" / "semantic_memory_v1_eval_pack.json"
-SPEC = Path(__file__).resolve().parents[2] / "docs" / "research" / "sar-1034-semantic-memory-v1-spec.md"
 
 
 def _load_fixture() -> dict[str, Any]:
@@ -147,15 +146,6 @@ def test_semantic_memory_v1_iris_canary_has_exact_scope_and_sources() -> None:
         forbidden in canary["hermes_context"]
         for forbidden in plan["iris_end_to_end"]["forbidden_scope_keys"]
     )
-
-
-def test_semantic_memory_v1_spec_mentions_fixture_and_non_goals() -> None:
-    text = SPEC.read_text()
-
-    assert "10 v1 ship gates" in text
-    assert "valid_until" in text
-    assert "No schema migration in SAR-1034" in text
-    assert "backend/tests/fixtures/semantic_memory_v1_eval_plan.json" in text
 
 
 def test_semantic_scope_profile_service_exists_for_retain_mission() -> None:

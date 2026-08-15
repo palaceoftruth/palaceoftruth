@@ -1368,7 +1368,7 @@
           "refId": "B"
         }
       ],
-      "title": "k3s-lab remote-write pipeline health",
+      "title": "example-cluster remote-write pipeline health",
       "type": "timeseries"
     }
   ],

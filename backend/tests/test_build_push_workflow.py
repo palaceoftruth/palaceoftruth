@@ -6,6 +6,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "build-push.yml"
+DEPENDENCY_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "dependency-scan.yml"
 GH_SETUP_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "setup-gh" / "action.yml"
 ATTEST_IMAGE_ACTION_PATH = REPO_ROOT / ".github" / "actions" / "attest-image" / "action.yml"
 TRUSTED_RUNNER = "palace-trusted-amd64"
@@ -20,6 +21,11 @@ def _load_workflow() -> dict:
     # BaseLoader keeps the top-level `on` key as a string instead of applying
     # YAML 1.1 boolean coercion.
     with WORKFLOW_PATH.open(encoding="utf-8") as workflow_file:
+        return yaml.load(workflow_file, Loader=yaml.BaseLoader)
+
+
+def _load_dependency_workflow() -> dict:
+    with DEPENDENCY_WORKFLOW_PATH.open(encoding="utf-8") as workflow_file:
         return yaml.load(workflow_file, Loader=yaml.BaseLoader)
 
 
@@ -299,7 +305,9 @@ def test_validation_fans_out_to_required_lanes_and_aggregates_one_gate() -> None
     gate_step = gate["steps"][0]
     assert gate_step["env"]["HELM_POLICY_RESULT"] == "${{ needs.helm-policy.result }}"
     assert 'if [ "$CHART_RELEASE_ONLY" = "true" ]' in gate_step["run"]
-    assert "All required validation lanes succeeded." in gate_step["run"]
+    assert "All selected validation lanes succeeded." in gate_step["run"]
+    assert 'required" = "true"' in gate_step["run"]
+    assert 'lane_result" != "skipped"' in gate_step["run"]
 
 
 def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks() -> None:
@@ -310,6 +318,7 @@ def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks
     )
     assert "python -m pytest tests" in backend_step["run"]
     assert "--ignore=tests/test_retrieval_query_plans.py" in backend_step["run"]
+    assert "--ignore=tests/test_build_push_workflow.py" in backend_step["run"]
     assert "--ignore-glob='tests/test_helm_*.py'" in backend_step["run"]
 
     database_step = next(
@@ -344,7 +353,7 @@ def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks
     report_step = next(
         step for step in browser["steps"] if step.get("name") == "Upload Playwright report"
     )
-    assert report_step["if"] == "${{ !cancelled() }}"
+    assert report_step["if"] == "${{ failure() }}"
     assert report_step["uses"] == (
         "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
     )
@@ -361,11 +370,73 @@ def test_validation_lanes_cover_full_backend_extension_browser_and_policy_checks
     playwright_config = (REPO_ROOT / "frontend" / "playwright.config.ts").read_text(
         encoding="utf-8"
     )
-    assert "retries: process.env.CI ? 2 : 0" in playwright_config
+    assert "retries: process.env.CI ? 1 : 0" in playwright_config
     assert '["html", { open: "never" }]' in playwright_config
     assert 'outputDir: process.env.CI' in playwright_config
     assert 'screenshot: "only-on-failure"' in playwright_config
     assert 'trace: "on-first-retry"' in playwright_config
+
+
+def test_change_classifier_targets_validation_lanes_and_keeps_full_main_validation() -> None:
+    jobs = _load_workflow()["jobs"]
+    classify = jobs["classify"]
+    script = classify["steps"][1]["run"]
+
+    assert set(classify["outputs"]) == {
+        "chart_release_only",
+        "backend_fast",
+        "backend_database",
+        "frontend",
+        "helm_policy",
+        "extension",
+        "browser",
+    }
+    assert 'if [ "$EVENT_NAME" != "pull_request" ]' in script
+    assert 'frontend/*)' in script
+    assert "FRONTEND=true" in script
+    assert "BROWSER=true" in script
+    assert 'extension/*)' in script
+    assert "EXTENSION=true" in script
+    assert 'chart/*|.github/*' in script
+    assert "HELM_POLICY=true" in script
+
+    lane_outputs = {
+        "backend-fast": "backend_fast",
+        "backend-database": "backend_database",
+        "frontend": "frontend",
+        "helm-policy": "helm_policy",
+        "extension": "extension",
+        "browser": "browser",
+    }
+    for lane_name, output_name in lane_outputs.items():
+        assert f"needs.classify.outputs.{output_name} == 'true'" in _normalize_expression(
+            jobs[lane_name]["if"]
+        )
+
+
+def test_frontend_lane_runs_fast_unit_tests_before_build() -> None:
+    run = next(
+        step["run"]
+        for step in _load_workflow()["jobs"]["frontend"]["steps"]
+        if step.get("name") == "Build frontend"
+    )
+
+    assert run.index("npm test") < run.index("npm run build")
+
+
+def test_dependency_scan_keeps_one_stable_job_and_targets_dependency_inputs() -> None:
+    scan = _load_dependency_workflow()["jobs"]["scan"]
+    classify = next(step for step in scan["steps"] if step.get("id") == "changes")
+    trivy = next(
+        step for step in scan["steps"] if step.get("name", "").startswith("Fail on known")
+    )
+
+    assert 'if [ "$EVENT_NAME" = "pull_request" ]' in classify["run"]
+    assert "package-lock.json" in classify["run"]
+    assert "backend/uv.lock" not in classify["run"]  # Generic */uv.lock covers it.
+    assert "Dockerfile*" in classify["run"]
+    assert "chart/*" in classify["run"]
+    assert trivy["if"] == "steps.changes.outputs.scan == 'true'"
 
 
 def test_backend_dockerfile_uses_pinned_locked_image_targets() -> None:

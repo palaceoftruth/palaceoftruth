@@ -76,11 +76,9 @@ The report is read-only and secret-safe. It must show:
 * no `recent_legacy_mcp_events` whose authenticated HTTP caller used the API-key path
 * any retained active API keys marked only as human-controlled break-glass
 
-Current `palace-sarvent` evidence captured for SAR-992 is recorded in
-`docs/research/sar-992-api-key-retirement-readiness-evidence.md`. That artifact
-includes the original staged evidence plus the 2026-07-29 post-SAR-1276
-investigation. Only disable fallback after the explicit-runtime report passes
-for the target tenant and lookback window.
+Environment-specific rollout evidence belongs in the ignored local
+`docs/research/` directory. Only disable fallback after the explicit-runtime
+report passes for the target tenant and lookback window.
 
 Only then set this to stop mounting the broad `API_KEY` into MCP runtime pods
 and smoke jobs:
