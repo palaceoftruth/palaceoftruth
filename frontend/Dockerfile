@@ -6,6 +6,16 @@ RUN npm ci --ignore-scripts
 COPY . .
 RUN npm run build
 
+FROM node:22-alpine AS development
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN chown -R 10001:10001 /app
+USER 10001:10001
+EXPOSE 5173
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+
 # Serve stage.
 # nginx-unprivileged runs as a non-root user, writes its pid and temp paths
 # under /tmp, and listens on 8080, so the pod needs neither uid 0 nor

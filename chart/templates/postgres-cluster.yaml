@@ -23,6 +23,9 @@ spec:
 
   storage:
     size: {{ .Values.postgres.storage.size }}
+    {{- if .Values.postgres.storage.storageClassName }}
+    storageClass: {{ .Values.postgres.storage.storageClassName | quote }}
+    {{- end }}
 
   {{- with .Values.postgres.resources }}
   resources:

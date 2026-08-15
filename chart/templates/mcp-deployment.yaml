@@ -108,6 +108,13 @@ spec:
             - name: PALACEOFTRUTH_DEFAULT_SCOPE_KEY
               value: {{ .Values.mcp.defaultScopeKey | quote }}
             {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "palaceoftruth.appSecretName" . }}
+            {{- range .Values.additionalEnvFromSecrets }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             exec:
               command:

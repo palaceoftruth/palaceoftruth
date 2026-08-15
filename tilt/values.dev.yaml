@@ -1,0 +1,83 @@
+namespace:
+  create: false
+podSecurity:
+  overrides:
+    frontend:
+      container:
+        readOnlyRootFilesystem: false
+externalSecrets:
+  enabled: false
+existingSecret: palace-dev-secrets
+existingRegistrySecret: registry-pull
+additionalEnvFromSecrets:
+  - shared-provider-keys
+image:
+  pullPolicy: Always
+postgres:
+  enabled: true
+  instances: 1
+  storage:
+    size: 5Gi
+    storageClassName: vc-dev-rwo
+  resources: {}
+  backup:
+    enabled: false
+    requireBackup: false
+valkey:
+  enabled: true
+  storage:
+    size: 1Gi
+    storageClassName: vc-dev-rwo
+  auth:
+    enabled: true
+    existingSecret: palace-dev-secrets
+    existingSecretKey: VALKEY_PASSWORD
+  resources: {}
+  sentinel:
+    enabled: false
+sharedRuntimeStorage:
+  enabled: true
+  storageClassName: vc-dev-rwx
+  size: 2Gi
+highAvailability:
+  enabled: false
+podDisruptionBudgets:
+  enabled: false
+migrations:
+  resources: {}
+  readiness:
+    resources: {}
+backend:
+  command: [uvicorn]
+  args: [app.main:app, --host, 0.0.0.0, --port, "8000", --reload]
+  resources: {}
+worker:
+  resources: {}
+mediaWorker:
+  resources: {}
+palaceWorker:
+  resources: {}
+mcp:
+  resources: {}
+frontend:
+  containerPort: 5173
+  command: [npm]
+  args: [run, dev, --, --host, 0.0.0.0, --port, "5173"]
+  nginxConfigEnabled: false
+  resources: {}
+memoryRolloutSmoke:
+  enabled: false
+certificate:
+  enabled: false
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+networkPolicy:
+  enabled: true
+  ingress:
+    enabled: true
+    namespaceDefaultDeny: true
+    ingressControllerNamespace: ingress-nginx
+    monitoringNamespace: ""

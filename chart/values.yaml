@@ -43,8 +43,8 @@ config:
   relationshipClassificationTemperature: "0.0"
   relationshipClassificationSeed: "1083"
   relationshipExtractionMinConfidence: "0.7"
-  corsAllowedOrigins: "https://palace.sarvent.cloud,https://palaceoftruth.test,http://localhost:3000"
-  trustedHosts: "palace.sarvent.cloud,api.palace.sarvent.cloud,mcp.palace.sarvent.cloud"
+  corsAllowedOrigins: "https://palaceoftruth.example.com,http://localhost:3000"
+  trustedHosts: "palaceoftruth.example.com,api.palaceoftruth.example.com,mcp.palaceoftruth.example.com"
   # SPA sign-in session (H-20). The rolling trusted-browser period is 30 days,
   # and the cookie is Secure because the deployment terminates TLS at ingress.
   browserSessionTtlSeconds: "2592000"
@@ -288,6 +288,8 @@ externalSecrets:
 existingSecret: ""
 # existingRegistrySecret must be a kubernetes.io/dockerconfigjson type secret
 existingRegistrySecret: ""
+# Optional shared Secrets appended to envFrom for application and worker pods.
+additionalEnvFromSecrets: []
 
 # Production database TLS. CNPG publishes its server CA in <cluster>-ca.
 # External database users must set caSecretName to a Secret with caKey.
@@ -305,6 +307,7 @@ postgres:
   image: ghcr.io/cloudnative-pg/postgresql:16.4@sha256:99be063781d171d3971089b49c992706bdab9ccbd2b57cdf126c7542773aedfe
   storage:
     size: 5Gi
+    storageClassName: ""
   # An empty resources block puts the database in BestEffort QoS, which makes
   # it the first pod the kubelet evicts under node memory pressure. These are
   # deliberately modest floors, not a sizing recommendation: raise them in the
@@ -415,6 +418,7 @@ valkey:
 
   storage:
     size: 1Gi
+    storageClassName: ""
   resources:
     requests:
       memory: "64Mi"
@@ -711,6 +715,8 @@ migrations:
       cpu: "500m"
 
 backend:
+  command: []
+  args: []
   # CNPG may take several minutes to promote a writable primary after a
   # configuration rollout. Keep liveness disabled until startup succeeds.
   startupProbe:
@@ -887,6 +893,9 @@ frontend:
   # 1024 as a non-root user. The Service still publishes 80, so nothing outside
   # the pod changes.
   containerPort: 8080
+  command: []
+  args: []
+  nginxConfigEnabled: true
   rollingUpdate:
     maxUnavailable: 0
     maxSurge: 1
