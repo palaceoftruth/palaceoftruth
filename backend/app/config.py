@@ -116,8 +116,8 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_default_model: str = "minimax/minimax-m2.7"
     openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
-    openrouter_vision_model: str = "minimax/minimax-m3"
-    openrouter_vision_fallback_models: str = "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+    openrouter_vision_model: str = "google/gemini-2.5-flash-lite"
+    openrouter_vision_fallback_models: str = "openai/gpt-4o-mini"
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
