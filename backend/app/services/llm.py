@@ -39,7 +39,10 @@ _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES = {401, 403, 404}
 _OPENROUTER_BACKOFF_FALLBACK_STATUSES = {429, 503}
 _OPENROUTER_TRANSIENT_RETRIES = 2
 
-_VISION_MAX_TOKENS = 1024
+# Text-dense diagrams can use most of the bounded 64-entry evidence lists.
+# Keep enough room for the provider to close the strict JSON document instead
+# of treating a token-limit truncation as malformed output.
+_VISION_MAX_TOKENS = 4096
 _VISION_TRANSIENT_RETRIES = 2
 _VISION_TERMINAL_STATUSES = {401}
 _VISION_IMMEDIATE_FALLBACK_STATUSES = {400, 403, 404, 422}

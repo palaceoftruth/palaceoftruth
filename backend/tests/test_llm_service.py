@@ -597,7 +597,7 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     call = openrouter_completions.calls[0]
     assert call["model"] == "google/gemini-2.5-flash-lite"
     assert call["temperature"] == 0.0
-    assert call["max_tokens"] == 1024
+    assert call["max_tokens"] == 4096
     assert call["response_format"]["type"] == "json_schema"
     assert call["extra_body"]["provider"] == {"require_parameters": True}
     assert call["extra_body"]["reasoning"] == {"enabled": False}
