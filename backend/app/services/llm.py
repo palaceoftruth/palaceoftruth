@@ -743,7 +743,13 @@ class LLMService:
 
         return _stream_inner(), get_usage
 
-    async def summarize(self, text: str, model: str | None = None) -> str:
+    async def summarize(
+        self,
+        text: str,
+        model: str | None = None,
+        *,
+        diagnostics: LLMCompletionDiagnostics | None = None,
+    ) -> str:
         """Generate a 2-3 sentence summary of the provided text."""
         messages = [
             {
@@ -756,7 +762,7 @@ class LLMService:
             },
             {"role": "user", "content": f"Summarize this text:\n\n{text}"},
         ]
-        return await self.complete(messages, model=model)
+        return await self.complete(messages, model=model, diagnostics=diagnostics)
 
     async def classify_relationship(
         self,
