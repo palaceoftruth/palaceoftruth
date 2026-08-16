@@ -62,3 +62,44 @@ def test_build_artifact_citation_exposes_browser_image_candidate_provenance() ->
     assert citation.source_url == "https://x.com/example/status/123"
     assert citation.source_label == "Parent social post"
     assert citation.original_artifact_url == "https://pbs.twimg.com/media/diagram-large.jpg"
+
+
+def test_processed_browser_image_citation_combines_parent_and_vision_provenance() -> None:
+    citation = build_artifact_citation(
+        {
+            "browser_capture_image": {
+                "source_post_url": "https://x.com/example/status/1",
+                "candidate_url": "https://pbs.twimg.com/media/original.png",
+                "final_url": "https://pbs.twimg.com/media/final.png",
+                "alt_text": "Original alt text",
+                "media_type": "image/png",
+                "dimensions": {"width": 640, "height": 480},
+                "byte_hash": "a" * 64,
+            },
+            "image_analysis": {
+                "caption": "A directed service diagram.",
+                "visible_text": ["API", "Worker"],
+                "dimensions": {"width": 800, "height": 600},
+                "byte_hash": "a" * 64,
+                "artifact": {"filename": "capture.png", "media_type": "image/png"},
+                "vision": {
+                    "provider": "openrouter",
+                    "model": "resolved/model",
+                    "returned_model": "google/gemini-2.5-flash-lite",
+                },
+            },
+        },
+        original_artifact_url="/api/v1/items/child/artifact",
+    )
+
+    assert citation is not None
+    assert citation.kind == "browser_image_candidate"
+    assert citation.source_url == "https://x.com/example/status/1"
+    assert citation.original_artifact_url == "https://pbs.twimg.com/media/final.png"
+    assert citation.thumbnail_url == "/api/v1/items/child/artifact"
+    assert citation.caption == "A directed service diagram."
+    assert citation.extracted_text == ["API", "Worker"]
+    assert citation.model == "google/gemini-2.5-flash-lite"
+    assert citation.provider == "openrouter"
+    assert citation.dimensions == {"width": 800, "height": 600}
+    assert citation.byte_hash == "a" * 64

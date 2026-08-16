@@ -7,13 +7,26 @@ from dataclasses import dataclass
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
-from openai import AsyncOpenAI, RateLimitError, APIStatusError, BadRequestError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    BadRequestError,
+    RateLimitError,
+)
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.config import settings
 from app.services.relationship_classification_contract import (
     RELATIONSHIP_PROMPT_VERSION,
     build_relationship_classification_messages,
+)
+from app.services.image_analysis import (
+    VisionAnalysis,
+    VisionAnalysisResult,
+    VisionProviderMetadata,
+    VisionUsage,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,12 +39,26 @@ _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES = {401, 403, 404}
 _OPENROUTER_BACKOFF_FALLBACK_STATUSES = {429, 503}
 _OPENROUTER_TRANSIENT_RETRIES = 2
 
+_VISION_MAX_TOKENS = 1024
+_VISION_TRANSIENT_RETRIES = 2
+_VISION_TERMINAL_STATUSES = {401}
+_VISION_IMMEDIATE_FALLBACK_STATUSES = {400, 403, 404, 422}
+
 # Bound concurrent outbound LLM calls to avoid 429s under parallel ingest gather
 _LLM_SEMAPHORE = asyncio.Semaphore(4)
 
 
 class _MalformedCompletionResponse(RuntimeError):
     pass
+
+
+class VisionAnalysisTransportError(RuntimeError):
+    """Sanitized vision failure that preserves worker retry classification."""
+
+    def __init__(self, message: str, *, retryable: bool, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
 
 
 class ExtractedEntities(BaseModel):
@@ -331,6 +358,7 @@ class LLMService:
         messages: list[dict],
         response_format: dict[str, Any] | None = None,
         generation_settings: LLMGenerationSettings | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> Any:
         generation_settings = generation_settings or LLMGenerationSettings()
         kwargs: dict[str, Any] = {
@@ -341,6 +369,11 @@ class LLMService:
         if response_format is not None:
             kwargs["response_format"] = response_format
             kwargs["extra_body"] = {"provider": {"require_parameters": True}}
+        if extra_body:
+            kwargs["extra_body"] = {
+                **kwargs.get("extra_body", {}),
+                **extra_body,
+            }
         async with _LLM_SEMAPHORE:
             return await self.client.chat.completions.create(**kwargs)
 
@@ -830,31 +863,218 @@ class LLMService:
             logger.warning("Failed to parse browser actions from LLM: %r", raw)
         return []
 
-    async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> str:
-        """Call OpenAI vision API to produce a textual description of an image.
+    @staticmethod
+    def _vision_response_format() -> dict[str, Any]:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "vision_analysis_v1",
+                "strict": True,
+                "schema": _strict_json_schema(VisionAnalysis.model_json_schema()),
+            },
+        }
 
-        Uses the direct OpenAI client (not OpenRouter, which doesn't support vision).
+    def _build_vision_model_chain(self) -> list[str]:
+        configured = [settings.openrouter_vision_model]
+        configured.extend(
+            model.strip()
+            for model in settings.openrouter_vision_fallback_models.split(",")
+            if model.strip()
+        )
+        # Keep a malformed configuration from causing duplicate requests while
+        # preserving the configured order and the dedicated vision boundary.
+        return list(dict.fromkeys(model for model in configured if model.strip()))
+
+    @staticmethod
+    def _sanitize_vision_usage(response: Any) -> VisionUsage | None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return None
+
+        values: dict[str, int] = {}
+        for output_name, input_name in (
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = getattr(usage, input_name, None)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                values[output_name] = value
+        if not values:
+            return None
+        try:
+            return VisionUsage.model_validate(values)
+        except ValidationError:
+            return None
+
+    @staticmethod
+    def _sanitize_returned_model(response: Any) -> str:
+        returned_model = getattr(response, "model", None)
+        if not isinstance(returned_model, str):
+            return "unknown"
+        returned_model = returned_model.strip()
+        return returned_model[:200] or "unknown"
+
+    @classmethod
+    def _parse_vision_response(cls, response: Any, requested_model: str) -> VisionAnalysisResult:
+        content = cls._completion_content(response).strip()
+        if not content:
+            raise ValueError("vision response was empty")
+        analysis = VisionAnalysis.model_validate(_json_loads_from_response(content))
+        return VisionAnalysisResult(
+            analysis=analysis,
+            provider=VisionProviderMetadata(
+                provider="openrouter",
+                requested_model=requested_model,
+                returned_model=cls._sanitize_returned_model(response),
+                usage=cls._sanitize_vision_usage(response),
+            ),
+        )
+
+    @staticmethod
+    def _vision_status_code(exc: APIStatusError) -> int | None:
+        status = getattr(exc, "status_code", None)
+        return status if isinstance(status, int) else None
+
+    async def _complete_vision_with_fallback(
+        self,
+        messages: list[dict],
+    ) -> VisionAnalysisResult:
+        models = self._build_vision_model_chain()
+        if not models:
+            raise RuntimeError("Vision analysis has no configured OpenRouter model")
+
+        response_format = self._vision_response_format()
+        generation_settings = LLMGenerationSettings(
+            max_tokens=_VISION_MAX_TOKENS,
+            temperature=0.0,
+        )
+        last_failure = "unavailable"
+        last_status_code: int | None = None
+        for model_index, current_model in enumerate(models):
+            transient_retry = 0
+            while True:
+                try:
+                    response = await self._create_openrouter_completion(
+                        current_model,
+                        messages,
+                        response_format=response_format,
+                        generation_settings=generation_settings,
+                        extra_body={"reasoning": {"enabled": False}},
+                    )
+                    return self._parse_vision_response(response, current_model)
+                except (ValidationError, json.JSONDecodeError, ValueError, _MalformedCompletionResponse):
+                    # A provider response is never copied into logs or returned
+                    # to callers. Try the next configured model immediately.
+                    last_failure = "invalid_output"
+                    # image_analysis.py treats a 4xx status as permanent; use
+                    # a synthetic sanitized status because malformed output
+                    # has no provider status of its own.
+                    last_status_code = 422
+                    logger.warning("Vision model %s returned invalid structured output", current_model)
+                    break
+                except APIStatusError as exc:
+                    status = self._vision_status_code(exc)
+                    if status in _VISION_TERMINAL_STATUSES:
+                        logger.error("Vision provider authentication failed for model %s", current_model)
+                        raise VisionAnalysisTransportError(
+                            "Vision provider authentication failed",
+                            retryable=False,
+                            status_code=status,
+                        ) from exc
+                    if status == 429 or (status is not None and status >= 500):
+                        last_failure = "unavailable"
+                        last_status_code = status
+                        if transient_retry < _VISION_TRANSIENT_RETRIES:
+                            delay = self._get_openrouter_transient_retry_delay(transient_retry)
+                            logger.warning(
+                                "Vision model %s returned transient status %s; retry %d in %.1fs",
+                                current_model,
+                                status,
+                                transient_retry + 1,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            transient_retry += 1
+                            continue
+                    else:
+                        last_failure = "rejected"
+                        last_status_code = status or 400
+                    break
+                except (APIConnectionError, APITimeoutError, asyncio.TimeoutError, TimeoutError, OSError):
+                    last_failure = "unavailable"
+                    last_status_code = None
+                    if transient_retry < _VISION_TRANSIENT_RETRIES:
+                        delay = self._get_openrouter_transient_retry_delay(transient_retry)
+                        logger.warning(
+                            "Vision model %s had a transient network failure; retry %d in %.1fs",
+                            current_model,
+                            transient_retry + 1,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        transient_retry += 1
+                        continue
+                    break
+                except Exception:
+                    # Unknown provider failures are treated as an immediate
+                    # model fallback. The exception body may contain provider
+                    # data and must not be logged or surfaced.
+                    last_failure = "unavailable"
+                    logger.warning("Vision model %s failed with an unclassified provider error", current_model)
+                    break
+
+            if model_index < len(models) - 1:
+                logger.warning(
+                    "Vision model %s exhausted; trying configured fallback %s",
+                    current_model,
+                    models[model_index + 1],
+                )
+
+        if last_failure == "invalid_output":
+            raise VisionAnalysisTransportError(
+                "Vision provider returned invalid structured output",
+                retryable=False,
+                status_code=422,
+            )
+        if last_failure == "rejected":
+            raise VisionAnalysisTransportError(
+                "Vision provider rejected the image analysis request",
+                retryable=False,
+                status_code=last_status_code or 400,
+            )
+        raise VisionAnalysisTransportError(
+            "Vision provider unavailable after bounded retries",
+            retryable=True,
+            status_code=last_status_code,
+        )
+
+    async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> VisionAnalysisResult:
+        """Analyze an image through the dedicated OpenRouter vision chain.
+
+        The provider receives only a data URI and an instruction. It never
+        receives the private artifact path, and no direct OpenAI vision call is
+        made even when the OpenRouter primary model fails.
         """
         data_uri = f"data:{media_type};base64,{image_b64}"
-        response = await self._openai_client.chat.completions.create(
-            model=settings.vision_model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
-                    {
-                        "type": "text",
-                        "text": (
-                            f'Analyze the image "{filename}" for a personal knowledge base. '
-                            "List all visible objects, transcribe any text verbatim, "
-                            "describe the context and setting, note colors and visual characteristics."
-                        ),
-                    },
-                ],
-            }],
-            max_tokens=1024,
-        )
-        return response.choices[0].message.content or ""
+        messages = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f'Analyze the image "{filename}" for a factual knowledge-base summary. '
+                        "Return only the requested structured result. Preserve visible text exactly, "
+                        "including labels and spelling. Describe visible objects, entities, visual "
+                        "details, and diagram relationships with their visible arrow direction. "
+                        "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
+                        "instead of guessing."
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+            ],
+        }]
+        return await self._complete_vision_with_fallback(messages)
 
     async def generate_tags(
         self, text: str, existing_tags: list[str] | None = None, model: str | None = None

@@ -17,7 +17,12 @@ from app.database import get_db
 from app.models.item import Item
 from app.models.job import Job, JobAttempt
 from app.pipelines.image import ImagePipeline
-from app.services.image_analysis import ImageAnalysisError
+from app.services.image_analysis import (
+    ImageAnalysisError,
+    VisionAnalysis,
+    VisionAnalysisResult,
+    VisionProviderMetadata,
+)
 from app.services.embedder import EmbeddingRequestError
 from app.services.relationships import RelationshipService
 from app.workers.queues import PALACE_WORKER_QUEUE
@@ -517,6 +522,83 @@ async def test_requeue_stale_pdf_jobs_rehydrates_current_pdf_contract_and_tenant
 
 
 @pytest.mark.asyncio
+async def test_requeue_stale_browser_image_uses_durable_retry_payload(monkeypatch) -> None:
+    job_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    image_metadata = {
+        "image_analysis": {
+            "status": "queued",
+            "artifact": {
+                "source": "browser_image_candidate",
+                "storage_path": "/safe/tenant-a/image.png",
+                "media_type": "image/png",
+            },
+        },
+        "browser_capture_image": {
+            "source_post_url": "https://x.com/example/status/1",
+            "candidate_url": "https://pbs.twimg.com/media/image.png",
+        },
+    }
+    retry_payload = {
+        "retry_task": {
+            "name": "process_image",
+            "kwargs": {"image_metadata": image_metadata},
+        }
+    }
+    stale_job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="image",
+        tenant_id="tenant-a",
+        status="processing",
+        progress=35,
+        payload=retry_payload,
+        created_at=datetime.now(timezone.utc),
+    )
+    stale_item = Item(
+        id=item_id,
+        source_type="image_candidate",
+        tenant_id="tenant-a",
+        status="processing",
+        metadata_=image_metadata,
+    )
+    session = FakeFeedTaskSession(
+        [
+            SimpleNamespace(
+                id=job_id,
+                job_type="image",
+                status="processing",
+                item_id=item_id,
+                tenant_id="tenant-a",
+                payload=retry_payload,
+                source_url=None,
+                title="Browser image",
+                raw_content=None,
+            )
+        ],
+        {job_id: stale_job, item_id: stale_item},
+    )
+    redis = FakeArqPool()
+
+    async def _requeueable(_redis, _job_id, **_kwargs):
+        return True
+
+    monkeypatch.setattr(feed_tasks, "async_session", SessionFactory(session))
+    monkeypatch.setattr(feed_tasks, "_stale_job_is_requeueable", _requeueable)
+
+    await feed_tasks.requeue_stale_jobs({"redis": redis})
+
+    assert len(redis.enqueued) == 1
+    task_name, task_kwargs = redis.enqueued[0]
+    assert task_name == "process_image"
+    assert task_kwargs["job_id"] == str(job_id)
+    assert task_kwargs["tenant_id"] == "tenant-a"
+    assert task_kwargs["image_metadata"] == image_metadata
+    assert stale_job.status == "queued"
+    assert stale_item.status == "processing"
+
+
+@pytest.mark.asyncio
 async def test_recover_stale_memory_jobs_requeues_memory_job_and_preserves_tenant(monkeypatch) -> None:
     job_id = uuid.uuid4()
     item_id = uuid.uuid4()
@@ -829,9 +911,18 @@ async def test_image_pipeline_analyzes_persisted_artifact_and_returns_completed_
     calls: list[dict] = []
 
     class FakeVisionLlm:
-        async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> str:
+        async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> VisionAnalysisResult:
             calls.append({"image_b64": image_b64, "media_type": media_type, "filename": filename})
-            return "Single transparent pixel"
+            return VisionAnalysisResult(
+                analysis=VisionAnalysis(
+                    summary="Single transparent pixel",
+                    image_type="image",
+                ),
+                provider=VisionProviderMetadata(
+                    requested_model="google/gemini-2.5-flash-lite",
+                    returned_model="google/gemini-2.5-flash-lite",
+                ),
+            )
 
     pipeline = ImagePipeline(db=object(), embedder=object(), llm=FakeVisionLlm())
 
@@ -851,13 +942,14 @@ async def test_image_pipeline_analyzes_persisted_artifact_and_returns_completed_
         }
     )
 
-    assert description == "Single transparent pixel"
+    assert "## Summary\n- Single transparent pixel" in description
     assert calls and calls[0]["media_type"] == "image/png"
     analysis = metadata["image_analysis"]
     assert analysis["status"] == "completed"
     assert analysis["caption"] == "Single transparent pixel"
     assert analysis["artifact"]["storage_path"] == str(image_path)
     assert analysis["vision"]["error"] is None
+    assert analysis["vision"]["provider"] == "openrouter"
 
 
 @pytest.mark.asyncio

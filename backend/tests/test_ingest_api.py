@@ -6,6 +6,7 @@ from pathlib import Path
 import app.api.ingest as ingest_api
 import httpx
 import app.api.capture as capture_api
+import app.services.image_candidates as image_candidate_service
 import app.utils.outbound_http as outbound_http
 import pytest
 from fastapi import FastAPI, Request
@@ -734,7 +735,7 @@ def test_browser_capture_rejects_oversized_streamed_image_candidate(monkeypatch)
         return httpx.Response(
             200,
             headers={"content-type": "image/jpeg"},
-            content=b"x" * (capture_api._CANDIDATE_IMAGE_SIZE_LIMIT + 1),
+            content=b"x" * (image_candidate_service.IMAGE_SIZE_LIMIT + 1),
             request=request,
         )
 
@@ -819,7 +820,9 @@ def test_browser_capture_rejects_too_many_image_candidates() -> None:
     assert arq_pool.enqueued == []
 
 
-def test_browser_capture_marks_linked_image_candidates_failed_when_enqueue_fails(tmp_path: Path, monkeypatch) -> None:
+def test_browser_capture_parent_enqueue_failure_preserves_linked_image_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
     _allow_public_image_candidate_dns(monkeypatch)
     monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
 
@@ -849,10 +852,62 @@ def test_browser_capture_marks_linked_image_candidates_failed_when_enqueue_fails
     parent_item, child_item = session.added_items
     artifact_path = Path(child_item.metadata_["browser_capture_image"]["artifact"]["storage_path"])
     assert parent_item.status == "failed"
-    assert child_item.status == "failed"
-    assert not artifact_path.exists()
+    assert child_item.status == "captured"
+    assert artifact_path.exists()
     assert session.added_web_saves[0].archived_at is not None
     assert arq_pool.enqueued == []
+
+
+def test_browser_capture_child_enqueue_failure_preserves_artifact_and_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A child retry state must not fail its parent or delete evidence."""
+    _allow_public_image_candidate_dns(monkeypatch)
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/png"},
+            content=PNG_1X1_BYTES,
+            request=request,
+        )
+
+    _mock_image_candidate_downloads(monkeypatch, handler)
+    session = FakeSession()
+    # Parent enqueue succeeds; first child enqueue fails; second child still runs.
+    arq_pool = FakeArqPool(error=RuntimeError("child redis unavailable"), fail_on_calls={2})
+    response = _client(session, arq_pool=arq_pool).post(
+        "/api/v1/capture/browser",
+        json={
+            "url": "https://x.com/example/status/123",
+            "detected_kind": "social_post",
+            "image_candidates": [
+                {"url": "https://pbs.twimg.com/media/evidence-1.png"},
+                {"url": "https://pbs.twimg.com/media/evidence-2.png"},
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    parent_item, first_child, second_child = session.added_items
+    assert parent_item.status == "processing"
+    assert [job.job_type for job in session.added_jobs] == ["webpage", "image", "image"]
+    assert session.added_jobs[1].status == "failed"
+    assert "child redis unavailable" in (session.added_jobs[1].error_message or "")
+    assert session.added_jobs[2].status == "queued"
+    retry_task = session.added_jobs[1].payload["retry_task"]
+    assert retry_task["name"] == "process_image"
+    assert retry_task["kwargs"]["image_metadata"]["image_analysis"]["status"] == "queued"
+    assert first_child.metadata_["browser_capture_image"]["enqueue_error"]["classification"] == "retryable"
+    assert first_child.metadata_["image_analysis"]["vision"]["error"]["retryable"] is True
+    first_artifact = Path(first_child.metadata_["browser_capture_image"]["artifact"]["storage_path"])
+    second_artifact = Path(second_child.metadata_["browser_capture_image"]["artifact"]["storage_path"])
+    assert first_artifact.exists()
+    assert second_artifact.exists()
+    assert len(arq_pool.enqueued) == 2
+    assert arq_pool.enqueued[0][0] == "process_webpage"
+    assert arq_pool.enqueued[1][0] == "process_image"
 
 
 def test_browser_capture_routes_selection_to_note_with_tags_and_source_metadata() -> None:
@@ -1629,9 +1684,13 @@ def test_ingest_image_stores_upload_provenance_metadata(tmp_path: Path, monkeypa
         "image_analysis": {
             "status": "queued",
             "caption": "",
+            "image_type": "",
             "visible_text": [],
             "objects": [],
             "entities": [],
+            "relationships": [],
+            "visual_details": [],
+            "uncertainties": [],
             "dimensions": {"width": None, "height": None},
             "byte_hash": byte_hash,
             "byte_size": len(b"\x89PNG\r\n\x1a\nfake"),
@@ -1643,9 +1702,11 @@ def test_ingest_image_stores_upload_provenance_metadata(tmp_path: Path, monkeypa
                 "storage_path": str(storage_path),
             },
             "vision": {
-                "provider": "openai",
-                "model": "gpt-4o-mini",
-                "version": None,
+                "provider": "openrouter",
+                "model": None,
+                "requested_model": None,
+                "returned_model": None,
+                "usage": None,
                 "confidence": None,
                 "error": None,
             },

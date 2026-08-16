@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     redis_sentinel_hosts: str = ""
     redis_sentinel_master: str = "mymaster"
 
-    # OpenAI (embeddings + transcription + vision)
+    # OpenAI (embeddings + transcription)
     openai_api_key: str
     embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
@@ -112,12 +112,12 @@ class Settings(BaseSettings):
     # failures exhausted), retry the chunk on OpenAI instead of failing the job.
     # Disable to guarantee audio never leaves the configured provider.
     transcription_fallback_to_openai: bool = True
-    vision_model: str = "gpt-4o-mini"
-
     # OpenRouter (LLM)
     openrouter_api_key: str
     openrouter_default_model: str = "minimax/minimax-m2.7"
     openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
+    openrouter_vision_model: str = "google/gemini-2.5-flash-lite"
+    openrouter_vision_fallback_models: str = "openai/gpt-4o-mini"
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0

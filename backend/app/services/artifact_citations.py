@@ -14,8 +14,10 @@ def build_artifact_citation(
 
     browser_image = metadata.get("browser_capture_image")
     if isinstance(browser_image, dict):
+        image_analysis = metadata.get("image_analysis")
         return _browser_image_citation(
             browser_image,
+            image_analysis=image_analysis if isinstance(image_analysis, dict) else None,
             source_url=source_url,
             artifact_url=original_artifact_url,
         )
@@ -59,25 +61,34 @@ def _dimensions(value: Any) -> dict[str, int | None] | None:
 def _browser_image_citation(
     data: dict[str, Any],
     *,
+    image_analysis: dict[str, Any] | None,
     source_url: str | None,
     artifact_url: str | None,
 ) -> ArtifactCitation:
     source_post_url = _string(data.get("source_post_url"))
     candidate_url = _string(data.get("candidate_url"))
     final_url = _string(data.get("final_url"))
+    analysis = image_analysis or {}
+    artifact = analysis.get("artifact") if isinstance(analysis.get("artifact"), dict) else {}
+    vision = analysis.get("vision") if isinstance(analysis.get("vision"), dict) else {}
     return ArtifactCitation(
         kind="browser_image_candidate",
         # Search and chat pass the tenant-authenticated Palace artifact route.
         # Never make a viewer's browser fetch the third-party image directly.
         thumbnail_url=artifact_url,
-        caption=_string(data.get("alt_text")),
+        caption=_string(analysis.get("caption")) or _string(data.get("alt_text")),
+        extracted_text=_string_list(analysis.get("visible_text")),
         source_url=source_post_url or source_url,
         source_label="Parent social post" if source_post_url else "Source",
         original_artifact_url=final_url or candidate_url,
         original_artifact_label=final_url or candidate_url,
-        media_type=_string(data.get("media_type")),
-        dimensions=_dimensions(data.get("dimensions")),
-        byte_hash=_string(data.get("byte_hash")),
+        filename=_string(artifact.get("filename")),
+        media_type=_string(artifact.get("media_type")) or _string(data.get("media_type")),
+        dimensions=_dimensions(analysis.get("dimensions")) or _dimensions(data.get("dimensions")),
+        model=_string(vision.get("returned_model")) or _string(vision.get("model")),
+        provider=_string(vision.get("provider")),
+        confidence=_float(vision.get("confidence")),
+        byte_hash=_string(analysis.get("byte_hash")) or _string(data.get("byte_hash")),
     )
 
 

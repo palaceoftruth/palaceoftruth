@@ -151,6 +151,13 @@ def test_settings_expose_frozen_relationship_classifier_profile() -> None:
     assert settings.relationship_extraction_min_confidence == 0.7
 
 
+def test_settings_expose_dedicated_openrouter_vision_chain_defaults() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.openrouter_vision_model == "google/gemini-2.5-flash-lite"
+    assert settings.openrouter_vision_fallback_models == "openai/gpt-4o-mini"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

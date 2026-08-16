@@ -4,15 +4,17 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APIStatusError
+from openai import APIConnectionError, APIStatusError
 
 from app.services.llm import (
     BrowserActions,
     LLMCompletionDiagnostics,
     LLMService,
     TagExtraction,
+    VisionAnalysisTransportError,
     _strict_json_schema,
 )
+from app.services.image_analysis import VisionAnalysisResult
 
 
 class _FakeCompletionsAPI:
@@ -96,6 +98,10 @@ def _api_status_error(status_code: int) -> APIStatusError:
     request = httpx.Request("POST", "https://example.test/chat/completions")
     response = httpx.Response(status_code, request=request)
     return APIStatusError("request failed", response=response, body={})
+
+
+def _api_connection_error() -> APIConnectionError:
+    return APIConnectionError(request=httpx.Request("POST", "https://example.test/chat/completions"))
 
 
 def test_strict_json_schema_requires_all_object_properties_and_rejects_extras() -> None:
@@ -551,3 +557,143 @@ async def test_browser_actions_parse_reasoning_wrapped_array(llm_service) -> Non
     actions = await service.get_browser_actions("Cookie settings", "https://example.test")
 
     assert actions == [{"action": "click", "text": "Accept all"}]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_uses_structured_openrouter_vision_request(llm_service, monkeypatch) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    monkeypatch.setattr(
+        "app.services.llm.settings.openrouter_vision_model",
+        "google/gemini-2.5-flash-lite",
+    )
+    monkeypatch.setattr(
+        "app.services.llm.settings.openrouter_vision_fallback_models",
+        "openai/gpt-4o-mini",
+    )
+    openrouter_completions.outcomes = [
+        _completion_response(
+            '{"summary":"A flow diagram.","image_type":"diagram",'
+            '"visible_text":["Start","Done"],"objects":[],"entities":[],'
+            '"relationships":[{"source":"Start","target":"Done",'
+            '"direction":"source_to_target","label":"next"}],'
+            '"visual_details":[],"uncertainties":[]}',
+            model="google/gemini-2.5-flash-lite:free",
+            prompt_tokens=31,
+            completion_tokens=19,
+        )
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
+
+    assert isinstance(result, VisionAnalysisResult)
+    assert result.analysis.summary == "A flow diagram."
+    assert result.analysis.relationships[0].direction == "source_to_target"
+    assert result.provider.requested_model == "google/gemini-2.5-flash-lite"
+    assert result.provider.returned_model == "google/gemini-2.5-flash-lite:free"
+    assert result.provider.usage is not None
+    assert result.provider.usage.input_tokens == 31
+    assert result.provider.usage.output_tokens == 19
+    call = openrouter_completions.calls[0]
+    assert call["model"] == "google/gemini-2.5-flash-lite"
+    assert call["temperature"] == 0.0
+    assert call["max_tokens"] == 1024
+    assert call["response_format"]["type"] == "json_schema"
+    assert call["extra_body"]["provider"] == {"require_parameters": True}
+    assert call["extra_body"]["reasoning"] == {"enabled": False}
+    content = call["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_401_is_terminal_without_vision_fallback(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [_api_status_error(401)]
+
+    with pytest.raises(VisionAnalysisTransportError, match="authentication failed") as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
+
+    assert failure.value.retryable is False
+    assert failure.value.status_code == 401
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "google/gemini-2.5-flash-lite"
+    ]
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 403, 404])
+async def test_analyze_image_model_access_errors_use_openrouter_fallback(
+    llm_service, status_code: int
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _api_status_error(status_code),
+        _completion_response('{"summary":"Fallback summary","image_type":"diagram"}'),
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
+
+    assert result.provider.requested_model == "openai/gpt-4o-mini"
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-4o-mini",
+    ]
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_retries_transient_then_uses_openrouter_fallback(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _api_status_error(503),
+        _api_status_error(503),
+        _api_status_error(503),
+        _completion_response('{"summary":"Fallback summary","image_type":"photo"}'),
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+
+    assert result.analysis.summary == "Fallback summary"
+    assert result.provider.requested_model == "openai/gpt-4o-mini"
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-4o-mini",
+    ]
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [_api_status_error(429), _api_connection_error()])
+async def test_analyze_image_rate_limit_and_network_errors_are_bounded_before_fallback(
+    llm_service, failure: Exception
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        failure,
+        failure,
+        failure,
+        _completion_response('{"summary":"Fallback summary","image_type":"photo"}'),
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+
+    assert result.provider.requested_model == "openai/gpt-4o-mini"
+    assert len(openrouter_completions.calls) == 4
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_invalid_output_fails_closed_without_invented_content(llm_service) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _completion_response("not json"),
+        _completion_response(""),
+    ]
+
+    with pytest.raises(RuntimeError, match="invalid structured output"):
+        await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
