@@ -38,10 +38,10 @@ config:
   tenantLlmDailyTokenLimit: "250000"
   # Ordered fallback models for OpenRouter when the default model is unavailable.
   openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
-  # Dedicated low-cost OpenRouter vision chain. The fallbacks are also routed
+  # Dedicated low-cost OpenRouter vision chain. The fallback is also routed
   # through OpenRouter; OPENAI_API_KEY is never used for image analysis.
-  openrouterVisionModel: "minimax/minimax-m3"
-  openrouterVisionFallbackModels: "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+  openrouterVisionModel: "google/gemini-2.5-flash-lite"
+  openrouterVisionFallbackModels: "openai/gpt-4o-mini"
   # Frozen relationship-classifier profile. Change only with a calibrated eval.
   relationshipClassificationModel: "openai/gpt-4.1"
   relationshipClassificationTemperature: "0.0"

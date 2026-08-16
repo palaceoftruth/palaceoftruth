@@ -565,11 +565,11 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     service, openrouter_completions, openai_completions = llm_service
     monkeypatch.setattr(
         "app.services.llm.settings.openrouter_vision_model",
-        "minimax/minimax-m3",
+        "google/gemini-2.5-flash-lite",
     )
     monkeypatch.setattr(
         "app.services.llm.settings.openrouter_vision_fallback_models",
-        "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini",
     )
     openrouter_completions.outcomes = [
         _completion_response(
@@ -578,7 +578,7 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
             '"relationships":[{"source":"Start","target":"Done",'
             '"direction":"source_to_target","label":"next"}],'
             '"visual_details":[],"uncertainties":[]}',
-            model="minimax/minimax-m3",
+            model="google/gemini-2.5-flash-lite:free",
             prompt_tokens=31,
             completion_tokens=19,
         )
@@ -589,18 +589,18 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     assert isinstance(result, VisionAnalysisResult)
     assert result.analysis.summary == "A flow diagram."
     assert result.analysis.relationships[0].direction == "source_to_target"
-    assert result.provider.requested_model == "minimax/minimax-m3"
-    assert result.provider.returned_model == "minimax/minimax-m3"
+    assert result.provider.requested_model == "google/gemini-2.5-flash-lite"
+    assert result.provider.returned_model == "google/gemini-2.5-flash-lite:free"
     assert result.provider.usage is not None
     assert result.provider.usage.input_tokens == 31
     assert result.provider.usage.output_tokens == 19
     call = openrouter_completions.calls[0]
-    assert call["model"] == "minimax/minimax-m3"
+    assert call["model"] == "google/gemini-2.5-flash-lite"
     assert call["temperature"] == 0.0
     assert call["max_tokens"] == 1024
     assert call["response_format"]["type"] == "json_schema"
     assert call["extra_body"]["provider"] == {"require_parameters": True}
-    assert call["extra_body"] == {"provider": {"require_parameters": True}}
+    assert call["extra_body"]["reasoning"] == {"enabled": False}
     schema = call["response_format"]["json_schema"]["schema"]
     serialized_schema = json.dumps(schema)
     assert "maxLength" not in serialized_schema
@@ -624,7 +624,7 @@ async def test_analyze_image_401_is_terminal_without_vision_fallback(llm_service
     assert failure.value.retryable is False
     assert failure.value.status_code == 401
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "minimax/minimax-m3"
+        "google/gemini-2.5-flash-lite"
     ]
     assert openai_completions.calls == []
 
@@ -644,12 +644,10 @@ async def test_analyze_image_model_access_errors_use_openrouter_fallback(
 
     assert result.provider.requested_model == "openai/gpt-4o-mini"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "minimax/minimax-m3",
+        "google/gemini-2.5-flash-lite",
         "openai/gpt-4o-mini",
     ]
-    assert openrouter_completions.calls[0]["extra_body"] == {
-        "provider": {"require_parameters": True}
-    }
+    assert openrouter_completions.calls[0]["extra_body"]["reasoning"] == {"enabled": False}
     assert openrouter_completions.calls[1]["extra_body"] == {
         "provider": {"require_parameters": True}
     }
@@ -671,9 +669,9 @@ async def test_analyze_image_retries_transient_then_uses_openrouter_fallback(llm
     assert result.analysis.summary == "Fallback summary"
     assert result.provider.requested_model == "openai/gpt-4o-mini"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "minimax/minimax-m3",
-        "minimax/minimax-m3",
-        "minimax/minimax-m3",
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite",
         "openai/gpt-4o-mini",
     ]
     assert openai_completions.calls == []
@@ -705,32 +703,7 @@ async def test_analyze_image_invalid_output_fails_closed_without_invented_conten
     openrouter_completions.outcomes = [
         _completion_response("not json"),
         _completion_response(""),
-        _completion_response("still not json"),
     ]
 
     with pytest.raises(RuntimeError, match="invalid structured output"):
         await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
-
-
-@pytest.mark.asyncio
-async def test_analyze_image_uses_final_gpt_4_1_mini_fallback(llm_service) -> None:
-    service, openrouter_completions, openai_completions = llm_service
-    openrouter_completions.outcomes = [
-        _api_status_error(404),
-        _api_status_error(404),
-        _completion_response(
-            '{"summary":"Final fallback summary","image_type":"photo"}',
-            model="openai/gpt-4.1-mini",
-        ),
-    ]
-
-    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
-
-    assert result.analysis.summary == "Final fallback summary"
-    assert result.provider.requested_model == "openai/gpt-4.1-mini"
-    assert [call["model"] for call in openrouter_completions.calls] == [
-        "minimax/minimax-m3",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
-    ]
-    assert openai_completions.calls == []
