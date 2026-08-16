@@ -44,6 +44,15 @@ _VISION_TRANSIENT_RETRIES = 2
 _VISION_TERMINAL_STATUSES = {401}
 _VISION_IMMEDIATE_FALLBACK_STATUSES = {400, 403, 404, 422}
 
+_VISION_PROVIDER_SCHEMA_CONSTRAINTS = {
+    "default",
+    "maxItems",
+    "maxLength",
+    "minItems",
+    "minLength",
+    "title",
+}
+
 # Bound concurrent outbound LLM calls to avoid 429s under parallel ingest gather
 _LLM_SEMAPHORE = asyncio.Semaphore(4)
 
@@ -252,6 +261,30 @@ def _strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
     visit(strict_schema)
     return strict_schema
+
+
+def _vision_provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Remove serving constraints while retaining strict local validation.
+
+    Gemini converts JSON Schema constraints into a serving grammar. Pydantic's
+    bounded list and string constraints can make that grammar too large. The
+    worker still validates the provider response against ``VisionAnalysis``, so
+    removing these provider-side bounds does not weaken the persisted contract.
+    """
+    provider_schema = _strict_json_schema(schema)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in _VISION_PROVIDER_SCHEMA_CONSTRAINTS:
+                node.pop(key, None)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(provider_schema)
+    return provider_schema
 
 
 class LLMService:
@@ -870,7 +903,7 @@ class LLMService:
             "json_schema": {
                 "name": "vision_analysis_v1",
                 "strict": True,
-                "schema": _strict_json_schema(VisionAnalysis.model_json_schema()),
+                "schema": _vision_provider_schema(VisionAnalysis.model_json_schema()),
             },
         }
 
@@ -960,7 +993,15 @@ class LLMService:
                         messages,
                         response_format=response_format,
                         generation_settings=generation_settings,
-                        extra_body={"reasoning": {"enabled": False}},
+                        # OpenRouter filters providers by every supplied
+                        # parameter. Gemini accepts this control, while the
+                        # gpt-4o-mini fallback has no compatible route when it
+                        # is present.
+                        extra_body=(
+                            {"reasoning": {"enabled": False}}
+                            if current_model.startswith("google/gemini-")
+                            else None
+                        ),
                     )
                     return self._parse_vision_response(response, current_model)
                 except (ValidationError, json.JSONDecodeError, ValueError, _MalformedCompletionResponse):

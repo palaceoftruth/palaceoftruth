@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -600,6 +601,11 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     assert call["response_format"]["type"] == "json_schema"
     assert call["extra_body"]["provider"] == {"require_parameters": True}
     assert call["extra_body"]["reasoning"] == {"enabled": False}
+    schema = call["response_format"]["json_schema"]["schema"]
+    serialized_schema = json.dumps(schema)
+    assert "maxLength" not in serialized_schema
+    assert "maxItems" not in serialized_schema
+    assert schema["additionalProperties"] is False
     content = call["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
@@ -641,6 +647,10 @@ async def test_analyze_image_model_access_errors_use_openrouter_fallback(
         "google/gemini-2.5-flash-lite",
         "openai/gpt-4o-mini",
     ]
+    assert openrouter_completions.calls[0]["extra_body"]["reasoning"] == {"enabled": False}
+    assert openrouter_completions.calls[1]["extra_body"] == {
+        "provider": {"require_parameters": True}
+    }
     assert openai_completions.calls == []
 
 
