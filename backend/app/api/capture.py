@@ -1,9 +1,8 @@
-import hashlib
-from dataclasses import dataclass
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 import httpx
@@ -15,13 +14,12 @@ from app.auth import generate_webhook_signing_key, verify_capture_write_auth
 from app.config import settings
 from app.database import get_db
 from app.models.item import Item
+from app.models.job import Job
 from app.models.web_save import WebSave
 from app.schemas.ingest import BrowserCaptureRequest, BrowserCaptureResponse, BrowserImageCandidate
 from app.utils.job_payloads import build_retry_payload
 from app.utils.outbound_http import (
     OutboundUrlError,
-    stream_public_http_async,
-    validate_public_http_url,
     validate_public_http_url_async,
 )
 from app.utils.webhook import validate_webhook_url
@@ -31,9 +29,17 @@ from app.api.ingest import (
     _record_extension_capture_audit,
 )
 from app.services.bundle import BundleValidationError, persist_upload_artifact_bytes
-from app.utils.file_type import SNIFF_BYTES, matches_extension
+from app.services.image_analysis import build_image_analysis_metadata
+from app.services.image_candidates import (
+    DownloadedImageCandidate,
+    HTTP_TIMEOUT,
+    ImageCandidateError,
+    download_image_candidate,
+    validate_candidate_relationship,
+)
 
 router = APIRouter(prefix="/capture", tags=["capture"])
+logger = logging.getLogger(__name__)
 
 _MEDIA_EXTENSIONS = frozenset(
     {
@@ -56,23 +62,6 @@ _MEDIA_EXTENSIONS = frozenset(
 )
 
 
-def _remove_browser_image_artifact(item: Item) -> None:
-    """Remove one server-created capture artifact without trusting metadata paths."""
-
-    metadata = item.metadata_ if isinstance(item.metadata_, dict) else {}
-    browser_image = metadata.get("browser_capture_image")
-    artifact = browser_image.get("artifact") if isinstance(browser_image, dict) else None
-    storage_path = artifact.get("storage_path") if isinstance(artifact, dict) else None
-    if not isinstance(storage_path, str) or not storage_path:
-        return
-    allowed_root = Path(settings.upload_artifact_dir).expanduser().resolve()
-    resolved = Path(storage_path).expanduser().resolve()
-    try:
-        resolved.relative_to(allowed_root)
-    except ValueError:
-        return
-    resolved.unlink(missing_ok=True)
-
 _SOCIAL_HOST_SUFFIXES = (
     "x.com",
     "twitter.com",
@@ -82,43 +71,7 @@ _SOCIAL_HOST_SUFFIXES = (
     "linkedin.com",
 )
 
-_SOCIAL_IMAGE_HOST_SUFFIXES: dict[str, tuple[str, ...]] = {
-    "x.com": ("pbs.twimg.com", "video.twimg.com"),
-    "twitter.com": ("pbs.twimg.com", "video.twimg.com"),
-    "bsky.app": ("cdn.bsky.app",),
-    "threads.net": ("cdninstagram.com", "fbcdn.net"),
-    "reddit.com": (
-        "i.redd.it",
-        "preview.redd.it",
-        "external-preview.redd.it",
-        "v.redd.it",
-        "redditmedia.com",
-    ),
-    "linkedin.com": ("media.licdn.com", "licdn.com"),
-}
-
-_CANDIDATE_IMAGE_SIZE_LIMIT = 8 * 1024 * 1024
-_CANDIDATE_REDIRECT_LIMIT = 3
-_CANDIDATE_HTTP_TIMEOUT = 10.0
-_IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
-_IMAGE_EXTENSIONS = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-}
-
-
-@dataclass(frozen=True)
-class _DownloadedImageCandidate:
-    candidate: BrowserImageCandidate
-    normalized_url: str
-    final_url: str
-    media_type: str
-    extension: str
-    byte_hash: str
-    byte_size: int
-    content: bytes
+_DownloadedImageCandidate = DownloadedImageCandidate
 
 
 def _normalize_http_url(value: str | None) -> str | None:
@@ -137,13 +90,6 @@ def _normalize_http_url(value: str | None) -> str | None:
             parsed.fragment or "",
         )
     )
-
-
-def _normalize_candidate_url(value: str | None, *, detail: str) -> str:
-    normalized = _normalize_http_url(value)
-    if normalized is None:
-        raise HTTPException(status_code=422, detail=detail)
-    return normalized
 
 
 def _source_domain(normalized_url: str | None) -> str | None:
@@ -168,58 +114,20 @@ def _host_matches(hostname: str, suffix: str) -> bool:
     return hostname == suffix or hostname.endswith(f".{suffix}")
 
 
-def _assert_public_candidate_host(normalized_url: str) -> str:
-    try:
-        safe_url = validate_public_http_url(normalized_url, resolve=False)
-    except OutboundUrlError as exc:
-        raise HTTPException(status_code=422, detail="image candidate host is not allowed") from exc
-    return urlparse(safe_url).hostname or ""
-
-
-async def _assert_allowed_image_host_async(*, image_url: str, source_url: str) -> None:
-    try:
-        safe_url = await validate_public_http_url_async(image_url)
-    except OutboundUrlError as exc:
-        raise HTTPException(status_code=422, detail="image candidate host is not allowed") from exc
-    image_host = urlparse(safe_url).hostname or ""
-    allowed_suffixes = _allowed_image_host_suffixes(source_url)
-    if not allowed_suffixes or not any(_host_matches(image_host, suffix) for suffix in allowed_suffixes):
-        raise HTTPException(status_code=422, detail="image candidate host is not allowed for source post")
-
-
-def _allowed_image_host_suffixes(source_url: str) -> tuple[str, ...]:
-    source_host = urlparse(source_url).hostname or ""
-    for source_suffix, image_suffixes in _SOCIAL_IMAGE_HOST_SUFFIXES.items():
-        if _host_matches(source_host, source_suffix):
-            return image_suffixes
-    return ()
-
-
-def _assert_allowed_image_host(*, image_url: str, source_url: str) -> None:
-    image_host = _assert_public_candidate_host(image_url)
-    allowed_suffixes = _allowed_image_host_suffixes(source_url)
-    if not allowed_suffixes or not any(_host_matches(image_host, suffix) for suffix in allowed_suffixes):
-        raise HTTPException(status_code=422, detail="image candidate host is not allowed for source post")
-
-
 def _validate_candidate_relationship(
     *,
     candidate: BrowserImageCandidate,
     normalized_url: str,
     resolved_kind: str,
 ) -> str:
-    if resolved_kind != "social_post":
-        raise HTTPException(status_code=422, detail="image_candidates are only supported for social_post captures")
-    normalized_candidate_url = _normalize_candidate_url(candidate.url, detail="Invalid image candidate URL")
-    _assert_allowed_image_host(image_url=normalized_candidate_url, source_url=normalized_url)
-    if candidate.source_post_url is not None:
-        source_post_url = _normalize_candidate_url(
-            candidate.source_post_url,
-            detail="Invalid image candidate source_post_url",
+    try:
+        return validate_candidate_relationship(
+            candidate=candidate,
+            source_url=normalized_url,
+            resolved_kind=resolved_kind,
         )
-        if source_post_url != normalized_url:
-            raise HTTPException(status_code=422, detail="image candidate source_post_url must match capture url")
-    return normalized_candidate_url
+    except ImageCandidateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 async def _download_image_candidate(
@@ -229,69 +137,15 @@ async def _download_image_candidate(
     normalized_candidate_url: str,
     source_url: str,
 ) -> _DownloadedImageCandidate:
-    current_url = normalized_candidate_url
-    for _redirect in range(_CANDIDATE_REDIRECT_LIMIT + 1):
-        await _assert_allowed_image_host_async(image_url=current_url, source_url=source_url)
-        try:
-            response_context = stream_public_http_async(
-                client,
-                "GET",
-                current_url,
-                follow_redirects=False,
-            )
-        except (httpx.HTTPError, OutboundUrlError) as exc:
-            raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
-
-        try:
-            async with response_context as response:
-                if response.is_redirect:
-                    location = response.headers.get("location")
-                    if not location:
-                        raise HTTPException(status_code=422, detail="image candidate redirect missing location")
-                    current_url = _normalize_candidate_url(
-                        urljoin(current_url, location),
-                        detail="Invalid image candidate redirect URL",
-                    )
-                    continue
-
-                if response.status_code >= 400:
-                    raise HTTPException(status_code=422, detail="image candidate returned an error")
-                final_url = current_url
-                await _assert_allowed_image_host_async(image_url=final_url, source_url=source_url)
-                media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                if media_type not in _IMAGE_MEDIA_TYPES:
-                    raise HTTPException(status_code=422, detail="image candidate content type is not allowed")
-                content_length = response.headers.get("content-length")
-                if content_length is not None:
-                    try:
-                        declared_size = int(content_length)
-                    except ValueError as exc:
-                        raise HTTPException(status_code=422, detail="image candidate content length is invalid") from exc
-                    if declared_size > _CANDIDATE_IMAGE_SIZE_LIMIT:
-                        raise HTTPException(status_code=413, detail="image candidate is too large")
-                content = bytearray()
-                async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    if len(content) > _CANDIDATE_IMAGE_SIZE_LIMIT:
-                        raise HTTPException(status_code=413, detail="image candidate is too large")
-                image_bytes = bytes(content)
-        except (httpx.HTTPError, OutboundUrlError) as exc:
-            raise HTTPException(status_code=422, detail="image candidate could not be downloaded") from exc
-        extension = _IMAGE_EXTENSIONS[media_type]
-        if not matches_extension(image_bytes[:SNIFF_BYTES], extension):
-            raise HTTPException(status_code=422, detail="image candidate bytes do not match content type")
-        byte_hash = hashlib.sha256(image_bytes).hexdigest()
-        return _DownloadedImageCandidate(
+    try:
+        return await download_image_candidate(
+            client=client,
             candidate=candidate,
-            normalized_url=normalized_candidate_url,
-            final_url=final_url,
-            media_type=media_type,
-            extension=extension,
-            byte_hash=byte_hash,
-            byte_size=len(image_bytes),
-            content=image_bytes,
+            normalized_candidate_url=normalized_candidate_url,
+            source_url=source_url,
         )
-    raise HTTPException(status_code=422, detail="image candidate redirected too many times")
+    except ImageCandidateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 async def download_browser_image_for_proxy(*, image_url: str, source_url: str) -> _DownloadedImageCandidate:
@@ -302,7 +156,7 @@ async def download_browser_image_for_proxy(*, image_url: str, source_url: str) -
         normalized_url=source_url,
         resolved_kind="social_post",
     )
-    async with httpx.AsyncClient(timeout=_CANDIDATE_HTTP_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, trust_env=False) as client:
         return await _download_image_candidate(
             client=client,
             candidate=candidate,
@@ -329,7 +183,7 @@ async def _validate_and_download_image_candidates(
         )
         for candidate in body.image_candidates
     ]
-    async with httpx.AsyncClient(timeout=_CANDIDATE_HTTP_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, trust_env=False) as client:
         return [
             await _download_image_candidate(
                 client=client,
@@ -411,9 +265,10 @@ async def _create_browser_image_items(
     tenant_id: str,
     normalized_url: str,
     downloaded_candidates: list[_DownloadedImageCandidate],
-) -> tuple[list[dict[str, Any]], list[Item]]:
+) -> tuple[list[dict[str, Any]], list[Item], list[Job]]:
     linked_candidates: list[dict[str, Any]] = []
     child_items: list[Item] = []
+    child_jobs: list[Job] = []
     artifact_paths: list[Path] = []
     seen_candidate_keys: set[tuple[str, str]] = set()
     try:
@@ -433,12 +288,30 @@ async def _create_browser_image_items(
                     if candidate.alt_text and candidate.alt_text.strip()
                     else f"Image from {parent_item.title}"
                 )
+                filename = f"browser-image{downloaded.extension}"
+                image_metadata = {
+                    "filename": filename,
+                    "media_type": downloaded.media_type,
+                    **build_image_analysis_metadata(
+                        filename=filename,
+                        media_type=downloaded.media_type,
+                        extension=downloaded.extension,
+                        image_bytes=downloaded.content,
+                        byte_hash=downloaded.byte_hash,
+                        status="queued",
+                    ),
+                }
+                image_metadata["image_analysis"]["artifact"]["source"] = "browser_image_candidate"
                 child_item = Item(
                     source_type="image_candidate",
                     source_url=None,
                     title=title,
+                    # Keep the captured evidence visible while its analysis
+                    # job runs independently.
                     status="captured",
                     tenant_id=tenant_id,
+                    # The byte hash is provenance metadata. Image candidates
+                    # are not deduped against user-uploaded ``image`` items.
                     content_hash=None,
                     metadata_={
                         "browser_capture_image": {
@@ -459,6 +332,7 @@ async def _create_browser_image_items(
                                 "height": candidate.height,
                             },
                         },
+                        **image_metadata,
                     },
                 )
                 db.add(child_item)
@@ -477,7 +351,35 @@ async def _create_browser_image_items(
                     "storage_path": storage_path,
                 }
                 child_item.metadata_ = {"browser_capture_image": browser_image}
+                child_item.metadata_.update(image_metadata)
+                image_metadata = {
+                    **image_metadata,
+                    "filename": f"{child_item.id}{downloaded.extension}",
+                    "image_analysis": {
+                        **image_metadata["image_analysis"],
+                        "artifact": {
+                            **image_metadata["image_analysis"]["artifact"],
+                            "filename": f"{child_item.id}{downloaded.extension}",
+                            "storage_path": storage_path,
+                        },
+                    },
+                }
+                child_item.metadata_["image_analysis"] = image_metadata["image_analysis"]
+                child_item.metadata_["filename"] = f"{child_item.id}{downloaded.extension}"
+                child_job = Job(
+                    item_id=child_item.id,
+                    job_type="image",
+                    status="queued",
+                    progress=0,
+                    tenant_id=tenant_id,
+                    payload=build_retry_payload(
+                        task_name="process_image",
+                        task_kwargs={"image_metadata": image_metadata},
+                    ),
+                )
+                db.add(child_job)
                 child_items.append(child_item)
+                child_jobs.append(child_job)
                 linked_candidates.append(
                     _linked_image_candidate_metadata(
                         item_id=child_item.id,
@@ -498,7 +400,7 @@ async def _create_browser_image_items(
             },
         }
         await db.commit()
-    return linked_candidates, child_items
+    return linked_candidates, child_items, child_jobs
 
 
 def _linked_image_candidate_metadata(
@@ -754,9 +656,10 @@ async def capture_browser(
             )
     linked_image_candidates = []
     linked_image_items: list[Item] = []
+    linked_image_jobs: list[Job] = []
     if downloaded_image_candidates and normalized_url is not None:
         try:
-            linked_image_candidates, linked_image_items = await _create_browser_image_items(
+            linked_image_candidates, linked_image_items, linked_image_jobs = await _create_browser_image_items(
                 db,
                 parent_item=item,
                 tenant_id=request.state.tenant_id,
@@ -796,11 +699,52 @@ async def capture_browser(
     if not enqueued:
         if web_save is not None:
             web_save.archived_at = datetime.now(timezone.utc)
-        for linked_image_item in linked_image_items:
-            _remove_browser_image_artifact(linked_image_item)
-            linked_image_item.status = "failed"
-        await db.commit()
+            await db.commit()
         raise HTTPException(status_code=503, detail="Capture enqueue failed; job marked failed for retry")
+
+    # Image candidates are independent child work. A failed child enqueue must
+    # not turn a valid parent capture into a failed request, and its durable
+    # artifact/citation remains available for retry.
+    for linked_image_item, linked_image_job in zip(
+        linked_image_items, linked_image_jobs, strict=True
+    ):
+        child_enqueued = await _enqueue_ingest_job(
+            request=request,
+            db=db,
+            job=linked_image_job,
+            item=linked_image_item,
+            task_name="process_image",
+            task_kwargs={
+                "image_metadata": linked_image_item.metadata_,
+                "tenant_id": request.state.tenant_id,
+            },
+        )
+        if not child_enqueued:
+            # _enqueue_ingest_job persisted only this child/job's failure.
+            # Keep processing sibling candidates and report the parent success.
+            child_metadata = dict(linked_image_item.metadata_ or {})
+            browser_image = dict(child_metadata.get("browser_capture_image") or {})
+            browser_image["status"] = "enqueue_failed"
+            browser_image["enqueue_error"] = {
+                "classification": "retryable",
+                "code": "enqueue_failed",
+                "message": "worker queue unavailable",
+                "attempted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            analysis = dict(child_metadata.get("image_analysis") or {})
+            analysis["status"] = "failed"
+            vision = dict(analysis.get("vision") or {})
+            vision["error"] = {
+                "message": "worker queue unavailable",
+                "retryable": True,
+                "code": "enqueue_failed",
+            }
+            analysis["vision"] = vision
+            child_metadata["browser_capture_image"] = browser_image
+            child_metadata["image_analysis"] = analysis
+            linked_image_item.metadata_ = child_metadata
+            await db.commit()
+            logger.warning("image candidate enqueue failed for %s; parent continues", linked_image_item.id)
 
     await _record_extension_capture_audit(request=request, route=route, job=job, item=item)
     return BrowserCaptureResponse(

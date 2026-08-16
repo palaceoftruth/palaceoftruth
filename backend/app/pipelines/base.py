@@ -92,11 +92,16 @@ class BasePipeline:
         """Override per pipeline. Returns (raw_text, metadata_dict)."""
         raise NotImplementedError
 
+    def _authoritative_summary(self, raw_text: str, metadata: dict[str, Any]) -> str | None:
+        """Return a source-owned summary, or None to use generic summarization."""
+        return None
+
     async def _run_enrichment(
         self,
         text_preview: str,
         existing_tags: list[str],
         model: str | None = None,
+        authoritative_summary: str | None = None,
     ) -> tuple[str, list[str], list[str], dict]:
         """Run summarize, generate_tags, and extract_entities in parallel.
 
@@ -104,8 +109,13 @@ class BasePipeline:
         returns a safe default — the other results are unaffected.
         Uses return_exceptions=True so a failed entity call does not kill the gather.
         """
+        summary_call = (
+            asyncio.sleep(0, result=authoritative_summary)
+            if authoritative_summary is not None
+            else self.llm.summarize(text_preview, model=model)
+        )
         results = await asyncio.gather(
-            self.llm.summarize(text_preview, model=model),
+            summary_call,
             self.llm.generate_tags(text_preview, existing_tags=existing_tags, model=model),
             self.llm.extract_entities(text_preview, model=model),
             return_exceptions=True,
@@ -138,6 +148,7 @@ class BasePipeline:
                 job.payload = payload
             await self._update_job(job, phase="extract", status="processing", progress=10)
             raw_text, metadata = await self.extract(job_id=str(job_id), **kwargs)
+            authoritative_summary = self._authoritative_summary(raw_text, metadata)
             await self._update_job(job, phase="extracted", progress=20)
 
             # --- Dedup: check for existing item with same content hash (scoped to tenant) ---
@@ -209,10 +220,14 @@ class BasePipeline:
                 await consume_tenant_token_budget(tenant_id, len(text_preview) // 4 + 12_288)
                 async with tenant_llm_slot(tenant_id):
                     summary, tags, categories, entities_dict = await self._run_enrichment(
-                        text_preview, existing_tags, model=model
+                        text_preview,
+                        existing_tags,
+                        model=model,
+                        authoritative_summary=authoritative_summary,
                     )
             except Exception as enrich_exc:
                 logger.warning("AI enrichment failed for job %s (continuing without): %s", job_id, enrich_exc)
+                summary = authoritative_summary or ""
             await self._update_job(job, phase="enriched", progress=80)
 
             # --- Store item ---

@@ -2,7 +2,11 @@ import logging
 from typing import Any
 
 from app.pipelines.base import BasePipeline
-from app.services.image_analysis import analyze_image_artifact, build_image_analysis_metadata
+from app.services.image_analysis import (
+    analyze_image_artifact,
+    build_image_analysis_metadata,
+    normalized_image_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ class ImagePipeline(BasePipeline):
         if not isinstance(storage_path, str) or not storage_path.strip():
             raise ValueError("Image job is missing upload artifact storage path")
 
-        generated_description, image_bytes, byte_hash = await analyze_image_artifact(
+        vision_result, image_bytes, byte_hash = await analyze_image_artifact(
             self.llm,
             storage_path=storage_path,
             media_type=media_type,
@@ -40,7 +44,7 @@ class ImagePipeline(BasePipeline):
         completed_metadata = {
             **metadata,
             **build_image_analysis_metadata(
-                description=generated_description,
+                vision_result=vision_result,
                 filename=filename,
                 media_type=media_type,
                 extension=extension,
@@ -50,4 +54,9 @@ class ImagePipeline(BasePipeline):
                 status="completed",
             ),
         }
-        return generated_description, completed_metadata
+        return normalized_image_content(vision_result.analysis), completed_metadata
+
+    def _authoritative_summary(self, raw_text: str, metadata: dict[str, Any]) -> str | None:
+        analysis = metadata.get("image_analysis")
+        caption = analysis.get("caption") if isinstance(analysis, dict) else None
+        return caption.strip() if isinstance(caption, str) and caption.strip() else None

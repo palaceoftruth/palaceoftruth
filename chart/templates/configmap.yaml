@@ -27,6 +27,8 @@ data:
   TENANT_LLM_MAX_CONCURRENT_REQUESTS: {{ .Values.config.tenantLlmMaxConcurrentRequests | quote }}
   TENANT_LLM_DAILY_TOKEN_LIMIT: {{ .Values.config.tenantLlmDailyTokenLimit | quote }}
   OPENROUTER_FALLBACK_MODELS: {{ .Values.config.openrouterFallbackModels | quote }}
+  OPENROUTER_VISION_MODEL: {{ .Values.config.openrouterVisionModel | quote }}
+  OPENROUTER_VISION_FALLBACK_MODELS: {{ .Values.config.openrouterVisionFallbackModels | quote }}
   RELATIONSHIP_CLASSIFICATION_MODEL: {{ .Values.config.relationshipClassificationModel | quote }}
   RELATIONSHIP_CLASSIFICATION_TEMPERATURE: {{ .Values.config.relationshipClassificationTemperature | quote }}
   RELATIONSHIP_CLASSIFICATION_SEED: {{ .Values.config.relationshipClassificationSeed | quote }}
