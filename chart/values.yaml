@@ -40,8 +40,8 @@ config:
   openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
   # Dedicated low-cost OpenRouter vision chain. The fallback is also routed
   # through OpenRouter; OPENAI_API_KEY is never used for image analysis.
-  openrouterVisionModel: "google/gemini-2.5-flash-lite"
-  openrouterVisionFallbackModels: "openai/gpt-4o-mini"
+  openrouterVisionModel: "minimax/minimax-m3"
+  openrouterVisionFallbackModels: "openai/gpt-4o-mini,openai/gpt-4.1-mini"
   # Frozen relationship-classifier profile. Change only with a calibrated eval.
   relationshipClassificationModel: "openai/gpt-4.1"
   relationshipClassificationTemperature: "0.0"
