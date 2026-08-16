@@ -125,6 +125,7 @@ class FakePipelineSession:
         self.attempts: list[JobAttempt] = []
         self.scalar_values: list[object | None] = []
         self.scalar_statements: list[str] = []
+        self.vocab_transaction_open = False
 
     async def get(self, model, key, **_kwargs):
         if model is Job:
@@ -135,6 +136,7 @@ class FakePipelineSession:
 
     async def commit(self) -> None:
         self.commits += 1
+        self.vocab_transaction_open = False
 
     async def rollback(self) -> None:
         self.rollbacks += 1
@@ -154,6 +156,7 @@ class FakePipelineSession:
                 [a for a in self.attempts if a.status in {"queued", "processing"}]
             )
         if "SELECT DISTINCT unnest(tags)" in sql:
+            self.vocab_transaction_open = True
             return FakeTagResult([])
         return FakeProgressEventResult(self.progress_events)
 
@@ -1245,6 +1248,61 @@ async def test_base_pipeline_preserves_image_byte_hash_for_worker_dedupe() -> No
     assert item.metadata_["image_analysis"]["byte_hash"] == "a" * 64
     assert job.status == "completed"
     assert session.embeddings
+
+
+@pytest.mark.asyncio
+async def test_base_pipeline_releases_vocab_transaction_before_llm_enrichment(monkeypatch) -> None:
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        title="Image notes",
+        source_type="image",
+        status="processing",
+        tags=[],
+        categories=[],
+    )
+    job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="image",
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+    )
+    session = FakePipelineSession(job=job, item=item)
+    vocab_transaction_states: list[bool] = []
+
+    async def consume_budget(_tenant_id: str, _estimated_tokens: int) -> None:
+        return None
+
+    @asynccontextmanager
+    async def llm_slot(_tenant_id: str):
+        yield
+
+    monkeypatch.setattr("app.pipelines.base.consume_tenant_token_budget", consume_budget)
+    monkeypatch.setattr("app.pipelines.base.tenant_llm_slot", llm_slot)
+
+    class ConnectionAwareLlm(FakeLlm):
+        async def summarize(self, _text: str, model: str | None = None) -> str:
+            vocab_transaction_states.append(session.vocab_transaction_open)
+            return "summary"
+
+        async def generate_tags(self, _text: str, *, existing_tags: list[str], model: str | None = None):
+            vocab_transaction_states.append(session.vocab_transaction_open)
+            return ([], [])
+
+        async def extract_entities(self, _text: str, model: str | None = None):
+            vocab_transaction_states.append(session.vocab_transaction_open)
+            return None
+
+    await TextPipeline(session, FakeEmbedder(), ConnectionAwareLlm()).process(
+        job_id,
+        tenant_id="tenant-a",
+    )
+
+    assert vocab_transaction_states == [False, False, False]
 
 
 def test_stable_merge_tags_preserves_order_and_normalizes_values() -> None:

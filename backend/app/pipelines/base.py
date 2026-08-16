@@ -217,6 +217,11 @@ class BasePipeline:
                     ).bindparams(tid=tenant_id)
                 )
                 existing_tags = [row.tag for row in vocab_result]
+                # The provider calls below can take longer than the database's
+                # idle-transaction timeout. Release the vocabulary transaction
+                # before waiting on external services so the next progress
+                # update checks out a healthy connection.
+                await self.db.commit()
                 await consume_tenant_token_budget(tenant_id, len(text_preview) // 4 + 12_288)
                 async with tenant_llm_slot(tenant_id):
                     summary, tags, categories, entities_dict = await self._run_enrichment(
