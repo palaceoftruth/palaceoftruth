@@ -2036,6 +2036,114 @@ def test_palaceoftruth_request_json_does_not_retry_permanent_4xx(monkeypatch) ->
     assert calls == 1
 
 
+def test_palaceoftruth_request_json_keeps_validation_detail_from_error_body(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    body = json.dumps(
+        {
+            "detail": [
+                {
+                    "type": "datetime_from_date_parsing",
+                    "loc": ["body", "valid_from"],
+                    "input": "tomorrow",
+                }
+            ]
+        }
+    ).encode("utf-8")
+
+    def fake_urlopen(_request, timeout: int):
+        raise module.HTTPError(
+            "http://palaceoftruth-backend:8000/api/v1/memory/entries",
+            422,
+            "Unprocessable Entity",
+            {},
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider._request_json(
+            "POST",
+            "/api/v1/memory/entries",
+            {"scope": {"type": "agent", "key": "orchestrator"}},
+        )
+
+    message = str(excinfo.value)
+    assert "HTTP 422" in message
+    assert "valid_from" in message
+    assert "datetime_from_date_parsing" in message
+
+
+def test_palaceoftruth_request_json_truncates_a_long_error_body(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    body = b'{"detail":"' + b"x" * 5000 + b'"}'
+
+    def fake_urlopen(_request, timeout: int):
+        raise module.HTTPError(
+            "http://palaceoftruth-backend:8000/api/v1/memory/entries",
+            422,
+            "Unprocessable Entity",
+            {},
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider._request_json(
+            "POST",
+            "/api/v1/memory/entries",
+            {"scope": {"type": "agent", "key": "orchestrator"}},
+        )
+
+    message = str(excinfo.value)
+    assert message.endswith("...")
+    assert len(message) < module.MAX_HTTP_ERROR_DETAIL_CHARS + 200
+
+
+def test_palaceoftruth_request_json_handles_an_empty_error_body(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    def fake_urlopen(_request, timeout: int):
+        raise module.HTTPError(
+            "http://palaceoftruth-backend:8000/api/v1/memory/entries",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider._request_json(
+            "POST",
+            "/api/v1/memory/entries",
+            {"scope": {"type": "agent", "key": "orchestrator"}},
+        )
+
+    assert str(excinfo.value).endswith("failed with HTTP 404")
+
+
 def test_palaceoftruth_request_json_opens_circuit_after_repeated_transient_failures(
     monkeypatch,
 ) -> None:
@@ -2102,6 +2210,262 @@ def test_palaceoftruth_remember_tool_rejects_oversized_explicit_memory(
 
     assert result["ok"] is False
     assert result["error"]["type"] == "PalacePayloadTooLargeError"
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+def _writing_provider(module, monkeypatch, requests_seen: list):
+    """Build an initialized provider whose POSTs fail the test loudly.
+
+    Used by the argument-validation tests below: a rejected write must never
+    reach /api/v1/memory/entries, so any POST is an assertion failure.
+    """
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="orchestrator",
+        agent_workspace="hermes",
+    )
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        raise AssertionError(f"invalid write arguments should not POST {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    return provider
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("valid_from", "tomorrow"),
+        ("valid_from", "08/17/2026"),
+        ("valid_from", "next Tuesday"),
+        ("valid_until", "next week"),
+        ("valid_until", "2026-13-01T00:00:00Z"),
+        ("valid_until", "in 30 days"),
+    ],
+)
+def test_palaceoftruth_remember_tool_rejects_unparsable_timestamps(
+    monkeypatch, field, value
+) -> None:
+    module = load_palaceoftruth_plugin()
+    requests_seen: list[tuple[str, str]] = []
+    provider = _writing_provider(module, monkeypatch, requests_seen)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {"content": "Hermes should cite provenance.", field: value},
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "ValueError"
+    assert field in result["error"]["message"]
+    assert "ISO-8601" in result["error"]["message"]
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "entry-123",
+        "Palace write validation fix",
+        "11111111-1111-1111-1111-11111111111",
+        "not a uuid at all",
+    ],
+)
+def test_palaceoftruth_remember_tool_rejects_non_uuid_supersedes_entry_id(
+    monkeypatch, value
+) -> None:
+    module = load_palaceoftruth_plugin()
+    requests_seen: list[tuple[str, str]] = []
+    provider = _writing_provider(module, monkeypatch, requests_seen)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {
+                "content": "Hermes should cite provenance.",
+                "supersedes_entry_id": value,
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "ValueError"
+    assert "supersedes_entry_id" in result["error"]["message"]
+    assert "UUID" in result["error"]["message"]
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+def test_palaceoftruth_remember_tool_rejects_inverted_temporal_window(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    requests_seen: list[tuple[str, str]] = []
+    provider = _writing_provider(module, monkeypatch, requests_seen)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {
+                "content": "Hermes should cite provenance.",
+                "valid_from": "2026-08-01T00:00:00Z",
+                "valid_until": "2026-07-01T00:00:00Z",
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "ValueError"
+    assert "valid_until must be greater than or equal to valid_from" in (
+        result["error"]["message"]
+    )
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+def test_palaceoftruth_remember_tool_allows_a_naive_and_aware_window_pair(monkeypatch) -> None:
+    """A naive/aware mix is not ordered client-side; the API normalizes it."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="orchestrator")
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        return {"job_id": "job-1", "status": "accepted"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {
+                "content": "Hermes should cite provenance.",
+                "valid_from": "2026-08-01T00:00:00Z",
+                "valid_until": "2026-07-01T00:00:00",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("valid_from", "valid_until", "supersedes_entry_id"),
+    [
+        ("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", None),
+        ("2026-07-01", "2026-08-01", None),
+        ("2026-07-01T00:00:00+02:00", None, "11111111-1111-1111-1111-111111111111"),
+        ("2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z", None),
+        (None, None, "11111111111111111111111111111111"),
+        # Forms the API accepts that a naive fromisoformat/UUID check would
+        # wrongly reject. Rejecting these would break writes that work today.
+        ("2026-07-01T00:00:00z", None, None),
+        ("2026-07-01 00:00:00", None, None),
+        ("2026-07-01T00:00:00.123456Z", None, None),
+        ("1751328000", None, None),
+        ("1751328000.5", None, None),
+        (None, None, "{11111111-1111-1111-1111-111111111111}"),
+        (None, None, "urn:uuid:11111111-1111-1111-1111-111111111111"),
+    ],
+)
+def test_palaceoftruth_remember_tool_accepts_valid_arguments_verbatim(
+    monkeypatch, valid_from, valid_until, supersedes_entry_id
+) -> None:
+    """Accepted values must reach the API unchanged.
+
+    Normalizing them would change the idempotency key and break client-side
+    dedup of repeated writes.
+    """
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "orchestrator")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="orchestrator")
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        if method == "GET":
+            return {"tenant_id": "tenant-a"}
+        return {"job_id": "job-1", "status": "accepted"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    args = {"content": "Hermes should cite provenance."}
+    for key, value in (
+        ("valid_from", valid_from),
+        ("valid_until", valid_until),
+        ("supersedes_entry_id", supersedes_entry_id),
+    ):
+        if value is not None:
+            args[key] = value
+
+    result = json.loads(provider.handle_tool_call("palace_remember", args))
+
+    assert result["ok"] is True
+    payload = requests_seen[1][2]
+    assert payload is not None
+    for key, value in (
+        ("valid_from", valid_from),
+        ("valid_until", valid_until),
+        ("supersedes_entry_id", supersedes_entry_id),
+    ):
+        if value is None:
+            assert key not in payload
+        else:
+            assert payload[key] == value
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"contents": [{"content": "Remember A.", "valid_from": "tomorrow"}]},
+        {"contents": [{"content": "Remember A.", "valid_until": "next week"}]},
+        {"contents": [{"content": "Remember A.", "supersedes_entry_id": "entry-123"}]},
+        {
+            "contents": [
+                {
+                    "content": "Remember A.",
+                    "valid_from": "2026-08-01T00:00:00Z",
+                    "valid_until": "2026-07-01T00:00:00Z",
+                }
+            ]
+        },
+        {"contents": ["Remember A."], "default_valid_from": "tomorrow"},
+        {"contents": ["Remember A."], "default_valid_until": "next week"},
+        {"contents": ["Remember A.", {"content": "Remember B.", "valid_from": "yesterday"}]},
+    ],
+)
+def test_palaceoftruth_remember_bulk_rejects_invalid_temporal_arguments(
+    monkeypatch, args
+) -> None:
+    module = load_palaceoftruth_plugin()
+    requests_seen: list[tuple[str, str]] = []
+    provider = _writing_provider(module, monkeypatch, requests_seen)
+
+    result = json.loads(provider.handle_tool_call("palace_remember_bulk", args))
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "ValueError"
     assert requests_seen == [("GET", "/api/v1/memory/whoami")]
 
 
