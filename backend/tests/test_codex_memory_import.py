@@ -109,6 +109,44 @@ def test_privacy_detector_finds_unlabeled_high_entropy_token_but_ignores_hashes(
     assert hash_scan.findings == []
 
 
+def test_privacy_detector_ignores_paths_and_version_labels() -> None:
+    """Engineering prose must not be quarantined as a secret.
+
+    Every string here was flagged as a high entropy token before the structured
+    identifier check existed, which silently dropped ordinary agent turns.
+    """
+    benign = [
+        "/Users/asarver/.t3/worktrees/palaceoftruth/t3code-f92df6fc",
+        "palaceoftruth-0.1.582_74b6e7491aae",
+        "ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin",
+        "third_party_plugins/hermes/memory/palaceoftruth/__init__.py",
+        "apps/k3s-lab/hermes-k8s/clara-statefulset.yaml",
+        "app.services.memory_admission.evaluate_memory_write",
+    ]
+
+    for value in benign:
+        scan = scan_codex_memory_privacy(f"Reconciled {value} during the rollout")
+        assert scan.findings == [], f"{value} must not be treated as a secret"
+
+
+def test_privacy_detector_still_finds_secrets_that_contain_delimiters() -> None:
+    """The structured identifier check must not open a hole for real tokens.
+
+    A credential stays one long random run even when it contains "/" or ".",
+    so splitting on delimiters must not reduce it to path-like segments.
+    """
+    secrets = [
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        "aG9sZC9vbi90aWdodC9zZWNyZXQvdmFsdWU/eHl6UTdyVDR3WDh5WjFhQjNjRDVlRjZnSDBqSw==",
+        "TWFuIGlzIGRpc3Rpbmd1aXNoZWQsIG5vdCBvbmx5IGJ5IGhpcyByZWFzb24sIGJ1dCBieSB0aGlz",
+    ]
+
+    for value in secrets:
+        scan = scan_codex_memory_privacy(f"Captured {value} during a run")
+        assert scan.findings, f"{value} must still be treated as a secret"
+
+
 def test_dry_run_redacts_body_by_default(tmp_path: Path) -> None:
     memory_file = tmp_path / "MEMORY.md"
     memory_file.write_text(
