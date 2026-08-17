@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -42,6 +43,7 @@ DEFAULT_TIMEOUT_SECONDS = 10
 DEFAULT_SOURCE = "hermes-agent"
 DEFAULT_CREATED_BY_ROLE = "assistant"
 MAX_MEMORY_BODY_CHARS = 24000
+MAX_HTTP_ERROR_DETAIL_CHARS = 600
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -72,6 +74,9 @@ SKILL_TAG_PREFIX = "skill-"
 SCOPE_TYPES = {"session", "agent", "workspace", "tenant_shared"}
 FACT_KINDS = {"world", "experience", "observation"}
 RELATIONSHIP_POLICIES = {"immediate", "deferred", "skip"}
+# Advertised in the tool schemas so the model is told the shape up front
+# instead of guessing an id and failing server-side validation.
+UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 PALACE_MEMORY_ROUTE_SCOPES = {
     ("GET", "/api/v1/memory/whoami"): "read",
     ("GET", "/api/v1/memory/scopes"): "read",
@@ -522,6 +527,87 @@ def _reject_oversized_explicit_write(content: str) -> None:
         "explicit Palace memory write exceeds "
         f"{MAX_MEMORY_BODY_CHARS} characters; shorten or split the memory"
     )
+
+
+_EPOCH_TIMESTAMP_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
+
+
+def _parse_api_timestamp(value: str | None, field_name: str) -> datetime | None:
+    """Parse an optional timestamp in a form the memory API accepts.
+
+    The API models valid_from/valid_until as datetimes, so a model-supplied
+    value such as "tomorrow" is only caught server-side and fails the whole
+    write with an opaque HTTP 422. Parsing here turns that into an actionable
+    tool error before the request leaves the plugin.
+
+    This accepts every form the API accepts, so that a write which succeeds
+    today is never rejected here: ISO-8601 including a lowercase "z" suffix,
+    which fromisoformat alone rejects, and a bare unix timestamp. The parsed
+    value is used only for the ordering check below - callers always send the
+    caller's original string, so the API stays the authority on how an
+    accepted value is interpreted.
+    """
+    if value is None:
+        return None
+    candidate = f"{value[:-1]}Z" if value.endswith("z") else value
+    try:
+        return datetime.fromisoformat(candidate)
+    except (TypeError, ValueError):
+        pass
+    if _EPOCH_TIMESTAMP_RE.match(value):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OSError, OverflowError, ValueError):
+            pass
+    raise ValueError(
+        f"{field_name} must be an ISO-8601 timestamp "
+        f'(for example "2026-07-01T00:00:00Z"), got {value!r}'
+    )
+
+
+def _validate_temporal_window(valid_from: str | None, valid_until: str | None) -> None:
+    start = _parse_api_timestamp(valid_from, "valid_from")
+    end = _parse_api_timestamp(valid_until, "valid_until")
+    if start is None or end is None:
+        return
+    # A naive/aware mix cannot be ordered here without inventing a timezone.
+    # Leave that case to the API, which normalizes both sides before applying
+    # the same rule.
+    if (start.tzinfo is None) != (end.tzinfo is None):
+        return
+    if end < start:
+        raise ValueError("valid_until must be greater than or equal to valid_from")
+
+
+def _validate_entry_uuid(value: str | None, field_name: str) -> None:
+    """Reject an entry id the memory API cannot parse as a UUID."""
+    if value is None:
+        return
+    try:
+        UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            f"{field_name} must be a UUID "
+            f'(for example "11111111-1111-1111-1111-111111111111"), got {value!r}'
+        ) from None
+
+
+def _http_error_detail(exc: HTTPError) -> str:
+    """Read a bounded snippet of an error response body for diagnostics.
+
+    Without this the server's explanation - such as which field failed
+    validation - is discarded and only a bare status code reaches the logs.
+    The snippet is truncated because an error body can echo the whole request
+    payload back.
+    """
+    try:
+        raw = exc.read()
+    except Exception:  # pragma: no cover - body already consumed or stream closed
+        return ""
+    if not raw:
+        return ""
+    text = _trim(raw.decode("utf-8", errors="replace"), MAX_HTTP_ERROR_DETAIL_CHARS)
+    return f": {text}" if text else ""
 
 
 def _scope_key(scope: dict[str, Any]) -> str | None:
@@ -1591,15 +1677,31 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         },
                         "valid_from": {
                             "type": "string",
-                            "description": "Optional ISO timestamp when this memory starts being valid.",
+                            "format": "date-time",
+                            "description": (
+                                "Optional ISO-8601 timestamp when this memory starts "
+                                'being valid, such as "2026-07-01T00:00:00Z". '
+                                'Relative wording such as "tomorrow" is rejected.'
+                            ),
                         },
                         "valid_until": {
                             "type": "string",
-                            "description": "Optional ISO timestamp when this memory stops being valid.",
+                            "format": "date-time",
+                            "description": (
+                                "Optional ISO-8601 timestamp when this memory stops "
+                                'being valid, such as "2026-08-01T00:00:00Z". '
+                                "Must not be earlier than valid_from."
+                            ),
                         },
                         "supersedes_entry_id": {
                             "type": "string",
-                            "description": "Optional prior semantic memory entry id this write supersedes.",
+                            "format": "uuid",
+                            "pattern": UUID_PATTERN,
+                            "description": (
+                                "Optional prior semantic memory entry id this write "
+                                "supersedes. Must be a UUID returned by a previous "
+                                "read, not a title or a made-up id."
+                            ),
                         },
                         "fact_kind": {
                             "type": "string",
@@ -1645,9 +1747,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                                                 "type": "string",
                                                 "enum": ["memory", "user"],
                                             },
-                                            "valid_from": {"type": "string"},
-                                            "valid_until": {"type": "string"},
-                                            "supersedes_entry_id": {"type": "string"},
+                                            "valid_from": {
+                                                "type": "string",
+                                                "format": "date-time",
+                                            },
+                                            "valid_until": {
+                                                "type": "string",
+                                                "format": "date-time",
+                                            },
+                                            "supersedes_entry_id": {
+                                                "type": "string",
+                                                "format": "uuid",
+                                                "pattern": UUID_PATTERN,
+                                            },
                                             "fact_kind": {
                                                 "type": "string",
                                                 "enum": sorted(FACT_KINDS),
@@ -1679,8 +1791,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                             ),
                             "default": "memory",
                         },
-                        "default_valid_from": {"type": "string"},
-                        "default_valid_until": {"type": "string"},
+                        "default_valid_from": {"type": "string", "format": "date-time"},
+                        "default_valid_until": {"type": "string", "format": "date-time"},
                         "default_fact_kind": {
                             "type": "string",
                             "enum": sorted(FACT_KINDS),
@@ -2417,9 +2529,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except HTTPError as exc:
                 retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
                 if not _is_retryable_http_status(exc.code):
-                    exc.read()
+                    detail = _http_error_detail(exc)
                     raise RuntimeError(
-                        f"Palace of Truth {method} {path} failed with HTTP {exc.code}"
+                        f"Palace of Truth {method} {path} failed with HTTP {exc.code}{detail}"
                     ) from exc
                 last_error = PalaceTransientError(
                     f"Palace of Truth {method} {path} retryable HTTP {exc.code}",
@@ -3424,6 +3536,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             raise ValueError("fact_kind is unsupported")
         if relationship_policy not in RELATIONSHIP_POLICIES:
             raise ValueError("relationship_policy is unsupported")
+        # Validate here rather than in the tool handlers: every write path
+        # (palace_remember, palace_remember_bulk, and the turn mirror) funnels
+        # through this builder, so one guard covers them all. The values are
+        # only checked, never rewritten - normalizing them would change the
+        # idempotency key and break client-side dedup of repeated writes.
+        _validate_temporal_window(valid_from, valid_until)
+        _validate_entry_uuid(supersedes_entry_id, "supersedes_entry_id")
         scope = self._build_scope(self._session_id)
         target_label = "user profile" if target == "user" else "memory"
         title = _trim(
