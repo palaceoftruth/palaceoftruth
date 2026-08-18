@@ -23,6 +23,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 CMD ["python", "-m", "pytest"]
 
 FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS runtime-base
+# Apply Debian security updates the pinned base image predates. The image
+# digest stays pinned for reproducibility, so without this the backend and
+# worker images keep shipping whatever was current when that digest was cut.
+# Trivy runs with ignore-unfixed, so it fails the build on exactly the
+# packages this upgrade can fix, which is why upgrading beats a suppression.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
