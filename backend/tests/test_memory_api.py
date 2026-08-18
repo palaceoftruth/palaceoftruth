@@ -1338,6 +1338,52 @@ def test_memory_entries_quarantines_unlabeled_high_entropy_token(monkeypatch) ->
     assert response.json()["detail"]["audit"]["privacy_scan"]["findings"][0]["pattern"] == "high_entropy_token"
 
 
+def test_memory_entries_accepts_conversation_turn_full_of_paths(monkeypatch) -> None:
+    """A mirrored agent turn about a deploy must reach storage.
+
+    The entropy heuristic used to read worktree paths, image refs and chart
+    labels as secret material, so ordinary turns were quarantined with
+    retryable=false and silently lost.
+    """
+    client = _build_app(FakeSession())
+    accepted: list[str] = []
+
+    async def fake_accept_canonical_memory_entry(db, *, body, signing_key, admission_audit=None):
+        accepted.append(body.title)
+        return MemoryArtifactAcceptanceResult(
+            job=Job(
+                id=uuid.uuid4(),
+                job_type=MEMORY_JOB_TYPE,
+                tenant_id=body.tenant_id,
+                status="queued",
+                progress=0,
+                created_at=datetime.now(timezone.utc),
+            ),
+            enqueue_requested=True,
+            scope_type=body.scope.type,
+            scope_key=body.scope.key,
+            accepted_as="canonical",
+        )
+
+    monkeypatch.setattr("app.api.memory.accept_canonical_memory_entry", fake_accept_canonical_memory_entry)
+    payload = _canonical_payload()
+    payload["body"] = "\n\n".join(
+        [
+            "# Conversation Turn",
+            "## User",
+            "Check the rollout under /Users/asarver/.t3/worktrees/palaceoftruth/t3code-f92df6fc",
+            "## Assistant",
+            "The pods carry helm.sh/chart=palaceoftruth-0.1.582_74b6e7491aae and pull "
+            "ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin.",
+        ]
+    )
+
+    response = client.post("/api/v1/memory/entries", json=payload)
+
+    assert response.status_code == 202
+    assert accepted == ["Shared launch brief"]
+
+
 def test_memory_entries_quarantines_raw_transcript_body_before_storage(monkeypatch) -> None:
     client = _build_app(FakeSession())
 

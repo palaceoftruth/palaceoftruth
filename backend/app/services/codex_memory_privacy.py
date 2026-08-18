@@ -62,6 +62,14 @@ _KNOWN_TOKEN_RE = re.compile(
 _ENTROPY_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9_+./-]{32,256}={0,2}(?![A-Za-z0-9_])")
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", re.I)
 _HASH_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", re.I)
+# Path and label delimiters only. "+" and "=" are base64 characters, so
+# splitting on them would break real credentials into harmless-looking pieces.
+_STRUCTURED_SEGMENT_RE = re.compile(r"[/._-]+")
+_MIN_STRUCTURED_SEGMENTS = 3
+_MAX_STRUCTURED_SEGMENT_LENGTH = 24
+_MIN_STRUCTURED_WORD_LENGTH = 4
+_MIN_STRUCTURED_LONE_WORD_LENGTH = 7
+_MIN_STRUCTURED_WORD_COVERAGE = 0.35
 
 
 @dataclass(frozen=True)
@@ -231,7 +239,12 @@ def _high_entropy_token_findings(text: str) -> list[CodexMemorySecretFinding]:
     findings: list[CodexMemorySecretFinding] = []
     for match in _ENTROPY_TOKEN_RE.finditer(text):
         value = match.group(0)
-        if _looks_like_placeholder(value) or _UUID_RE.fullmatch(value) or _HASH_RE.fullmatch(value):
+        if (
+            _looks_like_placeholder(value)
+            or _UUID_RE.fullmatch(value)
+            or _HASH_RE.fullmatch(value)
+            or _looks_like_structured_identifier(value)
+        ):
             continue
         character_classes = sum(
             (
@@ -254,6 +267,41 @@ def _high_entropy_token_findings(text: str) -> list[CodexMemorySecretFinding]:
             )
         )
     return findings
+
+
+def _looks_like_structured_identifier(value: str) -> bool:
+    """Tell a file path, image ref or version label from a real credential.
+
+    The entropy heuristic scores a whole token, so joining readable words with
+    delimiters inflates both the character-class count and the entropy. That is
+    why an ordinary worktree path scored above the 4.2 floor while a real JWT
+    header scored below it -- the entropy floor cannot separate the two without
+    losing true positives first.
+
+    The segment layout can. A credential is one unbroken random run, while a
+    path or a label is several short segments that are mostly words, so a token
+    is treated as structured only when every segment is short and word-like
+    characters make up a large part of it.
+    """
+    if "/" not in value and "." not in value:
+        return False
+    segments = [segment for segment in _STRUCTURED_SEGMENT_RE.split(value) if segment]
+    if len(segments) < _MIN_STRUCTURED_SEGMENTS:
+        return False
+    if max(len(segment) for segment in segments) >= _MAX_STRUCTURED_SEGMENT_LENGTH:
+        return False
+    words = [
+        segment
+        for segment in segments
+        if len(segment) >= _MIN_STRUCTURED_WORD_LENGTH and segment.isalpha()
+    ]
+    if not words:
+        return False
+    # Several words means a path; one long word means a named version label.
+    # A single short word is too weak a signal to suppress a secret finding.
+    if len(words) < 2 and max(len(word) for word in words) < _MIN_STRUCTURED_LONE_WORD_LENGTH:
+        return False
+    return sum(len(word) for word in words) >= _MIN_STRUCTURED_WORD_COVERAGE * len(value)
 
 
 def _shannon_entropy(value: str) -> float:
