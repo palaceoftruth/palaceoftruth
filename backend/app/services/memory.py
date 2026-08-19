@@ -336,6 +336,9 @@ class DelegatedAgentMemoryReadPolicy:
     require_access_reason: bool = True
     max_cross_agent_scopes: int = 5
     max_results_per_scope: int | None = None
+    read_workspace_scope_keys: tuple[str, ...] = ()
+    allow_all_workspace_scopes: bool = False
+    max_cross_workspace_scopes: int = 5
 
 
 @dataclass(frozen=True)
@@ -354,9 +357,19 @@ class DelegatedAgentMemoryDecision:
 
 
 @dataclass(frozen=True)
+class DelegatedWorkspaceMemoryDecision:
+    requested_workspace_scope_keys: tuple[str, ...] = ()
+    authorized_workspace_scope_keys: tuple[str, ...] = ()
+    denied_workspace_scope_keys: tuple[str, ...] = ()
+    decision: str = "not_requested"
+    deny_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AgentScopePatternResolution:
     requested_patterns: tuple[str, ...] = ()
     discovered_keys: tuple[str, ...] = ()
+    discovered_workspace_keys: tuple[str, ...] = ()
     matched_keys: tuple[str, ...] = ()
     selected_keys: tuple[str, ...] = ()
     skipped_keys: tuple[str, ...] = ()
@@ -407,6 +420,17 @@ def _policy_scope_keys(value: object, *, field: str) -> tuple[str, ...]:
     return keys
 
 
+def _policy_optional_scope_keys(value: object, *, field: str) -> tuple[str, ...]:
+    """Like ``_policy_scope_keys`` but absent means "none", not a config error.
+
+    Workspace reach is additive to existing policies, so a policy written before
+    it existed must keep parsing.
+    """
+    if value is None:
+        return ()
+    return _policy_scope_keys(value, field=field)
+
+
 def parse_delegated_agent_memory_read_policies(raw: str) -> tuple[DelegatedAgentMemoryReadPolicy, ...]:
     """Parse deployment-owned delegated memory read policies from JSON config."""
     if not raw.strip():
@@ -453,6 +477,22 @@ def parse_delegated_agent_memory_read_policies(raw: str) -> tuple[DelegatedAgent
                 max_cross_agent_scopes=_policy_int(
                     entry.get("max_cross_agent_scopes"),
                     field=f"policy {index} max_cross_agent_scopes",
+                    default=5,
+                    min_value=0,
+                )
+                or 0,
+                read_workspace_scope_keys=_policy_optional_scope_keys(
+                    entry.get("read_workspace_scope_keys"),
+                    field=f"policy {index} read_workspace_scope_keys",
+                ),
+                allow_all_workspace_scopes=_policy_bool(
+                    entry.get("allow_all_workspace_scopes"),
+                    field=f"policy {index} allow_all_workspace_scopes",
+                    default=False,
+                ),
+                max_cross_workspace_scopes=_policy_int(
+                    entry.get("max_cross_workspace_scopes"),
+                    field=f"policy {index} max_cross_workspace_scopes",
                     default=5,
                     min_value=0,
                 )
@@ -1936,7 +1976,13 @@ async def _resolve_agent_scope_patterns(
     body: AgentMemoryRetrieveRequest,
 ) -> AgentScopePatternResolution:
     requested_patterns = _dedupe_scope_keys(body.include_agent_scope_patterns)
-    if not requested_patterns:
+    # The wildcard opt-ins carry no patterns, but they still need the tenant's
+    # scope inventory: a policy that says "all permitted scopes" without naming
+    # them can only be resolved against what actually exists.
+    wildcard_requested = (
+        body.include_all_permitted_agent_scopes or body.include_all_permitted_workspace_scopes
+    )
+    if not requested_patterns and not wildcard_requested:
         return AgentScopePatternResolution()
 
     scope_response = await list_memory_scopes(
@@ -1947,6 +1993,18 @@ async def _resolve_agent_scope_patterns(
     )
     agent_summaries = [summary for summary in scope_response.scopes if summary.scope.type == "agent" and summary.scope.key]
     discovered_keys = _dedupe_scope_keys([summary.scope.key or "" for summary in agent_summaries])
+    discovered_workspace_keys = _dedupe_scope_keys(
+        [
+            summary.scope.key or ""
+            for summary in scope_response.scopes
+            if summary.scope.type == "workspace" and summary.scope.key
+        ]
+    )
+    if not requested_patterns:
+        return AgentScopePatternResolution(
+            discovered_keys=discovered_keys,
+            discovered_workspace_keys=discovered_workspace_keys,
+        )
     matched_summaries = [
         summary
         for summary in agent_summaries
@@ -1985,6 +2043,7 @@ async def _resolve_agent_scope_patterns(
     return AgentScopePatternResolution(
         requested_patterns=requested_patterns,
         discovered_keys=discovered_keys,
+        discovered_workspace_keys=discovered_workspace_keys,
         matched_keys=matched_keys,
         selected_keys=tuple(selected_keys),
         skipped_keys=tuple(skipped_keys),
@@ -2006,6 +2065,11 @@ def _evaluate_delegated_agent_memory_policy(
         requested.extend(pattern_resolution.selected_keys)
     if policy is not None and body.include_all_permitted_agent_scopes:
         requested.extend(policy.read_agent_scope_keys)
+        # A policy that allows every agent scope names none of them, so the
+        # request resolves to nothing unless the tenant's discovered inventory
+        # supplies the keys. Without this the opt-in silently reads zero scopes.
+        if policy.allow_all_agent_scopes and pattern_resolution is not None:
+            requested.extend(pattern_resolution.discovered_keys)
     requested_keys = tuple(key for key in _dedupe_scope_keys(tuple(requested)) if key != caller_agent_key)
     access_reason_present = bool(body.access_reason and body.access_reason.strip())
     if not requested_keys:
@@ -2088,6 +2152,96 @@ def _evaluate_delegated_agent_memory_policy(
     )
 
 
+def _evaluate_delegated_workspace_memory_policy(
+    *,
+    tenant_id: str,
+    body: AgentMemoryRetrieveRequest,
+    policy: DelegatedAgentMemoryReadPolicy | None,
+    pattern_resolution: AgentScopePatternResolution | None = None,
+) -> DelegatedWorkspaceMemoryDecision:
+    """Authorize reach into sibling workspace scopes.
+
+    Deliberately separate from the agent decision: a tenant may want an agent to
+    read every sibling agent without also reading every project workspace, and
+    the two limits are tuned independently.
+    """
+    if not body.include_all_permitted_workspace_scopes:
+        return DelegatedWorkspaceMemoryDecision()
+
+    requested: list[str] = []
+    if policy is not None:
+        requested.extend(policy.read_workspace_scope_keys)
+        if policy.allow_all_workspace_scopes and pattern_resolution is not None:
+            requested.extend(pattern_resolution.discovered_workspace_keys)
+    # Scopes the caller already named are searched by the normal path; the
+    # delegated decision only covers the ones reach added.
+    already_selected = {key.casefold() for key in body.workspace_scope_keys}
+    requested_keys = tuple(
+        key for key in _dedupe_scope_keys(tuple(requested)) if key.casefold() not in already_selected
+    )
+    if not requested_keys:
+        return DelegatedWorkspaceMemoryDecision(
+            decision="not_requested" if policy is not None else "denied",
+            deny_reasons=() if policy is not None else ("no_delegated_workspace_policy",),
+        )
+    if policy is None:
+        record_scope_guard_violation(reason="no_delegated_workspace_policy")
+        return DelegatedWorkspaceMemoryDecision(
+            requested_workspace_scope_keys=requested_keys,
+            denied_workspace_scope_keys=requested_keys,
+            decision="denied",
+            deny_reasons=("no_delegated_workspace_policy",),
+        )
+
+    deny_reasons: list[str] = []
+    if policy.tenant_id != tenant_id:
+        record_scope_guard_violation(reason="workspace_policy_tenant_mismatch")
+        return DelegatedWorkspaceMemoryDecision(
+            requested_workspace_scope_keys=requested_keys,
+            denied_workspace_scope_keys=requested_keys,
+            decision="denied",
+            deny_reasons=("workspace_policy_tenant_mismatch",),
+        )
+    if policy.require_access_reason and not (body.access_reason and body.access_reason.strip()):
+        record_scope_guard_violation(reason="workspace_access_reason_required")
+        return DelegatedWorkspaceMemoryDecision(
+            requested_workspace_scope_keys=requested_keys,
+            denied_workspace_scope_keys=requested_keys,
+            decision="denied",
+            deny_reasons=("workspace_access_reason_required",),
+        )
+
+    if policy.allow_all_workspace_scopes:
+        authorized = list(requested_keys)
+        denied: list[str] = []
+    else:
+        allowlist = {key.casefold() for key in policy.read_workspace_scope_keys}
+        authorized = [key for key in requested_keys if key.casefold() in allowlist]
+        denied = [key for key in requested_keys if key.casefold() not in allowlist]
+        if denied:
+            deny_reasons.append("workspace_scope_not_allowlisted")
+    if policy.max_cross_workspace_scopes >= 0 and len(authorized) > policy.max_cross_workspace_scopes:
+        denied.extend(authorized[policy.max_cross_workspace_scopes :])
+        authorized = authorized[: policy.max_cross_workspace_scopes]
+        deny_reasons.append("max_cross_workspace_scopes_exceeded")
+    for reason in deny_reasons:
+        record_scope_guard_violation(reason=reason)
+
+    if authorized and denied:
+        decision = "partial"
+    elif authorized:
+        decision = "allowed"
+    else:
+        decision = "denied"
+    return DelegatedWorkspaceMemoryDecision(
+        requested_workspace_scope_keys=requested_keys,
+        authorized_workspace_scope_keys=tuple(authorized),
+        denied_workspace_scope_keys=tuple(denied),
+        decision=decision,
+        deny_reasons=tuple(deny_reasons),
+    )
+
+
 def _scope_label_from_memory_scope(scope: MemoryScope) -> str:
     if scope.type == "tenant_shared":
         return "tenant_shared"
@@ -2149,10 +2303,18 @@ async def retrieve_agent_memory(
         policy=delegated_policy,
         pattern_resolution=pattern_resolution,
     )
+    delegated_workspace_decision = _evaluate_delegated_workspace_memory_policy(
+        tenant_id=tenant_id,
+        body=body,
+        policy=delegated_policy,
+        pattern_resolution=pattern_resolution,
+    )
     scopes = _agent_memory_selected_scopes(body)
     if not body.workspace_strict:
         for agent_scope_key in delegated_decision.authorized_agent_scope_keys:
             _append_scope_once(scopes, MemoryScope(type="agent", key=agent_scope_key))
+    for workspace_scope_key in delegated_workspace_decision.authorized_workspace_scope_keys:
+        _append_scope_once(scopes, MemoryScope(type="workspace", key=workspace_scope_key))
     if _should_search_initial_tenant_shared(body):
         _append_scope_once(scopes, MemoryScope(type="tenant_shared"))
 
@@ -2329,6 +2491,14 @@ async def retrieve_agent_memory(
             delegated_agent_policy_source=delegated_decision.policy_source,
             delegated_agent_decision=delegated_decision.decision,
             delegated_agent_deny_reasons=list(delegated_decision.deny_reasons),
+            authorized_workspace_scope_keys=list(
+                delegated_workspace_decision.authorized_workspace_scope_keys
+            ),
+            denied_workspace_scope_keys=list(
+                delegated_workspace_decision.denied_workspace_scope_keys
+            ),
+            delegated_workspace_decision=delegated_workspace_decision.decision,
+            delegated_workspace_deny_reasons=list(delegated_workspace_decision.deny_reasons),
             access_reason_required=delegated_decision.access_reason_required,
             access_reason_present=delegated_decision.access_reason_present,
             result_counts_by_scope=_route_result_counts_by_scope(scopes, route_results),

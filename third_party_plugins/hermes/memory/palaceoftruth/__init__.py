@@ -963,6 +963,12 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
         "include_agent_scope_patterns": _split_patterns(
             os.environ.get("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "")
         ),
+        "include_all_permitted_agent_scopes": _env_bool(
+            "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES", False
+        ),
+        "include_all_permitted_workspace_scopes": _env_bool(
+            "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", False
+        ),
         "agent_scope_pattern_limit": _env_int("PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT", 5),
         "timeout_seconds": _env_int(
             "PALACEOFTRUTH_REQUEST_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
@@ -1020,6 +1026,41 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
     return config
 
 
+def _agent_scope_pattern_matches(pattern: str, key: str) -> bool:
+    """Mirror the server's agent-scope glob so client and server agree on reach.
+
+    Kept in sync with `_agent_scope_pattern_matches` in
+    `backend/app/services/memory.py`; a client that matched more broadly would
+    send scopes the tenant policy then denies, turning an opt-in into an error.
+    """
+    normalized_pattern = pattern.strip().casefold()
+    normalized_key = key.strip().casefold()
+    if normalized_pattern.startswith("agent/"):
+        normalized_pattern = normalized_pattern.removeprefix("agent/")
+    if normalized_pattern in {"*", "agent/*"}:
+        return True
+    if normalized_pattern.endswith("*"):
+        return normalized_key.startswith(normalized_pattern[:-1])
+    return normalized_key == normalized_pattern
+
+
+def _empty_keyword_recall_message(searched_scopes: list[str]) -> str:
+    """Explain an empty keyword recall without claiming the memory does not exist.
+
+    A bare "no match" reads as "Palace holds nothing", which is wrong when the
+    plugin only searched a narrow scope or when every scope request failed.
+    """
+    if not searched_scopes:
+        return (
+            "Palace of Truth search was unavailable: no readable scope answered this "
+            "query. Do not report this as an empty memory."
+        )
+    return (
+        "No Palace of Truth memory matched this query in the scopes this session "
+        "searched: " + ", ".join(searched_scopes) + ". Other scopes were not searched."
+    )
+
+
 class PalaceOfTruthMemoryProvider(MemoryProvider):
     """Minimal Hermes memory plugin backed by Palace of Truth."""
 
@@ -1051,6 +1092,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._include_tenant_shared = False
         self._include_broad_corpus = False
         self._include_agent_scope_patterns: list[str] = []
+        self._include_all_permitted_agent_scopes = False
+        self._include_all_permitted_workspace_scopes = False
         self._agent_scope_pattern_limit = 5
         self._timeout_seconds = DEFAULT_TIMEOUT_SECONDS
         self._retry_attempts = DEFAULT_RETRY_ATTEMPTS
@@ -1524,6 +1567,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._include_agent_scope_patterns = _split_patterns(
             self._config.get("include_agent_scope_patterns")
         )
+        self._include_all_permitted_agent_scopes = _config_bool(
+            self._config,
+            "include_all_permitted_agent_scopes",
+            default=False,
+        )
+        self._include_all_permitted_workspace_scopes = _config_bool(
+            self._config,
+            "include_all_permitted_workspace_scopes",
+            default=False,
+        )
         self._agent_scope_pattern_limit = min(
             50,
             max(1, int(self._config.get("agent_scope_pattern_limit", 5))),
@@ -1866,7 +1919,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     }
                 )
             try:
-                text = self._retrieve_text(query, self._session_id)
+                text, searched_scopes = self._retrieve_text_with_scopes(
+                    query, self._session_id
+                )
             except Exception as exc:
                 return json.dumps(
                     {
@@ -1875,11 +1930,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": _safe_exception_summary(exc),
                     }
                 )
+            if not text:
+                text = _empty_keyword_recall_message(searched_scopes)
             return json.dumps(
                 {
                     "ok": True,
                     "query": query,
-                    "result": text or "No Palace of Truth memory matched this query.",
+                    "searched_scopes": searched_scopes,
+                    "result": text,
                 }
             )
 
@@ -1929,13 +1987,20 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         or "No Palace of Truth memory matched this query.",
                     }
                 )
+            searched_scope = _scope_label(
+                {"type": payload["scope_type"], "key": payload.get("scope_key")}
+            )
             return json.dumps(
                 {
                     "ok": True,
                     "query": query,
                     "fallback_used": False,
+                    "searched_scopes": [searched_scope],
                     "result": text
-                    or "No Palace of Truth semantic memory matched this query.",
+                    or (
+                        "No Palace of Truth semantic memory matched this query in "
+                        f"{searched_scope}. Other scopes were not searched."
+                    ),
                     "trace": response.get("trace"),
                 }
             )
@@ -2196,7 +2261,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             return
 
         def _worker() -> None:
-            text = self._prefetch_text(query, active_session)
+            # An unguarded raise here kills the daemon thread and leaves the cache
+            # holding the previous turn's text, so background failures must be
+            # logged and cached as empty instead of escaping the thread.
+            try:
+                text = self._prefetch_text(query, active_session)
+            except Exception as exc:
+                _log_retrieval_diagnostic(
+                    logging.WARNING,
+                    "background_prefetch_failed",
+                    error_class=exc.__class__.__name__,
+                    timeout_seconds=self._timeout_seconds,
+                )
+                text = ""
             with self._prefetch_lock:
                 self._prefetch_cache = {
                     "query": query,
@@ -2767,6 +2844,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             agent_scope_key = self._canonical_bound_agent_scope_key(primary_scope)
             if agent_scope_key:
                 _append_scope({"type": "agent", "key": agent_scope_key})
+            # No tenant_shared here on purpose: POST /api/v1/memory/retrieve 403s a
+            # bound Hermes client on any non-agent scope, so a tenant_shared
+            # fallback entry would only ever produce a failed request.
             return scopes
 
         _append_scope(primary_scope)
@@ -2802,6 +2882,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if primary_scope and primary_scope.get("type") == "agent":
             return _scope_key(primary_scope) or None
         return None
+
+    def _delegated_recall_requested(self) -> bool:
+        """True when the operator opted this agent into reach beyond its own scope."""
+        return bool(
+            self._include_tenant_shared
+            or self._include_agent_scope_patterns
+            or self._include_all_permitted_agent_scopes
+            or self._include_all_permitted_workspace_scopes
+        )
 
     def _delegated_access_reason(self, agent_scope_key: str) -> str:
         """Build a stable, non-secret audit reason without including the query."""
@@ -3030,6 +3119,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         else:
             scope = active_scope
 
+        # A recall outside the active scope is a delegated read. Attach the same
+        # stable, non-secret reason the keyword path sends so Palace can audit it.
+        access_reason = None
+        if scope != active_scope:
+            caller_agent_key = self._canonical_bound_agent_scope_key(active_scope) or (
+                self._agent_identity or _scope_key(active_scope)
+            )
+            if caller_agent_key:
+                access_reason = self._delegated_access_reason(caller_agent_key)
+
         def _bounded_int(key: str, default: int | None, minimum: int, maximum: int) -> int | None:
             raw = args.get(key)
             if raw is None:
@@ -3074,8 +3173,63 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "fact_kind_filter": normalized_fact_kinds,
             "date_from": _optional_str(args.get("date_from")),
             "date_to": _optional_str(args.get("date_to")),
+            "access_reason": access_reason,
         }
         return {key: value for key, value in payload.items() if value is not None}
+
+    def _allowed_semantic_recall_workspace_keys(
+        self,
+        active_scope: dict[str, str],
+    ) -> set[str]:
+        active_key = active_scope.get("key")
+        return {
+            key
+            for key in (
+                self._agent_workspace,
+                active_key if active_scope.get("type") == "workspace" else None,
+            )
+            if key
+        }
+
+    def _delegated_semantic_agent_scope_allowed(self, requested_key: str) -> bool:
+        """Cross-agent semantic recall is opt-in, matching the keyword-search contract.
+
+        When the operator opts in, the tenant's delegated-agent policy is the
+        authority on which sibling scopes actually resolve; the plugin only
+        refuses to ask when no opt-in exists at all.
+        """
+        if not requested_key:
+            return False
+        if self._include_all_permitted_agent_scopes:
+            return True
+        return any(
+            _agent_scope_pattern_matches(pattern, requested_key)
+            for pattern in self._include_agent_scope_patterns
+        )
+
+    def _readable_semantic_recall_scopes(self, active_scope: dict[str, str]) -> list[str]:
+        """Scope labels this tool accepts, so a rejection can name the alternatives."""
+        labels: list[str] = []
+
+        def _add(label: str) -> None:
+            if label and label not in labels:
+                labels.append(label)
+
+        try:
+            _add(_scope_label(active_scope))
+        except KeyError:
+            pass
+        for workspace_key in sorted(self._allowed_semantic_recall_workspace_keys(active_scope)):
+            _add(f"workspace/{workspace_key}")
+        if self._include_tenant_shared:
+            _add("tenant_shared")
+        if self._include_all_permitted_agent_scopes:
+            _add("every agent scope the tenant delegated-agent policy permits")
+        if self._include_all_permitted_workspace_scopes:
+            _add("every workspace scope the tenant delegated-read policy permits")
+        for pattern in self._include_agent_scope_patterns:
+            _add(f"agent scopes matching {pattern}")
+        return labels
 
     def _validate_semantic_recall_scope(
         self,
@@ -3089,20 +3243,48 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         if requested_type == active_type and requested_key == active_key:
             return
-        if requested_type == "tenant_shared" and self._include_tenant_shared:
-            return
-        if requested_type == "workspace":
-            allowed_workspace_keys = {
-                key
-                for key in (self._agent_workspace, active_key if active_type == "workspace" else None)
-                if key
-            }
-            if requested_key in allowed_workspace_keys:
+
+        # Name the scope that was actually refused. A single blanket message made
+        # callers misread a workspace refusal as a missing OAuth read scope.
+        if requested_type == "tenant_shared":
+            if self._include_tenant_shared:
                 return
+            reason = (
+                "tenant_shared semantic recall requires "
+                "PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true on this Hermes deployment"
+            )
+        elif requested_type == "workspace":
+            if requested_key in self._allowed_semantic_recall_workspace_keys(active_scope):
+                return
+            # Reach beyond the active workspace is opt-in on the client and
+            # policy-gated on the server, exactly like the sibling-agent path.
+            if self._include_all_permitted_workspace_scopes and requested_key:
+                return
+            reason = (
+                f"workspace/{requested_key} is not the active Hermes workspace "
+                f"({self._agent_workspace or 'unset'}); cross-workspace semantic recall "
+                "is not exposed through this tool until an operator sets "
+                "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES"
+            )
+        elif requested_type == "agent":
+            if self._delegated_semantic_agent_scope_allowed(requested_key or ""):
+                return
+            reason = (
+                f"agent/{requested_key} is not the active Hermes agent "
+                f"({self._agent_identity or 'unset'}); sibling-agent semantic recall "
+                "is not exposed through this tool until an operator sets "
+                "PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS or "
+                "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES"
+            )
+        else:
+            reason = (
+                f"{requested_type}/{requested_key} does not match the active Hermes scope "
+                f"({_scope_label(active_scope) if active_type else 'unset'})"
+            )
+        readable = ", ".join(self._readable_semantic_recall_scopes(active_scope)) or "none"
         raise ValueError(
-            "semantic recall scope must match the active Hermes scope; tenant_shared "
-            "requires PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true, and sibling-agent "
-            "semantic recall is not exposed through this tool"
+            f"{reason}. This tool is gated by the plugin's active Hermes scope, not by "
+            f"OAuth client scopes. Readable scopes for this session: {readable}"
         )
 
     def _format_semantic_recall_response(self, response: dict[str, Any]) -> str:
@@ -3169,7 +3351,25 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def _retrieve_text(self, query: str, session_id: str) -> str:
+        text, _ = self._retrieve_text_with_scopes(query, session_id)
+        return text
+
+    def _retrieve_text_with_scopes(
+        self, query: str, session_id: str
+    ) -> tuple[str, list[str]]:
+        """Route-aware keyword recall plus the scope labels that actually answered.
+
+        The caller needs the scope list to tell "nothing matched" apart from
+        "nothing readable was searched"; an empty string alone conflates them.
+        """
         started_at = perf_counter()
+        searched_labels: list[str] = []
+
+        def _record_searched(labels: list[str]) -> None:
+            for label in labels:
+                if label and label not in searched_labels:
+                    searched_labels.append(label)
+
         request_payload = {
             "query": _trim(query, 2000),
             "limit": self._retrieve_limit,
@@ -3194,9 +3394,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 agent_scope_key = self._agent_identity
 
         is_bound_hermes_client = self._is_bound_hermes_oauth_client()
-        delegated_recall_requested = bool(
-            self._include_tenant_shared or self._include_agent_scope_patterns
-        )
+        delegated_recall_requested = self._delegated_recall_requested()
         if not is_bound_hermes_client or delegated_recall_requested:
             try:
                 route_started_at = perf_counter()
@@ -3228,6 +3426,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "agent_scope_key": agent_scope_key,
                         "include_agent_scope_patterns": self._include_agent_scope_patterns,
                         "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
+                        "include_all_permitted_agent_scopes": (
+                            self._include_all_permitted_agent_scopes
+                        ),
+                        "include_all_permitted_workspace_scopes": (
+                            self._include_all_permitted_workspace_scopes
+                        ),
                         "workspace_scope_keys": workspace_scope_keys,
                         "include_tenant_shared": self._include_tenant_shared,
                         "tenant_shared_policy": "fallback_only"
@@ -3262,12 +3466,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     budget_truncated=trace.get("budget_truncated")
                     or trace.get("context_budget_truncated"),
                 )
+                _record_searched(searched_scope_labels)
                 text = self._format_agent_retrieve_response(
                     response,
                     discovered_scopes=discovered_scopes,
                 )
                 if text:
-                    return text
+                    return text, searched_labels
             except Exception as exc:
                 fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
                 _log_retrieval_diagnostic(
@@ -3305,6 +3510,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
                 continue
             scope_responses.append((scope, response))
+            _record_searched([_scope_label(scope)])
 
         if not scope_responses:
             _log_retrieval_diagnostic(
@@ -3318,7 +3524,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 failed_scope_count=len(failed_scopes),
                 failed_scopes=failed_scopes,
             )
-            return ""
+            return "", searched_labels
 
         merged_results = _merge_retrieval_results(_annotate_retrieval_results(scope_responses))
         _log_retrieval_diagnostic(
@@ -3336,7 +3542,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             result_count=len(merged_results),
         )
         if not merged_results:
-            return ""
+            return "", searched_labels
 
         traces = [
             response.get("trace")
@@ -3388,7 +3594,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if chunk:
                 lines.append(f"  Snippet: {chunk}")
 
-        return "\n".join(lines)
+        return "\n".join(lines), searched_labels
 
     def _build_entry_payload(
         self,

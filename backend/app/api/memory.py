@@ -1173,7 +1173,11 @@ async def retrieve_agent_memory_artifacts(
         agent_scope_keys=[body.agent_scope_key, *body.include_agent_scope_keys],
         workspace_scope_keys=body.workspace_scope_keys,
         tenant_shared=body.include_tenant_shared,
-        broad=body.include_broad_corpus or body.include_all_permitted_agent_scopes or bool(body.include_agent_scope_patterns) or body.session_scope_key is not None,
+        broad=body.include_broad_corpus
+        or body.include_all_permitted_agent_scopes
+        or body.include_all_permitted_workspace_scopes
+        or bool(body.include_agent_scope_patterns)
+        or body.session_scope_key is not None,
     )
     is_hermes_client = request_is_contained_agent_client(request)
     bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
@@ -1182,8 +1186,21 @@ async def retrieve_agent_memory_artifacts(
             raise HTTPException(status_code=403, detail="Hermes OAuth client has no canonical agent binding")
         if body.agent_scope_key != bound_agent_scope_key:
             raise HTTPException(status_code=403, detail="Hermes OAuth client must retrieve through its canonical agent scope")
-        if body.workspace_scope_keys or body.session_scope_key or body.include_broad_corpus:
+        # Session scopes and the broad corpus stay closed to bound clients under
+        # every configuration. Workspace reach is now grantable, but only to a
+        # client whose row carries the flag, so the DB remains the authority.
+        if body.session_scope_key or body.include_broad_corpus:
             raise HTTPException(status_code=403, detail="Hermes OAuth client may retrieve only same-tenant agent scopes")
+        workspace_reach_requested = bool(
+            body.workspace_scope_keys or body.include_all_permitted_workspace_scopes
+        )
+        if workspace_reach_requested and not bool(
+            getattr(request.state, "mcp_allow_workspace_scope_reads", False)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Hermes OAuth client is not permitted to read workspace scopes",
+            )
         if body.include_tenant_shared and not bool(
             getattr(request.state, "mcp_allow_tenant_shared_reads", False)
         ):
@@ -1198,6 +1215,7 @@ async def retrieve_agent_memory_artifacts(
         "include_agent_scope_patterns": body.include_agent_scope_patterns,
         "agent_scope_pattern_limit": body.agent_scope_pattern_limit,
         "include_all_permitted_agent_scopes": body.include_all_permitted_agent_scopes,
+        "include_all_permitted_workspace_scopes": body.include_all_permitted_workspace_scopes,
         "access_reason_present": body.access_reason is not None,
         "workspace_scope_keys": body.workspace_scope_keys,
         "session_scope_key": body.session_scope_key,
@@ -1221,6 +1239,7 @@ async def retrieve_agent_memory_artifacts(
         "include_agent_scope_pattern_count": len(body.include_agent_scope_patterns),
         "agent_scope_pattern_limit": body.agent_scope_pattern_limit,
         "include_all_permitted_agent_scopes": body.include_all_permitted_agent_scopes,
+        "include_all_permitted_workspace_scopes": body.include_all_permitted_workspace_scopes,
         "access_reason_present": body.access_reason is not None,
         "workspace_scope_count": len(body.workspace_scope_keys),
         "session_scope_present": body.session_scope_key is not None,
@@ -1239,20 +1258,29 @@ async def retrieve_agent_memory_artifacts(
                 or body.include_agent_scope_patterns
                 or body.include_all_permitted_agent_scopes
             )
-            if is_hermes_client and not cross_agent_requested:
-                delegated_policy = None
-            elif is_hermes_client and bool(
+            allow_all_agents = bool(
                 getattr(request.state, "mcp_allow_all_agent_scope_reads", False)
-            ):
+            )
+            allow_workspaces = bool(
+                getattr(request.state, "mcp_allow_workspace_scope_reads", False)
+            )
+            cross_scope_requested = bool(
+                cross_agent_requested or body.include_all_permitted_workspace_scopes
+            )
+            if is_hermes_client and not cross_scope_requested:
+                delegated_policy = None
+            elif is_hermes_client and (allow_all_agents or allow_workspaces):
                 delegated_policy = DelegatedAgentMemoryReadPolicy(
                     tenant_id=request.state.tenant_id,
                     subject_agent_scope_key=bound_agent_scope_key,
                     read_agent_scope_keys=(),
-                    allow_all_agent_scopes=True,
+                    allow_all_agent_scopes=allow_all_agents,
                     policy_id=f"oauth-client:{getattr(request.state, 'mcp_client_key', 'unknown')}",
                     policy_source="mcp_client_binding",
                     require_access_reason=True,
                     max_cross_agent_scopes=100,
+                    allow_all_workspace_scopes=allow_workspaces,
+                    max_cross_workspace_scopes=100,
                 )
             else:
                 delegated_policy = delegated_agent_memory_policy_from_config(
@@ -1260,7 +1288,7 @@ async def retrieve_agent_memory_artifacts(
                     agent_scope_key=body.agent_scope_key,
                     raw_policies=settings.palaceoftruth_delegated_agent_memory_read_policies,
                 )
-            if is_hermes_client and cross_agent_requested and delegated_policy is None:
+            if is_hermes_client and cross_scope_requested and delegated_policy is None:
                 raise HTTPException(status_code=403, detail="Hermes OAuth client is not permitted to read agent scopes")
         except ValueError as config_error:
             logger.error("invalid delegated agent memory policy config: %s", config_error)
@@ -1360,11 +1388,31 @@ async def semantic_recall_memory_artifacts(
         tenant_shared=body.scope_type == "tenant_shared",
         broad=False,
     )
-    return await semantic_recall_memory(
+    started = perf_counter()
+    response = await semantic_recall_memory(
         db,
         tenant_id=request.state.tenant_id,
         body=body,
     )
+    # Delegated semantic reads carry an access reason; log it so cross-scope
+    # semantic recall is auditable the way the route-aware path already is.
+    if body.access_reason:
+        _log_retrieval_diagnostics(
+            endpoint="/api/v1/memory/semantic-recall",
+            tenant_id=request.state.tenant_id,
+            query=body.query,
+            latency_ms=(perf_counter() - started) * 1000,
+            status="ok",
+            request_summary={
+                "scope_type": body.scope_type,
+                "scope_key": body.scope_key,
+                "access_reason": body.access_reason,
+                "delegated": True,
+            },
+            trace=response.trace,
+            results=response.items,
+        )
+    return response
 
 
 @router.post(

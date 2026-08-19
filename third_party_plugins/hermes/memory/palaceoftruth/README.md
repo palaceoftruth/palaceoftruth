@@ -80,12 +80,45 @@ write-back is explicitly delegated.
   fails closed for that turn instead of falling back to broader route-aware
   recall. Use the explicit `palace_semantic_recall` tool when an operator wants
   an older-server compatibility fallback.
+- Strict-scope refusals name the scope that was refused. `palace_semantic_recall`
+  reports a cross-workspace refusal as a workspace mismatch, a sibling-agent
+  refusal as an agent mismatch, and a `tenant_shared` refusal as the missing
+  `PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true` flag. Each refusal lists the scopes
+  the session can read and states that the gate is the plugin's active Hermes
+  scope, not the caller's OAuth client scopes. Widening a refusal is an operator
+  change to the Hermes scope configuration, not a client-side retry.
 - Delegated cross-agent recall remains opt-in. Set
   `PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS=agent/*` with
   `PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT` to ask Palace to discover matching
   agent scopes, select a bounded subset, and authorize those selected scopes
   server-side before searching them. Bound Hermes clients attach a stable
   non-secret access reason for Palace's delegated-read audit policy.
+- `PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES=true` is the broader opt-in:
+  it sets `include_all_permitted_agent_scopes` on the route-aware request and
+  lets the tenant's delegated-agent read policy decide which sibling scopes
+  resolve, instead of the plugin naming them. It is not self-service. The MCP
+  client row must also carry `mcp_allow_all_agent_scope_reads`, or Palace denies
+  the request with `no_delegated_agent_policy`. Tenant-shared reads likewise
+  need `mcp_allow_tenant_shared_reads` on the client row alongside
+  `PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true`.
+- `PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES=true` is the same
+  pattern one tier out: it sets `include_all_permitted_workspace_scopes` on the
+  route-aware request and lets the tenant's delegated read policy decide which
+  workspaces resolve. It is also not self-service. The MCP client row must carry
+  `mcp_allow_workspace_scope_reads`, or Palace denies the request with 403
+  before the search runs, and a policy that grants no workspace reach denies it
+  with `no_delegated_workspace_policy`.
+- `palace_semantic_recall` honours these opt-ins for sibling agent scopes and
+  for workspaces, and attaches the same access reason so delegated semantic
+  reads are audited. Without an opt-in it still refuses, and the refusal names
+  the flag that would grant reach.
+- The opt-ins are policy-gated on both the client and the server. A bound Hermes
+  client must still not send `session_scope_key` or `include_broad_corpus` at
+  all: `POST /api/v1/memory/retrieve-agent` rejects the whole request with 403
+  when it does. Workspace keys are the one widening: they are accepted only from
+  a client row that carries `mcp_allow_workspace_scope_reads`. For the same
+  reason the bound-client fallback to `POST /api/v1/memory/retrieve` stays on
+  the canonical agent scope, which that route also enforces.
 - Palace API calls use bounded retries for transient failures only: network
   errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
   validation failures, tenant mismatch, and privacy/admission rejections are not
@@ -153,6 +186,11 @@ No-memory answer guardrail:
 - The plugin's `system_prompt_block()` carries this rule for runtime consumers,
   and `backend/tests/test_hermes_memory_plugin.py` locks the prompt text so a
   future plugin edit does not silently remove it.
+- `palace_search` also enforces the rule in its own result. It returns a
+  `searched_scopes` list, and when nothing matched it names the scopes it
+  actually searched instead of returning a bare "no memory matched". When no
+  scope answered at all, the result says Palace search was unavailable, so a
+  failed search cannot be read as an empty memory.
 - This repo owns the canonical plugin contract and package. It cannot guarantee
   behavior for Hermes runtimes that do not consume this plugin version or that
   override the plugin prompt after load; deployment consumers must sync or pin

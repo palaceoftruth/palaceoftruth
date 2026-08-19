@@ -129,6 +129,7 @@ class McpOAuthClientRegisterRequest(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
     # A caller may ask for containment. The server can raise the requested mode
     # but never lowers it, so a reserved client key stays contained.
     containment_mode: Literal["standard", "hermes_agent"] = "standard"
@@ -145,7 +146,11 @@ class McpOAuthClientRegisterRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_agent_scope_read_binding(self) -> "McpOAuthClientRegisterRequest":
-        if (self.allow_all_agent_scope_reads or self.allow_tenant_shared_reads) and not self.agent_scope_key:
+        if (
+            self.allow_all_agent_scope_reads
+            or self.allow_tenant_shared_reads
+            or self.allow_workspace_scope_reads
+        ) and not self.agent_scope_key:
             raise ValueError("agent read permissions require agent_scope_key")
         if self.client_type == "service" and (self.redirect_uris or self.authorization_code_enabled):
             raise ValueError("service clients cannot register redirect URIs or authorization-code capability")
@@ -176,6 +181,7 @@ class McpOAuthClientAgentScopeBindingRequest(BaseModel):
     agent_scope_key: str
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
 
     @field_validator("agent_scope_key")
     @classmethod
@@ -193,6 +199,7 @@ class McpOAuthClientSummary(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
     containment_mode: Literal["standard", "hermes_agent"] = "standard"
     client_type: Literal["service", "confidential_web", "public"] = "service"
     client_id: str | None = None
@@ -363,6 +370,22 @@ class McpOAuthProtectedResourceMetadata(BaseModel):
     scope_catalog: list[McpOAuthScopeDefinition] = Field(default_factory=list)
 
 
+def _strip_redundant_scope_type_prefix(scope_type: str, key: str) -> str:
+    """Drop a leading ``<scope_type>/`` that a caller repeated inside the key.
+
+    Callers that build a scope from a label like ``workspace/quietfirm`` have
+    passed the whole label as the key, which silently creates a second bucket
+    (``workspace/workspace/quietfirm``) that no pattern or scope search finds.
+    Only the scope's own type is stripped: a key such as ``org/repo`` is a
+    legitimate value and must survive untouched.
+    """
+    prefix = f"{scope_type}/"
+    stripped = key
+    while stripped.casefold().startswith(prefix.casefold()):
+        stripped = stripped[len(prefix) :]
+    return stripped or key
+
+
 class MemoryScope(BaseModel):
     type: MemoryScopeType = "tenant_shared"
     key: str | None = None
@@ -383,6 +406,21 @@ class MemoryScope(BaseModel):
         if self.key is None:
             raise ValueError(f"{self.type} scope requires a key")
         return self
+
+
+def _normalize_write_scope(scope: MemoryScope) -> MemoryScope:
+    """Normalize a scope that is about to create a bucket.
+
+    Only writes normalize. Reads keep the caller's key verbatim, because rows
+    already written under a doubled prefix stay addressable only by the key
+    they were stored with; rewriting reads too would orphan them.
+    """
+    if scope.key is None or scope.type == "tenant_shared":
+        return scope
+    normalized = _strip_redundant_scope_type_prefix(scope.type, scope.key)
+    if normalized == scope.key:
+        return scope
+    return MemoryScope(type=scope.type, key=normalized)
 
 
 class MemoryScopeProfile(BaseModel):
@@ -416,6 +454,11 @@ class MemoryScopeProfileUpsertRequest(BaseModel):
         if value is None:
             return None
         return _validate_not_blank(value, "updated_by")
+
+    @model_validator(mode="after")
+    def normalize_scope_key(self) -> "MemoryScopeProfileUpsertRequest":
+        self.scope = _normalize_write_scope(self.scope)
+        return self
 
 
 class MemoryEntryRequest(BaseModel):
@@ -463,6 +506,11 @@ class MemoryEntryRequest(BaseModel):
     def validate_temporal_window(self) -> "MemoryEntryRequest":
         if self.valid_from is not None and self.valid_until is not None and self.valid_until < self.valid_from:
             raise ValueError("valid_until must be greater than or equal to valid_from")
+        return self
+
+    @model_validator(mode="after")
+    def normalize_scope_key(self) -> "MemoryEntryRequest":
+        self.scope = _normalize_write_scope(self.scope)
         return self
 
 
@@ -741,6 +789,7 @@ class SemanticRecallRequest(BaseModel):
     scope_type: MemoryScopeType = "tenant_shared"
     scope_key: str | None = None
     query: str
+    access_reason: str | None = None
     top_k: int = Field(8, ge=1, le=50)
     candidate_limit: int | None = Field(None, ge=1, le=200)
     score_threshold: float | None = Field(None, ge=0, le=1)
@@ -840,6 +889,7 @@ class AgentMemoryRetrieveRequest(BaseModel):
     include_agent_scope_patterns: list[str] = Field(default_factory=list)
     agent_scope_pattern_limit: int = Field(5, ge=1, le=50)
     include_all_permitted_agent_scopes: bool = False
+    include_all_permitted_workspace_scopes: bool = False
     access_reason: str | None = None
     workspace_scope_keys: list[str] = Field(default_factory=list)
     session_scope_key: str | None = None
@@ -925,6 +975,10 @@ class AgentMemoryRetrieveTrace(BaseModel):
     delegated_agent_policy_source: str | None = None
     delegated_agent_decision: DelegatedAgentMemoryDecision = "not_requested"
     delegated_agent_deny_reasons: list[str] = Field(default_factory=list)
+    authorized_workspace_scope_keys: list[str] = Field(default_factory=list)
+    denied_workspace_scope_keys: list[str] = Field(default_factory=list)
+    delegated_workspace_decision: DelegatedAgentMemoryDecision = "not_requested"
+    delegated_workspace_deny_reasons: list[str] = Field(default_factory=list)
     access_reason_required: bool = False
     access_reason_present: bool = False
     result_counts_by_scope: dict[str, int] = Field(default_factory=dict)
@@ -977,6 +1031,7 @@ class MemoryTrajectoryRequest(BaseModel):
     agent_scope_key: str | None = None
     include_agent_scope_keys: list[str] = Field(default_factory=list)
     include_all_permitted_agent_scopes: bool = False
+    include_all_permitted_workspace_scopes: bool = False
     access_reason: str | None = None
     workspace_scope_keys: list[str] = Field(default_factory=list)
     session_scope_key: str | None = None

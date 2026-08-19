@@ -643,6 +643,7 @@ def _hermes_retrieve_agent_client(
     *,
     allow_all_agent_scope_reads: bool = False,
     allow_tenant_shared_reads: bool = False,
+    allow_workspace_scope_reads: bool = False,
 ) -> TestClient:
     client = _build_app(
         FakeSession(),
@@ -660,6 +661,7 @@ def _hermes_retrieve_agent_client(
         request.state.mcp_agent_scope_key = "mara"
         request.state.mcp_allow_all_agent_scope_reads = allow_all_agent_scope_reads
         request.state.mcp_allow_tenant_shared_reads = allow_tenant_shared_reads
+        request.state.mcp_allow_workspace_scope_reads = allow_workspace_scope_reads
         request.state.mcp_allowed_scopes = ["read"]
         return "token"
 
@@ -772,7 +774,6 @@ def test_hermes_oauth_retrieve_agent_cross_agent_access_uses_delegated_policy(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("workspace_scope_keys", ["marketing"]),
         ("session_scope_key", "session-a"),
         ("include_broad_corpus", True),
     ],
@@ -802,6 +803,89 @@ def test_hermes_oauth_retrieve_agent_still_denies_non_agent_broad_scopes(
 
     assert response.status_code == 403
     assert "same-tenant agent scopes" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace_scope_keys", ["quietfirm"]),
+        ("include_all_permitted_workspace_scopes", True),
+    ],
+)
+def test_hermes_oauth_retrieve_agent_denies_workspace_reach_without_the_flag(
+    monkeypatch,
+    field,
+    value,
+) -> None:
+    """Workspace reach is grantable, but the client row is still the authority."""
+    client = _hermes_retrieve_agent_client(
+        allow_all_agent_scope_reads=True,
+        allow_tenant_shared_reads=True,
+    )
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("forbidden Hermes scope must not reach search")
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", reject_if_retrieved)
+    response = client.post(
+        "/api/v1/memory/retrieve-agent",
+        json={
+            "query": "quietfirm",
+            "agent_scope_key": "mara",
+            "access_reason": "cross-workspace recall",
+            "include_tenant_shared": False,
+            "include_broad_corpus": False,
+            field: value,
+        },
+    )
+
+    assert response.status_code == 403
+    assert "workspace scopes" in response.json()["detail"]
+
+
+def test_hermes_oauth_retrieve_agent_allows_workspace_reach_with_the_flag(
+    monkeypatch,
+) -> None:
+    client = _hermes_retrieve_agent_client(allow_workspace_scope_reads=True)
+    seen: dict[str, object] = {}
+
+    async def fake_retrieve_agent_memory(
+        db, *, embedder, tenant_id: str, body, delegated_policy=None
+    ):
+        seen["policy"] = delegated_policy
+        seen["include_all"] = body.include_all_permitted_workspace_scopes
+        return AgentMemoryRetrieveResponse(
+            scopes=[{"type": "agent", "key": "mara"}],
+            trace=AgentMemoryRetrieveTrace(
+                searched_scopes=[{"type": "agent", "key": "mara"}],
+                caller_agent_scope_key="mara",
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_agent_memory", fake_retrieve_agent_memory)
+    response = client.post(
+        "/api/v1/memory/retrieve-agent",
+        json={
+            "query": "quietfirm",
+            "agent_scope_key": "mara",
+            "access_reason": "cross-workspace recall",
+            "include_all_permitted_workspace_scopes": True,
+            "include_tenant_shared": False,
+            "include_broad_corpus": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["include_all"] is True
+    # The client row synthesises the policy, so the DB flag is what widens reach.
+    policy = seen["policy"]
+    assert policy is not None
+    assert policy.allow_all_workspace_scopes is True
+    assert policy.allow_all_agent_scopes is False
+    assert policy.subject_agent_scope_key == "mara"
+    assert policy.require_access_reason is True
 
 
 def test_memory_whoami_returns_authenticated_tenant() -> None:
@@ -1620,6 +1704,81 @@ def test_semantic_recall_rest_uses_authenticated_tenant_and_read_scope(monkeypat
     assert payload["items"][0]["fact_kind"] == "world"
     assert payload["items"][0]["temporal_status"] == "current"
     assert payload["trace"]["fact_kind_filter"] == ["world", "observation"]
+
+
+def test_semantic_recall_logs_delegated_access_reason(monkeypatch, caplog) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_semantic_recall(db, *, tenant_id: str, body):
+        assert body.access_reason == "Hermes agent clara recall of shared scopes."
+        return SemanticRecallResponse(
+            scope={"type": "agent", "key": "karen"},
+            items=[],
+            total=0,
+            total_considered=0,
+            trace={
+                "searched_scope": {"type": "agent", "key": "karen"},
+                "total_considered": 0,
+                "candidate_limit": 50,
+                "display_limit": 8,
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.semantic_recall_memory", fake_semantic_recall)
+
+    with caplog.at_level(logging.INFO, logger="app.api.memory"):
+        response = client.post(
+            "/api/v1/memory/semantic-recall",
+            json={
+                "scope_type": "agent",
+                "scope_key": "karen",
+                "query": "sibling recall",
+                "access_reason": "Hermes agent clara recall of shared scopes.",
+            },
+        )
+
+    assert response.status_code == 200
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if "memory retrieval diagnostics" in record.getMessage()
+    ]
+    assert any("/api/v1/memory/semantic-recall" in message for message in diagnostics)
+    assert any("Hermes agent clara recall of shared scopes." in message for message in diagnostics)
+    # The raw query must never reach the diagnostics log.
+    assert not any("sibling recall" in message for message in diagnostics)
+
+
+def test_semantic_recall_without_access_reason_is_not_audited(monkeypatch, caplog) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_semantic_recall(db, *, tenant_id: str, body):
+        assert body.access_reason is None
+        return SemanticRecallResponse(
+            scope={"type": "agent", "key": "clara"},
+            items=[],
+            total=0,
+            total_considered=0,
+            trace={
+                "searched_scope": {"type": "agent", "key": "clara"},
+                "total_considered": 0,
+                "candidate_limit": 50,
+                "display_limit": 8,
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.semantic_recall_memory", fake_semantic_recall)
+
+    with caplog.at_level(logging.INFO, logger="app.api.memory"):
+        response = client.post(
+            "/api/v1/memory/semantic-recall",
+            json={"scope_type": "agent", "scope_key": "clara", "query": "self recall"},
+        )
+
+    assert response.status_code == 200
+    assert not [
+        record for record in caplog.records if "memory retrieval diagnostics" in record.getMessage()
+    ]
 
 
 def test_semantic_recall_rest_requires_read_scope() -> None:
@@ -4532,3 +4691,219 @@ def test_memory_entries_overwrite_client_supplied_created_by_role(monkeypatch) -
 
     assert response.status_code == 202
     assert seen == ["agent"]
+
+
+def _write_scope(scope_type: str, key: str) -> str | None:
+    from datetime import datetime, timezone
+
+    from app.schemas.memory import MemoryEntryRequest
+
+    return MemoryEntryRequest(
+        tenant_id="tenant-a",
+        title="t",
+        body="b",
+        source="test",
+        created_at=datetime.now(timezone.utc),
+        scope={"type": scope_type, "key": key},
+    ).scope.key
+
+
+def test_write_scope_key_strips_repeated_type_prefix() -> None:
+    """A caller that passes the whole label as the key must not fork the scope."""
+    assert _write_scope("workspace", "workspace/quietfirm") == "quietfirm"
+    assert _write_scope("workspace", "workspace/workspace/quietfirm") == "quietfirm"
+    assert _write_scope("agent", "agent/vera") == "vera"
+    assert _write_scope("session", "session/abc") == "abc"
+
+
+def test_write_scope_key_preserves_legitimate_slashes_and_dashes() -> None:
+    """Only the scope's own type prefix is stripped; real keys survive intact."""
+    # A slash that is not the scope's own type is part of the key.
+    assert _write_scope("workspace", "org/repo") == "org/repo"
+    # A dash is a different naming mistake and cannot be safely guessed away.
+    assert _write_scope("agent", "agent-vera") == "agent-vera"
+    # A key that is nothing but the prefix keeps its original value rather than
+    # collapsing to an empty string that the shape validator would then reject.
+    assert _write_scope("workspace", "workspace/") == "workspace/"
+
+
+def test_read_scope_key_is_never_rewritten() -> None:
+    """Rows already stored under a doubled prefix must stay addressable.
+
+    The guard is write-only on purpose. Normalizing reads too would orphan the
+    entries that the un-guarded write path already created, which is worse than
+    leaving the duplicate bucket in place.
+    """
+    from app.schemas.memory import MemoryRetrieveRequest, MemoryScope
+
+    assert MemoryScope(type="workspace", key="workspace/quietfirm").key == "workspace/quietfirm"
+    body = MemoryRetrieveRequest(
+        query="quietfirm",
+        scope=MemoryScope(type="workspace", key="workspace/workspace/quietfirm"),
+    )
+    assert body.scope.key == "workspace/workspace/quietfirm"
+
+
+def test_scope_profile_upsert_normalizes_its_scope_key() -> None:
+    from app.schemas.memory import MemoryScope, MemoryScopeProfileUpsertRequest
+
+    body = MemoryScopeProfileUpsertRequest(
+        scope=MemoryScope(type="workspace", key="workspace/quietfirm"),
+    )
+    assert body.scope.key == "quietfirm"
+
+
+def test_delegated_agent_wildcard_resolves_discovered_scopes() -> None:
+    """allow_all_agent_scopes names no keys, so discovery must supply them.
+
+    Without this the opt-in reached the server and authorized nothing, which
+    looked identical to "the tenant holds no sibling memory".
+    """
+    from app.schemas.memory import AgentMemoryRetrieveRequest
+    from app.services.memory import (
+        AgentScopePatternResolution,
+        DelegatedAgentMemoryReadPolicy,
+        _evaluate_delegated_agent_memory_policy,
+    )
+
+    resolution = AgentScopePatternResolution(discovered_keys=("clara", "vera", "codex"))
+    policy = DelegatedAgentMemoryReadPolicy(
+        tenant_id="tenant-1",
+        subject_agent_scope_key="clara",
+        read_agent_scope_keys=(),
+        allow_all_agent_scopes=True,
+        policy_source="mcp_client_binding",
+        max_cross_agent_scopes=100,
+    )
+    body = AgentMemoryRetrieveRequest(
+        query="quietfirm",
+        agent_scope_key="clara",
+        include_all_permitted_agent_scopes=True,
+        access_reason="delegated read for clara",
+    )
+    decision = _evaluate_delegated_agent_memory_policy(
+        tenant_id="tenant-1", body=body, policy=policy, pattern_resolution=resolution
+    )
+    assert decision.decision == "allowed"
+    # The caller's own scope is searched by the normal path, not the reach path.
+    assert decision.authorized_agent_scope_keys == ("vera", "codex")
+
+
+def test_delegated_workspace_policy_authorizes_discovered_workspaces() -> None:
+    from app.schemas.memory import AgentMemoryRetrieveRequest
+    from app.services.memory import (
+        AgentScopePatternResolution,
+        DelegatedAgentMemoryReadPolicy,
+        _evaluate_delegated_workspace_memory_policy,
+    )
+
+    resolution = AgentScopePatternResolution(
+        discovered_workspace_keys=("quietfirm", "nebulaios")
+    )
+    policy = DelegatedAgentMemoryReadPolicy(
+        tenant_id="tenant-1",
+        subject_agent_scope_key="clara",
+        read_agent_scope_keys=(),
+        allow_all_workspace_scopes=True,
+        max_cross_workspace_scopes=100,
+    )
+    body = AgentMemoryRetrieveRequest(
+        query="quietfirm",
+        agent_scope_key="clara",
+        include_all_permitted_workspace_scopes=True,
+        access_reason="delegated read for clara",
+    )
+    decision = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-1", body=body, policy=policy, pattern_resolution=resolution
+    )
+    assert decision.decision == "allowed"
+    assert decision.authorized_workspace_scope_keys == ("quietfirm", "nebulaios")
+
+
+def test_delegated_workspace_policy_fails_closed() -> None:
+    """Every missing precondition denies rather than silently widening reach."""
+    from app.schemas.memory import AgentMemoryRetrieveRequest
+    from app.services.memory import (
+        AgentScopePatternResolution,
+        DelegatedAgentMemoryReadPolicy,
+        _evaluate_delegated_workspace_memory_policy,
+    )
+
+    resolution = AgentScopePatternResolution(discovered_workspace_keys=("quietfirm",))
+    policy = DelegatedAgentMemoryReadPolicy(
+        tenant_id="tenant-1",
+        subject_agent_scope_key="clara",
+        read_agent_scope_keys=(),
+        allow_all_workspace_scopes=True,
+        max_cross_workspace_scopes=100,
+    )
+    reach = dict(query="q", agent_scope_key="clara", include_all_permitted_workspace_scopes=True)
+
+    # No policy at all.
+    denied = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-1",
+        body=AgentMemoryRetrieveRequest(**reach, access_reason="r"),
+        policy=None,
+        pattern_resolution=resolution,
+    )
+    assert denied.deny_reasons == ("no_delegated_workspace_policy",)
+
+    # Policy requires an access reason and none was sent.
+    no_reason = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-1",
+        body=AgentMemoryRetrieveRequest(**reach),
+        policy=policy,
+        pattern_resolution=resolution,
+    )
+    assert no_reason.deny_reasons == ("workspace_access_reason_required",)
+
+    # Policy belongs to another tenant.
+    other_tenant = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-2",
+        body=AgentMemoryRetrieveRequest(**reach, access_reason="r"),
+        policy=policy,
+        pattern_resolution=resolution,
+    )
+    assert other_tenant.deny_reasons == ("workspace_policy_tenant_mismatch",)
+
+    # Opt-in absent entirely.
+    not_requested = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-1",
+        body=AgentMemoryRetrieveRequest(query="q", agent_scope_key="clara"),
+        policy=policy,
+        pattern_resolution=resolution,
+    )
+    assert not_requested.decision == "not_requested"
+
+
+def test_delegated_workspace_policy_respects_allowlist_and_limit() -> None:
+    from app.schemas.memory import AgentMemoryRetrieveRequest
+    from app.services.memory import (
+        AgentScopePatternResolution,
+        DelegatedAgentMemoryReadPolicy,
+        _evaluate_delegated_workspace_memory_policy,
+    )
+
+    resolution = AgentScopePatternResolution(
+        discovered_workspace_keys=("quietfirm", "nebulaios", "ncjh-main")
+    )
+    allowlisted = DelegatedAgentMemoryReadPolicy(
+        tenant_id="tenant-1",
+        read_agent_scope_keys=(),
+        read_workspace_scope_keys=("quietfirm", "nebulaios"),
+        allow_all_workspace_scopes=False,
+        max_cross_workspace_scopes=1,
+    )
+    body = AgentMemoryRetrieveRequest(
+        query="q",
+        agent_scope_key="clara",
+        include_all_permitted_workspace_scopes=True,
+        access_reason="r",
+    )
+    decision = _evaluate_delegated_workspace_memory_policy(
+        tenant_id="tenant-1", body=body, policy=allowlisted, pattern_resolution=resolution
+    )
+    # Only allowlisted keys are candidates, and the limit truncates the rest.
+    assert decision.authorized_workspace_scope_keys == ("quietfirm",)
+    assert decision.denied_workspace_scope_keys == ("nebulaios",)
+    assert "max_cross_workspace_scopes_exceeded" in decision.deny_reasons

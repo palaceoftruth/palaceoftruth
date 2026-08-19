@@ -19,7 +19,8 @@ class PublicClientDriftError(ValueError):
 
 _CLIENT_COLUMNS = """
 id, tenant_id, client_key, display_name, allowed_scopes, metadata,
-agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
+agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+allow_workspace_scope_reads, containment_mode,
 client_type, redirect_uris, allowed_resources, authorization_code_enabled, oauth_client_id,
 token_endpoint_auth_method, oauth_client_secret_hash, oauth_revoked_at,
 oauth_token_ttl_seconds, created_at, last_seen_at
@@ -39,6 +40,7 @@ def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, .
         "agent_scope_key": body.agent_scope_key,
         "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
         "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
+        "allow_workspace_scope_reads": body.allow_workspace_scope_reads,
         "containment_mode": derive_containment_mode(
             client_key=body.client_key, requested_mode=body.containment_mode
         ),
@@ -58,6 +60,7 @@ def _drift_fields(row: Any, body: McpOAuthClientRegisterRequest) -> tuple[str, .
         "agent_scope_key": row.get("agent_scope_key"),
         "allow_all_agent_scope_reads": bool(row.get("allow_all_agent_scope_reads")),
         "allow_tenant_shared_reads": bool(row.get("allow_tenant_shared_reads")),
+        "allow_workspace_scope_reads": bool(row.get("allow_workspace_scope_reads")),
         "containment_mode": row.get("containment_mode") or "standard",
         "client_type": row.get("client_type") or "service",
         "redirect_uris": sorted(_json_value(row.get("redirect_uris"), [])),
@@ -96,14 +99,15 @@ async def ensure_public_mcp_client(
                 f"""
                 INSERT INTO mcp_clients
                     (tenant_id, client_key, display_name, allowed_scopes, metadata, agent_scope_key,
-                     allow_all_agent_scope_reads, allow_tenant_shared_reads, containment_mode,
+                     allow_all_agent_scope_reads, allow_tenant_shared_reads,
+                     allow_workspace_scope_reads, containment_mode,
                      client_type, redirect_uris, allowed_resources, authorization_code_enabled,
                      oauth_client_id, token_endpoint_auth_method, oauth_client_secret_hash,
                      oauth_revoked_at, oauth_token_ttl_seconds)
                 VALUES
                     (:tenant_id, :client_key, :display_name, CAST(:allowed_scopes AS jsonb),
                      CAST(:metadata AS jsonb), :agent_scope_key, :allow_all_agent_scope_reads,
-                     :allow_tenant_shared_reads, :containment_mode, 'public',
+                     :allow_tenant_shared_reads, :allow_workspace_scope_reads, :containment_mode, 'public',
                      CAST(:redirect_uris AS jsonb), CAST(:allowed_resources AS jsonb), TRUE,
                      :oauth_client_id, 'none', NULL, NULL, :token_ttl_seconds)
                 ON CONFLICT (tenant_id, client_key) DO NOTHING
@@ -118,6 +122,7 @@ async def ensure_public_mcp_client(
                 "agent_scope_key": body.agent_scope_key,
                 "allow_all_agent_scope_reads": body.allow_all_agent_scope_reads,
                 "allow_tenant_shared_reads": body.allow_tenant_shared_reads,
+                "allow_workspace_scope_reads": body.allow_workspace_scope_reads,
                 "containment_mode": derive_containment_mode(
                     client_key=body.client_key, requested_mode=body.containment_mode
                 ),

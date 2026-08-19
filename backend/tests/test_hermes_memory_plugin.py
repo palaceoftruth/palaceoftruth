@@ -360,6 +360,8 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
                 "agent_scope_key": "sterling",
                 "include_agent_scope_patterns": [],
                 "agent_scope_pattern_limit": 5,
+                "include_all_permitted_agent_scopes": False,
+                "include_all_permitted_workspace_scopes": False,
                 "workspace_scope_keys": ["sterling"],
                 "include_tenant_shared": False,
                 "tenant_shared_policy": "never",
@@ -1448,6 +1450,349 @@ def test_palaceoftruth_semantic_recall_rejects_sibling_agent_scope(monkeypatch) 
     assert "sibling-agent semantic recall is not exposed" in result["error"]["message"]
 
 
+def test_palaceoftruth_semantic_recall_rejects_foreign_workspace_by_name(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    def fake_request_json(*_args, **_kwargs) -> dict:
+        raise AssertionError("cross-workspace semantic recall must fail before HTTP")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {
+                "query": "quietfirm history",
+                "scope_type": "workspace",
+                "scope_key": "quietfirm",
+            },
+        )
+    )
+
+    message = result["error"]["message"]
+    assert result["ok"] is False
+    assert "workspace/quietfirm is not the active Hermes workspace (hermes)" in message
+    assert "cross-workspace semantic recall is not exposed" in message
+    # The refusal must not be blamed on sibling agents or on OAuth client scopes.
+    assert "sibling-agent" not in message
+    assert "not by OAuth client scopes" in message
+    assert "Readable scopes for this session: agent/clara, workspace/hermes" in message
+
+
+def test_palaceoftruth_semantic_recall_tenant_shared_rejection_names_the_flag(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "false")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {"query": "shared context", "scope_type": "tenant_shared"},
+        )
+    )
+
+    message = result["error"]["message"]
+    assert result["ok"] is False
+    assert "PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true" in message
+    assert "sibling-agent" not in message
+
+
+def test_palaceoftruth_search_empty_result_names_the_searched_scopes(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        if method == "POST" and path == "/api/v1/memory/retrieve-agent":
+            return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
+        if method == "POST" and path == "/api/v1/memory/retrieve":
+            return {"trace": {"fallback_used": False}, "results": [], "total": 0}
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(provider.handle_tool_call("palace_search", {"query": "QuietFirm"}))
+
+    assert result["ok"] is True
+    assert result["searched_scopes"] == ["agent/clara"]
+    assert "agent/clara" in result["result"]
+    assert "Other scopes were not searched." in result["result"]
+
+
+def test_palaceoftruth_search_reports_unavailable_when_no_scope_answers(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        raise RuntimeError("Palace of Truth request failed")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(provider.handle_tool_call("palace_search", {"query": "QuietFirm"}))
+
+    assert result["ok"] is True
+    assert result["searched_scopes"] == []
+    assert "search was unavailable" in result["result"]
+    assert "Do not report this as an empty memory." in result["result"]
+
+
+def test_palaceoftruth_background_prefetch_survives_failure(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="clara")
+    provider._prefetch_cache = {
+        "query": "old query",
+        "session_id": "session-1",
+        "workspace": "",
+        "text": "stale recall from a previous turn",
+    }
+
+    def failing_prefetch_text(*_args, **_kwargs) -> str:
+        raise module.PalaceCircuitOpenError(12)
+
+    provider._prefetch_text = failing_prefetch_text  # type: ignore[attr-defined]
+
+    provider.queue_prefetch("new query", session_id="session-1")
+    thread = provider._prefetch_thread
+    assert thread is not None
+    thread.join(timeout=5)
+
+    assert thread.is_alive() is False
+    # A failed background prefetch must clear the cache, not replay stale text.
+    assert provider._prefetch_cache["query"] == "new query"
+    assert provider._prefetch_cache["text"] == ""
+
+
+def test_palaceoftruth_all_permitted_agent_scopes_reaches_route_aware_recall(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {
+            "trace": {"searched_scopes": [{"type": "agent", "key": "karen"}]},
+            "results": [
+                {
+                    "item_id": "karen-note",
+                    "title": "Karen memory",
+                    "source_type": "note",
+                    "chunk_text": "Sibling agent recall.",
+                    "score": 0.9,
+                }
+            ],
+            "total": 1,
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    text = provider.prefetch("sibling recall", session_id="session-1")
+
+    # The opt-in must reach the server switch the tenant policy gates on, and
+    # carry the audit reason that policy requires.
+    assert seen_payload["include_all_permitted_agent_scopes"] is True
+    assert seen_payload["agent_scope_key"] == "clara"
+    assert "clara" in seen_payload["access_reason"]
+    # A bound Hermes client still may not ask for workspace or broad corpus:
+    # the server 403s the whole request when it does.
+    assert seen_payload["workspace_scope_keys"] == []
+    assert seen_payload["include_broad_corpus"] is False
+    assert "Karen memory" in text
+
+
+def test_palaceoftruth_semantic_recall_allows_opted_in_sibling_agent(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "agent/*")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        assert path == "/api/v1/memory/semantic-recall"
+        seen_payload.update(payload or {})
+        return {
+            "items": [{"title": "Karen semantic memory", "body": "Sibling recall."}],
+            "trace": {"searched_scope": {"type": "agent", "key": "karen"}},
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {"query": "sibling", "scope_type": "agent", "scope_key": "karen"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert seen_payload["scope_type"] == "agent"
+    assert seen_payload["scope_key"] == "karen"
+    # Delegated semantic reads must be auditable, like the keyword path.
+    assert "clara" in seen_payload["access_reason"]
+    assert "Karen semantic memory" in result["result"]
+
+
+def test_palaceoftruth_semantic_recall_honours_pattern_boundaries(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "kar*")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="clara")
+
+    def fake_request_json(*_args, **_kwargs) -> dict:
+        raise AssertionError("an unmatched sibling scope must fail before HTTP")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {"query": "sibling", "scope_type": "agent", "scope_key": "mara"},
+        )
+    )
+
+    message = result["error"]["message"]
+    assert result["ok"] is False
+    assert "sibling-agent semantic recall is not exposed" in message
+    assert "agent scopes matching kar*" in message
+
+
+def test_palaceoftruth_semantic_recall_opt_in_does_not_open_workspaces(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    def fake_request_json(*_args, **_kwargs) -> dict:
+        raise AssertionError("cross-workspace recall must fail before HTTP")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_semantic_recall",
+            {"query": "quietfirm", "scope_type": "workspace", "scope_key": "quietfirm"},
+        )
+    )
+
+    # The cross-agent opt-in is agent-scoped on both client and server. It must
+    # not silently widen into other workspaces.
+    assert result["ok"] is False
+    assert "cross-workspace semantic recall is not exposed" in result["error"]["message"]
+
+
 def test_palaceoftruth_search_tool_exposes_generic_title_match_evidence(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
@@ -1519,7 +1864,7 @@ def test_palaceoftruth_search_tool_reports_degraded_search(monkeypatch) -> None:
     provider = module.PalaceOfTruthMemoryProvider()
     provider.initialize("session-1", hermes_home="/tmp/hermes-home")
 
-    provider._retrieve_text = lambda *_args: (_ for _ in ()).throw(
+    provider._retrieve_text_with_scopes = lambda *_args: (_ for _ in ()).throw(
         module.PalaceCircuitOpenError(12)
     )  # type: ignore[method-assign]
 
@@ -3481,3 +3826,130 @@ def test_palaceoftruth_provider_skips_write_when_whoami_fails(
 
     assert requests_seen == [("GET", "/api/v1/memory/whoami", None)]
     assert "Palace of Truth tenant resolution failed; skipping write" in caplog.text
+
+
+def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {
+            "trace": {"searched_scopes": [{"type": "workspace", "key": "quietfirm"}]},
+            "results": [
+                {
+                    "item_id": "quietfirm-note",
+                    "title": "QuietFirm memory",
+                    "source_type": "note",
+                    "chunk_text": "Workspace recall.",
+                    "score": 0.9,
+                }
+            ],
+            "total": 1,
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    text = provider.prefetch("quietfirm history", session_id="session-1")
+
+    # The opt-in reaches the server switch the tenant policy gates on and carries
+    # the audit reason that policy requires.
+    assert seen_payload["include_all_permitted_workspace_scopes"] is True
+    assert "clara" in seen_payload["access_reason"]
+    # The client still names no workspace itself, and never asks for the broad
+    # corpus: the server resolves which workspaces the policy permits.
+    assert seen_payload["workspace_scope_keys"] == []
+    assert seen_payload["include_broad_corpus"] is False
+    assert "QuietFirm memory" in text
+
+
+def test_palaceoftruth_workspace_reach_is_off_by_default(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+    assert provider._include_all_permitted_workspace_scopes is False
+
+
+def test_palaceoftruth_semantic_recall_allows_opted_in_workspace(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    provider._validate_semantic_recall_scope(
+        {"type": "workspace", "key": "quietfirm"},
+        {"type": "agent", "key": "clara"},
+    )
+
+
+def test_palaceoftruth_semantic_recall_workspace_refusal_names_the_flag(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.delenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", raising=False)
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        provider._validate_semantic_recall_scope(
+            {"type": "workspace", "key": "quietfirm"},
+            {"type": "agent", "key": "clara"},
+        )
+    message = str(excinfo.value)
+    # The refusal must name the workspace and the flag, not a sibling-agent cause.
+    assert "workspace/quietfirm" in message
+    assert "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES" in message
+    assert "sibling-agent" not in message

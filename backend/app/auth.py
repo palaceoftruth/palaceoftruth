@@ -43,6 +43,7 @@ class AuthContext:
     containment_mode: str = CONTAINMENT_STANDARD
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
     delegated_agent_scope_keys: tuple[str, ...] = ()
     delegated_workspace_scope_keys: tuple[str, ...] = ()
     delegated_grant_id: Any | None = None
@@ -343,6 +344,7 @@ def _context_from_scopes(
     containment_mode: object | None = None,
     allow_all_agent_scope_reads: bool = False,
     allow_tenant_shared_reads: bool = False,
+    allow_workspace_scope_reads: bool = False,
     delegated_agent_scope_keys: tuple[str, ...] = (),
     delegated_workspace_scope_keys: tuple[str, ...] = (),
     delegated_grant_id: object | None = None,
@@ -363,6 +365,7 @@ def _context_from_scopes(
         containment_mode=normalize_containment_mode(containment_mode),
         allow_all_agent_scope_reads=allow_all_agent_scope_reads,
         allow_tenant_shared_reads=allow_tenant_shared_reads,
+        allow_workspace_scope_reads=allow_workspace_scope_reads,
         delegated_agent_scope_keys=delegated_agent_scope_keys,
         delegated_workspace_scope_keys=delegated_workspace_scope_keys,
         delegated_grant_id=delegated_grant_id,
@@ -387,6 +390,7 @@ def _attach_auth_context(request: Request, context: AuthContext) -> AuthContext:
     request.state.mcp_containment_mode = context.containment_mode
     request.state.mcp_allow_all_agent_scope_reads = context.allow_all_agent_scope_reads
     request.state.mcp_allow_tenant_shared_reads = context.allow_tenant_shared_reads
+    request.state.mcp_allow_workspace_scope_reads = context.allow_workspace_scope_reads
     request.state.mcp_allowed_scopes = list(context.scopes) if context.scopes else None
     request.state.mcp_token_resource = context.resource
     return context
@@ -421,6 +425,9 @@ def get_auth_context(request: Request) -> AuthContext:
         ),
         allow_tenant_shared_reads=bool(
             getattr(request.state, "mcp_allow_tenant_shared_reads", False)
+        ),
+        allow_workspace_scope_reads=bool(
+            getattr(request.state, "mcp_allow_workspace_scope_reads", False)
         ),
         scopes=scopes,
         resource=token_resource,
@@ -609,6 +616,7 @@ async def verify_memory_auth(
                     c.containment_mode,
                     c.allow_all_agent_scope_reads,
                     c.allow_tenant_shared_reads,
+                    c.allow_workspace_scope_reads,
                     c.oauth_revoked_at AS client_revoked_at,
                     g.revoked_at AS grant_revoked_at,
                     g.agent_scope_keys AS delegated_agent_scope_keys,
@@ -756,6 +764,7 @@ async def verify_memory_auth(
             containment_mode=result.get("containment_mode"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
             allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
+            allow_workspace_scope_reads=bool(result.get("allow_workspace_scope_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
             delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
             delegated_grant_id=result.get("delegated_grant_id"),
@@ -803,6 +812,7 @@ async def _verify_scoped_bearer_token(
                     c.containment_mode,
                     c.allow_all_agent_scope_reads,
                     c.allow_tenant_shared_reads,
+                    c.allow_workspace_scope_reads,
                     c.oauth_revoked_at AS client_revoked_at,
                     g.revoked_at AS grant_revoked_at,
                     g.agent_scope_keys AS delegated_agent_scope_keys,
@@ -960,6 +970,7 @@ async def _verify_scoped_bearer_token(
             containment_mode=result.get("containment_mode"),
             allow_all_agent_scope_reads=bool(result.get("allow_all_agent_scope_reads")),
             allow_tenant_shared_reads=bool(result.get("allow_tenant_shared_reads")),
+            allow_workspace_scope_reads=bool(result.get("allow_workspace_scope_reads")),
             delegated_agent_scope_keys=tuple(result.get("delegated_agent_scope_keys") or ()),
             delegated_workspace_scope_keys=tuple(result.get("delegated_workspace_scope_keys") or ()),
             delegated_grant_id=result.get("delegated_grant_id"),
