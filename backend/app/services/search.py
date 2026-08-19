@@ -1242,6 +1242,7 @@ class SearchService:
         room_ids: list | None,
         scope_type: str | None,
         scope_key: str | None,
+        scope_labels: list[str] | None,
         tags: list[str] | None,
         tags_mode: str,
         date_from: datetime | None,
@@ -1300,6 +1301,22 @@ class SearchService:
                   AND (
                       CAST(:scope_key AS text) IS NULL
                       OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
+                  )
+                  AND (
+                      CAST(:scope_labels AS text[]) IS NULL
+                      OR (
+                          CASE
+                              WHEN COALESCE(
+                                  NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
+                                  'tenant_shared'
+                              ) = 'tenant_shared' THEN 'tenant_shared'
+                              WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
+                                  THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                       || '/'
+                                       || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
+                              ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                          END
+                      ) = ANY(CAST(:scope_labels AS text[]))
                   )
                   AND (
                       CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
@@ -1376,6 +1393,7 @@ class SearchService:
                     "room_ids": room_ids,
                     "scope_type": scope_type,
                     "scope_key": scope_key,
+                    "scope_labels": scope_labels,
                     "tags": tags,
                     "tags_mode": tags_mode,
                     "date_from": date_from,
@@ -1419,6 +1437,13 @@ class SearchService:
         room_ids: list | None = None,
         scope_type: str | None = None,
         scope_key: str | None = None,
+        # Batched multi-scope filter, given as retrieved_scope_label values
+        # ("<type>/<key>", or bare "tenant_shared"). One query over many scopes
+        # replaces one query per scope, which is what makes cross-scope reach
+        # affordable, and the label on each row is how the caller splits the
+        # results back apart. None keeps the single-scope scope_type/scope_key
+        # behaviour untouched.
+        scope_labels: list[str] | None = None,
         tags: list[str] | None = None,
         tags_mode: str = "any",
         date_from: datetime | None = None,
@@ -1524,6 +1549,22 @@ class SearchService:
                       OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
                   )
                   AND (
+                      CAST(:scope_labels AS text[]) IS NULL
+                      OR (
+                          CASE
+                              WHEN COALESCE(
+                                  NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
+                                  'tenant_shared'
+                              ) = 'tenant_shared' THEN 'tenant_shared'
+                              WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
+                                  THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                       || '/'
+                                       || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
+                              ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                          END
+                      ) = ANY(CAST(:scope_labels AS text[]))
+                  )
+                  AND (
                       CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
                       OR i.metadata->'memory_entry' IS NULL
                       OR COALESCE(
@@ -1591,6 +1632,22 @@ class SearchService:
                   AND (
                       CAST(:scope_key AS text) IS NULL
                       OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
+                  )
+                  AND (
+                      CAST(:scope_labels AS text[]) IS NULL
+                      OR (
+                          CASE
+                              WHEN COALESCE(
+                                  NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
+                                  'tenant_shared'
+                              ) = 'tenant_shared' THEN 'tenant_shared'
+                              WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
+                                  THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                       || '/'
+                                       || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
+                              ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                          END
+                      ) = ANY(CAST(:scope_labels AS text[]))
                   )
                   AND (
                       CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
@@ -1710,6 +1767,7 @@ class SearchService:
                 room_ids=room_ids,
                 scope_type=scope_type,
                 scope_key=scope_key,
+                scope_labels=scope_labels,
                 tags=tags,
                 tags_mode=tags_mode,
                 date_from=date_from,
@@ -1732,6 +1790,7 @@ class SearchService:
                     "room_ids": room_ids,
                     "scope_type": scope_type,
                     "scope_key": scope_key,
+                    "scope_labels": scope_labels,
                     "tags": tags,
                     "tags_mode": tags_mode,
                     "date_from": date_from,
@@ -1785,6 +1844,7 @@ class SearchService:
                 room_ids=room_ids,
                 scope_type=scope_type,
                 scope_key=scope_key,
+                scope_labels=scope_labels,
                 tags=tags,
                 tags_mode=tags_mode,
                 date_from=date_from,
@@ -2141,6 +2201,7 @@ class SearchService:
         room_ids: list | None,
         scope_type: str | None,
         scope_key: str | None,
+        scope_labels: list[str] | None,
         tags: list[str] | None,
         tags_mode: str,
         date_from: datetime | None,
@@ -2316,6 +2377,22 @@ class SearchService:
                               OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
                           )
                           AND (
+                              CAST(:scope_labels AS text[]) IS NULL
+                              OR (
+                                  CASE
+                                      WHEN COALESCE(
+                                          NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
+                                          'tenant_shared'
+                                      ) = 'tenant_shared' THEN 'tenant_shared'
+                                      WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
+                                          THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                               || '/'
+                                               || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
+                                      ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                  END
+                              ) = ANY(CAST(:scope_labels AS text[]))
+                          )
+                          AND (
                               CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
                               OR i.metadata->'memory_entry' IS NULL
                               OR COALESCE(
@@ -2352,6 +2429,7 @@ class SearchService:
                     "room_ids": room_ids,
                     "scope_type": scope_type,
                     "scope_key": scope_key,
+                    "scope_labels": scope_labels,
                     "tags": tags,
                     "tags_mode": tags_mode,
                     "date_from": date_from,

@@ -386,6 +386,9 @@ def test_vector_search_lexical_degradation_preserves_filter_and_scope_contract()
         "room_ids": [room_id],
         "scope_type": "workspace",
         "scope_key": "palaceoftruth",
+        # None keeps the batched multi-scope filter inert, so the single-scope
+        # contract this test pins stays exactly as it was.
+        "scope_labels": None,
         "tags": ["sar-1062"],
         "tags_mode": "all",
         "date_from": date_from,
