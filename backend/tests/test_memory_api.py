@@ -1622,6 +1622,81 @@ def test_semantic_recall_rest_uses_authenticated_tenant_and_read_scope(monkeypat
     assert payload["trace"]["fact_kind_filter"] == ["world", "observation"]
 
 
+def test_semantic_recall_logs_delegated_access_reason(monkeypatch, caplog) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_semantic_recall(db, *, tenant_id: str, body):
+        assert body.access_reason == "Hermes agent clara recall of shared scopes."
+        return SemanticRecallResponse(
+            scope={"type": "agent", "key": "karen"},
+            items=[],
+            total=0,
+            total_considered=0,
+            trace={
+                "searched_scope": {"type": "agent", "key": "karen"},
+                "total_considered": 0,
+                "candidate_limit": 50,
+                "display_limit": 8,
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.semantic_recall_memory", fake_semantic_recall)
+
+    with caplog.at_level(logging.INFO, logger="app.api.memory"):
+        response = client.post(
+            "/api/v1/memory/semantic-recall",
+            json={
+                "scope_type": "agent",
+                "scope_key": "karen",
+                "query": "sibling recall",
+                "access_reason": "Hermes agent clara recall of shared scopes.",
+            },
+        )
+
+    assert response.status_code == 200
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if "memory retrieval diagnostics" in record.getMessage()
+    ]
+    assert any("/api/v1/memory/semantic-recall" in message for message in diagnostics)
+    assert any("Hermes agent clara recall of shared scopes." in message for message in diagnostics)
+    # The raw query must never reach the diagnostics log.
+    assert not any("sibling recall" in message for message in diagnostics)
+
+
+def test_semantic_recall_without_access_reason_is_not_audited(monkeypatch, caplog) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_semantic_recall(db, *, tenant_id: str, body):
+        assert body.access_reason is None
+        return SemanticRecallResponse(
+            scope={"type": "agent", "key": "clara"},
+            items=[],
+            total=0,
+            total_considered=0,
+            trace={
+                "searched_scope": {"type": "agent", "key": "clara"},
+                "total_considered": 0,
+                "candidate_limit": 50,
+                "display_limit": 8,
+            },
+        )
+
+    monkeypatch.setattr("app.api.memory.semantic_recall_memory", fake_semantic_recall)
+
+    with caplog.at_level(logging.INFO, logger="app.api.memory"):
+        response = client.post(
+            "/api/v1/memory/semantic-recall",
+            json={"scope_type": "agent", "scope_key": "clara", "query": "self recall"},
+        )
+
+    assert response.status_code == 200
+    assert not [
+        record for record in caplog.records if "memory retrieval diagnostics" in record.getMessage()
+    ]
+
+
 def test_semantic_recall_rest_requires_read_scope() -> None:
     client = _build_app(FakeSession(), auth_mode="mcp_oauth", mcp_allowed_scopes=["write"])
 

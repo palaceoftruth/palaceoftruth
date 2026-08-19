@@ -1360,11 +1360,31 @@ async def semantic_recall_memory_artifacts(
         tenant_shared=body.scope_type == "tenant_shared",
         broad=False,
     )
-    return await semantic_recall_memory(
+    started = perf_counter()
+    response = await semantic_recall_memory(
         db,
         tenant_id=request.state.tenant_id,
         body=body,
     )
+    # Delegated semantic reads carry an access reason; log it so cross-scope
+    # semantic recall is auditable the way the route-aware path already is.
+    if body.access_reason:
+        _log_retrieval_diagnostics(
+            endpoint="/api/v1/memory/semantic-recall",
+            tenant_id=request.state.tenant_id,
+            query=body.query,
+            latency_ms=(perf_counter() - started) * 1000,
+            status="ok",
+            request_summary={
+                "scope_type": body.scope_type,
+                "scope_key": body.scope_key,
+                "access_reason": body.access_reason,
+                "delegated": True,
+            },
+            trace=response.trace,
+            results=response.items,
+        )
+    return response
 
 
 @router.post(

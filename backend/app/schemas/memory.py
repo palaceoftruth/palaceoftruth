@@ -741,6 +741,7 @@ class SemanticRecallRequest(BaseModel):
     scope_type: MemoryScopeType = "tenant_shared"
     scope_key: str | None = None
     query: str
+    access_reason: str | None = None
     top_k: int = Field(8, ge=1, le=50)
     candidate_limit: int | None = Field(None, ge=1, le=200)
     score_threshold: float | None = Field(None, ge=0, le=1)
