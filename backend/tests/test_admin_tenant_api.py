@@ -189,6 +189,7 @@ class FakeSession:
                     "agent_scope_key": params["agent_scope_key"],
                     "allow_all_agent_scope_reads": params["allow_all_agent_scope_reads"],
                     "allow_tenant_shared_reads": params["allow_tenant_shared_reads"],
+                    "allow_workspace_scope_reads": params["allow_workspace_scope_reads"],
                     "containment_mode": params.get("containment_mode", "standard"),
                     "client_type": params["client_type"],
                     "redirect_uris": json.loads(params["redirect_uris"]),
@@ -249,6 +250,7 @@ class FakeSession:
                     row["agent_scope_key"] = params["agent_scope_key"]
                     row["allow_all_agent_scope_reads"] = params["allow_all_agent_scope_reads"]
                     row["allow_tenant_shared_reads"] = params["allow_tenant_shared_reads"]
+                    row["allow_workspace_scope_reads"] = params["allow_workspace_scope_reads"]
                     return _Result([row])
             return _Result([])
 
@@ -757,6 +759,7 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
             "agent_scope_key": "iris",
             "allow_all_agent_scope_reads": True,
             "allow_tenant_shared_reads": True,
+            "allow_workspace_scope_reads": True,
             "token_ttl_seconds": 1800,
         },
     )
@@ -769,12 +772,16 @@ def test_register_mcp_oauth_client_returns_secret_once_and_hashes_storage() -> N
     assert body["client"]["agent_scope_key"] == "iris"
     assert body["client"]["allow_all_agent_scope_reads"] is True
     assert body["client"]["allow_tenant_shared_reads"] is True
+    assert body["client"]["allow_workspace_scope_reads"] is True
     assert isinstance(body["client_secret"], str) and len(body["client_secret"]) > 30
     stored = session.mcp_clients[0]
     assert stored["oauth_client_secret_hash"] != body["client_secret"]
     assert stored["oauth_token_ttl_seconds"] == 1800
     assert stored["agent_scope_key"] == "iris"
     assert stored["allow_tenant_shared_reads"] is True
+    # The column has to be writable through the admin API, or the reach flag on
+    # the plugin has no way to ever be granted.
+    assert stored["allow_workspace_scope_reads"] is True
 
 
 def test_bind_mcp_oauth_client_updates_read_permissions_without_rotating_secret() -> None:
@@ -789,6 +796,7 @@ def test_bind_mcp_oauth_client_updates_read_permissions_without_rotating_secret(
         "agent_scope_key": "mara",
         "allow_all_agent_scope_reads": False,
         "allow_tenant_shared_reads": False,
+        "allow_workspace_scope_reads": False,
         "oauth_client_secret_hash": "existing-hash",
         "oauth_revoked_at": None,
         "oauth_token_ttl_seconds": 3600,
@@ -805,13 +813,32 @@ def test_bind_mcp_oauth_client_updates_read_permissions_without_rotating_secret(
             "agent_scope_key": "mara",
             "allow_all_agent_scope_reads": True,
             "allow_tenant_shared_reads": True,
+            "allow_workspace_scope_reads": True,
         },
     )
 
     assert response.status_code == 200
     assert response.json()["allow_all_agent_scope_reads"] is True
     assert response.json()["allow_tenant_shared_reads"] is True
+    assert response.json()["allow_workspace_scope_reads"] is True
+    assert row["allow_workspace_scope_reads"] is True
     assert row["oauth_client_secret_hash"] == "existing-hash"
+
+
+def test_bind_mcp_oauth_client_rejects_workspace_reach_without_an_agent_binding() -> None:
+    """Reach is attributed to a bound scope, so an unbound grant is rejected."""
+    client_id = uuid.uuid4()
+    session = FakeSession(mcp_clients=[])
+    client = _client(session)
+
+    response = client.patch(
+        f"/api/v1/admin/tenants/tenant-a/mcp-clients/{client_id}/agent-scope-binding",
+        headers={"X-Admin-Secret": "test-admin-secret"},
+        json={"agent_scope_key": None, "allow_workspace_scope_reads": True},
+    )
+
+    assert response.status_code == 422
+    assert "agent_scope_key" in response.text
 
 
 def test_register_confidential_web_client_requires_exact_registered_https_uris() -> None:
