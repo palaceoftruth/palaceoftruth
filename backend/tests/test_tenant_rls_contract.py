@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,32 @@ CURATION_PRINCIPALS_MIGRATION = ROOT / "alembic" / "versions" / "068_curation_pr
 HISTORICAL_FEEDS_MIGRATION = ROOT / "alembic" / "versions" / "004_rss_feeds.py"
 
 
+def _alembic_head() -> str:
+    """Return the single head revision under alembic/versions.
+
+    Derived rather than hardcoded: enforce_tenant_rls runs as a Helm hook that
+    compares REQUIRED_ALEMBIC_REVISION to alembic_version exactly, so a new
+    migration that leaves the constant behind breaks the whole upgrade. Reading
+    the head here makes that drift a CI failure instead of a release failure.
+    """
+    revisions: set[str] = set()
+    down_revisions: set[str] = set()
+    for path in (ROOT / "alembic" / "versions").glob("*.py"):
+        source = path.read_text()
+        # Migrations declare these either bare or annotated, e.g.
+        # down_revision: Union[str, None] = "...", so the annotation is optional.
+        for match in re.finditer(r'^revision(?::[^=]+)?\s*=\s*["\']([^"\']+)["\']', source, re.M):
+            revisions.add(match.group(1))
+        for match in re.finditer(
+            r'^down_revision(?::[^=]+)?\s*=\s*["\']([^"\']+)["\']', source, re.M
+        ):
+            down_revisions.add(match.group(1))
+
+    heads = revisions - down_revisions
+    assert len(heads) == 1, f"expected exactly one Alembic head, found {sorted(heads)}"
+    return heads.pop()
+
+
 def _load_migration():
     spec = importlib.util.spec_from_file_location("tenant_rls_migration", MIGRATION)
     assert spec and spec.loader
@@ -49,7 +76,7 @@ def test_rls_inventory_matches_every_tenant_model() -> None:
 
     assert set(migration.TENANT_TABLES) == tenant_models - {"tenant_llm_daily_usage"}
     assert set(enforce_tenant_rls.TENANT_TABLES) == tenant_models
-    assert enforce_tenant_rls.REQUIRED_ALEMBIC_REVISION == "068_curation_principals"
+    assert enforce_tenant_rls.REQUIRED_ALEMBIC_REVISION == _alembic_head()
 
 
 def test_curation_principal_expand_migration_keeps_old_writers_compatible() -> None:
