@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MAX_TIMER_DELAY_MS,
   REFRESH_RETRY_DELAY_MS,
   REFRESH_THRESHOLD_MS,
   createBrowserSessionMaintenance,
@@ -146,4 +147,29 @@ test("an absent or revoked session stops without retrying", async () => {
 
 test("the refresh threshold is seven days", () => {
   assert.equal(REFRESH_THRESHOLD_MS, 7 * DAY_MS);
+});
+
+test("a far-future expiry waits in timer-safe chunks instead of looping", async () => {
+  // setTimeout truncates to int32. Before the clamp this delay wrapped
+  // negative, the timer fired at once, and every fire re-read the session.
+  const now = Date.parse("2026-08-14T12:00:00Z");
+  const remaining = Date.parse("2099-08-07T12:10:00Z") - now;
+  const run = harness({ reads: [session(now, remaining)] });
+
+  await run.maintenance.start();
+
+  assert.equal(run.readCount(), 1);
+  assert.equal(run.timers.length, 1);
+  assert.equal(run.timers[0].delay, MAX_TIMER_DELAY_MS);
+
+  // Firing a chunk must resume the wait, not re-read the session.
+  run.timers[0].callback();
+  assert.equal(run.readCount(), 1);
+  assert.equal(run.timers.length, 2);
+  assert.equal(run.timers[1].delay, MAX_TIMER_DELAY_MS);
+});
+
+test("the largest schedulable timer delay fits in a signed 32-bit integer", () => {
+  assert.equal(MAX_TIMER_DELAY_MS, 2_147_483_647);
+  assert.equal(MAX_TIMER_DELAY_MS | 0, MAX_TIMER_DELAY_MS);
 });
