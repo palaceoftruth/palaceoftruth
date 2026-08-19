@@ -28,7 +28,12 @@ TENANT_TABLES = (
     "sync_source_files", "sync_sources", "temporal_facts", "tenant_llm_daily_usage", "web_saves", "wings",
 )
 
-REQUIRED_ALEMBIC_REVISION = "068_curation_principals"
+# Must equal the current Alembic head. The hook compares this to
+# alembic_version exactly, so a new migration that leaves this behind fails the
+# hook and, with it, the whole Helm upgrade.
+# test_rls_inventory_matches_every_tenant_model pins this to the real head so
+# the mismatch is caught in CI rather than during a release.
+REQUIRED_ALEMBIC_REVISION = "069_mcp_workspace_scope_reads"
 
 POLICY_SQL = """
     CREATE POLICY tenant_isolation ON {table}
