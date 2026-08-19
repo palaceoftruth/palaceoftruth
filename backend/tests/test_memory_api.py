@@ -4693,27 +4693,64 @@ def test_memory_entries_overwrite_client_supplied_created_by_role(monkeypatch) -
     assert seen == ["agent"]
 
 
-def test_memory_scope_key_strips_repeated_type_prefix() -> None:
+def _write_scope(scope_type: str, key: str) -> str | None:
+    from datetime import datetime, timezone
+
+    from app.schemas.memory import MemoryEntryRequest
+
+    return MemoryEntryRequest(
+        tenant_id="tenant-a",
+        title="t",
+        body="b",
+        source="test",
+        created_at=datetime.now(timezone.utc),
+        scope={"type": scope_type, "key": key},
+    ).scope.key
+
+
+def test_write_scope_key_strips_repeated_type_prefix() -> None:
     """A caller that passes the whole label as the key must not fork the scope."""
-    from app.schemas.memory import MemoryScope
-
-    assert MemoryScope(type="workspace", key="workspace/quietfirm").key == "quietfirm"
-    assert MemoryScope(type="workspace", key="workspace/workspace/quietfirm").key == "quietfirm"
-    assert MemoryScope(type="agent", key="agent/vera").key == "vera"
-    assert MemoryScope(type="session", key="session/abc").key == "abc"
+    assert _write_scope("workspace", "workspace/quietfirm") == "quietfirm"
+    assert _write_scope("workspace", "workspace/workspace/quietfirm") == "quietfirm"
+    assert _write_scope("agent", "agent/vera") == "vera"
+    assert _write_scope("session", "session/abc") == "abc"
 
 
-def test_memory_scope_key_preserves_legitimate_slashes_and_dashes() -> None:
+def test_write_scope_key_preserves_legitimate_slashes_and_dashes() -> None:
     """Only the scope's own type prefix is stripped; real keys survive intact."""
-    from app.schemas.memory import MemoryScope
-
     # A slash that is not the scope's own type is part of the key.
-    assert MemoryScope(type="workspace", key="org/repo").key == "org/repo"
+    assert _write_scope("workspace", "org/repo") == "org/repo"
     # A dash is a different naming mistake and cannot be safely guessed away.
-    assert MemoryScope(type="agent", key="agent-vera").key == "agent-vera"
+    assert _write_scope("agent", "agent-vera") == "agent-vera"
     # A key that is nothing but the prefix keeps its original value rather than
     # collapsing to an empty string that the shape validator would then reject.
-    assert MemoryScope(type="workspace", key="workspace/").key == "workspace/"
+    assert _write_scope("workspace", "workspace/") == "workspace/"
+
+
+def test_read_scope_key_is_never_rewritten() -> None:
+    """Rows already stored under a doubled prefix must stay addressable.
+
+    The guard is write-only on purpose. Normalizing reads too would orphan the
+    entries that the un-guarded write path already created, which is worse than
+    leaving the duplicate bucket in place.
+    """
+    from app.schemas.memory import MemoryRetrieveRequest, MemoryScope
+
+    assert MemoryScope(type="workspace", key="workspace/quietfirm").key == "workspace/quietfirm"
+    body = MemoryRetrieveRequest(
+        query="quietfirm",
+        scope=MemoryScope(type="workspace", key="workspace/workspace/quietfirm"),
+    )
+    assert body.scope.key == "workspace/workspace/quietfirm"
+
+
+def test_scope_profile_upsert_normalizes_its_scope_key() -> None:
+    from app.schemas.memory import MemoryScope, MemoryScopeProfileUpsertRequest
+
+    body = MemoryScopeProfileUpsertRequest(
+        scope=MemoryScope(type="workspace", key="workspace/quietfirm"),
+    )
+    assert body.scope.key == "quietfirm"
 
 
 def test_delegated_agent_wildcard_resolves_discovered_scopes() -> None:

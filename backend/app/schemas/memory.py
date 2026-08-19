@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.mcp_scopes import McpOperationScope
 from app.schemas.palace import PalaceRetrieveTrace
@@ -392,14 +392,10 @@ class MemoryScope(BaseModel):
 
     @field_validator("key")
     @classmethod
-    def key_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+    def key_not_blank(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        key = _validate_not_blank(value, "scope.key")
-        scope_type = info.data.get("type")
-        if isinstance(scope_type, str) and scope_type != "tenant_shared":
-            key = _strip_redundant_scope_type_prefix(scope_type, key)
-        return key
+        return _validate_not_blank(value, "scope.key")
 
     @model_validator(mode="after")
     def validate_scope_shape(self) -> "MemoryScope":
@@ -410,6 +406,21 @@ class MemoryScope(BaseModel):
         if self.key is None:
             raise ValueError(f"{self.type} scope requires a key")
         return self
+
+
+def _normalize_write_scope(scope: MemoryScope) -> MemoryScope:
+    """Normalize a scope that is about to create a bucket.
+
+    Only writes normalize. Reads keep the caller's key verbatim, because rows
+    already written under a doubled prefix stay addressable only by the key
+    they were stored with; rewriting reads too would orphan them.
+    """
+    if scope.key is None or scope.type == "tenant_shared":
+        return scope
+    normalized = _strip_redundant_scope_type_prefix(scope.type, scope.key)
+    if normalized == scope.key:
+        return scope
+    return MemoryScope(type=scope.type, key=normalized)
 
 
 class MemoryScopeProfile(BaseModel):
@@ -443,6 +454,11 @@ class MemoryScopeProfileUpsertRequest(BaseModel):
         if value is None:
             return None
         return _validate_not_blank(value, "updated_by")
+
+    @model_validator(mode="after")
+    def normalize_scope_key(self) -> "MemoryScopeProfileUpsertRequest":
+        self.scope = _normalize_write_scope(self.scope)
+        return self
 
 
 class MemoryEntryRequest(BaseModel):
@@ -490,6 +506,11 @@ class MemoryEntryRequest(BaseModel):
     def validate_temporal_window(self) -> "MemoryEntryRequest":
         if self.valid_from is not None and self.valid_until is not None and self.valid_until < self.valid_from:
             raise ValueError("valid_until must be greater than or equal to valid_from")
+        return self
+
+    @model_validator(mode="after")
+    def normalize_scope_key(self) -> "MemoryEntryRequest":
+        self.scope = _normalize_write_scope(self.scope)
         return self
 
 
