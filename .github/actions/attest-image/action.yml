@@ -79,8 +79,24 @@ runs:
         IMAGE: ${{ inputs.image }}
         DIGEST: ${{ inputs.digest }}
       run: |
-        cosign verify-attestation \
-          --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
-          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-          --type https://spdx.dev/Document/v2.3 \
-          "${IMAGE}@${DIGEST}" >/dev/null
+        # A just-published attestation is not always readable at once. The
+        # GitHub-native step is immediately visible, but the cosign fallback
+        # writes a separate tag that the registry can still be serving from a
+        # stale manifest, so verification reports only the provenance
+        # predicate. Retry before treating the attestation as missing.
+        for attempt in 1 2 3 4 5; do
+          if cosign verify-attestation \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --type https://spdx.dev/Document/v2.3 \
+            "${IMAGE}@${DIGEST}" >/dev/null; then
+            exit 0
+          fi
+
+          if [ "$attempt" -eq 5 ]; then
+            echo "Failed to verify the SBOM attestation after ${attempt} attempts." >&2
+            exit 1
+          fi
+
+          sleep $((attempt * 10))
+        done
