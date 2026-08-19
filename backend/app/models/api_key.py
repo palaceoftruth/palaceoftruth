@@ -88,6 +88,7 @@ class McpClient(Base):
     agent_scope_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     allow_all_agent_scope_reads: Mapped[bool] = mapped_column(server_default="false", nullable=False)
     allow_tenant_shared_reads: Mapped[bool] = mapped_column(server_default="false", nullable=False)
+    allow_workspace_scope_reads: Mapped[bool] = mapped_column(server_default="false", nullable=False)
     oauth_client_secret_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_revoked_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_token_ttl_seconds: Mapped[int] = mapped_column(Integer, server_default="3600", nullable=False)

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from app.mcp_scopes import McpOperationScope
 from app.schemas.palace import PalaceRetrieveTrace
@@ -129,6 +129,7 @@ class McpOAuthClientRegisterRequest(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
     # A caller may ask for containment. The server can raise the requested mode
     # but never lowers it, so a reserved client key stays contained.
     containment_mode: Literal["standard", "hermes_agent"] = "standard"
@@ -145,7 +146,11 @@ class McpOAuthClientRegisterRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_agent_scope_read_binding(self) -> "McpOAuthClientRegisterRequest":
-        if (self.allow_all_agent_scope_reads or self.allow_tenant_shared_reads) and not self.agent_scope_key:
+        if (
+            self.allow_all_agent_scope_reads
+            or self.allow_tenant_shared_reads
+            or self.allow_workspace_scope_reads
+        ) and not self.agent_scope_key:
             raise ValueError("agent read permissions require agent_scope_key")
         if self.client_type == "service" and (self.redirect_uris or self.authorization_code_enabled):
             raise ValueError("service clients cannot register redirect URIs or authorization-code capability")
@@ -176,6 +181,7 @@ class McpOAuthClientAgentScopeBindingRequest(BaseModel):
     agent_scope_key: str
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
 
     @field_validator("agent_scope_key")
     @classmethod
@@ -193,6 +199,7 @@ class McpOAuthClientSummary(BaseModel):
     agent_scope_key: str | None = None
     allow_all_agent_scope_reads: bool = False
     allow_tenant_shared_reads: bool = False
+    allow_workspace_scope_reads: bool = False
     containment_mode: Literal["standard", "hermes_agent"] = "standard"
     client_type: Literal["service", "confidential_web", "public"] = "service"
     client_id: str | None = None
@@ -363,16 +370,36 @@ class McpOAuthProtectedResourceMetadata(BaseModel):
     scope_catalog: list[McpOAuthScopeDefinition] = Field(default_factory=list)
 
 
+def _strip_redundant_scope_type_prefix(scope_type: str, key: str) -> str:
+    """Drop a leading ``<scope_type>/`` that a caller repeated inside the key.
+
+    Callers that build a scope from a label like ``workspace/quietfirm`` have
+    passed the whole label as the key, which silently creates a second bucket
+    (``workspace/workspace/quietfirm``) that no pattern or scope search finds.
+    Only the scope's own type is stripped: a key such as ``org/repo`` is a
+    legitimate value and must survive untouched.
+    """
+    prefix = f"{scope_type}/"
+    stripped = key
+    while stripped.casefold().startswith(prefix.casefold()):
+        stripped = stripped[len(prefix) :]
+    return stripped or key
+
+
 class MemoryScope(BaseModel):
     type: MemoryScopeType = "tenant_shared"
     key: str | None = None
 
     @field_validator("key")
     @classmethod
-    def key_not_blank(cls, value: str | None) -> str | None:
+    def key_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None:
             return None
-        return _validate_not_blank(value, "scope.key")
+        key = _validate_not_blank(value, "scope.key")
+        scope_type = info.data.get("type")
+        if isinstance(scope_type, str) and scope_type != "tenant_shared":
+            key = _strip_redundant_scope_type_prefix(scope_type, key)
+        return key
 
     @model_validator(mode="after")
     def validate_scope_shape(self) -> "MemoryScope":
@@ -841,6 +868,7 @@ class AgentMemoryRetrieveRequest(BaseModel):
     include_agent_scope_patterns: list[str] = Field(default_factory=list)
     agent_scope_pattern_limit: int = Field(5, ge=1, le=50)
     include_all_permitted_agent_scopes: bool = False
+    include_all_permitted_workspace_scopes: bool = False
     access_reason: str | None = None
     workspace_scope_keys: list[str] = Field(default_factory=list)
     session_scope_key: str | None = None
@@ -926,6 +954,10 @@ class AgentMemoryRetrieveTrace(BaseModel):
     delegated_agent_policy_source: str | None = None
     delegated_agent_decision: DelegatedAgentMemoryDecision = "not_requested"
     delegated_agent_deny_reasons: list[str] = Field(default_factory=list)
+    authorized_workspace_scope_keys: list[str] = Field(default_factory=list)
+    denied_workspace_scope_keys: list[str] = Field(default_factory=list)
+    delegated_workspace_decision: DelegatedAgentMemoryDecision = "not_requested"
+    delegated_workspace_deny_reasons: list[str] = Field(default_factory=list)
     access_reason_required: bool = False
     access_reason_present: bool = False
     result_counts_by_scope: dict[str, int] = Field(default_factory=dict)
@@ -978,6 +1010,7 @@ class MemoryTrajectoryRequest(BaseModel):
     agent_scope_key: str | None = None
     include_agent_scope_keys: list[str] = Field(default_factory=list)
     include_all_permitted_agent_scopes: bool = False
+    include_all_permitted_workspace_scopes: bool = False
     access_reason: str | None = None
     workspace_scope_keys: list[str] = Field(default_factory=list)
     session_scope_key: str | None = None

@@ -966,6 +966,9 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
         "include_all_permitted_agent_scopes": _env_bool(
             "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_AGENT_SCOPES", False
         ),
+        "include_all_permitted_workspace_scopes": _env_bool(
+            "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", False
+        ),
         "agent_scope_pattern_limit": _env_int("PALACEOFTRUTH_AGENT_SCOPE_PATTERN_LIMIT", 5),
         "timeout_seconds": _env_int(
             "PALACEOFTRUTH_REQUEST_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
@@ -1090,6 +1093,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._include_broad_corpus = False
         self._include_agent_scope_patterns: list[str] = []
         self._include_all_permitted_agent_scopes = False
+        self._include_all_permitted_workspace_scopes = False
         self._agent_scope_pattern_limit = 5
         self._timeout_seconds = DEFAULT_TIMEOUT_SECONDS
         self._retry_attempts = DEFAULT_RETRY_ATTEMPTS
@@ -1566,6 +1570,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._include_all_permitted_agent_scopes = _config_bool(
             self._config,
             "include_all_permitted_agent_scopes",
+            default=False,
+        )
+        self._include_all_permitted_workspace_scopes = _config_bool(
+            self._config,
+            "include_all_permitted_workspace_scopes",
             default=False,
         )
         self._agent_scope_pattern_limit = min(
@@ -2880,6 +2889,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._include_tenant_shared
             or self._include_agent_scope_patterns
             or self._include_all_permitted_agent_scopes
+            or self._include_all_permitted_workspace_scopes
         )
 
     def _delegated_access_reason(self, agent_scope_key: str) -> str:
@@ -3215,6 +3225,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             _add("tenant_shared")
         if self._include_all_permitted_agent_scopes:
             _add("every agent scope the tenant delegated-agent policy permits")
+        if self._include_all_permitted_workspace_scopes:
+            _add("every workspace scope the tenant delegated-read policy permits")
         for pattern in self._include_agent_scope_patterns:
             _add(f"agent scopes matching {pattern}")
         return labels
@@ -3244,10 +3256,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         elif requested_type == "workspace":
             if requested_key in self._allowed_semantic_recall_workspace_keys(active_scope):
                 return
+            # Reach beyond the active workspace is opt-in on the client and
+            # policy-gated on the server, exactly like the sibling-agent path.
+            if self._include_all_permitted_workspace_scopes and requested_key:
+                return
             reason = (
                 f"workspace/{requested_key} is not the active Hermes workspace "
                 f"({self._agent_workspace or 'unset'}); cross-workspace semantic recall "
-                "is not exposed through this tool"
+                "is not exposed through this tool until an operator sets "
+                "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES"
             )
         elif requested_type == "agent":
             if self._delegated_semantic_agent_scope_allowed(requested_key or ""):
@@ -3411,6 +3428,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "agent_scope_pattern_limit": self._agent_scope_pattern_limit,
                         "include_all_permitted_agent_scopes": (
                             self._include_all_permitted_agent_scopes
+                        ),
+                        "include_all_permitted_workspace_scopes": (
+                            self._include_all_permitted_workspace_scopes
                         ),
                         "workspace_scope_keys": workspace_scope_keys,
                         "include_tenant_shared": self._include_tenant_shared,

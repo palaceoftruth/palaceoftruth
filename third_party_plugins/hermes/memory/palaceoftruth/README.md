@@ -101,17 +101,24 @@ write-back is explicitly delegated.
   the request with `no_delegated_agent_policy`. Tenant-shared reads likewise
   need `mcp_allow_tenant_shared_reads` on the client row alongside
   `PALACEOFTRUTH_INCLUDE_TENANT_SHARED=true`.
-- `palace_semantic_recall` honours the same two opt-ins for sibling agent
-  scopes, and attaches the same access reason so delegated semantic reads are
-  audited. Without an opt-in it still refuses, and the refusal names the flags
-  that would grant reach.
-- The cross-agent opt-ins are agent-scoped on both the client and the server.
-  They never widen into another workspace, and a bound Hermes client must not
-  send `workspace_scope_keys`, `session_scope_key`, or `include_broad_corpus` at
+- `PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES=true` is the same
+  pattern one tier out: it sets `include_all_permitted_workspace_scopes` on the
+  route-aware request and lets the tenant's delegated read policy decide which
+  workspaces resolve. It is also not self-service. The MCP client row must carry
+  `mcp_allow_workspace_scope_reads`, or Palace denies the request with 403
+  before the search runs, and a policy that grants no workspace reach denies it
+  with `no_delegated_workspace_policy`.
+- `palace_semantic_recall` honours these opt-ins for sibling agent scopes and
+  for workspaces, and attaches the same access reason so delegated semantic
+  reads are audited. Without an opt-in it still refuses, and the refusal names
+  the flag that would grant reach.
+- The opt-ins are policy-gated on both the client and the server. A bound Hermes
+  client must still not send `session_scope_key` or `include_broad_corpus` at
   all: `POST /api/v1/memory/retrieve-agent` rejects the whole request with 403
-  when it does. For the same reason the bound-client fallback to
-  `POST /api/v1/memory/retrieve` stays on the canonical agent scope, which that
-  route also enforces.
+  when it does. Workspace keys are the one widening: they are accepted only from
+  a client row that carries `mcp_allow_workspace_scope_reads`. For the same
+  reason the bound-client fallback to `POST /api/v1/memory/retrieve` stays on
+  the canonical agent scope, which that route also enforces.
 - Palace API calls use bounded retries for transient failures only: network
   errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
   validation failures, tenant mismatch, and privacy/admission rejections are not

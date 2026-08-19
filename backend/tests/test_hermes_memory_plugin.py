@@ -361,6 +361,7 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
                 "include_agent_scope_patterns": [],
                 "agent_scope_pattern_limit": 5,
                 "include_all_permitted_agent_scopes": False,
+                "include_all_permitted_workspace_scopes": False,
                 "workspace_scope_keys": ["sterling"],
                 "include_tenant_shared": False,
                 "tenant_shared_policy": "never",
@@ -3825,3 +3826,130 @@ def test_palaceoftruth_provider_skips_write_when_whoami_fails(
 
     assert requests_seen == [("GET", "/api/v1/memory/whoami", None)]
     assert "Palace of Truth tenant resolution failed; skipping write" in caplog.text
+
+
+def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+        platform="discord",
+    )
+
+    seen_payload: dict = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/scopes":
+            return {"scopes": [], "total": 0, "limit": 100}
+        assert path == "/api/v1/memory/retrieve-agent"
+        seen_payload.update(payload or {})
+        return {
+            "trace": {"searched_scopes": [{"type": "workspace", "key": "quietfirm"}]},
+            "results": [
+                {
+                    "item_id": "quietfirm-note",
+                    "title": "QuietFirm memory",
+                    "source_type": "note",
+                    "chunk_text": "Workspace recall.",
+                    "score": 0.9,
+                }
+            ],
+            "total": 1,
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    text = provider.prefetch("quietfirm history", session_id="session-1")
+
+    # The opt-in reaches the server switch the tenant policy gates on and carries
+    # the audit reason that policy requires.
+    assert seen_payload["include_all_permitted_workspace_scopes"] is True
+    assert "clara" in seen_payload["access_reason"]
+    # The client still names no workspace itself, and never asks for the broad
+    # corpus: the server resolves which workspaces the policy permits.
+    assert seen_payload["workspace_scope_keys"] == []
+    assert seen_payload["include_broad_corpus"] is False
+    assert "QuietFirm memory" in text
+
+
+def test_palaceoftruth_workspace_reach_is_off_by_default(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.delenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+    assert provider._include_all_permitted_workspace_scopes is False
+
+
+def test_palaceoftruth_semantic_recall_allows_opted_in_workspace(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", "true")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    provider._validate_semantic_recall_scope(
+        {"type": "workspace", "key": "quietfirm"},
+        {"type": "agent", "key": "clara"},
+    )
+
+
+def test_palaceoftruth_semantic_recall_workspace_refusal_names_the_flag(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.delenv("PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES", raising=False)
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+        agent_workspace="hermes",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        provider._validate_semantic_recall_scope(
+            {"type": "workspace", "key": "quietfirm"},
+            {"type": "agent", "key": "clara"},
+        )
+    message = str(excinfo.value)
+    # The refusal must name the workspace and the flag, not a sibling-agent cause.
+    assert "workspace/quietfirm" in message
+    assert "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES" in message
+    assert "sibling-agent" not in message
