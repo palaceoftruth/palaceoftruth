@@ -996,6 +996,10 @@ class AgentMemoryRetrieveTrace(BaseModel):
     context_budget_chars: int | None = None
     query_embedding_reused: bool = False
     selected_scope_query_count: int = 0
+    # How many of the selected scopes were answered by the single batched query
+    # instead of their own routed search. 0 means every scope took the full
+    # room-routed path, which is what narrow requests still do.
+    selected_scope_batched_count: int = 0
     selected_scope_result_count: int = 0
     selected_scope_fallback_used: bool = False
     selected_scope_completeness_warnings: list[str] = Field(default_factory=list)

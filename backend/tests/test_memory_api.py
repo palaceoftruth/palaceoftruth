@@ -3295,6 +3295,152 @@ async def test_delegated_agent_memory_policy_adds_allowlisted_agent_scope(
 
 
 @pytest.mark.asyncio
+async def test_wide_agent_reach_batches_scopes_into_one_query(monkeypatch) -> None:
+    """A wide reach must cost one scoped query, not one routed search per scope.
+
+    The routed path reloads and rescores every active room, so a serial fan-out
+    over dozens of authorized scopes times out at the gateway. Only the caller's
+    own scope may keep that path.
+    """
+    import app.services.memory as memory_service
+
+    reach_keys = [f"agent-{index}" for index in range(8)]
+    routed_scopes: list[tuple[str, str | None]] = []
+    batched_calls: list[dict] = []
+
+    async def fake_retrieve_memory(
+        db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False
+    ):
+        routed_scopes.append((body.scope.type, body.scope.key))
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    class FakeSearchService:
+        def __init__(self, db, embedder, tenant_id: str) -> None:
+            self.tenant_id = tenant_id
+
+        async def vector_search(self, **kwargs):
+            batched_calls.append(kwargs)
+            return [
+                _agent_memory_result(
+                    f"00000000-0000-0000-0000-0000000000{index:02d}",
+                    f"Note from {key}",
+                    f"Reach memory held by {key}.",
+                    agent_key=key,
+                    score=0.9 - index / 100,
+                )
+                for index, key in enumerate(reach_keys)
+            ]
+
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+    monkeypatch.setattr(memory_service, "SearchService", FakeSearchService)
+
+    response = await memory_service.retrieve_agent_memory(
+        FakeSession(),
+        embedder=object(),
+        tenant_id="tenant-a",
+        delegated_policy=DelegatedAgentMemoryReadPolicy(
+            tenant_id="tenant-a",
+            subject_agent_scope_key="orchestrator",
+            read_agent_scope_keys=tuple(reach_keys),
+            max_cross_agent_scopes=len(reach_keys),
+            require_access_reason=False,
+        ),
+        body=AgentMemoryRetrieveRequest(
+            query="reach across agents",
+            agent_scope_key="orchestrator",
+            include_agent_scope_keys=reach_keys,
+            include_tenant_shared=False,
+            include_broad_corpus=False,
+            limit=20,
+        ),
+    )
+
+    # Only the caller's own scope keeps the routed path; the eight reach scopes
+    # share one query.
+    assert routed_scopes == [("agent", "orchestrator")]
+    assert len(batched_calls) == 1
+    assert sorted(batched_calls[0]["scope_labels"]) == sorted(
+        f"agent/{key}" for key in reach_keys
+    )
+    assert response.trace.selected_scope_batched_count == len(reach_keys)
+    # Each reach scope keeps its own slot, so per-scope accounting survives the
+    # batching.
+    assert response.trace.result_counts_by_scope == {
+        "agent/orchestrator": 0,
+        **{f"agent/{key}": 1 for key in reach_keys},
+    }
+    assert len(response.results) == len(reach_keys)
+
+
+@pytest.mark.asyncio
+async def test_narrow_agent_reach_keeps_routed_search_per_scope(monkeypatch) -> None:
+    """At or below the batching threshold nothing changes: every scope routes."""
+    import app.services.memory as memory_service
+
+    routed_scopes: list[tuple[str, str | None]] = []
+    batched_calls: list[dict] = []
+
+    async def fake_retrieve_memory(
+        db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False
+    ):
+        routed_scopes.append((body.scope.type, body.scope.key))
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    class FakeSearchService:
+        def __init__(self, db, embedder, tenant_id: str) -> None:
+            self.tenant_id = tenant_id
+
+        async def vector_search(self, **kwargs):
+            batched_calls.append(kwargs)
+            return []
+
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+    monkeypatch.setattr(memory_service, "SearchService", FakeSearchService)
+
+    response = await memory_service.retrieve_agent_memory(
+        FakeSession(),
+        embedder=object(),
+        tenant_id="tenant-a",
+        delegated_policy=DelegatedAgentMemoryReadPolicy(
+            tenant_id="tenant-a",
+            subject_agent_scope_key="orchestrator",
+            read_agent_scope_keys=("security-agent",),
+            require_access_reason=False,
+        ),
+        body=AgentMemoryRetrieveRequest(
+            query="narrow reach",
+            agent_scope_key="orchestrator",
+            include_agent_scope_keys=["security-agent"],
+            include_tenant_shared=False,
+            include_broad_corpus=False,
+            limit=5,
+        ),
+    )
+
+    assert routed_scopes == [("agent", "orchestrator"), ("agent", "security-agent")]
+    assert batched_calls == []
+    assert response.trace.selected_scope_batched_count == 0
+
+
+@pytest.mark.asyncio
 async def test_agent_scope_pattern_selects_bounded_policy_authorized_scopes(
     monkeypatch,
 ) -> None:

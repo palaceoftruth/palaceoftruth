@@ -2248,6 +2248,80 @@ def _scope_label_from_memory_scope(scope: MemoryScope) -> str:
     return f"{scope.type}/{scope.key}"
 
 
+# Above this many selected scopes the per-scope retrieve_memory fan-out stops
+# fitting in a request. Each route reloads and rescores every active room before
+# it searches, which measured at roughly 2.3 s per scope, so a wide reach across
+# dozens of authorized scopes times out at the gateway. At or below the
+# threshold the fan-out is cheap, so narrow requests keep the full routed path
+# and behave exactly as before.
+_AGENT_MEMORY_BATCHED_SCOPE_THRESHOLD = 4
+
+# The batched query ranks all reach scopes against one another instead of giving
+# each its own quota, so it fetches deeper than a single route would. The
+# ceiling stops a very wide reach from asking for an unbounded row count.
+_AGENT_MEMORY_BATCHED_CANDIDATE_CEILING = 200
+
+
+async def _batched_scope_results(
+    db: AsyncSession,
+    *,
+    embedder,
+    tenant_id: str,
+    body: AgentMemoryRetrieveRequest,
+    scopes: list[MemoryScope],
+    query_vector: list[float] | None,
+    query_embedding_error: EmbeddingRequestError | None,
+    caps_by_label: dict[str, int],
+) -> dict[str, list]:
+    """Search many scopes with one query and split the hits back per scope.
+
+    This trades the per-scope palace room routing for a flat scoped vector
+    search. That routing is exactly what makes the serial fan-out unaffordable
+    at this width, and reach scopes are secondary context, so the caller's own
+    scope and tenant_shared still take the full routed path.
+    """
+    if not scopes:
+        return {}
+    labels = [_scope_label_from_memory_scope(scope) for scope in scopes]
+    per_scope_cap = max(caps_by_label.values()) if caps_by_label else 0
+    service = SearchService(db, embedder, tenant_id=tenant_id)
+    grouped: dict[str, list] = {label: [] for label in labels}
+    try:
+        results = await service.vector_search(
+            query=body.query,
+            limit=min(
+                max(per_scope_cap * len(scopes), 1),
+                _AGENT_MEMORY_BATCHED_CANDIDATE_CEILING,
+            ),
+            retrieval_lens=body.retrieval_lens,
+            tags=body.tags,
+            tags_mode=body.tags_mode,
+            min_score=body.min_score,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            scope_labels=labels,
+            include_derived_artifacts=body.include_derived_artifacts,
+            query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
+        )
+    except EmbeddingRequestError:
+        # vector_search raises on a non-retryable embedding failure, but the
+        # routed scopes degrade instead of failing. Match them: return nothing
+        # from the reach scopes and let the caller decide, so a dead embedder
+        # cannot turn a partially answerable request into a hard error.
+        return grouped
+    for result in results:
+        bucket = grouped.get(result.retrieved_scope_label or "")
+        # A hit whose label is not one we asked for came from outside the
+        # authorized set, so dropping it keeps the delegated decision exact.
+        if bucket is None:
+            continue
+        if len(bucket) >= caps_by_label.get(result.retrieved_scope_label, 0):
+            continue
+        bucket.append(result)
+    return grouped
+
+
 def _route_result_counts_by_scope(scopes: list[MemoryScope], route_results: list[list]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for scope, results in zip(scopes, route_results):
@@ -2318,21 +2392,45 @@ async def retrieve_agent_memory(
     if _should_search_initial_tenant_shared(body):
         _append_scope_once(scopes, MemoryScope(type="tenant_shared"))
 
-    route_results: list[list] = []
+    # One slot per selected scope, filled by index so the later zip(scopes,
+    # route_results) pairings stay correct no matter which scopes were batched.
+    route_results: list[list] = [[] for _ in scopes]
     selected_scope_warnings: list[str] = []
     selected_scope_fallback_used = False
     query_vector, query_embedding_reused, query_embedding_error = await _agent_memory_query_vector(
         embedder, body.query
     )
-    selected_scopes_started_at = perf_counter()
-    for scope in scopes:
-        route_candidate_limit = selected_candidate_limit
+
+    def _route_candidate_limit(scope: MemoryScope) -> int:
         if (
             scope.type == "agent"
             and scope.key in delegated_decision.authorized_agent_scope_keys
             and delegated_decision.max_results_per_scope is not None
         ):
-            route_candidate_limit = min(selected_candidate_limit, delegated_decision.max_results_per_scope)
+            return min(selected_candidate_limit, delegated_decision.max_results_per_scope)
+        return selected_candidate_limit
+
+    # A wide reach cannot afford one routed search per scope, so every scope
+    # beyond the caller's own request goes into a single batched query. Narrow
+    # requests skip this entirely and route every scope as before.
+    batched_indexes: list[int] = []
+    if len(scopes) > _AGENT_MEMORY_BATCHED_SCOPE_THRESHOLD:
+        routed_labels = {
+            _scope_label_from_memory_scope(scope)
+            for scope in _agent_memory_selected_scopes(body)
+        }
+        routed_labels.add("tenant_shared")
+        batched_indexes = [
+            index
+            for index, scope in enumerate(scopes)
+            if _scope_label_from_memory_scope(scope) not in routed_labels
+        ]
+    batched_index_set = set(batched_indexes)
+    selected_scopes_started_at = perf_counter()
+    for scope_index, scope in enumerate(scopes):
+        if scope_index in batched_index_set:
+            continue
+        route_candidate_limit = _route_candidate_limit(scope)
         response = await retrieve_memory(
             db,
             embedder=embedder,
@@ -2353,12 +2451,30 @@ async def retrieve_agent_memory(
             query_embedding_error=query_embedding_error,
             allow_empty_degraded=True,
         )
-        route_results.append(response.results)
+        route_results[scope_index] = response.results
         selected_scope_fallback_used = selected_scope_fallback_used or response.trace.fallback_used
         if response.trace.completeness_warning:
             warning = _agent_memory_trace_warning(response.trace.completeness_warning)
             if warning not in selected_scope_warnings:
                 selected_scope_warnings.append(warning)
+    if batched_indexes:
+        batched_scopes = [scopes[index] for index in batched_indexes]
+        batched_results = await _batched_scope_results(
+            db,
+            embedder=embedder,
+            tenant_id=tenant_id,
+            body=body,
+            scopes=batched_scopes,
+            query_vector=query_vector,
+            query_embedding_error=query_embedding_error,
+            caps_by_label={
+                _scope_label_from_memory_scope(scope): _route_candidate_limit(scope)
+                for scope in batched_scopes
+            },
+        )
+        for scope_index in batched_indexes:
+            label = _scope_label_from_memory_scope(scopes[scope_index])
+            route_results[scope_index] = batched_results.get(label, [])
     selected_scope_duration_ms = _duration_ms(selected_scopes_started_at)
 
     broad_corpus_searched = False
@@ -2516,6 +2632,7 @@ async def retrieve_agent_memory(
             context_budget_chars=body.context_budget_chars,
             query_embedding_reused=query_embedding_reused,
             selected_scope_query_count=len(scopes),
+            selected_scope_batched_count=len(batched_indexes),
             selected_scope_result_count=selected_scope_result_count,
             selected_scope_fallback_used=selected_scope_fallback_used,
             selected_scope_completeness_warnings=selected_scope_warnings,
