@@ -5,6 +5,12 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 export const REFRESH_THRESHOLD_MS = 7 * DAY_MS;
 export const REFRESH_RETRY_DELAY_MS = 5 * 60 * 1_000;
 
+// `setTimeout` truncates its delay to a signed 32-bit integer. A longer delay
+// wraps, and once it wraps negative the timer fires at once, so a session with
+// a far-future expiry would re-check in a hot loop instead of waiting. Wait in
+// chunks no larger than the maximum a timer can represent.
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 interface BrowserSessionMaintenanceDependencies {
   readSession: () => Promise<BrowserSession>;
   refreshSession: () => Promise<BrowserSession>;
@@ -43,10 +49,16 @@ export function createBrowserSessionMaintenance(
   const schedule = (delay: number, check: () => Promise<BrowserSession | null>) => {
     if (disposed) return;
     clearScheduledCheck();
+    const remainingDelay = Math.max(0, delay);
+    const chunk = Math.min(remainingDelay, MAX_TIMER_DELAY_MS);
     timer = dependencies.setTimer(() => {
       timer = undefined;
+      if (remainingDelay > chunk) {
+        schedule(remainingDelay - chunk, check);
+        return;
+      }
       void check();
-    }, Math.max(0, delay));
+    }, chunk);
   };
 
   const remainingLifetime = (session: BrowserSession) => {
