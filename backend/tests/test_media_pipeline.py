@@ -407,6 +407,7 @@ def test_download_audio_applies_byte_and_playlist_ceilings(monkeypatch, tmp_path
     MediaPipeline._download_audio("https://example.com/watch?v=too-long", "job-123")
 
     assert factory.opts["max_filesize"] == int(settings.media_max_download_bytes)
+    assert factory.opts["extractor_args"] == {"youtube": {"player_client": ["web_embedded"]}}
     # One URL is already enforced by noplaylist and the one-element download
     # call. yt-dlp raises MaxDownloadsReached after the first successful file
     # when max_downloads is 1, which turns successful ingests into failures.

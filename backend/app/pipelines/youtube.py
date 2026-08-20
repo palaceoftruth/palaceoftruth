@@ -968,6 +968,10 @@ class MediaPipeline(BasePipeline):
 
         ydl_opts: dict[str, Any] = {
             "format": "bestaudio/best",
+            # The default android_vr client returns Google Video URLs that
+            # reject this worker's requests with HTTP 403. web_embedded
+            # successfully downloads from the same worker without a PO token.
+            "extractor_args": {"youtube": {"player_client": ["web_embedded"]}},
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
             "outtmpl": output_template,
             "quiet": True,
