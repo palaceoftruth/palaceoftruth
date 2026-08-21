@@ -16,6 +16,7 @@ import type {
 } from "../api/types";
 import PalaceFreshnessPill from "../components/PalaceFreshnessPill";
 import PageHeader from "../components/PageHeader";
+import PalaceChatDock from "../components/PalaceChatDock";
 import PalaceStateBanner from "../components/PalaceStateBanner";
 import ProvenanceDrawer from "../components/ProvenanceDrawer";
 import StatePanel from "../components/StatePanel";
@@ -1469,6 +1470,8 @@ export default function Palace() {
           </aside>
         </div>
       ) : null}
+
+      <PalaceChatDock />
     </div>
   );
 }

@@ -667,3 +667,79 @@ export async function streamChat(
   }
   onDone();
 }
+
+export interface PalaceChatMeta {
+  routed_room_id: string | null;
+  selected_wing: string | null;
+  route_confidence: "none" | "low" | "high";
+  result_count: number;
+  completeness_warning?: string | null;
+}
+
+export async function streamPalaceChat(
+  query: string,
+  history: ChatMessage[],
+  onToken: (token: string) => void,
+  onDone: () => void,
+  onError: (err: Error) => void,
+  onSources?: (sources: ChatResponse["sources"]) => void,
+  onMeta?: (meta: PalaceChatMeta) => void,
+): Promise<void> {
+  const res = await fetch(`${BASE}/palace/chat`, {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify({
+      query,
+      history,
+      retrieval_limit: 8,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    onError(new ApiError(res.status, parseErrorMessage(res.status, text)));
+    return;
+  }
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6);
+      if (data === "[DONE]") {
+        onDone();
+        return;
+      }
+      try {
+        const event = JSON.parse(data) as {
+          type?: string;
+          sources?: ChatResponse["sources"];
+        } & Partial<PalaceChatMeta>;
+        if (event.type === "usage") continue;
+        if (event.type === "sources") {
+          onSources?.(event.sources ?? []);
+          continue;
+        }
+        if (event.type === "meta" && onMeta) {
+          onMeta({
+            routed_room_id: event.routed_room_id ?? null,
+            selected_wing: event.selected_wing ?? null,
+            route_confidence: (event.route_confidence as PalaceChatMeta["route_confidence"]) ?? "none",
+            result_count: typeof event.result_count === "number" ? event.result_count : 0,
+            completeness_warning: event.completeness_warning ?? null,
+          });
+          continue;
+        }
+      } catch {
+        // Token payloads are plain text. Only structured events are JSON.
+      }
+      onToken(data.replace(/\\n/g, "\n"));
+    }
+  }
+  onDone();
+}

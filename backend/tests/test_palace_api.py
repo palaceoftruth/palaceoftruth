@@ -18,6 +18,7 @@ from app.models.item import Item
 from app.models.palace import PalaceRoomEvent, PalaceRun, Room, SyncSource
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
 from app.schemas.palace import (
+    PalaceChatRequest,
     PalaceControlTower,
     PalaceRoomClusterReview,
     PalaceDiaryRollupStatus,
@@ -2175,3 +2176,141 @@ def test_register_palace_mcp_client_may_opt_into_containment() -> None:
 
     assert response.status_code == 201
     assert session.executed_params[0]["containment_mode"] == "hermes_agent"
+
+
+def _fake_palace_search_result(*, item_id: uuid.UUID, title: str, score: float) -> SearchResult:
+    return SearchResult(
+        item_id=item_id,
+        title=title,
+        summary=None,
+        source_type="note",
+        source_url=None,
+        tags=[],
+        chunk_text=f"chunk for {title}",
+        chunk_index=0,
+        score=score,
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_palace_chat_validation_rejects_blank_query() -> None:
+    client = _build_app(FakeSession())
+
+    response = client.post("/api/v1/palace/chat", json={"query": "   "})
+    assert response.status_code == 422
+
+
+def test_palace_chat_streams_tokens_meta_sources_and_done(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+    item_a = uuid.uuid4()
+    item_b = uuid.uuid4()
+    room_id = uuid.uuid4()
+
+    async def fake_retrieve(db, *, tenant_id, embedder, body, query_vector=None):
+        assert body.scope_type == "tenant_shared"
+        assert body.room_id is None
+        assert body.limit == 8
+        assert body.query == "What changed in the Palace?"
+        return PalaceRetrieveResponse(
+            routed_room_id=room_id,
+            redirected_from_room_id=None,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type="tenant_shared",
+                selected_wing="Product / Growth",
+                route_confidence="high",
+                candidate_rooms=["Investor Diligence"],
+                result_count=2,
+            ),
+            results=[
+                _fake_palace_search_result(item_id=item_a, title="Diary 2026-08-19", score=0.82),
+                _fake_palace_search_result(item_id=item_b, title="Latest run summary", score=0.71),
+            ],
+            total=2,
+        )
+
+    monkeypatch.setattr("app.api.palace.retrieve_palace", fake_retrieve)
+
+    class FakeLlm:
+        async def stream_complete(self, messages, model=None):
+            async def iterator():
+                yield "First "
+                yield "token"
+
+            return iterator(), lambda: {"input_tokens": 12, "output_tokens": 4}
+
+    client.app.state.llm = FakeLlm()
+
+    response = client.post(
+        "/api/v1/palace/chat",
+        json={
+            "query": "What changed in the Palace?",
+            "history": [{"role": "user", "content": "earlier question"}],
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    body = response.text
+    assert '"type": "meta"' in body
+    assert str(room_id) in body
+    assert '"selected_wing": "Product / Growth"' in body
+    assert '"route_confidence": "high"' in body
+    assert "data: First \n\n" in body
+    assert "data: token\n\n" in body
+    assert '"type": "sources"' in body
+    assert str(item_a) in body
+    assert str(item_b) in body
+    assert '"type": "usage"' in body
+    assert "data: [DONE]" in body
+
+
+def test_palace_chat_emits_no_context_reply_when_retrieval_returns_nothing(monkeypatch) -> None:
+    client = _build_app(FakeSession())
+
+    async def fake_retrieve(db, *, tenant_id, embedder, body, query_vector=None):
+        assert body.scope_type == "tenant_shared"
+        assert body.room_id is None
+        return PalaceRetrieveResponse(
+            routed_room_id=None,
+            redirected_from_room_id=None,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type="tenant_shared",
+                route_confidence="none",
+                result_count=0,
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.palace.retrieve_palace", fake_retrieve)
+
+    response = client.post("/api/v1/palace/chat", json={"query": "Anything new?"})
+    assert response.status_code == 200
+
+    body = response.text
+    assert '"type": "meta"' in body
+    assert '"result_count": 0' in body
+    assert "Palace does not have anything ready" in body
+    assert "data: [DONE]" in body
+
+
+def test_palace_chat_caps_history_depth() -> None:
+    import pytest
+
+    long_history = [{"role": "user", "content": f"prior question {i}"} for i in range(40)]
+    request = PalaceChatRequest(query="What now?", history=long_history)
+    assert len(request.history) == 12
+
+
+def test_palace_chat_request_rejects_blank_message_in_history() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        PalaceChatRequest(
+            query="hi",
+            history=[
+                {"role": "user", "content": "ok"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "  "},
+            ],
+        )
