@@ -2085,6 +2085,50 @@ def test_retrieve_agent_memory_searches_policy_scopes_and_excludes_private_broad
     assert response.trace.broad_corpus_duration_ms is not None
     assert response.trace.merge_duration_ms is not None
     assert response.trace.total_duration_ms is not None
+    assert response.trace.workspace_scopes_skipped is False
+
+
+def test_retrieve_agent_memory_flags_workspace_scopes_skipped_when_omitted(monkeypatch) -> None:
+    import app.services.memory as memory_service
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
+        return memory_service.MemoryRetrieveResponse(
+            scope=body.scope,
+            routed_room_id=None,
+            redirected_from_room_id=None,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    class FakeSearchService:
+        def __init__(self, db, embedder, tenant_id: str) -> None:
+            self.tenant_id = tenant_id
+
+        async def vector_search(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+    monkeypatch.setattr(memory_service, "SearchService", FakeSearchService)
+
+    embedder = FakeEmbedder()
+    response = asyncio.run(
+        retrieve_agent_memory(
+            FakeSession(),
+            embedder=embedder,
+            tenant_id="tenant-a",
+            body=AgentMemoryRetrieveRequest(
+                query="exampleos memory",
+                agent_scope_key="orchestrator",
+            ),
+        )
+    )
+
+    assert response.trace.workspace_scopes_skipped is True
 
 
 def test_retrieve_memory_forwards_explicit_derived_artifact_policy(monkeypatch) -> None:

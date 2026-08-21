@@ -2620,6 +2620,7 @@ async def retrieve_agent_memory(
             result_counts_by_scope=_route_result_counts_by_scope(scopes, route_results),
             workspace_strict=body.workspace_strict,
             workspace_scope_exhausted=workspace_scope_exhausted,
+            workspace_scopes_skipped=not body.workspace_scope_keys,
             tenant_shared_policy=body.tenant_shared_policy,
             tenant_shared_fallback_used=tenant_shared_fallback_used,
             broad_corpus_policy=body.broad_corpus_policy,
