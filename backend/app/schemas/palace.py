@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.chat import ChatMessage
 from app.schemas.job import JobProgressEventResponse
 from app.schemas.retrieval_provenance import (
     RetrievalDerivedRawClass,
@@ -426,6 +427,42 @@ class PalaceRetrieveRequest(BaseModel):
         if self.scope_key is None:
             raise ValueError(f"{self.scope_type} scope requires a key")
         return self
+
+
+class PalaceChatRequest(BaseModel):
+    """Tenant-wide Palace chat request.
+
+    Uses Palace retrieve (room routing + tenant_shared retrieval) to pull context
+    across the entire tenant corpus, then streams an LLM answer with sources.
+    """
+
+    query: str
+    history: list[ChatMessage] = Field(default_factory=list)
+    conversation_id: uuid.UUID | None = None
+    retrieval_limit: int = Field(8, ge=1, le=20)
+    model: str | None = None
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("query must not be blank")
+        return normalized
+
+    @field_validator("history")
+    @classmethod
+    def validate_history(cls, value: list[ChatMessage]) -> list[ChatMessage]:
+        # Cap history depth so a long conversation cannot blow past the LLM context.
+        return value[-12:]
+
+    @field_validator("model")
+    @classmethod
+    def model_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class PalaceTraceStep(BaseModel):

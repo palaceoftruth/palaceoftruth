@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 import shlex
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from app.database import bind_session_to_tenant, get_credential_exchange_db, get
 from app.mcp_scopes import serialize_mcp_scope_catalog
 from app.models.palace import PalaceRun, SyncRun, SyncSource
 from app.models.source_resource import SourceResource, SourceResourceAlias, SourceResourceAuditSnapshot
+from app.schemas.chat import ChatSource
 from app.schemas.memory import (
     BrowserExtensionTokenIssueRequest,
     BrowserExtensionTokenIssueResponse,
@@ -36,6 +38,7 @@ from app.schemas.memory import (
 )
 from app.schemas.palace import (
     PalaceAnswerAuditReport,
+    PalaceChatRequest,
     PalaceClaimReviewRequest,
     PalaceClaimSupportSummary,
     PalaceClaimSupportReport,
@@ -1415,6 +1418,173 @@ async def retrieve_in_palace(
         tenant_id=request.state.tenant_id,
         embedder=request.app.state.embedder,
         body=body,
+    )
+
+
+_PALACE_CHAT_NO_CONTEXT = (
+    "The Palace does not have anything ready to answer that for this tenant yet. "
+    "Ingest some captures or trigger a Palace run, then ask again."
+)
+
+_PALACE_CHAT_SYSTEM_PROMPT = """\
+You are a quick chat assistant for a tenant's Palace of Truth. You answer questions \
+about the workspace by grounding every claim in the supplied CONTEXT.
+
+CONTEXT BLOCKS list items the Palace retrieval just pulled from the tenant corpus. \
+Each block quotes a source so you can cite it. If the CONTEXT is empty, say so \
+honestly — do not invent facts.
+
+Rules:
+- Answer ONLY from the CONTEXT. If the CONTEXT does not cover the question, say so.
+- Cite sources inline using [Source: "title" (source_type)] when a claim comes from a specific block.
+- Keep answers concise. The user is glancing at the Palace while navigating it.
+- When the user asks about the Palace itself (rooms, runs, diary, facts), lean on any \
+matching blocks first; if no block covers it, say which Palace surface would help.
+
+CONTEXT:
+{context}"""
+
+
+def _palace_chat_sources(results: list) -> list[ChatSource]:
+    """Convert Palace retrieve results to ChatSource objects, capping chunk_text."""
+    sources: list[ChatSource] = []
+    for r in results:
+        chunk = r.chunk_text or ""
+        capped = (chunk[:500] + "…") if len(chunk) > 500 else chunk
+        sources.append(
+            ChatSource(
+                item_id=r.item_id,
+                title=r.title,
+                source_type=r.source_type,
+                chunk_text=capped,
+                score=r.score,
+                chunk_index=getattr(r, "chunk_index", 0) or 0,
+                source_url=getattr(r, "source_url", None),
+                artifact_citation=getattr(r, "artifact_citation", None),
+                retrieval_provenance=getattr(r, "retrieval_provenance", None),
+            )
+        )
+    return sources
+
+
+def _build_palace_chat_context(sources: list[ChatSource]) -> str:
+    """Render retrieved sources as a single context block for the LLM."""
+    parts: list[str] = []
+    total = 0
+    cap = 24000
+    for src in sources:
+        snippet = f'[Source: "{src.title}" ({src.source_type})]\n{src.chunk_text}'
+        if total + len(snippet) > cap:
+            break
+        parts.append(snippet)
+        total += len(snippet)
+    return "\n---\n".join(parts)
+
+
+@router.post("/chat", dependencies=[Depends(require_api_capability("read"))])
+async def palace_chat(
+    body: PalaceChatRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Tenant-wide Palace chat: Palace retrieve -> LLM stream.
+
+    Streams Server-Sent Events:
+        data: <token>
+        data: {"type":"meta","routed_room_id":"...","selected_wing":"...","route_confidence":"low|high|none"}
+        data: {"type":"sources","sources":[...]}
+        data: {"type":"usage","input_tokens":N,"output_tokens":M}
+        data: [DONE]
+
+    The retrieval uses scope_type=tenant_shared with no room_id, so it pulls
+    from across the whole tenant corpus and reports the Palace room (if any)
+    it would have routed the query to.
+    """
+    retrieve_request = PalaceRetrieveRequest(
+        query=body.query,
+        limit=body.retrieval_limit,
+        scope_type="tenant_shared",
+    )
+    retrieval = await retrieve_palace(
+        db,
+        tenant_id=request.state.tenant_id,
+        embedder=request.app.state.embedder,
+        body=retrieve_request,
+    )
+
+    sources = _palace_chat_sources(retrieval.results)
+    context = _build_palace_chat_context(sources)
+
+    if not sources:
+        async def _no_context_stream():
+            meta_event = json.dumps(
+                {
+                    "type": "meta",
+                    "routed_room_id": str(retrieval.routed_room_id) if retrieval.routed_room_id else None,
+                    "selected_wing": retrieval.trace.selected_wing,
+                    "route_confidence": retrieval.trace.route_confidence,
+                    "result_count": 0,
+                }
+            )
+            yield f"data: {meta_event}\n\n"
+            sources_event = json.dumps({"type": "sources", "sources": []})
+            yield f"data: {sources_event}\n\n"
+            usage_event = json.dumps({"type": "usage", "input_tokens": None, "output_tokens": None})
+            yield f"data: {usage_event}\n\n"
+            yield f"data: {_PALACE_CHAT_NO_CONTEXT}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _no_context_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    system_content = _PALACE_CHAT_SYSTEM_PROMPT.format(context=context)
+    prompt_messages: list[dict] = [{"role": "system", "content": system_content}]
+    for prior in body.history:
+        prompt_messages.append({"role": prior.role, "content": prior.content})
+    prompt_messages.append({"role": "user", "content": body.query})
+
+    llm = request.app.state.llm
+    token_iter, get_usage = await llm.stream_complete(prompt_messages, model=body.model)
+
+    async def generate():
+        meta_event = json.dumps(
+            {
+                "type": "meta",
+                "routed_room_id": str(retrieval.routed_room_id) if retrieval.routed_room_id else None,
+                "selected_wing": retrieval.trace.selected_wing,
+                "route_confidence": retrieval.trace.route_confidence,
+                "result_count": len(sources),
+                "completeness_warning": retrieval.trace.completeness_warning,
+            }
+        )
+        yield f"data: {meta_event}\n\n"
+
+        async for token in token_iter:
+            escaped = token.replace("\n", "\\n")
+            yield f"data: {escaped}\n\n"
+
+        usage = get_usage()
+        if usage is not None:
+            usage_payload = {
+                "type": "usage",
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+            }
+        else:
+            usage_payload = {"type": "usage", "input_tokens": None, "output_tokens": None}
+        yield f"data: {json.dumps(usage_payload)}\n\n"
+
+        sources_event = {"type": "sources", "sources": [src.model_dump(mode="json") for src in sources]}
+        yield f"data: {json.dumps(sources_event)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
