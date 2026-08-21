@@ -1444,6 +1444,12 @@ class SearchService:
         # results back apart. None keeps the single-scope scope_type/scope_key
         # behaviour untouched.
         scope_labels: list[str] | None = None,
+        # Caps how many semantic candidates a single scope_label can contribute
+        # before the flat candidate limit is applied, so a batched multi-scope
+        # search cannot let one scope with many close matches starve the others
+        # of a candidate slot. None preserves the prior flat-LIMIT behaviour
+        # (no per-scope partitioning) for every other caller.
+        per_scope_candidate_cap: int | None = None,
         tags: list[str] | None = None,
         tags_mode: str = "any",
         date_from: datetime | None = None,
@@ -1488,15 +1494,11 @@ class SearchService:
         # which made candidate_limit an output cap rather than a work bound and kept
         # PostgreSQL from using the HNSW/GIN indexes as candidate generators.
         # Use CAST() instead of :: to avoid conflict with SQLAlchemy :param syntax.
-        sql = text(f"""
-            WITH semantic_candidates AS MATERIALIZED (
-                SELECT
-                    e.item_id,
-                    e.chunk_text,
-                    e.chunk_index,
-                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance
-                FROM {embedding_plan.table_name} e
-                JOIN items i ON e.item_id = i.id
+        #
+        # semantic_candidates_where is shared by both the flat and the per-scope
+        # ranked variant below, so the candidate-generation filters can never
+        # drift between them.
+        semantic_candidates_where = f"""
                 WHERE i.status = 'ready'
                   AND i.deleted_at IS NULL
                   AND i.tenant_id = :tenant_id
@@ -1579,10 +1581,71 @@ class SearchService:
                   )
                   AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
                   AND (CAST(:date_to   AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
+        """
+        if per_scope_candidate_cap is None:
+            # No cap requested: keep the exact prior flat-LIMIT behaviour, with
+            # no partitioning overhead, for every caller that doesn't ask for it.
+            semantic_candidates_cte = f"""
+            WITH semantic_candidates AS MATERIALIZED (
+                SELECT
+                    e.item_id,
+                    e.chunk_text,
+                    e.chunk_index,
+                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance
+                FROM {embedding_plan.table_name} e
+                JOIN items i ON e.item_id = i.id
+                {semantic_candidates_where}
                 ORDER BY
                     e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) ASC
                 LIMIT :semantic_candidate_limit
             ),
+            """
+        else:
+            # A cap is requested: rank candidates within each scope_label before
+            # the flat limit applies, so a scope with many close matches cannot
+            # use up every slot and starve scopes with fewer, lower-scoring hits.
+            semantic_candidates_cte = f"""
+            WITH semantic_ranked AS MATERIALIZED (
+                SELECT
+                    e.item_id,
+                    e.chunk_text,
+                    e.chunk_index,
+                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance,
+                    (
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
+                                'tenant_shared'
+                            ) = 'tenant_shared' THEN 'tenant_shared'
+                            WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
+                                THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                                     || '/'
+                                     || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
+                            ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
+                        END
+                    ) AS scope_label_partition
+                FROM {embedding_plan.table_name} e
+                JOIN items i ON e.item_id = i.id
+                {semantic_candidates_where}
+            ),
+            semantic_candidates AS MATERIALIZED (
+                SELECT item_id, chunk_text, chunk_index, distance
+                FROM (
+                    SELECT
+                        item_id, chunk_text, chunk_index, distance,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY scope_label_partition
+                            ORDER BY distance ASC
+                        ) AS rn
+                    FROM semantic_ranked
+                ) ranked_by_scope
+                WHERE rn <= :per_scope_candidate_cap
+                ORDER BY distance ASC
+                LIMIT :semantic_candidate_limit
+            ),
+            """
+        sql = text(f"""
+            {semantic_candidates_cte}
             lexical_match_window AS MATERIALIZED (
                 SELECT i.id AS item_id
                 FROM items i
@@ -1798,6 +1861,7 @@ class SearchService:
                     "candidate_limit": effective_candidate_limit,
                     "semantic_candidate_limit": effective_candidate_limit,
                     "lexical_candidate_limit": effective_candidate_limit,
+                    "per_scope_candidate_cap": per_scope_candidate_cap,
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
                     "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,

@@ -1833,6 +1833,50 @@ def _merge_search_results(
     )
 
 
+def _interleave_scope_label(result: object) -> str:
+    label = getattr(result, "retrieved_scope_label", None)
+    if label:
+        return str(label)
+    scope_type = getattr(result, "retrieved_scope_type", None)
+    if scope_type:
+        scope_key = getattr(result, "retrieved_scope_key", None)
+        return f"{scope_type}/{scope_key}" if scope_key else str(scope_type)
+    return ""
+
+
+def _interleave_results_by_scope(results: list, display_limit: int) -> list:
+    """Round-robin the priority+score sorted results across scopes.
+
+    A flat results[:display_limit] slice lets one scope with many
+    high-scoring hits crowd out a scope that only has a few, lower-scoring
+    ones. This takes results one-per-scope per pass instead, cycling through
+    scopes in the order they first appear (which mirrors the priority-tier
+    sort _merge_search_results already applied), so every scope with a
+    candidate gets at least one slot before any scope gets a second.
+    """
+    if display_limit <= 0 or len(results) <= display_limit:
+        return results[:display_limit]
+
+    queues: dict[str, list] = {}
+    scope_order: list[str] = []
+    for result in results:
+        label = _interleave_scope_label(result)
+        if label not in queues:
+            queues[label] = []
+            scope_order.append(label)
+        queues[label].append(result)
+
+    interleaved: list = []
+    while len(interleaved) < display_limit and any(queues[label] for label in scope_order):
+        for label in scope_order:
+            if not queues[label]:
+                continue
+            interleaved.append(queues[label].pop(0))
+            if len(interleaved) >= display_limit:
+                break
+    return interleaved
+
+
 def _effective_agent_memory_budgets(body: AgentMemoryRetrieveRequest) -> tuple[int, int, int]:
     display_limit = body.display_limit or body.limit
     selected_candidate_limit = body.candidate_limit or min(50, max(display_limit * 4, body.limit))
@@ -2261,6 +2305,12 @@ _AGENT_MEMORY_BATCHED_SCOPE_THRESHOLD = 4
 # ceiling stops a very wide reach from asking for an unbounded row count.
 _AGENT_MEMORY_BATCHED_CANDIDATE_CEILING = 200
 
+# Floor for the per-scope candidate cap below. A very wide reach can drive
+# ceiling / len(scopes) down toward zero, which would let the SQL partition
+# filter starve a scope entirely before the Python merge gets a chance to
+# interleave it in.
+_AGENT_MEMORY_BATCHED_PER_SCOPE_CANDIDATE_FLOOR = 5
+
 
 async def _batched_scope_results(
     db: AsyncSession,
@@ -2284,6 +2334,13 @@ async def _batched_scope_results(
         return {}
     labels = [_scope_label_from_memory_scope(scope) for scope in scopes]
     per_scope_cap = max(caps_by_label.values()) if caps_by_label else 0
+    # Cap what any single scope can contribute to the flat candidate query, so
+    # a scope with many close matches cannot use up the whole row budget
+    # before the Python-side merge ever sees the other scopes' results.
+    per_scope_candidate_cap = max(
+        min(per_scope_cap, _AGENT_MEMORY_BATCHED_CANDIDATE_CEILING // len(scopes)),
+        _AGENT_MEMORY_BATCHED_PER_SCOPE_CANDIDATE_FLOOR,
+    )
     service = SearchService(db, embedder, tenant_id=tenant_id)
     grouped: dict[str, list] = {label: [] for label in labels}
     try:
@@ -2300,6 +2357,7 @@ async def _batched_scope_results(
             date_from=body.date_from,
             date_to=body.date_to,
             scope_labels=labels,
+            per_scope_candidate_cap=per_scope_candidate_cap,
             include_derived_artifacts=body.include_derived_artifacts,
             query_vector=query_vector,
             query_embedding_error=query_embedding_error,
@@ -2576,7 +2634,7 @@ async def retrieve_agent_memory(
         preferred_workspace_keys=preferred_workspace_keys,
         preferred_agent_keys=preferred_agent_keys,
     )
-    displayed_results = deduped_results[:display_limit]
+    displayed_results = _interleave_results_by_scope(deduped_results, display_limit)
     displayed_results, context_budget_truncated = _apply_context_budget(
         displayed_results,
         body.context_budget_chars,
@@ -2620,6 +2678,7 @@ async def retrieve_agent_memory(
             result_counts_by_scope=_route_result_counts_by_scope(scopes, route_results),
             workspace_strict=body.workspace_strict,
             workspace_scope_exhausted=workspace_scope_exhausted,
+            workspace_scopes_skipped=not body.workspace_scope_keys,
             tenant_shared_policy=body.tenant_shared_policy,
             tenant_shared_fallback_used=tenant_shared_fallback_used,
             broad_corpus_policy=body.broad_corpus_policy,

@@ -984,6 +984,14 @@ class AgentMemoryRetrieveTrace(BaseModel):
     result_counts_by_scope: dict[str, int] = Field(default_factory=dict)
     workspace_strict: bool = False
     workspace_scope_exhausted: bool = False
+    workspace_scopes_skipped: bool = Field(
+        default=False,
+        description=(
+            "True when workspace_scope_keys was empty on the request, so no "
+            "workspace scope was included in this search even if the caller "
+            "has writable workspace scopes."
+        ),
+    )
     tenant_shared_policy: AgentMemoryTenantSharedPolicy = "always"
     tenant_shared_fallback_used: bool = False
     broad_corpus_policy: AgentMemoryBroadCorpusPolicy = "default"
