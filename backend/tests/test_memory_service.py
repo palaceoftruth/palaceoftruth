@@ -24,6 +24,8 @@ from app.schemas.search import SearchResult
 from app.services.memory import (
     MEMORY_JOB_TYPE,
     _build_relationship_doctor_state,
+    _interleave_results_by_scope,
+    _merge_search_results,
     accept_canonical_memory_entry,
     accept_memory_artifact,
     build_memory_idempotency_key,
@@ -224,6 +226,39 @@ def _search_result(
         source_span=source_span,
         retrieved_scope_label=retrieved_scope_label,
     )
+
+
+def test_interleave_results_by_scope_gives_small_scope_a_slot() -> None:
+    big_scope_results = [
+        _search_result(
+            f"Big scope result {i}",
+            score=0.9 - i * 0.01,
+            retrieved_scope_label="workspace/big-scope",
+        )
+        for i in range(10)
+    ]
+    small_scope_results = [
+        _search_result(
+            "Small scope result",
+            score=0.2,
+            retrieved_scope_label="workspace/small-scope",
+        )
+    ]
+    merged = _merge_search_results([big_scope_results, small_scope_results])
+
+    interleaved = _interleave_results_by_scope(merged, 5)
+
+    assert len(interleaved) == 5
+    assert any(result.title == "Small scope result" for result in interleaved)
+    # The big scope still dominates the remaining slots once every scope with
+    # a candidate has had its turn, so the top-scored items are still first.
+    assert interleaved[0].title == "Big scope result 0"
+
+
+def test_interleave_results_by_scope_is_a_no_op_when_everything_fits() -> None:
+    results = [_search_result("Only result", score=0.5, retrieved_scope_label="workspace/a")]
+
+    assert _interleave_results_by_scope(results, 5) == results
 
 
 def test_memory_ranking_trace_is_bounded_and_redacted() -> None:
@@ -2555,6 +2590,68 @@ def test_retrieve_agent_memory_prefers_exact_workspace_over_tenant_shared(monkey
         "Receipt Shelf full project brief",
         "Shared Codex project briefs",
     ]
+
+
+def test_retrieve_agent_memory_interleaves_scopes_so_small_scope_is_not_crowded_out(monkeypatch) -> None:
+    import app.services.memory as memory_service
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body, query_vector=None, query_embedding_error=None, allow_empty_degraded=False):
+        if body.scope.key == "big-scope":
+            results = [
+                _search_result(
+                    f"Big scope result {i}",
+                    score=0.9 - i * 0.01,
+                    tags=["codex-memory", "scope-workspace", "workspace-big-scope"],
+                    retrieved_scope_label="workspace/big-scope",
+                )
+                for i in range(10)
+            ]
+        elif body.scope.key == "small-scope":
+            results = [
+                _search_result(
+                    "Small scope result",
+                    score=0.2,
+                    tags=["codex-memory", "scope-workspace", "workspace-small-scope"],
+                    retrieved_scope_label="workspace/small-scope",
+                )
+            ]
+        else:
+            results = []
+        return memory_service.MemoryRetrieveResponse(
+            scope=body.scope,
+            routed_room_id=None,
+            redirected_from_room_id=None,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=results,
+            total=len(results),
+        )
+
+    monkeypatch.setattr(memory_service, "retrieve_memory", fake_retrieve_memory)
+
+    response = asyncio.run(
+        retrieve_agent_memory(
+            FakeSession(),
+            embedder=object(),
+            tenant_id="tenant-a",
+            body=AgentMemoryRetrieveRequest(
+                query="scope mix",
+                workspace_scope_keys=["big-scope", "small-scope"],
+                include_tenant_shared=False,
+                include_broad_corpus=False,
+                display_limit=5,
+            ),
+        )
+    )
+
+    assert len(response.results) == 5
+    assert any(result.title == "Small scope result" for result in response.results), (
+        "the low-scoring small scope must still get a slot instead of being "
+        "crowded out by the high-scoring big scope"
+    )
 
 
 def test_retrieve_agent_memory_workspace_strict_skips_agent_session_and_shared_when_workspace_hits(

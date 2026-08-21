@@ -220,6 +220,41 @@ def test_vector_search_accepts_candidate_limit_separate_from_display_limit() -> 
     assert service.last_ranking_trace["candidate_limit"] == 80
 
 
+def test_vector_search_omits_per_scope_partitioning_when_cap_not_given() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(
+        service.vector_search(
+            query="test",
+            scope_labels=["workspace/a", "workspace/b"],
+        )
+    )
+
+    assert db.last_sql is not None
+    assert "scope_label_partition" not in db.last_sql
+    assert "rn <= :per_scope_candidate_cap" not in db.last_sql
+    assert db.last_params["per_scope_candidate_cap"] is None
+
+
+def test_vector_search_partitions_semantic_candidates_by_scope_when_cap_given() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(
+        service.vector_search(
+            query="test",
+            scope_labels=["workspace/a", "workspace/b"],
+            per_scope_candidate_cap=5,
+        )
+    )
+
+    assert db.last_sql is not None
+    assert "scope_label_partition" in db.last_sql
+    assert "rn <= :per_scope_candidate_cap" in db.last_sql
+    assert db.last_params["per_scope_candidate_cap"] == 5
+
+
 def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() -> None:
     db = _FakeDB()
     service = SearchService(db, _FakeEmbedder(), tenant_id="default")
