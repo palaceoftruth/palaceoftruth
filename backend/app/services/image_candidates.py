@@ -74,6 +74,62 @@ class DownloadedImageCandidate:
     byte_hash: str
 
 
+@dataclass(frozen=True)
+class UploadedImage:
+    """Image bytes the browser decoded, uploaded by the extension.
+
+    Nothing here was fetched by Palace, so there is no ``final_url``: the
+    source URL an uploaded image claims is a client assertion, not verified
+    provenance. Callers must record it as such.
+    """
+
+    media_type: str
+    extension: str
+    content: bytes
+    byte_size: int
+    byte_hash: str
+
+
+# How the extension obtained the bytes. Kept as provenance because the three
+# routes differ in fidelity: only a page fetch returns the original file, while
+# a canvas read is a re-encode of what the page rendered.
+UPLOADED_IMAGE_ORIGINS = frozenset({"page_fetch", "canvas", "context_menu"})
+
+
+def inspect_uploaded_image(content: bytes) -> UploadedImage:
+    """Type uploaded image bytes from the bytes themselves.
+
+    The multipart filename and Content-Type are both client controlled, and an
+    upload has no server-side fetch to corroborate them, so the file signature
+    is the only input trusted for routing and for the served media type.
+    """
+
+    if not content:
+        raise ImageCandidateError("uploaded image is empty")
+    if len(content) > IMAGE_SIZE_LIMIT:
+        raise ImageCandidateError("uploaded image is too large", status_code=413)
+    head = content[:SNIFF_BYTES]
+    for media_type, extension in IMAGE_EXTENSIONS.items():
+        if matches_extension(head, extension):
+            return UploadedImage(
+                media_type=media_type,
+                extension=extension,
+                content=content,
+                byte_size=len(content),
+                byte_hash=hashlib.sha256(content).hexdigest(),
+            )
+    raise ImageCandidateError("uploaded image is not a supported image type")
+
+
+def normalize_uploaded_image_origin(value: str | None) -> str:
+    origin = (value or "").strip().lower()
+    if origin not in UPLOADED_IMAGE_ORIGINS:
+        raise ImageCandidateError(
+            "origin must be one of: " + ", ".join(sorted(UPLOADED_IMAGE_ORIGINS))
+        )
+    return origin
+
+
 def normalize_http_url(value: str | None, *, detail: str = "Invalid URL") -> str:
     if value is None or not value.strip():
         raise ImageCandidateError(detail)

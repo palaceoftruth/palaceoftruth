@@ -1824,3 +1824,256 @@ def test_ingest_image_defers_vision_failure_to_worker_job(tmp_path: Path, monkey
     assert len(session.added_jobs) == 1
     assert session.added_items[0].metadata_["image_analysis"]["status"] == "queued"
     assert arq_pool.enqueued[0][0] == "process_image"
+
+
+def _browser_capture_parent(item_id: uuid.UUID | None = None, **metadata) -> Item:
+    return Item(
+        id=item_id or uuid.uuid4(),
+        source_type="webpage",
+        source_url="https://x.com/Zephyr_hg/status/2051708305819435445",
+        title="Private post",
+        tenant_id="tenant-a",
+        status="processing",
+        metadata_={
+            "browser_capture": {
+                "source_url": "https://x.com/Zephyr_hg/status/2051708305819435445",
+                "capture_kind": "social_post",
+                **metadata,
+            }
+        },
+    )
+
+
+def test_browser_image_upload_creates_standalone_image_capture(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+    session = FakeSession()
+    arq_pool = FakeArqPool()
+    client = _client(session, arq_pool=arq_pool)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={
+            "image_url": "https://private.example.com/media/secret.png",
+            "source_url": "https://private.example.com/album/17",
+            "page_title": "Album 17",
+            "alt_text": "the private diagram",
+            "origin": "page_fetch",
+            "tags": "research, private",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    image_hash = hashlib.sha256(PNG_1X1_BYTES).hexdigest()
+    assert body["status"] == "queued"
+    assert body["byte_hash"] == image_hash
+    assert body["byte_origin"] == "page_fetch"
+    assert body["media_type"] == "image/png"
+    assert body["parent_item_id"] is None
+
+    assert len(session.added_items) == 1
+    item = session.added_items[0]
+    assert item.source_type == "image"
+    assert item.source_url == "https://private.example.com/media/secret.png"
+    assert item.content_hash == image_hash
+    assert item.tags == ["research", "private"]
+    capture_image = item.metadata_["browser_capture_image"]
+    assert capture_image["source"] == "browser_image_upload"
+    assert capture_image["byte_origin"] == "page_fetch"
+    # Palace never fetched the bytes, so the URL stays marked as a claim.
+    assert capture_image["client_asserted_source"] is True
+    assert capture_image["source_image_url"] == "https://private.example.com/media/secret.png"
+    assert capture_image["source_post_url"] == "https://private.example.com/album/17"
+    artifact = capture_image["artifact"]
+    assert Path(artifact["storage_path"]).read_bytes() == PNG_1X1_BYTES
+    assert item.metadata_["image_analysis"]["artifact"]["source"] == "browser_image_upload"
+    assert item.metadata_["image_analysis"]["artifact"]["storage_path"] == artifact["storage_path"]
+
+    assert len(session.added_web_saves) == 1
+    web_save = session.added_web_saves[0]
+    assert web_save.capture_kind == "image"
+    assert web_save.normalized_url == "https://private.example.com/media/secret.png"
+    assert arq_pool.enqueued[0][0] == "process_image"
+
+
+def test_browser_image_upload_attaches_bytes_to_an_existing_capture(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+    parent = _browser_capture_parent()
+    session = FakeSession(existing_items=[parent])
+    arq_pool = FakeArqPool()
+    client = _client(session, arq_pool=arq_pool)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={
+            "item_id": str(parent.id),
+            "image_url": "https://pbs.twimg.com/media/post-image.jpg?token=private",
+            "alt_text": "diagram from the post",
+            "width": "1200",
+            "height": "675",
+            "role": "post_image",
+            "order": "0",
+            "origin": "canvas",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["parent_item_id"] == str(parent.id)
+    assert body["byte_origin"] == "canvas"
+
+    assert len(session.added_items) == 1
+    child_item = session.added_items[0]
+    assert child_item.source_type == "image_candidate"
+    assert child_item.status == "captured"
+    capture_image = child_item.metadata_["browser_capture_image"]
+    assert capture_image["source"] == "browser_image_upload"
+    assert capture_image["client_asserted_source"] is True
+    assert capture_image["dimensions"] == {"width": 1200, "height": 675}
+    assert Path(capture_image["artifact"]["storage_path"]).read_bytes() == PNG_1X1_BYTES
+
+    linked = parent.metadata_["browser_capture"]["image_candidates"]
+    assert linked == [
+        {
+            "item_id": str(child_item.id),
+            "source": "browser_image_upload",
+            "source_image_url": "https://pbs.twimg.com/media/post-image.jpg?token=private",
+            "byte_origin": "canvas",
+            "media_type": "image/png",
+            "byte_hash": hashlib.sha256(PNG_1X1_BYTES).hexdigest(),
+            "byte_size": len(PNG_1X1_BYTES),
+            "order": 0,
+        }
+    ]
+    assert arq_pool.enqueued[0][0] == "process_image"
+
+
+def test_browser_image_upload_repeated_bytes_do_not_store_a_second_copy() -> None:
+    image_hash = hashlib.sha256(PNG_1X1_BYTES).hexdigest()
+    existing_child_id = uuid.uuid4()
+    parent = _browser_capture_parent(
+        image_candidates=[{"item_id": str(existing_child_id), "byte_hash": image_hash}]
+    )
+    session = FakeSession(existing_items=[parent])
+    arq_pool = FakeArqPool()
+    client = _client(session, arq_pool=arq_pool)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={"item_id": str(parent.id), "origin": "page_fetch"},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "duplicate"
+    assert body["item_id"] == str(existing_child_id)
+    assert body["duplicate_of"] == str(existing_child_id)
+    assert session.added_items == []
+    assert arq_pool.enqueued == []
+
+
+def test_browser_image_upload_types_the_bytes_not_the_declared_filename(tmp_path: Path, monkeypatch) -> None:
+    """A .jpg name over PNG bytes must be stored and served as a PNG."""
+
+    monkeypatch.setattr("app.services.bundle.settings.upload_artifact_dir", str(tmp_path / "uploads"))
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("mislabelled.jpg", PNG_1X1_BYTES, "image/jpeg")},
+        data={"image_url": "https://private.example.com/media/secret.jpg", "origin": "page_fetch"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["media_type"] == "image/png"
+    item = session.added_items[0]
+    assert item.metadata_["browser_capture_image"]["artifact"]["filename"].endswith(".png")
+    assert item.metadata_["browser_capture_image"]["media_type"] == "image/png"
+
+
+def test_browser_image_upload_rejects_bytes_that_are_not_an_image() -> None:
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("payload.png", b"<html>not an image</html>", "image/png")},
+        data={"image_url": "https://private.example.com/media/secret.png"},
+    )
+
+    assert response.status_code == 422
+    assert "supported image type" in response.json()["detail"]
+    assert session.added_items == []
+
+
+def test_browser_image_upload_rejects_an_oversized_upload(monkeypatch) -> None:
+    monkeypatch.setattr(capture_api, "IMAGE_SIZE_LIMIT", 16)
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={"image_url": "https://private.example.com/media/secret.png"},
+    )
+
+    assert response.status_code == 413
+    assert session.added_items == []
+
+
+def test_browser_image_upload_rejects_an_unknown_byte_origin() -> None:
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={"image_url": "https://private.example.com/media/secret.png", "origin": "trust-me"},
+    )
+
+    assert response.status_code == 422
+    assert "origin must be one of" in response.json()["detail"]
+    assert session.added_items == []
+
+
+def test_browser_image_upload_rejects_an_item_that_is_not_a_browser_capture() -> None:
+    plain_item = Item(
+        id=uuid.uuid4(),
+        source_type="webpage",
+        source_url="https://example.com/story",
+        title="Plain story",
+        tenant_id="tenant-a",
+        status="ready",
+        metadata_={},
+    )
+    session = FakeSession(existing_items=[plain_item])
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={"item_id": str(plain_item.id), "origin": "page_fetch"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Item is not a browser capture"
+    assert session.added_items == []
+
+
+def test_browser_image_upload_requires_a_url_when_there_is_no_parent_capture() -> None:
+    session = FakeSession()
+    client = _client(session)
+
+    response = client.post(
+        "/api/v1/capture/browser/images",
+        files={"file": ("post-image.png", PNG_1X1_BYTES, "image/png")},
+        data={"origin": "page_fetch"},
+    )
+
+    assert response.status_code == 422
+    assert "image_url or source_url is required" in response.json()["detail"]
+    assert session.added_items == []

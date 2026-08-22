@@ -12,6 +12,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
   "optional_host_permissions": ["https://*/*"]
 }

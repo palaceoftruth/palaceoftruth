@@ -19,7 +19,7 @@ from app.schemas.web_save import (
 router = APIRouter(prefix="/web-saves", tags=["web-saves"])
 
 _SORT_ORDERS = frozenset({"asc", "desc"})
-_CAPTURE_KINDS = frozenset({"webpage", "social_post", "media", "selection_note"})
+_CAPTURE_KINDS = frozenset({"webpage", "social_post", "media", "selection_note", "image"})
 
 
 def _to_response(web_save: WebSave, item: Item) -> WebSaveResponse:

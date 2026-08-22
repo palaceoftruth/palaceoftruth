@@ -46,3 +46,33 @@ test("rejects invalid and unsupported URLs", () => {
   assert.equal(classifyCapture({ url: "not a url" }).kind, "invalid");
   assert.equal(classifyCapture({ url: "chrome://settings" }).kind, "invalid");
 });
+
+test("classifies direct image files as an image upload", () => {
+  for (const url of [
+    "https://example.com/photo.jpg",
+    "https://cdn.example.com/a/b/diagram.PNG",
+    "https://example.com/animation.gif?v=2",
+    "https://example.com/modern.avif",
+  ]) {
+    assert.equal(classifyCapture({ url }).kind, "image", url);
+  }
+});
+
+test("an image on a social host is uploaded as bytes, not saved as a post", () => {
+  const result = classifyCapture({ url: "https://pbs.twimg.com/media/post-image.jpg" });
+  assert.equal(result.kind, "image");
+  assert.equal(result.reason, "The image file itself is uploaded to Palace, not just its URL.");
+});
+
+test("a page that merely mentions an extension is still a webpage", () => {
+  assert.equal(classifyCapture({ url: "https://example.com/articles/jpg-vs-png" }).kind, "webpage");
+  assert.equal(classifyCapture({ url: "https://example.com/gallery?file=photo.jpg" }).kind, "webpage");
+});
+
+test("selected text still wins over a direct image URL", () => {
+  const result = classifyCapture({
+    url: "https://example.com/photo.jpg",
+    selectionText: "Caption worth keeping",
+  });
+  assert.equal(result.kind, "selection_note");
+});
