@@ -54,7 +54,7 @@ class IngestResponse(BaseModel):
     status: str = "queued"
 
 
-BrowserCaptureKind = Literal["selection_note", "media", "social_post", "webpage"]
+BrowserCaptureKind = Literal["selection_note", "media", "social_post", "webpage", "image"]
 BrowserCaptureRoute = Literal["media", "webpage", "note"]
 
 
@@ -84,6 +84,25 @@ class BrowserCaptureRequest(BaseModel):
     @classmethod
     def model_not_blank(cls, v: str | None) -> str | None:
         return _validate_model_not_blank(v)
+
+
+class BrowserImageUploadResponse(BaseModel):
+    """Result of an image the extension uploaded as bytes.
+
+    ``parent_item_id`` is set when the image was attached to an existing
+    capture; it is null for a standalone image capture.
+    """
+
+    job_id: uuid.UUID | None = None
+    item_id: uuid.UUID
+    status: str = "queued"
+    parent_item_id: uuid.UUID | None = None
+    media_type: str
+    byte_hash: str
+    byte_size: int
+    byte_origin: str
+    duplicate_of: uuid.UUID | None = None
+    web_save_id: uuid.UUID | None = None
 
 
 class BrowserCaptureResponse(BaseModel):

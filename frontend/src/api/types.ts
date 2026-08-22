@@ -21,7 +21,7 @@ export interface ItemListResponse {
   per_page: number;
 }
 
-export type WebSaveCaptureKind = "webpage" | "social_post" | "media" | "selection_note";
+export type WebSaveCaptureKind = "webpage" | "social_post" | "media" | "selection_note" | "image";
 
 export interface WebSaveItemSummary {
   id: string;

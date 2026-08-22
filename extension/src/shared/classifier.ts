@@ -1,4 +1,4 @@
-export type CaptureKind = "selection_note" | "media" | "social_post" | "webpage" | "invalid";
+export type CaptureKind = "selection_note" | "image" | "media" | "social_post" | "webpage" | "invalid";
 
 export type CaptureInput = {
   url?: string | null;
@@ -28,6 +28,8 @@ const MEDIA_EXTENSIONS = new Set([
   ".wav",
   ".webm",
 ]);
+
+const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 
 const SOCIAL_HOSTS = [
   /(^|\.)x\.com$/i,
@@ -61,6 +63,11 @@ function isDirectMediaUrl(url: URL): boolean {
   return [...MEDIA_EXTENSIONS].some((extension) => pathname.endsWith(extension));
 }
 
+function isDirectImageUrl(url: URL): boolean {
+  const pathname = url.pathname.toLowerCase();
+  return [...IMAGE_EXTENSIONS].some((extension) => pathname.endsWith(extension));
+}
+
 function isYouTubeUrl(url: URL): boolean {
   if (/^youtu\.be$/i.test(url.hostname)) return true;
   if (!/(^|\.)youtube\.com$/i.test(url.hostname)) return false;
@@ -87,6 +94,16 @@ export function classifyCapture(input: CaptureInput): CaptureClassification {
       kind: "invalid",
       url: null,
       reason: "Open an http or https page before saving to Palace.",
+    };
+  }
+
+  // Checked before media and social: an image is uploaded as its own bytes,
+  // which is the only route that works when Palace cannot fetch the URL.
+  if (isDirectImageUrl(parsedUrl)) {
+    return {
+      kind: "image",
+      url: parsedUrl.href,
+      reason: "The image file itself is uploaded to Palace, not just its URL.",
     };
   }
 
@@ -117,6 +134,8 @@ export function labelForCaptureKind(kind: CaptureKind): string {
   switch (kind) {
     case "selection_note":
       return "Selected text";
+    case "image":
+      return "Image";
     case "media":
       return "Media URL";
     case "social_post":

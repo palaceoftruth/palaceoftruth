@@ -1,13 +1,25 @@
 import { classifyCapture, labelForCaptureKind, type CaptureClassification } from "./shared/classifier.js";
-import { getCredentials } from "./shared/credentials.js";
+import { getCredentials, type PalaceCredentials } from "./shared/credentials.js";
 import { extractXPostImageCandidates, type BrowserImageCandidate } from "./shared/imageCandidates.js";
-import { lookupWebSavesForUrl, submitCapture, type WebSave } from "./shared/palaceClient.js";
+import { decodeGrabbedImage, grabImageBytesFromTab, type GrabbedImageBytes } from "./shared/imageBytes.js";
+import {
+  lookupWebSavesForUrl,
+  submitCapture,
+  uploadCaptureImage,
+  type WebSave,
+} from "./shared/palaceClient.js";
 
 type CurrentTabContext = {
   imageCandidates: BrowserImageCandidate[];
+  tabId: number | null;
   title: string;
   url: string | null;
   selectionText: string | null;
+};
+
+type GrabbedCandidate = {
+  candidate: BrowserImageCandidate;
+  grabbed: GrabbedImageBytes;
 };
 
 const kindLabel = document.querySelector<HTMLSpanElement>("#kindLabel");
@@ -55,6 +67,7 @@ async function readCurrentTab(): Promise<CurrentTabContext> {
   if (typeof chrome === "undefined" || !chrome.tabs?.query || !chrome.scripting?.executeScript) {
     return {
       imageCandidates: [],
+      tabId: null,
       title: "Example article",
       url: "https://example.com/article",
       selectionText: null,
@@ -81,6 +94,7 @@ async function readCurrentTab(): Promise<CurrentTabContext> {
       : [];
   return {
     imageCandidates: imageCandidateResults[0]?.result ?? [],
+    tabId: tabId ?? null,
     title: tab.title?.trim() || tab.url || "Current tab",
     url: tab.url ?? null,
     selectionText: selectionResults[0]?.result?.trim() || null,
@@ -174,6 +188,166 @@ function parseTags(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Reads the bytes of every image candidate the page offered. A candidate whose
+ * bytes cannot be read is dropped here, not failed: the caller then sends its
+ * URL instead and lets Palace try the download.
+ */
+async function grabImageCandidates(context: CurrentTabContext): Promise<GrabbedCandidate[]> {
+  if (context.tabId === null || !context.imageCandidates.length) return [];
+  const grabbedCandidates: GrabbedCandidate[] = [];
+  for (const candidate of context.imageCandidates) {
+    const grabbed = await grabImageBytesFromTab(context.tabId, candidate.url);
+    if (grabbed) grabbedCandidates.push({ candidate, grabbed });
+  }
+  return grabbedCandidates;
+}
+
+async function uploadGrabbedCandidates(
+  credentials: PalaceCredentials,
+  context: CurrentTabContext,
+  itemId: string,
+  grabbedCandidates: GrabbedCandidate[],
+): Promise<number> {
+  let stored = 0;
+  for (const [index, { candidate, grabbed }] of grabbedCandidates.entries()) {
+    const result = await uploadCaptureImage(credentials, {
+      bytes: decodeGrabbedImage(grabbed),
+      mediaType: grabbed.mediaType,
+      byteOrigin: grabbed.origin,
+      itemId,
+      imageUrl: candidate.url,
+      sourceUrl: candidate.source_post_url ?? context.url,
+      altText: candidate.alt_text ?? grabbed.altText ?? null,
+      width: candidate.width ?? grabbed.width ?? null,
+      height: candidate.height ?? grabbed.height ?? null,
+      role: candidate.role ?? null,
+      order: candidate.order ?? index,
+    });
+    if (result.state === "queued" || result.state === "duplicate") stored += 1;
+  }
+  return stored;
+}
+
+/** Uploads the image in the tab itself. Returns false to fall back to a URL save. */
+async function saveImageBytesCapture(
+  credentials: PalaceCredentials,
+  context: CurrentTabContext,
+  classification: CaptureClassification,
+): Promise<boolean> {
+  if (context.tabId === null || !classification.url) return false;
+  const grabbed = await grabImageBytesFromTab(context.tabId, classification.url);
+  if (!grabbed) return false;
+
+  const result = await uploadCaptureImage(credentials, {
+    bytes: decodeGrabbedImage(grabbed),
+    mediaType: grabbed.mediaType,
+    byteOrigin: grabbed.origin,
+    imageUrl: classification.url,
+    sourceUrl: context.url,
+    pageTitle: context.title,
+    altText: grabbed.altText ?? null,
+    width: grabbed.width ?? null,
+    height: grabbed.height ?? null,
+    tags: parseTags(),
+  });
+
+  if (result.state === "queued") {
+    const note = grabbed.origin === "canvas" ? " Re-encoded from the rendered image." : "";
+    setMessage(`Uploaded the image file to Palace.${note}`, "success");
+    return true;
+  }
+  if (result.state === "duplicate") {
+    setMessage(result.message, "success");
+    return true;
+  }
+  if (result.state === "auth_error") {
+    setMessage(result.message, "error");
+    if (typeof chrome !== "undefined" && chrome.runtime?.openOptionsPage) {
+      await chrome.runtime.openOptionsPage();
+    }
+    return true;
+  }
+  setMessage(result.message, "error");
+  return true;
+}
+
+async function saveUrlCapture(
+  credentials: PalaceCredentials,
+  context: CurrentTabContext,
+  classification: CaptureClassification,
+  notice = "",
+): Promise<void> {
+  // Bytes read from the page beat a URL Palace has to fetch, so the candidate
+  // URLs are only sent for the images whose bytes could not be read.
+  const grabbedCandidates =
+    classification.kind === "social_post" ? await grabImageCandidates(context) : [];
+  const grabbedUrls = new Set(grabbedCandidates.map(({ candidate }) => candidate.url));
+  const remainingCandidates =
+    classification.kind === "social_post"
+      ? context.imageCandidates.filter((candidate) => !grabbedUrls.has(candidate.url))
+      : [];
+
+  const result = await submitCapture(credentials, {
+    classification,
+    imageCandidates: remainingCandidates,
+    pageTitle: context.title,
+    selectionText: context.selectionText,
+    tags: parseTags(),
+  });
+
+  if (result.state === "queued") {
+    const stored = result.itemId
+      ? await uploadGrabbedCandidates(credentials, context, result.itemId, grabbedCandidates)
+      : 0;
+    const imageNote = stored ? ` Uploaded ${stored} image file${stored === 1 ? "" : "s"}.` : "";
+    setMessage(
+      `${notice}Queued ${labelForCaptureKind(result.kind).toLowerCase()} capture. Job ${result.jobId}.${imageNote}`,
+      "success",
+    );
+    return;
+  }
+  if (result.state === "duplicate") {
+    // The capture already exists, but its images may not: an earlier save can
+    // have lost them to a download Palace was never able to make.
+    if (result.itemId) {
+      await uploadGrabbedCandidates(credentials, context, result.itemId, grabbedCandidates);
+    }
+    const savedUrl = classification.url ?? context.url ?? "";
+    const savedKind = classification.kind === "invalid" ? "webpage" : classification.kind;
+    setSavedState({
+      id: result.webSaveId ?? "duplicate",
+      item_id: result.itemId ?? "duplicate",
+      original_url: savedUrl,
+      normalized_url: savedUrl,
+      source_title: context.title,
+      source_domain: null,
+      capture_kind: savedKind,
+      user_tags: parseTags(),
+      saved_at: new Date().toISOString(),
+      archived_at: null,
+      item: {
+        id: result.itemId ?? "duplicate",
+        title: context.title,
+        source_type: "webpage",
+        status: "ready",
+        summary: null,
+        tags: parseTags(),
+      },
+    });
+    setMessage(`${notice}${result.message}`, "success");
+    return;
+  }
+  if (result.state === "auth_error") {
+    setMessage(result.message, "error");
+    if (typeof chrome !== "undefined" && chrome.runtime?.openOptionsPage) {
+      await chrome.runtime.openOptionsPage();
+    }
+    return;
+  }
+  setMessage(result.message, "error");
+}
+
 async function saveCapture(): Promise<void> {
   if (!currentContext || !currentClassification) return;
   const credentials = await getCredentials();
@@ -185,55 +359,23 @@ async function saveCapture(): Promise<void> {
     return;
   }
 
+  const context = currentContext;
+  const classification = currentClassification;
   setBusy(true);
   setMessage("");
-  const result = await submitCapture(credentials, {
-    classification: currentClassification,
-    imageCandidates: currentClassification.kind === "social_post" ? currentContext.imageCandidates : [],
-    pageTitle: currentContext.title,
-    selectionText: currentContext.selectionText,
-    tags: parseTags(),
-  });
-  setBusy(false);
-
-  if (result.state === "queued") {
-    setMessage(`Queued ${labelForCaptureKind(result.kind).toLowerCase()} capture. Job ${result.jobId}.`, "success");
-    return;
+  try {
+    // The bytes are the point, but an unreadable image is still worth saving
+    // by URL: Palace may be able to fetch what the page would not hand over.
+    const uploaded =
+      classification.kind === "image" &&
+      (await saveImageBytesCapture(credentials, context, classification));
+    if (uploaded) return;
+    const notice =
+      classification.kind === "image" ? "Could not read the image file, so the URL was saved. " : "";
+    await saveUrlCapture(credentials, context, classification, notice);
+  } finally {
+    setBusy(false);
   }
-  if (result.state === "duplicate") {
-    const savedUrl = currentClassification.url ?? currentContext.url ?? "";
-    const savedKind = currentClassification.kind === "invalid" ? "webpage" : currentClassification.kind;
-    setSavedState({
-      id: result.webSaveId ?? "duplicate",
-      item_id: result.itemId ?? "duplicate",
-      original_url: savedUrl,
-      normalized_url: savedUrl,
-      source_title: currentContext.title,
-      source_domain: null,
-      capture_kind: savedKind,
-      user_tags: parseTags(),
-      saved_at: new Date().toISOString(),
-      archived_at: null,
-      item: {
-        id: result.itemId ?? "duplicate",
-        title: currentContext.title,
-        source_type: "webpage",
-        status: "ready",
-        summary: null,
-        tags: parseTags(),
-      },
-    });
-    setMessage(result.message, "success");
-    return;
-  }
-  if (result.state === "auth_error") {
-    setMessage(result.message, "error");
-    if (typeof chrome !== "undefined" && chrome.runtime?.openOptionsPage) {
-      await chrome.runtime.openOptionsPage();
-    }
-    return;
-  }
-  setMessage(result.message, "error");
 }
 
 async function init(): Promise<void> {

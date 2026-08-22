@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   FileText,
   Grid2X2,
+  Image as ImageIcon,
   Link2,
   List,
   Loader2,
@@ -31,6 +32,7 @@ const KIND_FILTERS: Array<{ value: WebSaveCaptureKind | ""; label: string; icon:
   { value: "social_post", label: "Social", icon: Tags },
   { value: "media", label: "Media", icon: Video },
   { value: "selection_note", label: "Selections", icon: FileText },
+  { value: "image", label: "Images", icon: ImageIcon },
 ];
 
 const SORT_OPTIONS: Array<{ value: SortValue; label: string }> = [
@@ -242,7 +244,7 @@ export default function SavedWeb() {
   const tags = useMemo(() => uniqueTags(countSaves), [countSaves]);
 
   const counts = useMemo(() => {
-    const next: Record<string, number> = { "": countSaves.length, webpage: 0, social_post: 0, media: 0, selection_note: 0 };
+    const next: Record<string, number> = { "": countSaves.length, webpage: 0, social_post: 0, media: 0, selection_note: 0, image: 0 };
     countSaves.forEach((save) => {
       next[save.capture_kind] += 1;
     });

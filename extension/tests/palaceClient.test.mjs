@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { classifyCapture } from "../dist/shared/classifier.js";
-import { issueExtensionToken, lookupWebSavesForUrl, submitCapture } from "../dist/shared/palaceClient.js";
+import {
+  issueExtensionToken,
+  lookupWebSavesForUrl,
+  submitCapture,
+  uploadCaptureImage,
+} from "../dist/shared/palaceClient.js";
 
 const credentials = {
   apiBaseUrl: "https://palaceoftruth.test",
@@ -275,4 +280,124 @@ test("network failures return error state", async () => {
     state: "error",
     message: "offline",
   });
+});
+
+test("image bytes are uploaded as multipart, not as a URL to fetch", async () => {
+  const calls = [];
+  const result = await uploadCaptureImage(
+    credentials,
+    {
+      bytes: new Uint8Array([137, 80, 78, 71]),
+      mediaType: "image/png",
+      byteOrigin: "page_fetch",
+      imageUrl: "https://private.example.com/session-only.png",
+      sourceUrl: "https://private.example.com/album/7",
+      pageTitle: "Album 7",
+      altText: "A gated image",
+      width: 800,
+      height: 600,
+      tags: ["private", "private", " "],
+    },
+    async (url, init) => {
+      calls.push({ url, init });
+      return jsonResponse(202, {
+        job_id: "job-image",
+        item_id: "item-image",
+        status: "queued",
+        parent_item_id: null,
+      });
+    },
+  );
+
+  assert.equal(result.state, "queued");
+  assert.equal(result.itemId, "item-image");
+  assert.equal(result.jobId, "job-image");
+  assert.equal(calls[0].url, "https://palaceoftruth.test/api/v1/capture/browser/images");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer capture-token");
+  // fetch has to supply the multipart boundary, so no Content-Type is set.
+  assert.equal(calls[0].init.headers["Content-Type"], undefined);
+
+  const form = calls[0].init.body;
+  const file = form.get("file");
+  assert.equal(file.type, "image/png");
+  assert.equal(file.name, "capture.png");
+  assert.deepEqual([...new Uint8Array(await file.arrayBuffer())], [137, 80, 78, 71]);
+  assert.equal(form.get("origin"), "page_fetch");
+  assert.equal(form.get("image_url"), "https://private.example.com/session-only.png");
+  assert.equal(form.get("source_url"), "https://private.example.com/album/7");
+  assert.equal(form.get("page_title"), "Album 7");
+  assert.equal(form.get("alt_text"), "A gated image");
+  assert.equal(form.get("width"), "800");
+  assert.equal(form.get("height"), "600");
+  assert.equal(form.get("tags"), "private");
+  assert.equal(form.get("item_id"), null);
+});
+
+test("an image attached to an existing capture carries its parent item id", async () => {
+  const calls = [];
+  const result = await uploadCaptureImage(
+    credentials,
+    {
+      bytes: new Uint8Array([255, 216, 255]),
+      mediaType: "image/jpeg",
+      byteOrigin: "canvas",
+      itemId: "item-parent",
+      imageUrl: "https://pbs.twimg.com/media/post-image.jpg",
+      order: 2,
+      role: "img",
+    },
+    async (url, init) => {
+      calls.push({ url, init });
+      return jsonResponse(202, {
+        job_id: "job-child",
+        item_id: "item-child",
+        status: "queued",
+        parent_item_id: "item-parent",
+      });
+    },
+  );
+
+  assert.equal(result.state, "queued");
+  assert.equal(result.parentItemId, "item-parent");
+  const form = calls[0].init.body;
+  assert.equal(form.get("item_id"), "item-parent");
+  assert.equal(form.get("origin"), "canvas");
+  assert.equal(form.get("order"), "2");
+  assert.equal(form.get("role"), "img");
+  assert.equal(form.get("file").name, "capture.jpg");
+});
+
+test("repeated bytes report as a duplicate, not a failure", async () => {
+  const result = await uploadCaptureImage(
+    credentials,
+    { bytes: new Uint8Array([1]), mediaType: "image/png", byteOrigin: "context_menu" },
+    async () => jsonResponse(202, { item_id: "item-image", status: "duplicate", duplicate_of: "item-image" }),
+  );
+
+  assert.equal(result.state, "duplicate");
+  assert.equal(result.itemId, "item-image");
+});
+
+test("an image upload with an expired token returns auth_error", async () => {
+  const result = await uploadCaptureImage(
+    credentials,
+    { bytes: new Uint8Array([1]), mediaType: "image/png", byteOrigin: "page_fetch" },
+    async () => jsonResponse(403, { detail: "Capture token expired." }),
+  );
+
+  assert.equal(result.state, "auth_error");
+  assert.equal(result.message, "Capture token expired.");
+});
+
+test("an image upload network failure returns error state", async () => {
+  const result = await uploadCaptureImage(
+    credentials,
+    { bytes: new Uint8Array([1]), mediaType: "image/png", byteOrigin: "page_fetch" },
+    async () => {
+      throw new Error("Failed to fetch");
+    },
+  );
+
+  assert.equal(result.state, "error");
+  assert.equal(result.message, "Failed to fetch");
 });

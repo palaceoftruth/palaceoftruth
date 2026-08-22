@@ -1,6 +1,7 @@
 import type { CaptureClassification, CaptureKind } from "./classifier.js";
 import type { PalaceCredentials } from "./credentials.js";
 import type { BrowserImageCandidate } from "./imageCandidates.js";
+import type { ImageByteOrigin } from "./imageBytes.js";
 
 export type CaptureRequest = {
   classification: CaptureClassification;
@@ -11,12 +12,47 @@ export type CaptureRequest = {
 };
 
 export type CaptureResult =
-  | { state: "queued"; jobId: string; routedTo: "media" | "webpage" | "note"; kind: CaptureKind }
+  | {
+      state: "queued";
+      jobId: string;
+      routedTo: "media" | "webpage" | "note";
+      kind: CaptureKind;
+      itemId?: string;
+    }
   | { state: "duplicate"; message: string; webSaveId?: string; itemId?: string }
   | { state: "auth_error"; message: string }
   | { state: "error"; message: string };
 
-export type WebSaveCaptureKind = "webpage" | "social_post" | "media" | "selection_note";
+export type CaptureImageUpload = {
+  /** Backed by a plain ArrayBuffer: a Blob part cannot be shared memory. */
+  bytes: Uint8Array<ArrayBuffer>;
+  mediaType: string;
+  byteOrigin: ImageByteOrigin;
+  /** Attaches the image to an existing capture. Omit for a standalone one. */
+  itemId?: string | null;
+  imageUrl?: string | null;
+  sourceUrl?: string | null;
+  pageTitle?: string | null;
+  altText?: string | null;
+  width?: number | null;
+  height?: number | null;
+  role?: string | null;
+  order?: number | null;
+  tags?: string[];
+};
+
+export type CaptureImageResult =
+  | { state: "queued"; jobId: string | null; itemId: string; parentItemId: string | null }
+  | { state: "duplicate"; itemId: string; message: string }
+  | { state: "auth_error"; message: string }
+  | { state: "error"; message: string };
+
+export type WebSaveCaptureKind =
+  | "webpage"
+  | "social_post"
+  | "media"
+  | "selection_note"
+  | "image";
 
 export type WebSave = {
   id: string;
@@ -43,6 +79,14 @@ export type WebSaveLookupResult =
   | { state: "ready"; saved: WebSave | null; related: WebSave[] }
   | { state: "auth_error"; message: string }
   | { state: "error"; message: string };
+
+type ImageUploadResponse = {
+  job_id?: string | null;
+  item_id?: string;
+  status?: string;
+  parent_item_id?: string | null;
+  duplicate_of?: string | null;
+};
 
 type IngestResponse = {
   job_id?: string;
@@ -130,7 +174,9 @@ export async function issueExtensionToken(
 
 function routeForKind(kind: CaptureKind): "media" | "webpage" | "note" | null {
   if (kind === "media") return "media";
-  if (kind === "webpage" || kind === "social_post") return "webpage";
+  // An image only reaches this path as the fallback for a byte upload that
+  // could not be read. Palace then fetches the URL itself, as it did before.
+  if (kind === "webpage" || kind === "social_post" || kind === "image") return "webpage";
   if (kind === "selection_note") return "note";
   return null;
 }
@@ -284,6 +330,7 @@ export async function submitCapture(
         jobId,
         routedTo: (body as IngestResponse | null)?.route ?? route,
         kind: (body as IngestResponse | null)?.kind ?? request.classification.kind,
+        itemId: (body as IngestResponse | null)?.item_id,
       };
     }
     if (response.status === 403) {
@@ -291,6 +338,91 @@ export async function submitCapture(
     }
     if (response.status === 409) {
       return { state: "duplicate", message: detailMessage(body, "This URL is already in Palace.") };
+    }
+    return { state: "error", message: detailMessage(body, `Palace returned HTTP ${response.status}.`) };
+  } catch (error) {
+    return {
+      state: "error",
+      message: error instanceof Error ? error.message : "Network request failed.",
+    };
+  }
+}
+
+const UPLOAD_FILENAMES: Record<string, string> = {
+  "image/jpeg": "capture.jpg",
+  "image/png": "capture.png",
+  "image/gif": "capture.gif",
+  "image/webp": "capture.webp",
+};
+
+function appendOptional(form: FormData, field: string, value: string | number | null | undefined): void {
+  if (value === null || value === undefined) return;
+  const text = String(value).trim();
+  if (!text) return;
+  form.set(field, text);
+}
+
+/**
+ * Uploads image bytes the browser already holds.
+ *
+ * Palace types the upload from the bytes, so the file name below is only a
+ * label. With `itemId` the image joins an existing capture; without one it
+ * becomes an image capture of its own.
+ */
+export async function uploadCaptureImage(
+  credentials: PalaceCredentials,
+  upload: CaptureImageUpload,
+  fetchImpl: typeof fetch = fetch,
+): Promise<CaptureImageResult> {
+  const form = new FormData();
+  const filename = UPLOAD_FILENAMES[upload.mediaType] ?? "capture.png";
+  form.set("file", new Blob([upload.bytes], { type: upload.mediaType }), filename);
+  form.set("origin", upload.byteOrigin);
+  appendOptional(form, "item_id", upload.itemId);
+  appendOptional(form, "image_url", upload.imageUrl);
+  appendOptional(form, "source_url", upload.sourceUrl);
+  appendOptional(form, "page_title", upload.pageTitle);
+  appendOptional(form, "alt_text", upload.altText);
+  appendOptional(form, "width", upload.width);
+  appendOptional(form, "height", upload.height);
+  appendOptional(form, "role", upload.role);
+  appendOptional(form, "order", upload.order);
+  const tags = cleanTags(upload.tags);
+  if (tags.length) form.set("tags", tags.join(","));
+
+  try {
+    const response = await fetchImpl(buildEndpoint(credentials, "/capture/browser/images"), {
+      method: "POST",
+      // Content-Type is left unset on purpose: fetch adds the multipart
+      // boundary, and setting it by hand would drop that boundary.
+      headers: {
+        Authorization: `Bearer ${credentials.accessToken}`,
+        "X-Palace-Extension-Version": "0.1.0",
+      },
+      body: form,
+    });
+    const body = await parseBody(response);
+
+    if (response.status === 202) {
+      const itemId = (body as ImageUploadResponse | null)?.item_id;
+      if (typeof itemId !== "string" || !itemId) {
+        return { state: "error", message: "Palace stored the image without an item id." };
+      }
+      if ((body as ImageUploadResponse | null)?.status === "duplicate") {
+        return { state: "duplicate", itemId, message: "This image is already in Palace." };
+      }
+      return {
+        state: "queued",
+        jobId: (body as ImageUploadResponse | null)?.job_id ?? null,
+        itemId,
+        parentItemId: (body as ImageUploadResponse | null)?.parent_item_id ?? null,
+      };
+    }
+    if (response.status === 403) {
+      return { state: "auth_error", message: detailMessage(body, "Palace rejected the capture token.") };
+    }
+    if (response.status === 409) {
+      return { state: "error", message: detailMessage(body, "This image is already in Palace.") };
     }
     return { state: "error", message: detailMessage(body, `Palace returned HTTP ${response.status}.`) };
   } catch (error) {
