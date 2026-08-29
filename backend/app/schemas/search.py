@@ -15,6 +15,15 @@ from app.schemas.retrieval_provenance import (
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
 TagsMode = Literal["any", "all"]
+# Recommendation 1: governance accountability on important knowledge. These
+# mirrors of the DB check constraints keep the wire format, the search
+# ranking adjustments, and the migration schema in lockstep.
+GovernanceVerificationState = Literal["unverified", "verified", "stale", "rejected"]
+GovernanceRiskClass = Literal["low", "moderate", "high", "critical"]
+# Derived from the recommendation 1 columns. Absence of accountability is its
+# own state and is distinct from "evergreen" so users can tell "no owner" apart
+# from "nothing has aged out yet".
+GovernanceCurrentnessState = Literal["unassigned", "current", "expired", "superseded"]
 SYSTEM_PROVENANCE_TAG_PREFIXES = (
     "skill-",
     "scope-",
@@ -39,6 +48,26 @@ class SearchContextChunk(BaseModel):
     chunk_index: int
     chunk_text: str
     relation: Literal["previous", "matched", "next"]
+
+
+class GovernanceSurface(BaseModel):
+    """Per-item governance accountability as it appears on a search hit.
+
+    ``governance_currentness_state`` is always present so callers can branch on
+    it (``"unassigned"`` is the safe default for items nobody has triaged yet).
+    The other fields mirror the DB columns and are absent on the wire when
+    NULL so legacy clients stay bit-compatible.
+    """
+
+    owner_subject: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    reviewer_subject: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    verification_state: GovernanceVerificationState | None = Field(default=None, exclude_if=lambda value: value is None)
+    verified_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    verification_deadline: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    risk_class: GovernanceRiskClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_currentness_state: GovernanceCurrentnessState = "unassigned"
+
+    model_config = {"from_attributes": True}
 
 
 class SearchResult(BaseModel):
@@ -70,6 +99,20 @@ class SearchResult(BaseModel):
     last_verified_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
     valid_until: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
     superseded_by_entry_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Recommendation 1 governance surface on search hits. The nested object
+    # is the canonical shape; the flat fields preserve the prior wire contract
+    # bit-for-bit so legacy clients keep working. Absent values are dropped
+    # from the wire (``exclude_if``) so we never emit ``null`` for columns the
+    # row has not yet triaged.
+    governance: GovernanceSurface | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_owner_subject: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_reviewer_subject: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_verification_state: GovernanceVerificationState | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_verified_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_verification_deadline: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_risk_class: GovernanceRiskClass | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_superseded_by_item_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    governance_currentness_state: GovernanceCurrentnessState = "unassigned"
     context_chunks: list[SearchContextChunk] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

@@ -21,6 +21,10 @@ from app.schemas.item import ItemResponse, ItemListResponse, ItemUpdate, ItemCre
 from app.schemas.relationship import RelatedItemResponse, RelatedItemsResponse
 from app.services.item_dates import apply_effective_date
 from app.services.data_lifecycle import hard_delete_item
+from app.services.governance import (
+    apply_governance_update,
+    log_governance_denial,
+)
 from app.utils.file_type import SNIFF_BYTES, matches_extension, safe_media_type
 from app.workers.queues import enqueue_palace_job, enqueue_tenant_job
 
@@ -202,7 +206,7 @@ async def list_items(
         next_cursor = _encode_items_cursor(rows[-1])
 
     return ItemListResponse(
-        items=[ItemResponse.model_validate(r) for r in rows],
+        items=[ItemResponse.from_orm_row(r) for r in rows],
         total=total,
         page=page,
         per_page=per_page,
@@ -322,7 +326,7 @@ async def get_item(
         raise HTTPException(status_code=404, detail="Item not found")
     if str(row.tenant_id) != request.state.tenant_id:
         raise HTTPException(status_code=404, detail="Item not found")
-    return ItemResponse.model_validate(row)
+    return ItemResponse.from_orm_row(row)
 
 
 @router.get("/{item_id}/artifact", dependencies=[Depends(require_api_capability("read"))])
@@ -465,6 +469,18 @@ async def update_item(
     if body.metadata is not None:
         row.metadata_ = {**row.metadata_, **body.metadata}
         apply_effective_date(row)
+    if body.governance is not None:
+        governance_payload = body.governance.model_dump(exclude_unset=True)
+        actor_subject_id = get_auth_context(request).subject_id
+        apply_governance_update(
+            row,
+            governance=governance_payload,
+            actor_subject_id=actor_subject_id,
+        )
+        # Governance transitions can change the public ranking trace and the
+        # search-result payload (verified_at, risk_class, currentness), so the
+        # item must be re-dirtied for the next palace run.
+        palace_relevant_change = True
     await db.commit()
     await db.refresh(row)
     if reindex_requested:
@@ -483,7 +499,7 @@ async def update_item(
             tenant_id=request.state.tenant_id,
             reason="item-update",
         )
-    return ItemResponse.model_validate(row)
+    return ItemResponse.from_orm_row(row)
 
 
 @router.delete("/{item_id}", response_model=ItemDeleteResponse, dependencies=[Depends(require_api_capability("write"))])
@@ -519,7 +535,7 @@ async def restore_item(
         await db.commit()
         await db.refresh(row)
         await _schedule_palace_dirty(request, [row.id], "item-restore")
-    return ItemRestoreResponse(restored=True, item=ItemResponse.model_validate(row))
+    return ItemRestoreResponse(restored=True, item=ItemResponse.from_orm_row(row))
 
 
 @router.delete("/{item_id}/hard", dependencies=[Depends(require_api_capability("write"))])

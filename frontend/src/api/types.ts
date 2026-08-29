@@ -1,3 +1,20 @@
+export type GovernanceVerificationState = "unverified" | "verified" | "stale" | "rejected";
+export type GovernanceRiskClass = "low" | "moderate" | "high" | "critical";
+export type GovernanceCurrentnessState = "unassigned" | "current" | "expired" | "superseded";
+
+export interface ItemGovernance {
+  owner_subject: string | null;
+  reviewer_subject: string | null;
+  verification_state: GovernanceVerificationState | null;
+  verified_at: string | null;
+  verified_by_subject: string | null;
+  verification_deadline: string | null;
+  risk_class: GovernanceRiskClass | null;
+  supersession_reason: string | null;
+  superseded_by_item_id: string | null;
+  superseded_at: string | null;
+}
+
 export interface Item {
   id: string;
   title: string;
@@ -12,6 +29,7 @@ export interface Item {
   deleted_at?: string | null;
   metadata?: Record<string, unknown>;
   metadata_?: Record<string, unknown>;
+  governance?: ItemGovernance | null;
 }
 
 export interface ItemListResponse {
@@ -82,6 +100,8 @@ export interface SearchResult {
   system_tags?: string[];
   semantic_tags?: string[];
   artifact_citation?: ArtifactCitation | null;
+  governance?: ItemGovernance | null;
+  governance_currentness_state?: GovernanceCurrentnessState;
 }
 
 export interface SearchResponse {

@@ -13,6 +13,7 @@ from app.services.search import (
     SearchService,
     _SearchCandidate,
     _candidate_currentness,
+    _candidate_governance_currentness,
     _with_canonical_currentness,
     classify_query_intent,
 )
@@ -2754,3 +2755,276 @@ def test_vector_search_drops_unverifiable_conversation_fact_source_reference() -
     assert results[0].source_item_id is None
     assert results[0].source_span is None
     assert results[0].source_support_state != "source_backed"
+
+
+def _governance_candidate(**overrides) -> _SearchCandidate:
+    base = dict(
+        item_id=uuid.uuid4(),
+        title="governance probe",
+        summary=None,
+        source_type="note",
+        source_url=None,
+        tags=[],
+        created_at=datetime.now(timezone.utc),
+        effective_date=None,
+        effective_date_source=None,
+        effective_date_quality=None,
+        chunk_text="governance probe",
+        chunk_index=0,
+        score=0.8,
+        item_metadata={},
+    )
+    base.update(overrides)
+    return _SearchCandidate(**base)
+
+
+def test_governance_currentness_states_are_distinct() -> None:
+    now = datetime(2026, 8, 29, tzinfo=timezone.utc)
+
+    unassigned = _governance_candidate()
+    assert _candidate_governance_currentness(unassigned)["state"] == "unassigned"
+
+    verified = _governance_candidate(
+        governance_owner_subject="agent:codex",
+        governance_verification_state="verified",
+    )
+    assert _candidate_governance_currentness(verified)["state"] == "current"
+
+    expired_high_risk = _governance_candidate(
+        governance_owner_subject="agent:codex",
+        governance_verification_state="verified",
+        governance_verification_deadline=now - timedelta(days=1),
+        governance_risk_class="high",
+    )
+    assert _candidate_governance_currentness(expired_high_risk)["state"] == "expired"
+
+    superseded_by_id = _governance_candidate(
+        governance_owner_subject="agent:codex",
+        governance_verification_state="verified",
+        governance_superseded_by_item_id=uuid.uuid4(),
+    )
+    assert _candidate_governance_currentness(superseded_by_id)["state"] == "superseded"
+
+    rejected = _governance_candidate(
+        governance_owner_subject="agent:codex",
+        governance_verification_state="rejected",
+    )
+    assert _candidate_governance_currentness(rejected)["state"] == "superseded"
+
+
+def test_vector_search_returns_governance_surface_on_search_result() -> None:
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=uuid.uuid4(),
+                title="Accountable note",
+                summary=None,
+                source_type="note",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="has owner",
+                chunk_index=0,
+                score=0.8,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject="agent:codex",
+                governance_reviewer_subject="agent:reviewer",
+                governance_verification_state="verified",
+                governance_verified_at=now,
+                governance_verified_by_subject="agent:reviewer",
+                governance_verification_deadline=now + timedelta(days=30),
+                governance_risk_class="high",
+                governance_superseded_by_item_id=None,
+            )
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="accountable", limit=1))
+
+    result = results[0]
+    assert result.governance is not None
+    assert result.governance.owner_subject == "agent:codex"
+    assert result.governance.verification_state == "verified"
+    assert result.governance.risk_class == "high"
+    assert result.governance_currentness_state == "current"
+    # Flat fields remain populated for legacy clients.
+    assert result.governance_owner_subject == "agent:codex"
+    assert result.governance_verification_state == "verified"
+    assert result.governance_risk_class == "high"
+
+
+def test_vector_search_omits_governance_surface_when_no_columns_set() -> None:
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=uuid.uuid4(),
+                title="Untouched note",
+                summary=None,
+                source_type="note",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="never triaged",
+                chunk_index=0,
+                score=0.8,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject=None,
+                governance_reviewer_subject=None,
+                governance_verification_state=None,
+                governance_verified_at=None,
+                governance_verified_by_subject=None,
+                governance_verification_deadline=None,
+                governance_risk_class=None,
+                governance_superseded_by_item_id=None,
+            )
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="untriaged", limit=1))
+
+    assert results[0].governance is None
+    assert results[0].governance_currentness_state == "unassigned"
+    # ``exclude_if`` strips absent flat fields too.
+    assert "governance_owner_subject" not in results[0].model_dump(exclude_none=True)
+
+
+def test_vector_search_penalizes_expired_high_risk_item_in_current_mode() -> None:
+    now = datetime.now(timezone.utc)
+    safe_id = uuid.uuid4()
+    expired_id = uuid.uuid4()
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=expired_id,
+                title="Expired high-risk doc",
+                summary=None,
+                source_type="doc",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="expired high risk content",
+                chunk_index=0,
+                score=0.80,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject="agent:codex",
+                governance_reviewer_subject=None,
+                governance_verification_state="verified",
+                governance_verified_at=now - timedelta(days=60),
+                governance_verified_by_subject="agent:reviewer",
+                governance_verification_deadline=now - timedelta(days=1),
+                governance_risk_class="critical",
+                governance_superseded_by_item_id=None,
+            ),
+            SimpleNamespace(
+                item_id=safe_id,
+                title="Safe current doc",
+                summary=None,
+                source_type="doc",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="safe current content",
+                chunk_index=0,
+                score=0.79,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject="agent:codex",
+                governance_reviewer_subject=None,
+                governance_verification_state="verified",
+                governance_verified_at=now,
+                governance_verified_by_subject="agent:reviewer",
+                governance_verification_deadline=now + timedelta(days=30),
+                governance_risk_class="low",
+                governance_superseded_by_item_id=None,
+            ),
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="latest", limit=2))
+
+    # Expired high-risk item still appears, but ranked below the safe one
+    # and labeled with the explicit warning.
+    assert [result.item_id for result in results] == [safe_id, expired_id]
+    assert results[1].governance_currentness_state == "expired"
+    expired_trace = next(
+        row for row in service.last_ranking_trace["results"]
+        if row["item_id"] == str(expired_id)
+    )
+    assert expired_trace["governance_expired_high_risk"] is True
+    assert expired_trace["adjustments"]["governance_expired_high_risk"] == -0.35
+
+
+def test_vector_search_excludes_governance_superseded_items_in_current_mode() -> None:
+    now = datetime.now(timezone.utc)
+    superseded_id = uuid.uuid4()
+    successor_id = uuid.uuid4()
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=superseded_id,
+                title="Superseded via governance",
+                summary=None,
+                source_type="doc",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="old claim",
+                chunk_index=0,
+                score=0.95,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject="agent:codex",
+                governance_reviewer_subject=None,
+                governance_verification_state="verified",
+                governance_verified_at=now,
+                governance_verified_by_subject="agent:reviewer",
+                governance_verification_deadline=now + timedelta(days=30),
+                governance_risk_class="high",
+                governance_superseded_by_item_id=successor_id,
+            ),
+            SimpleNamespace(
+                item_id=successor_id,
+                title="Successor claim",
+                summary=None,
+                source_type="doc",
+                source_url=None,
+                tags=[],
+                created_at=now,
+                chunk_text="new claim",
+                chunk_index=0,
+                score=0.50,
+                item_metadata={},
+                canonical_valid_until=None,
+                canonical_superseded_by_entry_id=None,
+                governance_owner_subject="agent:codex",
+                governance_reviewer_subject=None,
+                governance_verification_state="verified",
+                governance_verified_at=now,
+                governance_verified_by_subject="agent:reviewer",
+                governance_verification_deadline=now + timedelta(days=30),
+                governance_risk_class="moderate",
+                governance_superseded_by_item_id=None,
+            ),
+        ]
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="claim", limit=5))
+
+    assert superseded_id not in {result.item_id for result in results}
+    assert successor_id in {result.item_id for result in results}
+    assert service.last_ranking_trace["excluded_governance_counts"] == {"superseded": 1}
+    assert service.last_ranking_trace["governance_state_counts"].get("current") == 1
