@@ -2,11 +2,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import String, Text, ARRAY, UniqueConstraint, func, Computed
+from sqlalchemy import String, Text, ARRAY, UniqueConstraint, func, Computed, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, TIMESTAMP, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+
+
+# Keep the enum surface narrow and shared between migration, API schema, and
+# search ranking so the schema, the wire format, and the ranking adjustment
+# cannot drift apart.
+ITEM_GOVERNANCE_VERIFICATION_STATES = ("unverified", "verified", "stale", "rejected")
+ITEM_GOVERNANCE_RISK_CLASSES = ("low", "moderate", "high", "critical")
 
 
 class Item(Base):
@@ -48,4 +55,30 @@ class Item(Base):
             "to_tsvector('english', coalesce(title, '') || ' ' || coalesce(raw_content, ''))",
             persisted=True,
         ),
+    )
+
+    # Recommendation 1: accountably-owned knowledge. Every column is nullable
+    # so the existing corpus stays "unassigned / unverified" until a human
+    # touches it; we never infer ownership.
+    governance_owner_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_reviewer_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_verification_state: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    governance_verified_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    governance_verified_by_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_verification_deadline: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    governance_risk_class: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    governance_supersession_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_superseded_by_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    governance_superseded_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
     )

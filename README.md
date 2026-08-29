@@ -356,6 +356,62 @@ Maintainers publish release containers to GHCR. External operators can use
 those public images or build and publish their own runtime images under their
 own registry coordinates.
 
+## Item Governance
+
+Palace carries a nullable governance surface on every item (and a matching subset on derived claims) so important knowledge keeps its accountable owner, reviewer, verification state, expiry deadline, risk class, and supersession chain with the row itself. Teams running shared knowledge systems consistently expect that knowledge keeps itself accurate; the four-state currentness signal below lets search ranking visibly demote unverified, expired, or superseded items instead of silently re-ranking them.
+
+### PATCH payload
+
+```bash
+PATCH /api/v1/items/{id}
+```
+
+```json
+{
+  "governance": {
+    "owner_subject": "apikey:01HXYZ...",
+    "reviewer_subject": "human:alice",
+    "verification_state": "verified",
+    "verified_at": "2026-08-29T12:00:00Z",
+    "verified_by_subject": "human:alice",
+    "verification_deadline": "2026-11-29T00:00:00Z",
+    "risk_class": "high",
+    "supersession_reason": "Replaced by Q4 handbook revision",
+    "superseded_by_item_id": "01HXYZ...",
+    "superseded_at": "2026-08-29T12:00:00Z"
+  }
+}
+```
+
+All fields are optional; existing items stay `unassigned` until an operator writes them. `owner_subject`, `reviewer_subject`, and `verified_by_subject` are bounded to 1–200 characters and should be stable identifiers (`api_keys.id`, MCP client ids, or human handles), not free-form prose. `supersession_reason` is bounded to 1–1000 characters. Validation failures return `422`.
+
+Closed enums (mirrored by Postgres check constraints so the schema and Pydantic model cannot drift):
+
+- `verification_state`: `unverified`, `verified`, `stale`, `rejected`
+- `risk_class`: `low`, `moderate`, `high`, `critical`
+
+### Currentness and search ranking
+
+Every search hit carries `governance_currentness_state`, derived from the stored columns:
+
+| State | Trigger | Effect on ranking |
+| --- | --- | --- |
+| `unassigned` | No owner or verification recorded | No adjustment (safe default for untriaged items) |
+| `current` | `verification_state` is `verified` or `stale` and the deadline has not passed | No adjustment |
+| `expired` | `verification_deadline` has passed (and the item is not superseded) | `-0.35` penalty when `risk_class` is `high` or `critical`; otherwise no adjustment |
+| `superseded` | `superseded_by_item_id` is set, or `verification_state = rejected` | Excluded from `current`-mode results; appears in `historical`-mode results |
+
+Expired items stay visible in current mode (ranked down) so the wire carries the explicit warning; superseded items only appear defensively via `currentness_mode = historical`. The search ranking trace surfaces `governance_state_counts` and `excluded_governance_counts` so operators can see the slice.
+
+### Audit trail and structured logs
+
+Each transition appends one entry to `metadata.governance_audit`. The list is capped at the 25 most recent entries (`MAX_AUDIT_ENTRIES`); older entries drop off in FIFO order. Every transition also emits:
+
+- `governance.item.update` at INFO with `extra={"item_id", "tenant_id", "actor_subject", "changed_fields", "verification_state", "risk_class", "verification_deadline"}`.
+- `governance.item.denied` at WARNING when a cross-tenant or scope-limited write is refused, with `extra={"tenant_id", "item_id", "actor_subject", "reason"}`.
+
+The audit trail, the structured log line, and the API wire format all share one field map, so an SRE can replay a log line against an audit entry without an ORM round-trip.
+
 ## Deployment
 
 The primary deployment artifact is the Helm chart in [chart/](chart/). External

@@ -1,5 +1,6 @@
 import type {
   Item,
+  ItemGovernance,
   ItemListResponse,
   JobStatus,
   WebSave,
@@ -224,7 +225,7 @@ export const api = {
 
   getItem: (id: string) => req<Item>(`/items/${id}`),
 
-  updateItem: (id: string, body: { tags?: string[]; title?: string }) =>
+  updateItem: (id: string, body: { tags?: string[]; title?: string; governance?: ItemGovernance | null }) =>
     req<Item>(`/items/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
 
   deleteItem: (id: string) =>

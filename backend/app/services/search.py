@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.embedding_profile import EMBEDDING_DIMENSIONS, EmbeddingProfile, is_default_embedding_profile, resolve_embedding_profile
-from app.schemas.search import SearchContextChunk, SearchResult, split_system_provenance_tags
+from app.schemas.search import (
+    GovernanceCurrentnessState,
+    GovernanceSurface,
+    SearchContextChunk,
+    SearchResult,
+    split_system_provenance_tags,
+)
 from app.services.artifact_citations import build_artifact_citation
 from app.services.embedder import EmbeddingRequestError, EmbeddingService
 from app.services.memory_entries import source_project_from_memory_metadata
@@ -129,6 +135,8 @@ _DERIVED_ARTIFACT_PENALTY = 0.45
 _INTENT_RECENCY_MAX_BONUS = 0.12
 _INTENT_RECENCY_HALF_LIFE_DAYS = 14.0
 _STALE_CURRENTNESS_PENALTY = 0.55
+_GOVERNANCE_EXPIRED_HIGH_RISK_PENALTY = 0.35
+_GOVERNANCE_SUPERSEDED_PENALTY = 0.10
 _EXACT_IDENTIFIER_MATCH_BONUS = 0.40
 _EFFECTIVE_DATE_QUALITY_WEIGHT = {
     "high": 1.0,
@@ -467,6 +475,17 @@ class _SearchCandidate:
     # This identifier comes only from the server-owned memory_entries join.
     # Client metadata must never be enough to grant curated-memory trust.
     canonical_memory_entry_id: Any | None = None
+    # Recommendation 1 governance surface (server-owned columns). Nullable
+    # across the board so untriaged rows stay "unassigned / unverified" until
+    # an operator touches them.
+    governance_owner_subject: str | None = None
+    governance_reviewer_subject: str | None = None
+    governance_verification_state: str | None = None
+    governance_verified_at: datetime | None = None
+    governance_verified_by_subject: str | None = None
+    governance_verification_deadline: datetime | None = None
+    governance_risk_class: str | None = None
+    governance_superseded_by_item_id: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -1059,6 +1078,43 @@ def _candidate_currentness(candidate: _SearchCandidate, *, now: datetime | None 
     }
 
 
+def _candidate_governance_currentness(candidate: _SearchCandidate, *, now: datetime | None = None) -> dict[str, Any]:
+    """Interpret Recommendation 1 governance accountability as a single state.
+
+    Absence of accountability (``governance_owner_subject IS NULL`` and no
+    verification_state) is its own state (``"unassigned"``) so callers can
+    tell "no owner" apart from "owner exists and item is verified". A
+    ``rejected`` verification_state is treated as superseded: the item is
+    no longer current truth even though the supersession chain lives
+    elsewhere.
+    """
+    reference = now or datetime.now(timezone.utc)
+    deadline = candidate.governance_verification_deadline
+    if deadline is not None and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    superseded_by = candidate.governance_superseded_by_item_id
+    verification_state = candidate.governance_verification_state
+    expired = deadline is not None and deadline <= reference
+
+    if superseded_by is not None:
+        state = "superseded"
+    elif verification_state == "rejected":
+        state = "superseded"
+    elif expired:
+        state = "expired"
+    elif verification_state in {"verified", "stale"} and (deadline is None or deadline > reference):
+        state = "current"
+    else:
+        state = "unassigned"
+
+    return {
+        "state": state,
+        "deadline": deadline,
+        "superseded_by_item_id": str(superseded_by) if superseded_by is not None else None,
+        "verification_state": verification_state,
+    }
+
+
 def _score_candidate(
     candidate: _SearchCandidate,
     query: str,
@@ -1090,6 +1146,20 @@ def _score_candidate(
     currentness = _candidate_currentness(candidate)
     if intent.currentness_mode != "historical" and currentness["state"] != "current":
         adjustments["stale_currentness"] = -_STALE_CURRENTNESS_PENALTY
+    # Recommendation 1: accountably-owned knowledge. Expired high-risk items
+    # must be visibly demoted (penalty + explicit warning in the wire) without
+    # being silently hidden; superseded items only appear defensively if the
+    # current-mode SQL pre-filter did not strip them, so we still nudge them
+    # down to keep the contract honest.
+    governance_currentness = _candidate_governance_currentness(candidate)
+    if intent.currentness_mode != "historical":
+        if (
+            governance_currentness["state"] == "expired"
+            and candidate.governance_risk_class in {"high", "critical"}
+        ):
+            adjustments["governance_expired_high_risk"] = -_GOVERNANCE_EXPIRED_HIGH_RISK_PENALTY
+        if governance_currentness["state"] == "superseded":
+            adjustments["governance_superseded"] = -_GOVERNANCE_SUPERSEDED_PENALTY
     if source_ranking_enabled and intent.allow_strict_source_boosts:
         adjustments.update(_source_aware_adjustments(candidate))
         adjustments.update(_nist_source_role_adjustments(query, candidate))
@@ -1366,6 +1436,14 @@ class SearchService:
                 (SELECT sr.status FROM source_records sr
                  WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
                  ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status,
+                i.governance_owner_subject,
+                i.governance_reviewer_subject,
+                i.governance_verification_state AS governance_verification_state,
+                i.governance_verified_at,
+                i.governance_verified_by_subject,
+                i.governance_verification_deadline,
+                i.governance_risk_class,
+                i.governance_superseded_by_item_id,
                 li.text_score AS score
             FROM lexical_items li
             JOIN items i ON i.id = li.item_id
@@ -1787,7 +1865,15 @@ class SearchService:
                     me.superseded_by_entry_id AS canonical_superseded_by_entry_id,
                     (SELECT sr.status FROM source_records sr
                      WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
-                     ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status
+                     ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status,
+                    i.governance_owner_subject,
+                    i.governance_reviewer_subject,
+                    i.governance_verification_state AS governance_verification_state,
+                    i.governance_verified_at,
+                    i.governance_verified_by_subject,
+                    i.governance_verification_deadline,
+                    i.governance_risk_class,
+                    i.governance_superseded_by_item_id
                 FROM candidate_chunks candidate
                 JOIN {embedding_plan.table_name} e
                   ON e.item_id = candidate.item_id
@@ -1813,6 +1899,10 @@ class SearchService:
                 effective_date, effective_date_source, effective_date_quality, item_metadata,
                 canonical_memory_entry_id, canonical_valid_until,
                 canonical_superseded_by_entry_id, canonical_source_status,
+                governance_owner_subject, governance_reviewer_subject,
+                governance_verification_state, governance_verified_at,
+                governance_verified_by_subject, governance_verification_deadline,
+                governance_risk_class, governance_superseded_by_item_id,
                 (:vw * vec_score + :tw * text_score) AS score
             FROM ranked
             WHERE rn = 1
@@ -1886,6 +1976,14 @@ class SearchService:
                 score=float(r.score),
                 item_metadata=_with_canonical_currentness(r),
                 canonical_memory_entry_id=getattr(r, "canonical_memory_entry_id", None),
+                governance_owner_subject=getattr(r, "governance_owner_subject", None),
+                governance_reviewer_subject=getattr(r, "governance_reviewer_subject", None),
+                governance_verification_state=getattr(r, "governance_verification_state", None),
+                governance_verified_at=getattr(r, "governance_verified_at", None),
+                governance_verified_by_subject=getattr(r, "governance_verified_by_subject", None),
+                governance_verification_deadline=getattr(r, "governance_verification_deadline", None),
+                governance_risk_class=getattr(r, "governance_risk_class", None),
+                governance_superseded_by_item_id=getattr(r, "governance_superseded_by_item_id", None),
             )
             for r in rows
         ]
@@ -1968,6 +2066,7 @@ class SearchService:
             scored_candidates=reranked,
         )
         excluded_currentness_counts: dict[str, int] = {}
+        excluded_governance_counts: dict[str, int] = {}
         requested_identifiers = _requested_identifiers(query)
         if requested_identifiers:
             reranked = [
@@ -1980,6 +2079,18 @@ class SearchService:
                 state = _candidate_currentness(row[2])["state"]
                 if state in {"expired", "superseded"}:
                     excluded_currentness_counts[state] = excluded_currentness_counts.get(state, 0) + 1
+                    continue
+                # Recommendation 1: items explicitly superseded via the
+                # governance column are treated as no-longer-current-truth and
+                # are excluded from current-mode results. Expired items stay
+                # visible (ranked down via the governance_expired_high_risk
+                # penalty) so the wire still carries the explicit warning
+                # rather than silently dropping them.
+                governance_state = _candidate_governance_currentness(row[2])["state"]
+                if governance_state == "superseded":
+                    excluded_governance_counts[governance_state] = (
+                        excluded_governance_counts.get(governance_state, 0) + 1
+                    )
                     continue
                 eligible_reranked.append(row)
             reranked = eligible_reranked
@@ -2037,6 +2148,34 @@ class SearchService:
                 source_support_level=_source_support_level(candidate),
             )
             currentness = _candidate_currentness(candidate)
+            governance_currentness = _candidate_governance_currentness(candidate)
+            governance_currentness_state: GovernanceCurrentnessState = governance_currentness["state"]  # type: ignore[assignment]
+            # Build the nested GovernanceSurface only when at least one
+            # governance column is populated. ``exclude_if`` on the schema
+            # then drops the field for rows the corpus has not triaged yet,
+            # which keeps the legacy wire contract bit-identical.
+            governance_surface: GovernanceSurface | None = None
+            if any(
+                value is not None
+                for value in (
+                    candidate.governance_owner_subject,
+                    candidate.governance_reviewer_subject,
+                    candidate.governance_verification_state,
+                    candidate.governance_verified_at,
+                    candidate.governance_verification_deadline,
+                    candidate.governance_risk_class,
+                    candidate.governance_superseded_by_item_id,
+                )
+            ):
+                governance_surface = GovernanceSurface(
+                    owner_subject=candidate.governance_owner_subject,
+                    reviewer_subject=candidate.governance_reviewer_subject,
+                    verification_state=candidate.governance_verification_state,
+                    verified_at=candidate.governance_verified_at,
+                    verification_deadline=candidate.governance_verification_deadline,
+                    risk_class=candidate.governance_risk_class,
+                    governance_currentness_state=governance_currentness_state,
+                )
             ranking_trace_rows.append(
                 {
                     "item_id": str(candidate.item_id),
@@ -2083,6 +2222,26 @@ class SearchService:
                         currentness["valid_until"].isoformat() if currentness["valid_until"] else None
                     ),
                     "superseded_by_entry_id": currentness["superseded_by_entry_id"],
+                    "governance_owner_subject": candidate.governance_owner_subject,
+                    "governance_reviewer_subject": candidate.governance_reviewer_subject,
+                    "governance_verification_state": candidate.governance_verification_state,
+                    "governance_verified_at": (
+                        candidate.governance_verified_at.isoformat()
+                        if candidate.governance_verified_at else None
+                    ),
+                    "governance_verification_deadline": (
+                        candidate.governance_verification_deadline.isoformat()
+                        if candidate.governance_verification_deadline else None
+                    ),
+                    "governance_risk_class": candidate.governance_risk_class,
+                    "governance_currentness_state": governance_currentness_state,
+                    "governance_expired_high_risk": (
+                        "governance_expired_high_risk" in adjustments
+                    ),
+                    "governance_superseded": (
+                        "governance_superseded" in adjustments
+                        or bool(candidate.governance_superseded_by_item_id)
+                    ),
                     "adjustments": {
                         name: round(value, 6)
                         for name, value in adjustments.items()
@@ -2163,6 +2322,19 @@ class SearchService:
                     last_verified_at=currentness["last_verified_at"],
                     valid_until=currentness["valid_until"],
                     superseded_by_entry_id=currentness["superseded_by_entry_id"],
+                    governance=governance_surface,
+                    governance_owner_subject=candidate.governance_owner_subject,
+                    governance_reviewer_subject=candidate.governance_reviewer_subject,
+                    governance_verification_state=candidate.governance_verification_state,
+                    governance_verified_at=candidate.governance_verified_at,
+                    governance_verification_deadline=candidate.governance_verification_deadline,
+                    governance_risk_class=candidate.governance_risk_class,
+                    governance_superseded_by_item_id=(
+                        str(candidate.governance_superseded_by_item_id)
+                        if candidate.governance_superseded_by_item_id is not None
+                        else None
+                    ),
+                    governance_currentness_state=governance_currentness_state,
                 )
             )
             if len(results) >= limit:
@@ -2202,6 +2374,8 @@ class SearchService:
             "query_intent": query_intent.name,
             "currentness_mode": query_intent.currentness_mode,
             "excluded_currentness_counts": excluded_currentness_counts,
+            "excluded_governance_counts": excluded_governance_counts,
+            "governance_state_counts": _trace_counts(ranking_trace_rows, "governance_currentness_state"),
             "retrieval_lens": lens_profile.name,
             "retrieval_lens_profile": lens_profile.as_trace(),
             "source_ranking_enabled": source_ranking_enabled,
@@ -2347,6 +2521,14 @@ class SearchService:
                             (SELECT sr.status FROM source_records sr
                              WHERE sr.tenant_id = i.tenant_id AND sr.item_id = i.id
                              ORDER BY (sr.status = 'active') ASC, sr.id ASC LIMIT 1) AS canonical_source_status,
+                            i.governance_owner_subject,
+                            i.governance_reviewer_subject,
+                            i.governance_verification_state AS governance_verification_state,
+                            i.governance_verified_at,
+                            i.governance_verified_by_subject,
+                            i.governance_verification_deadline,
+                            i.governance_risk_class,
+                            i.governance_superseded_by_item_id,
                             (
                                 :vw * (1 - (e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})))) +
                                 :tw * COALESCE(
@@ -2530,6 +2712,14 @@ class SearchService:
                     score=float(row.score),
                     item_metadata=_with_canonical_currentness(row),
                     canonical_memory_entry_id=getattr(row, "canonical_memory_entry_id", None),
+                    governance_owner_subject=getattr(row, "governance_owner_subject", None),
+                    governance_reviewer_subject=getattr(row, "governance_reviewer_subject", None),
+                    governance_verification_state=getattr(row, "governance_verification_state", None),
+                    governance_verified_at=getattr(row, "governance_verified_at", None),
+                    governance_verified_by_subject=getattr(row, "governance_verified_by_subject", None),
+                    governance_verification_deadline=getattr(row, "governance_verification_deadline", None),
+                    governance_risk_class=getattr(row, "governance_risk_class", None),
+                    governance_superseded_by_item_id=getattr(row, "governance_superseded_by_item_id", None),
                 )
             )
         return graph_candidates, graph_scores

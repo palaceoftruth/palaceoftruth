@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
-import { Check, Edit2, ExternalLink, PencilLine, Tag, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Edit2, ExternalLink, PencilLine, ShieldAlert, Tag, Trash2, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
-import type { Item, RelatedItem } from "../api/types";
+import type {
+  GovernanceCurrentnessState,
+  GovernanceRiskClass,
+  GovernanceVerificationState,
+  Item,
+  ItemGovernance,
+  RelatedItem,
+} from "../api/types";
 import ArtifactCitation, { artifactCitationFromItem } from "../components/ArtifactCitation";
 import PageHeader from "../components/PageHeader";
 import ProvenanceDrawer, { relatedItemsToProvenanceRelationships } from "../components/ProvenanceDrawer";
@@ -32,6 +39,12 @@ function parseTags(tagsInput: string): string[] {
     .filter(Boolean);
 }
 
+function emptyToNull(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function isSystemProvenanceTag(tag: string): boolean {
   return [
     "skill-",
@@ -41,6 +54,75 @@ function isSystemProvenanceTag(tag: string): boolean {
     "hermes-memory-",
   ].some((prefix) => tag.startsWith(prefix));
 }
+
+function isoToLocalInput(value: string | null | undefined): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}T${pad(parsed.getHours())}:${pad(
+    parsed.getMinutes(),
+  )}`;
+}
+
+function isExpiredInPast(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.getTime() < Date.now();
+}
+
+function governanceFormFromItem(governance: ItemGovernance | null | undefined): ItemGovernance {
+  return {
+    owner_subject: governance?.owner_subject ?? null,
+    reviewer_subject: governance?.reviewer_subject ?? null,
+    verification_state: governance?.verification_state ?? null,
+    verified_at: governance?.verified_at ?? null,
+    verified_by_subject: governance?.verified_by_subject ?? null,
+    verification_deadline: governance?.verification_deadline ?? null,
+    risk_class: governance?.risk_class ?? null,
+    supersession_reason: governance?.supersession_reason ?? null,
+    superseded_by_item_id: governance?.superseded_by_item_id ?? null,
+    superseded_at: governance?.superseded_at ?? null,
+  };
+}
+
+interface GovernanceAuditEntry {
+  recorded_at?: string;
+  actor_subject?: string | null;
+  changes?: Array<{ field: string; previous: unknown; next: unknown }>;
+}
+
+function latestGovernanceAudit(item: Item): GovernanceAuditEntry | null {
+  const history = item.metadata_?.governance_audit;
+  if (!Array.isArray(history) || history.length === 0) return null;
+  const last = history[history.length - 1];
+  if (!last || typeof last !== "object") return null;
+  return last as GovernanceAuditEntry;
+}
+
+function formatGovernanceAuditChange(entry: GovernanceAuditEntry): string {
+  const changes = entry.changes ?? [];
+  if (changes.length === 0) return "Recorded change";
+  return changes
+    .map((change) => {
+      const previous = change.previous === null || change.previous === undefined ? "∅" : String(change.previous);
+      const next = change.next === null || change.next === undefined ? "∅" : String(change.next);
+      return `${change.field}: ${previous} → ${next}`;
+    })
+    .join("; ");
+}
+
+const GOVERNANCE_VERIFICATION_OPTIONS: GovernanceVerificationState[] = [
+  "unverified",
+  "verified",
+  "stale",
+  "rejected",
+];
+
+const GOVERNANCE_RISK_OPTIONS: GovernanceRiskClass[] = ["low", "moderate", "high", "critical"];
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface DetailSectionProps {
   title: string;
@@ -86,6 +168,9 @@ export default function ItemDetail() {
   const [editingTags, setEditingTags] = useState(false);
   const [tagsInput, setTagsInput] = useState("");
   const [savingTags, setSavingTags] = useState(false);
+  const [editingGovernance, setEditingGovernance] = useState(false);
+  const [governanceForm, setGovernanceForm] = useState<ItemGovernance>(governanceFormFromItem(null));
+  const [savingGovernance, setSavingGovernance] = useState(false);
 
   useEffect(() => {
     if (!id) {
@@ -104,6 +189,7 @@ export default function ItemDetail() {
         setItem(itemData);
         setRelated(relData.relationships);
         setTagsInput(itemData.tags.join(", "));
+        setGovernanceForm(governanceFormFromItem(itemData.governance));
       })
       .catch((err) => {
         if (cancelled) return;
@@ -139,6 +225,51 @@ export default function ItemDetail() {
     if (!item) return;
     setTagsInput(item.tags.join(", "));
     setEditingTags(false);
+  };
+
+  const handleSaveGovernance = async () => {
+    if (!item || !id) return;
+    const trimmedUuid = (governanceForm.superseded_by_item_id ?? "").trim();
+    if (trimmedUuid && !UUID_PATTERN.test(trimmedUuid)) {
+      toast.error("Superseded by item id must be a valid UUID.");
+      return;
+    }
+    if (
+      (governanceForm.supersession_reason ?? "").length > 1000
+    ) {
+      toast.error("Supersession reason must be 1000 characters or fewer.");
+      return;
+    }
+    setSavingGovernance(true);
+    const payload: ItemGovernance = {
+      owner_subject: emptyToNull(governanceForm.owner_subject),
+      reviewer_subject: emptyToNull(governanceForm.reviewer_subject),
+      verification_state: governanceForm.verification_state ?? null,
+      verified_at: governanceForm.verified_at,
+      verified_by_subject: emptyToNull(governanceForm.verified_by_subject),
+      verification_deadline: governanceForm.verification_deadline,
+      risk_class: governanceForm.risk_class ?? null,
+      supersession_reason: emptyToNull(governanceForm.supersession_reason),
+      superseded_by_item_id: trimmedUuid || null,
+      superseded_at: governanceForm.superseded_at,
+    };
+    try {
+      const updated = await api.updateItem(id, { governance: payload });
+      setItem(updated);
+      setGovernanceForm(governanceFormFromItem(updated.governance));
+      setEditingGovernance(false);
+      toast.success("Governance updated");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSavingGovernance(false);
+    }
+  };
+
+  const handleCancelGovernance = () => {
+    if (!item) return;
+    setGovernanceForm(governanceFormFromItem(item.governance));
+    setEditingGovernance(false);
   };
 
   const handleDelete = async () => {
@@ -424,6 +555,352 @@ export default function ItemDetail() {
               </p>
             )}
           </DetailSection>
+
+          {(() => {
+            const governance = item.governance ?? null;
+            const verificationState = governance?.verification_state ?? null;
+            const riskClass = governance?.risk_class ?? null;
+            const deadlineExpired = isExpiredInPast(governance?.verification_deadline);
+            const deadlineExpiredHighRisk =
+              deadlineExpired && (riskClass === "high" || riskClass === "critical");
+            const currentnessState: GovernanceCurrentnessState | null = (() => {
+              if (governance?.superseded_by_item_id) return "superseded";
+              if (verificationState === "rejected") return "superseded";
+              if (deadlineExpired) return "expired";
+              if (
+                (verificationState === "verified" || verificationState === "stale") &&
+                !deadlineExpired
+              ) {
+                return "current";
+              }
+              return "unassigned";
+            })();
+            const showCurrentnessWarning =
+              verificationState === "rejected" || currentnessState === "expired";
+            const auditEntry = latestGovernanceAudit(item);
+            const supersessionReason = governance?.supersession_reason ?? null;
+            const supersededById = governance?.superseded_by_item_id ?? null;
+            const supersededAt = governance?.superseded_at ?? null;
+            const governanceHasData =
+              !!governance &&
+              Object.values(governance).some((value) => value !== null && value !== "");
+            return (
+              <DetailSection
+                title="Governance"
+                description="Accountable owner and expiry on important knowledge. Captures who owns the claim, when it was last verified, and whether it has been superseded."
+              >
+                {showCurrentnessWarning ? (
+                  <StatePanel
+                    icon={ShieldAlert}
+                    compact
+                    variant="error"
+                    title={
+                      verificationState === "rejected"
+                        ? "This item has been rejected."
+                        : "This item's governance has expired."
+                    }
+                    description={
+                      verificationState === "rejected"
+                        ? "Marked rejected on the governance surface. Treat its claims as untrustworthy until a reviewer re-verifies it."
+                        : "The verification deadline has passed. Treat its claims as stale until a reviewer re-verifies it."
+                    }
+                    action={null}
+                  />
+                ) : null}
+
+                {deadlineExpiredHighRisk ? (
+                  <div className="mt-3">
+                    <StatePanel
+                      icon={AlertTriangle}
+                      compact
+                      variant="error"
+                      title="Expired high-risk content — verify before citing"
+                      description="The verification deadline has passed and the risk class is high or critical. Confirm with the owner or a reviewer before relying on this item."
+                      action={null}
+                    />
+                  </div>
+                ) : null}
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm text-zinc-400">
+                    <ShieldAlert className="h-4 w-4" />
+                    <span>
+                      {governanceHasData
+                        ? "Governance metadata is set."
+                        : "No governance metadata assigned yet."}
+                    </span>
+                  </div>
+                  {!editingGovernance ? (
+                    <button
+                      type="button"
+                      onClick={() => setEditingGovernance(true)}
+                      className="sb-button-ghost"
+                    >
+                      <Edit2 className="h-4 w-4" />
+                      Edit governance
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleSaveGovernance}
+                        disabled={savingGovernance}
+                        className="sb-button-primary px-3 py-2"
+                      >
+                        <Check className="h-4 w-4" />
+                        {savingGovernance ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCancelGovernance}
+                        disabled={savingGovernance}
+                        className="sb-button-ghost"
+                      >
+                        <X className="h-4 w-4" />
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {supersededById ? (
+                  <div className="mt-4">
+                    <Link
+                      to={`/items/${supersededById}`}
+                      className="sb-chip border-amber-800/70 bg-amber-950/30 text-amber-100 hover:border-amber-500"
+                    >
+                      Superseded by item {supersededById}
+                    </Link>
+                  </div>
+                ) : null}
+
+                {editingGovernance ? (
+                  <div className="mt-4 space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Owner subject</span>
+                        <input
+                          type="text"
+                          maxLength={200}
+                          value={governanceForm.owner_subject ?? ""}
+                          onChange={(event) =>
+                            setGovernanceForm((prev) => ({ ...prev, owner_subject: event.target.value }))
+                          }
+                          className="sb-input py-2.5"
+                          placeholder="alice"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Reviewer subject</span>
+                        <input
+                          type="text"
+                          maxLength={200}
+                          value={governanceForm.reviewer_subject ?? ""}
+                          onChange={(event) =>
+                            setGovernanceForm((prev) => ({ ...prev, reviewer_subject: event.target.value }))
+                          }
+                          className="sb-input py-2.5"
+                          placeholder="bob"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Verification state</span>
+                        <select
+                          value={governanceForm.verification_state ?? ""}
+                          onChange={(event) => {
+                            const next = event.target.value as GovernanceVerificationState | "";
+                            setGovernanceForm((prev) => ({
+                              ...prev,
+                              verification_state: next === "" ? null : next,
+                            }));
+                          }}
+                          className="sb-select"
+                        >
+                          <option value="">Unset</option>
+                          {GOVERNANCE_VERIFICATION_OPTIONS.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Risk class</span>
+                        <select
+                          value={governanceForm.risk_class ?? ""}
+                          onChange={(event) => {
+                            const next = event.target.value as GovernanceRiskClass | "";
+                            setGovernanceForm((prev) => ({
+                              ...prev,
+                              risk_class: next === "" ? null : next,
+                            }));
+                          }}
+                          className="sb-select"
+                        >
+                          <option value="">Unset</option>
+                          {GOVERNANCE_RISK_OPTIONS.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Verification deadline</span>
+                        <input
+                          type="datetime-local"
+                          value={isoToLocalInput(governanceForm.verification_deadline)}
+                          onChange={(event) => {
+                            const next = event.target.value
+                              ? new Date(event.target.value).toISOString()
+                              : null;
+                            setGovernanceForm((prev) => ({ ...prev, verification_deadline: next }));
+                          }}
+                          className="sb-input py-2.5"
+                        />
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Supersession reason</span>
+                        <textarea
+                          maxLength={1000}
+                          rows={3}
+                          value={governanceForm.supersession_reason ?? ""}
+                          onChange={(event) =>
+                            setGovernanceForm((prev) => ({
+                              ...prev,
+                              supersession_reason: event.target.value,
+                            }))
+                          }
+                          className="sb-textarea"
+                          placeholder="Why this item has been replaced (optional)"
+                        />
+                        <span className="mt-1 block text-xs text-zinc-500">
+                          {(governanceForm.supersession_reason ?? "").length}/1000 characters
+                        </span>
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.22em] text-zinc-500">Superseded by item id</span>
+                        <input
+                          type="text"
+                          value={governanceForm.superseded_by_item_id ?? ""}
+                          onChange={(event) =>
+                            setGovernanceForm((prev) => ({
+                              ...prev,
+                              superseded_by_item_id: event.target.value,
+                            }))
+                          }
+                          className="sb-input py-2.5 font-mono"
+                          placeholder="00000000-0000-0000-0000-000000000000"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ) : (
+                  <dl className="mt-4 divide-y divide-zinc-800/70">
+                    <MetadataRow
+                      label="Owner subject"
+                      value={
+                        governance?.owner_subject ? <span className="capitalize">{governance.owner_subject}</span> : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Reviewer subject"
+                      value={
+                        governance?.reviewer_subject ? (
+                          <span className="capitalize">{governance.reviewer_subject}</span>
+                        ) : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Verification state"
+                      value={
+                        verificationState ? <span className="capitalize">{verificationState}</span> : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Verified at"
+                      value={formatDate(governance?.verified_at, { dateStyle: "medium", timeStyle: "short" }) ?? undefined}
+                    />
+                    <MetadataRow
+                      label="Verified by"
+                      value={
+                        governance?.verified_by_subject ? (
+                          <span className="capitalize">{governance.verified_by_subject}</span>
+                        ) : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Verification deadline"
+                      value={formatDate(governance?.verification_deadline, {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      }) ?? undefined}
+                    />
+                    <MetadataRow
+                      label="Risk class"
+                      value={riskClass ? <span className="capitalize">{riskClass}</span> : undefined}
+                    />
+                    <MetadataRow
+                      label="Supersession reason"
+                      value={
+                        supersessionReason ? (
+                          <span className="whitespace-pre-wrap text-left">{supersessionReason}</span>
+                        ) : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Superseded by"
+                      value={
+                        supersededById ? (
+                          <Link
+                            to={`/items/${supersededById}`}
+                            className="font-mono text-xs text-amber-200 transition hover:text-white"
+                          >
+                            {supersededById}
+                          </Link>
+                        ) : undefined
+                      }
+                    />
+                    <MetadataRow
+                      label="Superseded at"
+                      value={formatDate(supersededAt, { dateStyle: "medium", timeStyle: "short" }) ?? undefined}
+                    />
+                  </dl>
+                )}
+
+                <details className="group mt-4 overflow-hidden rounded-2xl border border-zinc-800/70 bg-zinc-950/40">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm text-zinc-300 transition hover:text-white">
+                    <span>Last governance change</span>
+                    <span className="text-xs uppercase tracking-[0.22em] text-zinc-500 transition group-open:text-zinc-300">
+                      {auditEntry ? "Toggle" : "Unavailable"}
+                    </span>
+                  </summary>
+                  {auditEntry ? (
+                    <div className="space-y-2 border-t border-zinc-800/80 px-4 py-4 text-xs leading-6 text-zinc-400">
+                      <p>
+                        <span className="text-zinc-500">Recorded:</span>{" "}
+                        {formatDate(auditEntry.recorded_at, { dateStyle: "medium", timeStyle: "short" }) ?? "Unknown"}
+                      </p>
+                      {auditEntry.actor_subject ? (
+                        <p>
+                          <span className="text-zinc-500">Actor:</span>{" "}
+                          <span className="font-mono">{auditEntry.actor_subject}</span>
+                        </p>
+                      ) : null}
+                      <p>
+                        <span className="text-zinc-500">Changes:</span>{" "}
+                        <span className="font-mono">{formatGovernanceAuditChange(auditEntry)}</span>
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="border-t border-zinc-800/80 px-4 py-4 text-xs leading-6 text-zinc-500">
+                      No governance audit entries recorded yet.
+                    </p>
+                  )}
+                </details>
+              </DetailSection>
+            );
+          })()}
 
           {item.source_type === "feed_article" ? (
             <DetailSection

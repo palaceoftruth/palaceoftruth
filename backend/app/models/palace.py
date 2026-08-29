@@ -426,6 +426,23 @@ class Claim(Base):
         onupdate=func.now(),
     )
 
+    # Recommendation 1 governance surface for derived claims: who owns the
+    # claim, who reviews it, when does it expire, and how much harm does
+    # citing a stale version cause. Nullable for the same reason as Item.
+    governance_owner_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_reviewer_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_verification_state: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    governance_verified_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    governance_verified_by_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    governance_verification_deadline: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    governance_risk_class: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
 
 class ClaimSource(Base):
     __tablename__ = "claim_sources"

@@ -708,6 +708,34 @@ every credential hashed with the previous value.
 
 ---
 
+## Item Governance
+
+### Structured Log Keys
+
+Governance transitions on `PATCH /api/v1/items/{id}` emit structured log lines that operators can replay against the audit trail without an ORM round-trip. The `extra` payload never includes raw content, secrets, or tenant identifiers beyond what is needed to find the row.
+
+- `governance.item.update` at INFO on every successful transition, with `extra={"item_id", "tenant_id", "actor_subject", "changed_fields", "verification_state", "risk_class", "verification_deadline"}`.
+- `governance.item.denied` at WARNING when a cross-tenant or scope-limited write is refused, with `extra={"tenant_id", "item_id", "actor_subject", "reason"}`.
+
+### Partial Indexes
+
+Migration `070_item_governance` adds three partial Postgres indexes so the columns operators actually filter on stay indexable without bloating the catalog for the untriaged majority:
+
+- `idx_items_governance_tenant_deadline` on `(tenant_id, governance_verification_deadline)` — used by background sweeps that flag expired verification and by the currentness derivation in search ranking.
+- `idx_items_governance_tenant_risk` on `(tenant_id, governance_risk_class)` — used by ranking-trace rollups and by any operator query that groups high-risk items by tenant.
+- `idx_claims_governance_tenant_deadline` on `(tenant_id, governance_verification_deadline)` — used by claim-level expiry sweeps; claims inherit enough of the item surface to be auditable on their own.
+
+Each index is partial with `WHERE <column> IS NOT NULL`, so it only indexes rows that have been triaged.
+
+### Search Ranking
+
+The search service projects the eight governance columns through to `_SearchCandidate` and computes `governance_currentness_state ∈ {unassigned, current, expired, superseded}`. Ranking adjustments:
+
+- `governance_expired_high_risk = -0.35` is applied to items whose deadline has passed and whose `risk_class` is `high` or `critical`. Lower-risk expired items stay visible without a penalty so the warning reaches the wire.
+- Items in `governance_currentness_state = superseded` are excluded from `current`-mode search results. The count is recorded as `excluded_governance_counts["superseded"]` on the ranking trace, alongside `governance_state_counts` for the four-state distribution.
+
+---
+
 ## Local Development
 
 Public localhost fallback:
