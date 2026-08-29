@@ -97,7 +97,13 @@ async def plan_session() -> AsyncSession:
                     tags text[] NOT NULL DEFAULT '{}', effective_date timestamptz,
                     created_at timestamptz NOT NULL DEFAULT now(), search_vector tsvector NOT NULL,
                     title text NOT NULL, summary text, source_url text,
-                    effective_date_source text, effective_date_quality text
+                    effective_date_source text, effective_date_quality text,
+                    governance_owner_subject text, governance_reviewer_subject text,
+                    governance_verification_state varchar(20), governance_verified_at timestamptz,
+                    governance_verified_by_subject text,
+                    governance_verification_deadline timestamptz,
+                    governance_risk_class varchar(20), governance_supersession_reason text,
+                    governance_superseded_by_item_id uuid, governance_superseded_at timestamptz
                 )
             """))
             await session.execute(text("""
