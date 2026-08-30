@@ -361,8 +361,9 @@ def test_palaceoftruth_provider_retrieve_uses_memory_retrieve_contract(monkeypat
             "POST",
             "/api/v1/memory/retrieve-agent",
             {
-                "query": "position sizing rules",
-                "limit": 5,
+                    "query": "position sizing rules",
+                    "limit": 5,
+                    "corpus_class": "raw_capture",
                 "candidate_limit": 20,
                 "broad_candidate_limit": 20,
                 "display_limit": 12,
@@ -1892,15 +1893,15 @@ def test_palaceoftruth_search_tool_reports_degraded_search(monkeypatch) -> None:
 
     result = json.loads(provider.handle_tool_call("palace_search", {"query": "palace status"}))
 
-    assert result == {
-        "ok": False,
-        "query": "palace status",
-        "error": {
-            "type": "PalaceCircuitOpenError",
-            "message": "Palace of Truth circuit is open; retry after 12 seconds",
-            "retry_after_seconds": 12,
-            "retryable": True,
-        },
+    assert result["ok"] is False
+    assert result["query"] == "palace status"
+    assert result["retrieval_mode"] == "hybrid"
+    assert result["corpus_class"] == "raw_capture"
+    assert result["error"] == {
+        "type": "PalaceCircuitOpenError",
+        "message": "Palace of Truth circuit is open; retry after 12 seconds",
+        "retry_after_seconds": 12,
+        "retryable": True,
     }
 
 
@@ -4475,6 +4476,7 @@ def test_sar1381_search_reports_hybrid_capture_corpus_and_scope(monkeypatch) -> 
             }
         if path == "/api/v1/memory/scopes":
             return {"scopes": []}
+        assert payload["corpus_class"] == "raw_capture"
         assert path in {"/api/v1/memory/retrieve-agent", "/api/v1/memory/retrieve"}
         return {
             "trace": {
@@ -4590,8 +4592,93 @@ def test_sar1381_normal_reads_are_bounded_per_turn_but_canaries_are_exempt(
     assert blocked["error"]["type"] == "PalaceReadBudgetError"
     assert route_calls == 3
 
-    assert json.loads(provider.handle_tool_call("palace_exact_scope_recall", {"query": "canary"}))["ok"]
-    assert exact_calls == 1
+    exact_blocked = json.loads(
+        provider.handle_tool_call("palace_exact_scope_recall", {"query": "canary"})
+    )
+    assert exact_blocked["ok"] is False
+    assert exact_blocked["error"]["type"] == "PalaceReadBudgetError"
+    assert exact_calls == 0
     provider.sync_turn("", "")
-    assert json.loads(provider.handle_tool_call("palace_search", {"query": "new turn"}))["ok"]
-    assert route_calls == 4
+    assert json.loads(
+        provider.handle_tool_call("palace_exact_scope_recall", {"query": "canary"})
+    )["ok"]
+    assert exact_calls == 1
+
+
+def test_sar1381_fact_cache_keys_include_scope_and_temporal_filters(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_AGENT_SCOPE_PATTERNS", "agent/*")
+    provider = _lux_oauth_provider(module, monkeypatch)
+    payloads: list[dict] = []
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        assert path == "/api/v1/memory/semantic-recall"
+        payloads.append(dict(payload))
+        return {
+            "trace": {"searched_scope": {"type": payload["scope_type"], "key": payload.get("scope_key")}},
+            "items": [],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    first = provider.handle_tool_call(
+        "palace_fact_recall",
+        {
+            "query": "same fact",
+            "scope_type": "agent",
+            "scope_key": "iris",
+            "valid_at": "2026-08-01T00:00:00Z",
+            "fact_kind_filter": ["world"],
+        },
+    )
+    second = provider.handle_tool_call(
+        "palace_semantic_recall",
+        {
+            "query": "same fact",
+            "valid_at": "2026-08-29T00:00:00Z",
+            "fact_kind_filter": ["observation"],
+        },
+    )
+
+    assert first != second
+    assert len(payloads) == 2
+    assert payloads[0]["scope_key"] == "iris"
+    assert payloads[1]["scope_key"] == "lux"
+    assert payloads[0]["valid_at"] != payloads[1]["valid_at"]
+    assert payloads[0]["fact_kind_filter"] != payloads[1]["fact_kind_filter"]
+
+
+@pytest.mark.parametrize("tool_name", ["palace_search", "palace_exact_scope_recall"])
+def test_sar1381_failed_read_output_is_bounded(monkeypatch, tool_name: str) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_CONTEXT_BUDGET_CHARS", "300")
+    provider = _lux_oauth_provider(module, monkeypatch)
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        raise RuntimeError("bounded transport failure")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    raw = provider.handle_tool_call(tool_name, {"query": "q" * 10000})
+
+    assert len(raw) <= 300
+    result = json.loads(raw)
+    if tool_name == "palace_search":
+        assert result["truncated"] is True
+        assert "omitted" in result["result"].lower()
+    else:
+        assert result["ok"] is False

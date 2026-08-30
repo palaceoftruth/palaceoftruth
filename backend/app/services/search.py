@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1541,6 +1541,7 @@ class SearchService:
         neighbor_chunk_window: int = 1,
         context_budget_chars: int | None = None,
         include_derived_artifacts: bool = False,
+        corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all",
     ) -> list[SearchResult]:
         lens_profile = resolve_retrieval_lens(retrieval_lens)
         derived_artifacts_requested = include_derived_artifacts or _tags_request_derived_artifacts(tags)
@@ -1987,6 +1988,18 @@ class SearchService:
             )
             for r in rows
         ]
+        if corpus_class == "raw_capture":
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.canonical_memory_entry_id is None
+            ]
+        elif corpus_class == "curated_memory_entry":
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.canonical_memory_entry_id is not None
+            ]
         relationship_graph_scores: dict[Any, float] = {}
         relationship_graph_candidate_count = 0
         relationship_graph_expansion_enabled = (
@@ -2298,6 +2311,11 @@ class SearchService:
                     title=candidate.title,
                     summary=candidate.summary,
                     source_type=candidate.source_type,
+                    corpus_class=(
+                        "curated_memory_entry"
+                        if candidate.canonical_memory_entry_id is not None
+                        else "raw_capture"
+                    ),
                     source_url=candidate.source_url,
                     tags=candidate.tags,
                     system_tags=system_tags,

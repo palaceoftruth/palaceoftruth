@@ -75,6 +75,7 @@ class SearchResult(BaseModel):
     title: str
     summary: str | None
     source_type: str
+    corpus_class: Literal["raw_capture", "curated_memory_entry"] = "raw_capture"
     source_url: str | None
     tags: list[str]
     system_tags: list[str] = Field(default_factory=list)

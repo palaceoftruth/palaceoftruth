@@ -1320,6 +1320,7 @@ async def retrieve_memory(
             neighbor_chunk_window=body.neighbor_chunk_window,
             context_budget_chars=body.context_budget_chars,
             include_derived_artifacts=body.include_derived_artifacts,
+            corpus_class=body.corpus_class,
             retrieval_lens=body.retrieval_lens,
             scope_type=body.scope.type,
             scope_key=body.scope.key,
@@ -1333,14 +1334,21 @@ async def retrieve_memory(
         query_embedding_error=query_embedding_error,
         allow_empty_degraded=allow_empty_degraded,
     )
+    filtered_results = _filter_results_by_corpus(result.results, body.corpus_class)
     return MemoryRetrieveResponse(
         scope=body.scope,
         routed_room_id=result.routed_room_id,
         redirected_from_room_id=result.redirected_from_room_id,
         trace=result.trace,
-        results=result.results,
-        total=result.total,
+        results=filtered_results,
+        total=len(filtered_results),
     )
+
+
+def _filter_results_by_corpus(results: list, corpus_class: str) -> list:
+    if corpus_class == "all":
+        return results
+    return [result for result in results if result.corpus_class == corpus_class]
 
 
 def _append_scope_once(scopes: list[MemoryScope], scope: MemoryScope) -> None:
@@ -2359,6 +2367,7 @@ async def _batched_scope_results(
             scope_labels=labels,
             per_scope_candidate_cap=per_scope_candidate_cap,
             include_derived_artifacts=body.include_derived_artifacts,
+            corpus_class=body.corpus_class,
             query_vector=query_vector,
             query_embedding_error=query_embedding_error,
         )
@@ -2495,6 +2504,7 @@ async def retrieve_agent_memory(
             tenant_id=tenant_id,
             body=MemoryRetrieveRequest(
                 query=body.query,
+                corpus_class=body.corpus_class,
                 limit=route_candidate_limit,
                 tags=body.tags,
                 tags_mode=body.tags_mode,
@@ -2553,6 +2563,7 @@ async def retrieve_agent_memory(
             tenant_id=tenant_id,
             body=MemoryRetrieveRequest(
                 query=body.query,
+                corpus_class=body.corpus_class,
                 limit=selected_candidate_limit,
                 tags=body.tags,
                 tags_mode=body.tags_mode,
@@ -2608,7 +2619,8 @@ async def retrieve_agent_memory(
         broad_corpus_searched = True
         search_service = SearchService(db, embedder, tenant_id=tenant_id)
         route_results.append(
-            await search_service.vector_search(
+            _filter_results_by_corpus(
+                await search_service.vector_search(
                 query=body.query,
                 limit=broad_candidate_limit,
                 retrieval_lens=body.retrieval_lens,
@@ -2621,6 +2633,8 @@ async def retrieve_agent_memory(
                 include_derived_artifacts=body.include_derived_artifacts,
                 query_vector=query_vector,
                 query_embedding_error=query_embedding_error,
+                ),
+                body.corpus_class,
             )
         )
         broad_corpus_duration_ms = _duration_ms(broad_started_at)

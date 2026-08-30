@@ -210,12 +210,14 @@ def _search_result(
     source_item_id: uuid.UUID | None = None,
     source_span: dict | None = None,
     retrieved_scope_label: str | None = None,
+    corpus_class: str = "raw_capture",
 ) -> SearchResult:
     return SearchResult(
         item_id=item_id or uuid.uuid4(),
         title=title,
         summary=None,
         source_type="note",
+        corpus_class=corpus_class,
         source_url=None,
         tags=tags or ["codex-memory"],
         created_at=created_at or datetime.now(timezone.utc),
@@ -226,6 +228,25 @@ def _search_result(
         source_span=source_span,
         retrieved_scope_label=retrieved_scope_label,
     )
+
+
+def test_raw_capture_corpus_filter_excludes_curated_memory_entries() -> None:
+    from app.services.memory import _filter_results_by_corpus
+
+    capture = _search_result(
+        "Captured media",
+        score=0.9,
+        corpus_class="raw_capture",
+    )
+    curated = _search_result(
+        "Curated fact",
+        score=0.99,
+        corpus_class="curated_memory_entry",
+    )
+
+    assert _filter_results_by_corpus([curated, capture], "raw_capture") == [capture]
+    assert _filter_results_by_corpus([curated, capture], "curated_memory_entry") == [curated]
+    assert _filter_results_by_corpus([curated, capture], "all") == [curated, capture]
 
 
 def test_interleave_results_by_scope_gives_small_scope_a_slot() -> None:

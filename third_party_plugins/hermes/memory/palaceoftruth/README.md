@@ -249,7 +249,7 @@ Troubleshooting a no-memory-answer regression:
 |---|---|---|
 | Captured URL, video, transcript, document, title, or source | `palace_search` | Raw captures through `hybrid`, or `lexical_degraded` only when the embedding dependency has a retryable failure |
 | Current or historical curated fact with `valid_at`, `fact_kind`, or supersession semantics | `palace_fact_recall` | Curated memory entries through `fact_token_overlap` |
-| Exact-scope canary or containment verification | `palace_exact_scope_recall` | Active authorized scope only; exempt from the normal read-attempt budget |
+| Exact-scope canary or containment verification | `palace_exact_scope_recall` | Active authorized scope only; counts toward the same per-turn read budget |
 
 Every explicit tool result reports `retrieval_mode`, `corpus_class`, searched
 scope, and whether broader authorized fallback was used. The complete serialized
