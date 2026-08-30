@@ -1161,13 +1161,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._server_agent_scope_key = ""
         self._server_containment_mode = ""
         self._server_identity_lock = threading.Lock()
-        self._read_authorization_latch: tuple[str, str] | None = None
+        self._turn_epoch = 0
+        self._read_authorization_latch: tuple[int, str, str] | None = None
         self._read_authorization_latch_lock = threading.Lock()
-        self._prefetch_cache: dict[str, str] = {
+        self._read_authorization_condition = threading.Condition(
+            self._read_authorization_latch_lock
+        )
+        self._canonical_read_in_flight_epoch: int | None = None
+        self._prefetch_cache: dict[str, Any] = {
             "query": "",
             "session_id": "",
             "workspace": "",
             "text": "",
+            "epoch": 0,
         }
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
@@ -1634,7 +1640,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._server_identity_loaded = False
         self._server_agent_scope_key = ""
         self._server_containment_mode = ""
-        self._reset_read_authorization_latch()
+        with self._read_authorization_condition:
+            self._turn_epoch = 0
+            self._read_authorization_latch = None
+            self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
         self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
@@ -2277,11 +2287,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         active_workspace = self._agent_workspace
         if not query or not self._has_api_auth():
             return ""
+        turn_epoch = self._current_turn_epoch()
         with self._prefetch_lock:
             if (
                 self._prefetch_cache["query"] == query
                 and self._prefetch_cache["session_id"] == active_session
                 and self._prefetch_cache["workspace"] == active_workspace
+                and self._prefetch_cache.get("epoch") == turn_epoch
             ):
                 return self._prefetch_cache["text"]
         text = self._prefetch_text(query, active_session)
@@ -2291,6 +2303,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "session_id": active_session,
                 "workspace": active_workspace,
                 "text": text,
+                "epoch": turn_epoch,
             }
         return text
 
@@ -2302,6 +2315,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             return
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             return
+        turn_epoch = self._current_turn_epoch()
 
         def _worker() -> None:
             # An unguarded raise here kills the daemon thread and leaves the cache
@@ -2323,6 +2337,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "session_id": active_session,
                     "workspace": active_workspace,
                     "text": text,
+                    "epoch": turn_epoch,
                 }
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
@@ -2400,9 +2415,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
     ) -> None:
-        # Hermes calls sync_turn at the turn boundary. Clear read authorization
-        # failures before any early return so the next turn gets one fresh try.
-        self._reset_read_authorization_latch()
+        # Hermes calls sync_turn at the turn boundary. Advance the epoch before
+        # any early return so stale reads cannot affect the next turn.
+        self._advance_turn_epoch()
         if self._writes_disabled or not self._has_api_auth():
             return
         user_text = (user_content or "").strip()
@@ -2443,12 +2458,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     ) -> None:
         del parent_session_id, reset, kwargs
         self._session_id = (new_session_id or "").strip()
+        self._advance_turn_epoch()
         with self._prefetch_lock:
             self._prefetch_cache = {
                 "query": "",
                 "session_id": "",
                 "workspace": "",
                 "text": "",
+                "epoch": self._current_turn_epoch(),
             }
         with self._tenant_id_lock:
             self._tenant_id = ""
@@ -2456,7 +2473,6 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._server_identity_loaded = False
             self._server_agent_scope_key = ""
             self._server_containment_mode = ""
-        self._reset_read_authorization_latch()
         self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
@@ -2628,16 +2644,37 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             return f"agent/{key}" if key else None
         return None
 
-    def _reset_read_authorization_latch(self) -> None:
-        with self._read_authorization_latch_lock:
-            self._read_authorization_latch = None
+    def _current_turn_epoch(self) -> int:
+        with self._read_authorization_condition:
+            return self._turn_epoch
 
-    def _raise_if_read_authorization_latched(self) -> None:
-        with self._read_authorization_latch_lock:
-            latched = self._read_authorization_latch
-        if latched is None:
-            return
-        endpoint, scope_label = latched
+    def _advance_turn_epoch(self) -> None:
+        with self._read_authorization_condition:
+            self._turn_epoch += 1
+            self._read_authorization_latch = None
+            self._read_authorization_condition.notify_all()
+
+    def _reserve_canonical_read(self) -> int:
+        with self._read_authorization_condition:
+            while True:
+                epoch = self._turn_epoch
+                latched = self._read_authorization_latch
+                if latched is not None and latched[0] == epoch:
+                    _, endpoint, scope_label = latched
+                    self._log_authorization_latch(endpoint, scope_label)
+                    raise PalaceAuthorizationLatchError(endpoint, scope_label)
+                if self._canonical_read_in_flight_epoch != epoch:
+                    self._canonical_read_in_flight_epoch = epoch
+                    return epoch
+                self._read_authorization_condition.wait()
+
+    def _release_canonical_read(self, epoch: int) -> None:
+        with self._read_authorization_condition:
+            if self._canonical_read_in_flight_epoch == epoch:
+                self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
+
+    def _log_authorization_latch(self, endpoint: str, scope_label: str) -> None:
         _log_retrieval_diagnostic(
             logging.WARNING,
             "canonical_scope_403_latched",
@@ -2651,12 +2688,29 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             status_class="authorization",
             latch_prevented_call=True,
         )
+
+    def _raise_if_read_authorization_latched(self) -> None:
+        with self._read_authorization_condition:
+            latched = self._read_authorization_latch
+            epoch = self._turn_epoch
+        if latched is None or latched[0] != epoch:
+            return
+        _, endpoint, scope_label = latched
+        self._log_authorization_latch(endpoint, scope_label)
         raise PalaceAuthorizationLatchError(endpoint, scope_label)
 
-    def _record_read_authorization_failure(self, endpoint: str, scope_label: str) -> None:
-        with self._read_authorization_latch_lock:
-            if self._read_authorization_latch is None:
-                self._read_authorization_latch = (endpoint, scope_label)
+    def _record_read_authorization_failure(
+        self,
+        epoch: int,
+        endpoint: str,
+        scope_label: str,
+    ) -> None:
+        with self._read_authorization_condition:
+            if epoch == self._turn_epoch and self._read_authorization_latch is None:
+                self._read_authorization_latch = (epoch, endpoint, scope_label)
+            if self._canonical_read_in_flight_epoch == epoch:
+                self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
         _log_retrieval_diagnostic(
             logging.WARNING,
             "canonical_scope_403",
@@ -2678,10 +2732,34 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_circuit_open()
         request_scope_label = self._request_agent_scope_label(path, payload)
-        if request_scope_label:
-            self._raise_if_read_authorization_latched()
+        if not request_scope_label:
+            return self._request_json_unreserved(method, path, payload, params)
+
+        authorization_epoch = self._reserve_canonical_read()
+        try:
+            return self._request_json_unreserved(
+                method,
+                path,
+                payload,
+                params,
+                request_scope_label=request_scope_label,
+                authorization_epoch=authorization_epoch,
+            )
+        finally:
+            self._release_canonical_read(authorization_epoch)
+
+    def _request_json_unreserved(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        params: dict[str, Any] | None,
+        *,
+        request_scope_label: str | None = None,
+        authorization_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        self._raise_if_circuit_open()
         body = None
         mcp_scopes = _mcp_scopes_for_memory_route(method, path, payload)
         headers = self._auth_headers(mcp_scopes)
@@ -2720,7 +2798,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 if not _is_retryable_http_status(exc.code):
                     if exc.code == 403 and request_scope_label:
                         exc.read()
-                        self._record_read_authorization_failure(path, request_scope_label)
+                        assert authorization_epoch is not None
+                        self._record_read_authorization_failure(
+                            authorization_epoch,
+                            path,
+                            request_scope_label,
+                        )
                         raise PalaceAuthorizationError(path, request_scope_label) from exc
                     detail = _http_error_detail(exc)
                     raise RuntimeError(

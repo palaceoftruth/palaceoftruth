@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import sys
+import threading
 import types
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -947,6 +948,7 @@ def test_palaceoftruth_on_session_switch_resets_session_cache_and_tenant(monkeyp
         "session_id": "",
         "workspace": "",
         "text": "",
+        "epoch": 1,
     }
 
 
@@ -4046,6 +4048,159 @@ def test_palaceoftruth_canonical_403_latches_for_turn_and_new_turn_clears_it(
     assert third["ok"] is False
     assert third["error"]["type"] == "PalaceAuthorizationError"
     assert calls.count("/api/v1/memory/retrieve-agent") == 2
+
+
+def test_palaceoftruth_same_query_prefetch_retries_after_turn_boundary(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("turn-1", hermes_home="/tmp/hermes-home", agent_identity="default")
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        calls.append(path)
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": []})
+        raise module.HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"detail":"canonical agent scope required"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    assert "search is unavailable" in provider.prefetch("same query", session_id="turn-1")
+    provider.sync_turn("", "")
+    assert "search is unavailable" in provider.prefetch("same query", session_id="turn-1")
+    assert calls.count("/api/v1/memory/retrieve-agent") == 2
+
+
+def test_palaceoftruth_concurrent_same_turn_reads_share_one_403_request(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("turn-1", hermes_home="/tmp/hermes-home", agent_identity="default")
+    request_started = threading.Event()
+    release_request = threading.Event()
+    count_lock = threading.Lock()
+    canonical_calls = 0
+
+    def fake_urlopen(request, timeout: int):
+        nonlocal canonical_calls
+        path = request_path(request)
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": []})
+        with count_lock:
+            canonical_calls += 1
+        request_started.set()
+        assert release_request.wait(timeout=2)
+        raise module.HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"detail":"canonical agent scope required"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    results: list[dict] = []
+
+    def search(query: str) -> None:
+        results.append(json.loads(provider.handle_tool_call("palace_search", {"query": query})))
+
+    first = threading.Thread(target=search, args=("first",))
+    second = threading.Thread(target=search, args=("second",))
+    first.start()
+    assert request_started.wait(timeout=2)
+    second.start()
+    release_request.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert canonical_calls == 1
+    assert {result["error"]["type"] for result in results} == {
+        "PalaceAuthorizationError",
+        "PalaceAuthorizationLatchError",
+    }
+
+
+def test_palaceoftruth_stale_background_prefetch_cannot_latch_new_turn(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("turn-1", hermes_home="/tmp/hermes-home", agent_identity="default")
+    old_request_started = threading.Event()
+    release_old_request = threading.Event()
+    count_lock = threading.Lock()
+    canonical_calls = 0
+
+    def fake_urlopen(request, timeout: int):
+        nonlocal canonical_calls
+        path = request_path(request)
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": []})
+        with count_lock:
+            canonical_calls += 1
+            call_number = canonical_calls
+        if call_number == 1:
+            old_request_started.set()
+            assert release_old_request.wait(timeout=2)
+            raise module.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(b'{"detail":"canonical agent scope required"}'),
+            )
+        return FakeJsonResponse(
+            {
+                "trace": {"searched_scopes": [{"type": "agent", "key": "lux"}]},
+                "results": [
+                    {
+                        "item_id": "lux-memory",
+                        "title": "Lux memory",
+                        "chunk_text": "The new turn can read Palace.",
+                        "score": 0.9,
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    provider.queue_prefetch("old turn", session_id="turn-1")
+    assert old_request_started.wait(timeout=2)
+
+    provider.sync_turn("", "")
+    new_turn = json.loads(provider.handle_tool_call("palace_search", {"query": "new turn"}))
+    release_old_request.set()
+    provider.shutdown()
+
+    assert new_turn["ok"] is True
+    assert "Lux memory" in new_turn["result"]
+    assert canonical_calls == 2
+    assert provider._prefetch_cache.get("epoch") != provider._current_turn_epoch()
+    final = json.loads(provider.handle_tool_call("palace_search", {"query": "still new"}))
+    assert final["ok"] is True
+    assert canonical_calls == 3
 
 
 def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall(
