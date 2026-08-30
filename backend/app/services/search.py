@@ -488,6 +488,25 @@ class _SearchCandidate:
     governance_superseded_by_item_id: Any | None = None
 
 
+def _filter_candidates_by_corpus(
+    candidates: list[_SearchCandidate],
+    corpus_class: Literal["all", "raw_capture", "curated_memory_entry"],
+) -> list[_SearchCandidate]:
+    if corpus_class == "raw_capture":
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.canonical_memory_entry_id is None
+        ]
+    if corpus_class == "curated_memory_entry":
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.canonical_memory_entry_id is not None
+        ]
+    return candidates
+
+
 @dataclass(frozen=True)
 class _RuntimeRerankDecision:
     item_id: Any
@@ -1988,18 +2007,7 @@ class SearchService:
             )
             for r in rows
         ]
-        if corpus_class == "raw_capture":
-            candidates = [
-                candidate
-                for candidate in candidates
-                if candidate.canonical_memory_entry_id is None
-            ]
-        elif corpus_class == "curated_memory_entry":
-            candidates = [
-                candidate
-                for candidate in candidates
-                if candidate.canonical_memory_entry_id is not None
-            ]
+        candidates = _filter_candidates_by_corpus(candidates, corpus_class)
         relationship_graph_scores: dict[Any, float] = {}
         relationship_graph_candidate_count = 0
         relationship_graph_expansion_enabled = (
@@ -2027,6 +2035,17 @@ class SearchService:
                 exclude_private_memory_scopes=exclude_private_memory_scopes,
                 historical_mode=historical_mode,
             )
+            graph_candidates = _filter_candidates_by_corpus(
+                graph_candidates, corpus_class
+            )
+            allowed_graph_item_ids = {
+                candidate.item_id for candidate in graph_candidates
+            }
+            relationship_graph_scores = {
+                item_id: score
+                for item_id, score in relationship_graph_scores.items()
+                if item_id in allowed_graph_item_ids
+            }
             relationship_graph_candidate_count = len(graph_candidates)
             existing_item_ids = {candidate.item_id for candidate in candidates}
             candidates.extend(
