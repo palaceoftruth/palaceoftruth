@@ -55,7 +55,7 @@ write-back is explicitly delegated.
   `PALACEOFTRUTH_AGENT_BROAD_CANDIDATE_LIMIT`,
   `PALACEOFTRUTH_AGENT_DISPLAY_LIMIT`, and
   `PALACEOFTRUTH_CONTEXT_BUDGET_CHARS`.
-- `palace_semantic_recall` exposes the strict-scope semantic memory route
+- `palace_fact_recall` exposes the strict-scope curated temporal fact route
   `/api/v1/memory/semantic-recall` for Hermes agents that need source-backed
   temporal recall. It defaults to the active configured Hermes scope and
   supports `valid_at`, `fact_kind_filter`, `top_k`, `candidate_limit`,
@@ -65,7 +65,9 @@ write-back is explicitly delegated.
 - Hermes pre-turn recall remains route-aware by default. Set
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_ENABLED=true` to make the pre-turn
   `prefetch()` hook call strict-scope semantic recall instead. The explicit
-  `palace_semantic_recall` tool remains available regardless of this setting.
+  `palace_fact_recall` tool remains available regardless of this setting.
+- `palace_semantic_recall` is a documented compatibility alias for
+  `palace_fact_recall` for the 1.0.34 release cycle.
 - Semantic pre-turn recall uses separate operator knobs from route-aware recall:
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K` (default `5`),
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT` (default `20`),
@@ -240,6 +242,21 @@ Troubleshooting a no-memory-answer regression:
    search as unavailable or failed.
 5. If the call exists and succeeded, inspect the rendered `palace_search` result
    for evidence lines before debugging model reasoning.
+
+### Retrieval tool decision table
+
+| Request | Tool | Corpus and mode |
+|---|---|---|
+| Captured URL, video, transcript, document, title, or source | `palace_search` | Raw captures through `hybrid`, or `lexical_degraded` only when the embedding dependency has a retryable failure |
+| Current or historical curated fact with `valid_at`, `fact_kind`, or supersession semantics | `palace_fact_recall` | Curated memory entries through `fact_token_overlap` |
+| Exact-scope canary or containment verification | `palace_exact_scope_recall` | Active authorized scope only; exempt from the normal read-attempt budget |
+
+Every explicit tool result reports `retrieval_mode`, `corpus_class`, searched
+scope, and whether broader authorized fallback was used. The complete serialized
+tool response respects `context_budget_chars` and states when results were
+omitted. Normal explicit lookup is limited to three distinct queries per turn;
+repeated healthy queries reuse the bounded result, and a new turn resets the
+budget.
 
 Current packaging boundary:
 

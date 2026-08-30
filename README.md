@@ -460,3 +460,11 @@ CI currently runs a backend smoke subset, the static database health gate, retri
 - [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](third_party_plugins/agent_clients/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
 
 Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
+
+For Hermes retrieval, use this decision table:
+
+| Request | Tool |
+|---|---|
+| Captured URL, video, transcript, document, title, or source | `palace_search` |
+| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.34 compatibility alias) |
+| Exact-scope canary or containment check | `palace_exact_scope_recall` |

@@ -512,7 +512,7 @@ def test_palaceoftruth_hermes_oauth_tenant_shared_uses_constrained_agent_route(
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert method == "POST"
-        assert path == "/api/v1/memory/retrieve-agent"
+        assert path in {"/api/v1/memory/retrieve-agent", "/api/v1/memory/retrieve"}
         seen_payload.update(payload or {})
         return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
 
@@ -567,7 +567,7 @@ def test_palaceoftruth_hermes_oauth_mara_sibling_patterns_are_bounded_and_audite
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert method == "POST"
-        assert path == "/api/v1/memory/retrieve-agent"
+        assert path in {"/api/v1/memory/retrieve-agent", "/api/v1/memory/retrieve"}
         seen_payload.update(payload or {})
         return {"trace": {"searched_scopes": []}, "results": [], "total": 0}
 
@@ -837,6 +837,7 @@ def test_palaceoftruth_provider_exposes_explicit_search_and_remember_tools(
 
     assert tool_names == {
         "palace_search",
+        "palace_fact_recall",
         "palace_semantic_recall",
         "palace_remember",
         "palace_remember_bulk",
@@ -1402,7 +1403,9 @@ def test_palaceoftruth_semantic_prefetch_rejects_sibling_agent_scope(monkeypatch
         provider.prefetch("sibling recall", session_id="session-1")
 
 
-def test_palaceoftruth_semantic_recall_falls_back_for_older_server(monkeypatch) -> None:
+def test_palaceoftruth_semantic_recall_does_not_cross_to_raw_capture_on_404(
+    monkeypatch,
+) -> None:
     module = load_palaceoftruth_plugin()
     monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
     monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
@@ -1420,18 +1423,16 @@ def test_palaceoftruth_semantic_recall_falls_back_for_older_server(monkeypatch) 
         raise RuntimeError("Palace of Truth POST /api/v1/memory/semantic-recall failed with HTTP 404")
 
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
-    provider._retrieve_text = lambda query, session_id: "fallback route-aware memory"  # type: ignore[method-assign]
-
     result = json.loads(
         provider.handle_tool_call("palace_semantic_recall", {"query": "older server"})
     )
 
-    assert result == {
-        "ok": True,
-        "query": "older server",
-        "fallback_used": True,
-        "result": "fallback route-aware memory",
-    }
+    assert result["ok"] is False
+    assert result["query"] == "older server"
+    assert result["retrieval_mode"] == "fact_token_overlap"
+    assert result["corpus_class"] == "curated_memory_entry"
+    assert result["broader_authorized_fallback_used"] is False
+    assert "Raw capture search was not used" in result["result"]
 
 
 def test_palaceoftruth_semantic_recall_rejects_sibling_agent_scope(monkeypatch) -> None:
@@ -4385,3 +4386,212 @@ def test_palaceoftruth_semantic_recall_workspace_refusal_names_the_flag(monkeypa
     assert "workspace/quietfirm" in message
     assert "PALACEOFTRUTH_INCLUDE_ALL_PERMITTED_WORKSPACE_SCOPES" in message
     assert "sibling-agent" not in message
+
+
+def test_sar1381_replay_fixture_separates_raw_capture_from_curated_facts() -> None:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "retrieval_replay"
+        / "sar1381_capture_fact_split.json"
+    )
+    fixture_text = fixture_path.read_text()
+    fixture = json.loads(fixture_text)
+
+    assert fixture["raw_capture"]["source_type"] == "media"
+    assert fixture["raw_capture"]["embedding_count"] > 0
+    assert fixture["raw_capture"]["memory_entry_count"] == 0
+    assert fixture["competing_curated_entries"]
+    assert all(entry.get("fact_kind") for entry in fixture["competing_curated_entries"])
+    assert "bd26babe-c135-4e17-b1c1-be82ae0f1b8b" not in fixture_text
+
+
+def test_sar1381_tool_contract_routes_captures_facts_and_canaries(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    prompt = provider.system_prompt_block()
+
+    assert "palace_fact_recall" in schemas
+    assert "palace_semantic_recall" in schemas
+    assert "captured URL" in schemas["palace_search"]["description"]
+    assert "curated temporal fact" in schemas["palace_fact_recall"]["description"]
+    assert "compatibility alias" in schemas["palace_semantic_recall"]["description"]
+    assert "captured URL, video, transcript, document, title, or source" in prompt
+    assert "palace_fact_recall" in prompt
+    assert "exact-scope canary" in prompt
+
+
+@pytest.mark.parametrize("tool_name", ["palace_fact_recall", "palace_semantic_recall"])
+def test_sar1381_fact_tool_and_alias_report_curated_fact_mode(
+    monkeypatch, tool_name: str
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        assert method == "POST"
+        assert path == "/api/v1/memory/semantic-recall"
+        assert payload["valid_at"] == "2026-08-29T00:00:00Z"
+        return {
+            "trace": {"searched_scope": {"type": "agent", "key": "lux"}},
+            "items": [],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            tool_name,
+            {"query": "current inference host", "valid_at": "2026-08-29T00:00:00Z"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["retrieval_mode"] == "fact_token_overlap"
+    assert result["corpus_class"] == "curated_memory_entry"
+    assert result["searched_scopes"] == ["agent/lux"]
+    assert result["broader_authorized_fallback_used"] is False
+    assert "curated fact memory only" in result["result"]
+
+
+def test_sar1381_search_reports_hybrid_capture_corpus_and_scope(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        assert path in {"/api/v1/memory/retrieve-agent", "/api/v1/memory/retrieve"}
+        return {
+            "trace": {
+                "searched_scopes": [{"type": "agent", "key": "lux"}],
+                "retrieval_mode": "hybrid",
+                "tenant_shared_fallback_used": False,
+                "broad_corpus_searched": False,
+            },
+            "results": [
+                {
+                    "item_id": "11111111-2222-4333-8444-555555555555",
+                    "title": "Fast local model serving stack - Video",
+                    "source_type": "media",
+                    "scope": {"type": "agent", "key": "lux"},
+                    "score": 0.98,
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(provider.handle_tool_call("palace_search", {"query": "serving video"}))
+
+    assert result["retrieval_mode"] == "hybrid"
+    assert result["corpus_class"] == "raw_capture"
+    assert result["searched_scopes"] == ["agent/lux"]
+    assert result["broader_authorized_fallback_used"] is False
+
+
+def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_CONTEXT_BUDGET_CHARS", "400")
+    provider = _lux_oauth_provider(module, monkeypatch)
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        assert path == "/api/v1/memory/retrieve"
+        return {
+            "trace": {"retrieval_mode": "hybrid"},
+            "results": [
+                {
+                    "item_id": f"item-{index}",
+                    "title": f"Long result {index}",
+                    "chunk_text": "x" * 500,
+                    "scope": {"type": "agent", "key": "lux"},
+                    "source_type": "media",
+                    "score": 0.9 - index / 100,
+                }
+                for index in range(5)
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    raw = provider.handle_tool_call("palace_exact_scope_recall", {"query": "canary"})
+    result = json.loads(raw)
+
+    assert len(raw) <= 400
+    assert result["truncated"] is True
+    assert "omitted" in result["result"]
+    assert result["retrieval_mode"] == "hybrid"
+    assert result["corpus_class"] == "raw_capture"
+
+
+def test_sar1381_normal_reads_are_bounded_per_turn_but_canaries_are_exempt(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    route_calls = 0
+    exact_calls = 0
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        nonlocal route_calls, exact_calls
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        if path == "/api/v1/memory/retrieve-agent":
+            route_calls += 1
+            return {
+                "trace": {
+                    "searched_scopes": [{"type": "agent", "key": "lux"}],
+                    "retrieval_mode": "hybrid",
+                },
+                "results": [{"item_id": f"item-{route_calls}", "title": "Healthy source"}],
+            }
+        if path == "/api/v1/memory/retrieve":
+            if payload.get("query") == "canary":
+                exact_calls += 1
+                return {"trace": {"retrieval_mode": "hybrid"}, "results": []}
+            route_calls += 1
+            return {
+                "trace": {"retrieval_mode": "hybrid"},
+                "results": [{"item_id": f"item-{route_calls}", "title": "Healthy source"}],
+            }
+        raise AssertionError(path)
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    for query in ("one", "two", "three"):
+        assert json.loads(provider.handle_tool_call("palace_search", {"query": query}))["ok"]
+    blocked = json.loads(provider.handle_tool_call("palace_search", {"query": "four"}))
+    assert blocked["ok"] is False
+    assert blocked["error"]["type"] == "PalaceReadBudgetError"
+    assert route_calls == 3
+
+    assert json.loads(provider.handle_tool_call("palace_exact_scope_recall", {"query": "canary"}))["ok"]
+    assert exact_calls == 1
+    provider.sync_turn("", "")
+    assert json.loads(provider.handle_tool_call("palace_search", {"query": "new turn"}))["ok"]
+    assert route_calls == 4

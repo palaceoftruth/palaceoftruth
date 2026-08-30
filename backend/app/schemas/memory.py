@@ -842,6 +842,8 @@ class SemanticRecallRequest(BaseModel):
 
 class SemanticRecallTrace(BaseModel):
     status: SemanticMemoryRecallStatus = "ok"
+    retrieval_mode: Literal["fact_token_overlap"] = "fact_token_overlap"
+    corpus_class: Literal["curated_memory_entry"] = "curated_memory_entry"
     searched_scope: MemoryScope
     valid_at: datetime | None = None
     fact_kind_filter: list[MemoryEntryFactKind] = Field(default_factory=list)
