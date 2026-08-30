@@ -4545,7 +4545,7 @@ def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypat
     assert result["corpus_class"] == "raw_capture"
 
 
-def test_sar1381_normal_reads_are_bounded_per_turn_but_canaries_are_exempt(
+def test_sar1381_normal_and_canary_reads_share_one_per_turn_budget(
     monkeypatch,
 ) -> None:
     module = load_palaceoftruth_plugin()
@@ -4682,3 +4682,62 @@ def test_sar1381_failed_read_output_is_bounded(monkeypatch, tool_name: str) -> N
         assert "omitted" in result["result"].lower()
     else:
         assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "target_path"),
+    [
+        ("palace_search", "/api/v1/memory/retrieve"),
+        ("palace_fact_recall", "/api/v1/memory/semantic-recall"),
+        ("palace_exact_scope_recall", "/api/v1/memory/retrieve"),
+    ],
+)
+def test_sar1381_identical_concurrent_failed_reads_share_one_attempt(
+    monkeypatch, tool_name: str, target_path: str
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    provider._request_json = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "agent_scope_key": "lux",
+        "containment_mode": "hermes_agent",
+    }
+    assert provider._canonical_bound_agent_scope_key() == "lux"
+
+    request_started = threading.Event()
+    release_request = threading.Event()
+    request_lock = threading.Lock()
+    target_calls = 0
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        nonlocal target_calls
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        assert path == target_path
+        with request_lock:
+            target_calls += 1
+        request_started.set()
+        assert release_request.wait(timeout=2)
+        raise RuntimeError("bounded shared failure")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    results: list[str] = []
+
+    def call_tool() -> None:
+        results.append(provider.handle_tool_call(tool_name, {"query": "same failed read"}))
+
+    first = threading.Thread(target=call_tool)
+    second = threading.Thread(target=call_tool)
+    first.start()
+    assert request_started.wait(timeout=2)
+    second.start()
+    release_request.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert target_calls == 1
+    assert len(results) == 2
+    assert results[0] == results[1]

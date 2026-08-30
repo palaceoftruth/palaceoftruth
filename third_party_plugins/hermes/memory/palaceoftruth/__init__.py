@@ -1224,7 +1224,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._read_epoch_context = threading.local()
         self._turn_read_fingerprints: set[str] = set()
         self._turn_read_cache: dict[str, str] = {}
-        self._turn_read_budget_lock = threading.Lock()
+        self._turn_read_in_flight: set[str] = set()
+        self._turn_read_budget_lock = threading.Condition()
         self._prefetch_cache: dict[str, Any] = {
             "query": "",
             "session_id": "",
@@ -1705,6 +1706,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         with self._turn_read_budget_lock:
             self._turn_read_fingerprints.clear()
             self._turn_read_cache.clear()
+            self._turn_read_in_flight.clear()
+            self._turn_read_budget_lock.notify_all()
         self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
@@ -2057,7 +2060,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     safe_query, self._session_id
                 )
             except Exception as exc:
-                return _bounded_tool_json(
+                serialized = _bounded_tool_json(
                     {
                         "ok": False,
                         "query": _trim(query, 2000),
@@ -2070,6 +2073,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     },
                     self._context_budget_chars,
                 )
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
             if not text:
                 text = _empty_keyword_recall_message(searched_scopes)
             serialized = _bounded_tool_json(
@@ -2111,7 +2117,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
                 text = self._format_semantic_recall_response(response)
             except Exception as exc:
-                return _bounded_tool_json(
+                serialized = _bounded_tool_json(
                     {
                         "ok": False,
                         "query": _trim(query, 2000),
@@ -2127,6 +2133,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     },
                     self._context_budget_chars,
                 )
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
             searched_scope = _scope_label(
                 {"type": payload["scope_type"], "key": payload.get("scope_key")}
             )
@@ -2365,7 +2374,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 annotated = _annotate_retrieval_results([(scope, response)])
                 text = self._format_exact_scope_recall(scope, annotated)
             except Exception as exc:
-                return _bounded_tool_json(
+                serialized = _bounded_tool_json(
                     {
                         "ok": False,
                         "query": _trim(query, 2000),
@@ -2378,6 +2387,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     },
                     self._context_budget_chars,
                 )
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
             trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
             source_types = {
                 str(result.get("source_type") or "")
@@ -2801,6 +2813,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         with self._turn_read_budget_lock:
             self._turn_read_fingerprints.clear()
             self._turn_read_cache.clear()
+            self._turn_read_in_flight.clear()
+            self._turn_read_budget_lock.notify_all()
 
     def _explicit_read_cache_key(self, tool_name: str, request: dict[str, Any]) -> str:
         canonical_tool = (
@@ -2809,13 +2823,18 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             else tool_name
         )
         canonical_request = json.dumps(request, sort_keys=True, separators=(",", ":"))
-        return f"{canonical_tool}:{hashlib.sha256(canonical_request.encode()).hexdigest()[:16]}"
+        return (
+            f"{self._current_turn_epoch()}:{canonical_tool}:"
+            f"{hashlib.sha256(canonical_request.encode()).hexdigest()[:16]}"
+        )
 
     def _reserve_explicit_read(
         self, tool_name: str, request: dict[str, Any]
     ) -> tuple[str, str | None]:
         cache_key = self._explicit_read_cache_key(tool_name, request)
         with self._turn_read_budget_lock:
+            while cache_key in self._turn_read_in_flight:
+                self._turn_read_budget_lock.wait()
             cached = self._turn_read_cache.get(cache_key)
             if cached is not None:
                 return cache_key, cached
@@ -2826,11 +2845,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "attempts in this turn; start a new turn before another read"
                     )
                 self._turn_read_fingerprints.add(cache_key)
+            self._turn_read_in_flight.add(cache_key)
         return cache_key, None
 
     def _cache_explicit_read(self, cache_key: str, response: str) -> None:
         with self._turn_read_budget_lock:
             self._turn_read_cache[cache_key] = response
+            self._turn_read_in_flight.discard(cache_key)
+            self._turn_read_budget_lock.notify_all()
 
     def _expected_read_epoch(self) -> int | None:
         expected = getattr(self._read_epoch_context, "expected_epoch", None)
