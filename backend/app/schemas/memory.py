@@ -756,6 +756,7 @@ class MemoryRetrieveRequest(BaseModel):
     date_from: datetime | None = None
     date_to: datetime | None = None
     scope: MemoryScope = Field(default_factory=MemoryScope)
+    corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all"
     room_id: uuid.UUID | None = None
 
     @field_validator("query")
@@ -842,6 +843,8 @@ class SemanticRecallRequest(BaseModel):
 
 class SemanticRecallTrace(BaseModel):
     status: SemanticMemoryRecallStatus = "ok"
+    retrieval_mode: Literal["fact_token_overlap"] = "fact_token_overlap"
+    corpus_class: Literal["curated_memory_entry"] = "curated_memory_entry"
     searched_scope: MemoryScope
     valid_at: datetime | None = None
     fact_kind_filter: list[MemoryEntryFactKind] = Field(default_factory=list)
@@ -886,6 +889,7 @@ class SemanticRecallResponse(BaseModel):
 
 class AgentMemoryRetrieveRequest(BaseModel):
     query: str
+    corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all"
     agent_scope_key: str | None = None
     include_agent_scope_keys: list[str] = Field(default_factory=list)
     include_agent_scope_patterns: list[str] = Field(default_factory=list)

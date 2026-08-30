@@ -3105,6 +3105,66 @@ async def palace_search(
 
 
 @mcp.tool()
+async def palace_fact_recall(
+    query: str,
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    scope_type: ScopeType | None = None,
+    scope_key: str | None = None,
+    top_k: int = 8,
+    candidate_limit: int | None = None,
+    score_threshold: float | None = None,
+    recall_max_tokens: int | None = 1500,
+    context_budget_chars: int | None = None,
+    valid_at: str | None = None,
+    fact_kind_filter: list[MemoryFactKind] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Strict-scope curated fact recall with temporal filters and provenance."""
+    runtime = _runtime(ctx)
+    resolved_scope_type, resolved_scope_key = _resolve_write_scope(
+        runtime.settings,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        fallback_scope_type="tenant_shared",
+        fallback_scope_key=None,
+    )
+    params = {
+        "query": query,
+        "scope_type": resolved_scope_type,
+        "scope_key": resolved_scope_key,
+        "top_k": top_k,
+        "candidate_limit": candidate_limit,
+        "score_threshold": score_threshold,
+        "recall_max_tokens": recall_max_tokens,
+        "context_budget_chars": context_budget_chars,
+        "valid_at": valid_at,
+        "fact_kind_filter": fact_kind_filter,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+    return await _run_mcp_operation(
+        ctx,
+        operation="palace_fact_recall",
+        params=params,
+        call=lambda: runtime.api.semantic_recall_memory(
+            query=query,
+            scope_type=resolved_scope_type,
+            scope_key=resolved_scope_key,
+            top_k=top_k,
+            candidate_limit=candidate_limit,
+            score_threshold=score_threshold,
+            recall_max_tokens=recall_max_tokens,
+            context_budget_chars=context_budget_chars,
+            valid_at=valid_at,
+            fact_kind_filter=fact_kind_filter,
+            date_from=date_from,
+            date_to=date_to,
+        ),
+    )
+
+
+@mcp.tool()
 async def palace_semantic_recall(
     query: str,
     ctx: Context[ServerSession, SecondBrainMcpRuntime],
@@ -3120,7 +3180,7 @@ async def palace_semantic_recall(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> dict[str, Any]:
-    """Strict-scope semantic recall with temporal filters and source-backed provenance."""
+    """One-release compatibility alias for palace_fact_recall."""
     runtime = _runtime(ctx)
     resolved_scope_type, resolved_scope_key = _resolve_write_scope(
         runtime.settings,

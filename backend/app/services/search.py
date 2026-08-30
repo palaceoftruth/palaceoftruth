@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -486,6 +486,25 @@ class _SearchCandidate:
     governance_verification_deadline: datetime | None = None
     governance_risk_class: str | None = None
     governance_superseded_by_item_id: Any | None = None
+
+
+def _filter_candidates_by_corpus(
+    candidates: list[_SearchCandidate],
+    corpus_class: Literal["all", "raw_capture", "curated_memory_entry"],
+) -> list[_SearchCandidate]:
+    if corpus_class == "raw_capture":
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.canonical_memory_entry_id is None
+        ]
+    if corpus_class == "curated_memory_entry":
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.canonical_memory_entry_id is not None
+        ]
+    return candidates
 
 
 @dataclass(frozen=True)
@@ -1541,6 +1560,7 @@ class SearchService:
         neighbor_chunk_window: int = 1,
         context_budget_chars: int | None = None,
         include_derived_artifacts: bool = False,
+        corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all",
     ) -> list[SearchResult]:
         lens_profile = resolve_retrieval_lens(retrieval_lens)
         derived_artifacts_requested = include_derived_artifacts or _tags_request_derived_artifacts(tags)
@@ -1987,6 +2007,7 @@ class SearchService:
             )
             for r in rows
         ]
+        candidates = _filter_candidates_by_corpus(candidates, corpus_class)
         relationship_graph_scores: dict[Any, float] = {}
         relationship_graph_candidate_count = 0
         relationship_graph_expansion_enabled = (
@@ -2014,6 +2035,17 @@ class SearchService:
                 exclude_private_memory_scopes=exclude_private_memory_scopes,
                 historical_mode=historical_mode,
             )
+            graph_candidates = _filter_candidates_by_corpus(
+                graph_candidates, corpus_class
+            )
+            allowed_graph_item_ids = {
+                candidate.item_id for candidate in graph_candidates
+            }
+            relationship_graph_scores = {
+                item_id: score
+                for item_id, score in relationship_graph_scores.items()
+                if item_id in allowed_graph_item_ids
+            }
             relationship_graph_candidate_count = len(graph_candidates)
             existing_item_ids = {candidate.item_id for candidate in candidates}
             candidates.extend(
@@ -2298,6 +2330,11 @@ class SearchService:
                     title=candidate.title,
                     summary=candidate.summary,
                     source_type=candidate.source_type,
+                    corpus_class=(
+                        "curated_memory_entry"
+                        if candidate.canonical_memory_entry_id is not None
+                        else "raw_capture"
+                    ),
                     source_url=candidate.source_url,
                     tags=candidate.tags,
                     system_tags=system_tags,

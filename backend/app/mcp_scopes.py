@@ -121,6 +121,7 @@ MCP_OPERATION_SCOPES: dict[str, McpOperationScope] = {
     "retrieve_agent_memory": "read",
     "retrieve_memory_trajectory": "read",
     "palace_semantic_recall": "read",
+    "palace_fact_recall": "read",
     "search_items": "read",
     "list_tags": "read",
     "list_items": "read",

@@ -53,6 +53,7 @@ from app.mcp_server import (
     palace_checkpoint,
     palace_connection_info,
     palace_context,
+    palace_fact_recall,
     palace_remember,
     palace_remember_bulk,
     palace_search,
@@ -3016,7 +3017,16 @@ def test_palace_search_alias_posts_agent_memory_request_with_codex_defaults() ->
     assert "secret summary" not in json.dumps(audit_payload)
 
 
-def test_palace_semantic_recall_posts_strict_scope_request_and_audits() -> None:
+@pytest.mark.parametrize(
+    ("tool", "expected_operation"),
+    [
+        (palace_fact_recall, "palace_fact_recall"),
+        (palace_semantic_recall, "palace_semantic_recall"),
+    ],
+)
+def test_palace_fact_recall_and_alias_post_strict_scope_request_and_audit(
+    tool, expected_operation: str
+) -> None:
     seen: list[tuple[str, str]] = []
     seen_payload: dict[str, object] = {}
     audit_payload: dict[str, object] = {}
@@ -3085,7 +3095,7 @@ def test_palace_semantic_recall_posts_strict_scope_request_and_audits() -> None:
                     lifespan_context=SecondBrainMcpRuntime(settings=api.settings, api=api)
                 )
             )
-            await palace_semantic_recall(
+            await tool(
                 query="Iris current state",
                 ctx=ctx,
                 scope_type="agent",
@@ -3106,7 +3116,7 @@ def test_palace_semantic_recall_posts_strict_scope_request_and_audits() -> None:
     assert seen_payload["scope_key"] == "iris"
     assert seen_payload["valid_at"] == "2026-07-09T12:00:00Z"
     assert seen_payload["fact_kind_filter"] == ["world"]
-    assert audit_payload["operation"] == "palace_semantic_recall"
+    assert audit_payload["operation"] == expected_operation
     assert audit_payload["required_scope"] == "read"
     assert audit_payload["params_summary"]["query"] == {"redacted": True, "present": True}
     assert audit_payload["params_summary"]["scope_type"] == "agent"

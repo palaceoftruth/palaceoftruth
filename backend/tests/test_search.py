@@ -1918,6 +1918,62 @@ def test_vector_search_relationship_graph_expansion_adds_bounded_related_candida
     assert related_trace["adjustments"]["relationship_graph"] == 0.045
 
 
+def test_raw_capture_search_excludes_curated_relationship_graph_candidate(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.search.settings.retrieval_relationship_expansion_enabled", True)
+    seed_id = uuid.uuid4()
+    related_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(
+        rows=[
+            SimpleNamespace(
+                item_id=seed_id,
+                title="Captured media seed",
+                summary="Raw captured source.",
+                source_type="media",
+                source_url=None,
+                tags=["retrieval"],
+                created_at=now,
+                chunk_text="Find the captured source.",
+                chunk_index=0,
+                score=0.8,
+                item_metadata={},
+                canonical_memory_entry_id=None,
+            )
+        ],
+        graph_rows=[
+            SimpleNamespace(
+                item_id=related_id,
+                title="Curated related fact",
+                summary="Must not cross into raw capture search.",
+                source_type="note",
+                source_url=None,
+                tags=["retrieval"],
+                created_at=now,
+                chunk_text="Curated fact linked to the capture.",
+                chunk_index=0,
+                score=0.95,
+                item_metadata={},
+                confidence=0.95,
+                canonical_memory_entry_id=uuid.uuid4(),
+            )
+        ],
+    )
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(
+        service.vector_search(
+            query="find anything about the captured source",
+            limit=3,
+            corpus_class="raw_capture",
+        )
+    )
+
+    assert [result.item_id for result in results] == [seed_id]
+    assert service.last_ranking_trace is not None
+    assert service.last_ranking_trace["relationship_graph_expansion_enabled"] is True
+    assert service.last_ranking_trace["relationship_graph_candidate_count"] == 0
+
+
 def test_vector_search_opt_in_retrieval_lens_enables_advisory_graph_signal(monkeypatch) -> None:
     monkeypatch.setattr("app.services.search.settings.retrieval_relationship_expansion_enabled", False)
     monkeypatch.setattr("app.services.search.settings.retrieval_relationship_min_confidence", 0.8)

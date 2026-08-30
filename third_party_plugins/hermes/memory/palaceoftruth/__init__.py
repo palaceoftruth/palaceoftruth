@@ -52,6 +52,7 @@ DEFAULT_WRITE_QUOTAS_ENABLED = True
 DEFAULT_MAX_WRITES_PER_TURN = 5
 DEFAULT_MAX_WRITES_PER_SESSION = 100
 DEFAULT_MAX_BULK_CALLS_PER_TURN = 2
+DEFAULT_MAX_DISTINCT_READS_PER_TURN = 3
 DEFAULT_DEDUP_CACHE_TTL_SECONDS = 300
 DEFAULT_OAUTH_CLIENT_KEY = "default"
 GENERIC_RUNTIME_AGENT_IDENTITIES = frozenset(
@@ -68,6 +69,7 @@ DEFAULT_OAUTH_CLIENT_SCOPES = (
     "write:session",
 )
 SEARCH_TOOL_NAME = "palace_search"
+FACT_RECALL_TOOL_NAME = "palace_fact_recall"
 SEMANTIC_RECALL_TOOL_NAME = "palace_semantic_recall"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
@@ -444,6 +446,53 @@ class PalaceRateLimitError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.retryable = False
+
+
+class PalaceReadBudgetError(RuntimeError):
+    """Raised when normal explicit recall exceeds the bounded turn budget."""
+
+
+def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
+    """Serialize an explicit tool response without exceeding its model budget."""
+    compact = dict(payload)
+    compact.setdefault("truncated", False)
+
+    def _dump() -> str:
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+    encoded = _dump()
+    if len(encoded) <= budget:
+        return encoded
+    compact["truncated"] = True
+    result = str(compact.get("result") or "")
+    marker = " Additional results were omitted to stay within the context budget."
+    low, high = 0, len(result)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        compact["result"] = result[:midpoint].rstrip() + marker
+        if len(_dump()) <= budget:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    compact["result"] = result[:low].rstrip() + marker
+    encoded = _dump()
+    if len(encoded) <= budget:
+        return encoded
+    for optional_key in ("query", "trace", "scope", "fallback_used", "error"):
+        compact.pop(optional_key, None)
+        encoded = _dump()
+        if len(encoded) <= budget:
+            return encoded
+    compact["result"] = "More results omitted."
+    encoded = _dump()
+    if len(encoded) <= budget:
+        return encoded
+    # This should be reachable only at the schema minimum. Keep a valid bounded
+    # response rather than sending oversized model context.
+    return json.dumps(
+        {"ok": bool(payload.get("ok")), "truncated": True, "result": "Output omitted."},
+        separators=(",", ":"),
+    )
 
 
 class PalaceScopeConflictError(RuntimeError):
@@ -1173,6 +1222,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         )
         self._canonical_read_in_flight_epoch: int | None = None
         self._read_epoch_context = threading.local()
+        self._turn_read_fingerprints: set[str] = set()
+        self._turn_read_cache: dict[str, str] = {}
+        self._turn_read_in_flight: set[str] = set()
+        self._turn_read_budget_lock = threading.Condition()
         self._prefetch_cache: dict[str, Any] = {
             "query": "",
             "session_id": "",
@@ -1650,6 +1703,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._read_authorization_latch = None
             self._canonical_read_in_flight_epoch = None
             self._read_authorization_condition.notify_all()
+        with self._turn_read_budget_lock:
+            self._turn_read_fingerprints.clear()
+            self._turn_read_cache.clear()
+            self._turn_read_in_flight.clear()
+            self._turn_read_budget_lock.notify_all()
         self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
@@ -1657,9 +1715,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "External memory provider active: Palace of Truth.\n"
             "Relevant long-term context may be recalled automatically before turns, "
             "and durable memory writes happen automatically after completed turns.\n"
-            "Use palace_search when the user asks what you remember, asks you to "
-            "look something up in memory, references prior context, or says Palace "
-            "of Truth should know something. Do not answer that Palace has no "
+            "Use palace_search for a captured URL, video, transcript, document, title, "
+            "or source. Use palace_fact_recall for a current or historical curated "
+            "memory fact with valid_at, fact_kind, or supersession semantics. Use "
+            "palace_exact_scope_recall only for an exact-scope canary or containment "
+            "verification. Do not answer that Palace has no "
             "memory unless you called palace_search for the user's query in this "
             "turn; if search was unavailable, say that explicitly. Use "
             "palace_remember for explicit durable memory saves."
@@ -1674,13 +1734,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return base
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return [
+        schemas = [
             {
                 "name": SEARCH_TOOL_NAME,
                 "description": (
-                    "Search Palace of Truth long-term memory using the active "
-                    "Hermes orchestrator scope and workspace. Tenant-shared "
-                    "and broad non-private recall are used only when explicitly enabled."
+                    "Search captured URL, video, transcript, document, title, or source "
+                    "content with Palace hybrid vector and lexical retrieval. Uses the "
+                    "active authorized Hermes scope; broader lanes stay policy gated."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1695,9 +1755,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": SEMANTIC_RECALL_TOOL_NAME,
+                "name": FACT_RECALL_TOOL_NAME,
                 "description": (
-                    "Strict-scope semantic recall from Palace memory entries. "
+                    "Strict-scope curated temporal fact recall from Palace memory entries. "
                     "Use temporal filters and fact_kind_filter when the user asks "
                     "for current, historical, or fact-kind-specific memory."
                 ),
@@ -1965,6 +2025,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 },
             },
         ]
+        fact_schema = schemas[1]
+        schemas.insert(
+            2,
+            {
+                **fact_schema,
+                "name": SEMANTIC_RECALL_TOOL_NAME,
+                "description": (
+                    "Documented compatibility alias for palace_fact_recall during the one-release "
+                    "migration window. Searches curated temporal fact memory only."
+                ),
+            },
+        )
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         if tool_name == SEARCH_TOOL_NAME:
@@ -1977,29 +2050,53 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     }
                 )
             try:
-                text, searched_scopes = self._retrieve_text_with_scopes(
-                    query, self._session_id
+                safe_query = _trim(query, 2000)
+                cache_key, cached = self._reserve_explicit_read(
+                    tool_name, {"query": safe_query, "corpus_class": "raw_capture"}
+                )
+                if cached is not None:
+                    return cached
+                text, searched_scopes, retrieval = self._retrieve_text_with_scopes(
+                    safe_query, self._session_id
                 )
             except Exception as exc:
-                return json.dumps(
+                serialized = _bounded_tool_json(
                     {
                         "ok": False,
-                        "query": query,
+                        "query": _trim(query, 2000),
+                        "retrieval_mode": "hybrid",
+                        "corpus_class": "raw_capture",
+                        "searched_scopes": [],
+                        "broader_authorized_fallback_used": False,
+                        "result": "Palace raw-capture search was unavailable.",
                         "error": _safe_exception_summary(exc),
-                    }
+                    },
+                    self._context_budget_chars,
                 )
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
             if not text:
                 text = _empty_keyword_recall_message(searched_scopes)
-            return json.dumps(
+            serialized = _bounded_tool_json(
                 {
                     "ok": True,
-                    "query": query,
+                    "query": safe_query,
+                    "retrieval_mode": retrieval["retrieval_mode"],
+                    "corpus_class": retrieval["corpus_class"],
                     "searched_scopes": searched_scopes,
+                    "broader_authorized_fallback_used": retrieval[
+                        "broader_authorized_fallback_used"
+                    ],
+                    "trace": retrieval["trace"],
                     "result": text,
-                }
+                },
+                self._context_budget_chars,
             )
+            self._cache_explicit_read(cache_key, serialized)
+            return serialized
 
-        if tool_name == SEMANTIC_RECALL_TOOL_NAME:
+        if tool_name in {FACT_RECALL_TOOL_NAME, SEMANTIC_RECALL_TOOL_NAME}:
             query = str(args.get("query") or "").strip()
             if not query:
                 return json.dumps(
@@ -2010,6 +2107,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
             try:
                 payload = self._build_semantic_recall_payload(query, args, self._session_id)
+                cache_key, cached = self._reserve_explicit_read(tool_name, payload)
+                if cached is not None:
+                    return cached
                 response = self._request_json(
                     "POST",
                     "/api/v1/memory/semantic-recall",
@@ -2017,51 +2117,48 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
                 text = self._format_semantic_recall_response(response)
             except Exception as exc:
-                if "HTTP 404" not in str(exc):
-                    return json.dumps(
-                        {
-                            "ok": False,
-                            "query": query,
-                            "error": _safe_exception_summary(exc),
-                        }
-                    )
-                try:
-                    text = self._retrieve_text(query, self._session_id)
-                except Exception as fallback_exc:
-                    return json.dumps(
-                        {
-                            "ok": False,
-                            "query": query,
-                            "fallback_used": True,
-                            "error": _safe_exception_summary(fallback_exc),
-                        }
-                    )
-                return json.dumps(
+                serialized = _bounded_tool_json(
                     {
-                        "ok": True,
-                        "query": query,
-                        "fallback_used": True,
-                        "result": text
-                        or "No Palace of Truth memory matched this query.",
-                    }
+                        "ok": False,
+                        "query": _trim(query, 2000),
+                        "retrieval_mode": "fact_token_overlap",
+                        "corpus_class": "curated_memory_entry",
+                        "searched_scopes": [],
+                        "broader_authorized_fallback_used": False,
+                        "result": (
+                            "Curated fact recall was unavailable. Raw capture search was "
+                            "not used as a fallback."
+                        ),
+                        "error": _safe_exception_summary(exc),
+                    },
+                    self._context_budget_chars,
                 )
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
             searched_scope = _scope_label(
                 {"type": payload["scope_type"], "key": payload.get("scope_key")}
             )
-            return json.dumps(
+            serialized = _bounded_tool_json(
                 {
                     "ok": True,
-                    "query": query,
+                    "query": payload["query"],
                     "fallback_used": False,
+                    "retrieval_mode": "fact_token_overlap",
+                    "corpus_class": "curated_memory_entry",
                     "searched_scopes": [searched_scope],
+                    "broader_authorized_fallback_used": False,
                     "result": text
                     or (
-                        "No Palace of Truth semantic memory matched this query in "
-                        f"{searched_scope}. Other scopes were not searched."
+                        "No Palace of Truth memory matched this query in curated fact "
+                        f"memory only for {searched_scope}. Other corpora were not searched."
                     ),
                     "trace": response.get("trace"),
-                }
+                },
+                self._context_budget_chars,
             )
+            self._cache_explicit_read(cache_key, serialized)
+            return serialized
 
         if tool_name == REMEMBER_TOOL_NAME:
             content = str(args.get("content") or "").strip()
@@ -2259,25 +2356,69 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 scope = self._build_scope(self._session_id)
                 if scope is None:
                     raise RuntimeError("active Palace scope is not configured")
+                request_payload = {
+                    "query": _trim(query, 2000),
+                    "limit": limit,
+                    "scope": scope,
+                }
+                cache_key, cached = self._reserve_explicit_read(
+                    tool_name, request_payload
+                )
+                if cached is not None:
+                    return cached
                 response = self._request_json(
                     "POST",
                     "/api/v1/memory/retrieve",
-                    {"query": _trim(query, 2000), "limit": limit, "scope": scope},
+                    request_payload,
                 )
                 annotated = _annotate_retrieval_results([(scope, response)])
                 text = self._format_exact_scope_recall(scope, annotated)
             except Exception as exc:
-                return json.dumps(
-                    {"ok": False, "query": query, "error": _safe_exception_summary(exc)}
+                serialized = _bounded_tool_json(
+                    {
+                        "ok": False,
+                        "query": _trim(query, 2000),
+                        "retrieval_mode": "hybrid",
+                        "corpus_class": "raw_capture",
+                        "searched_scopes": [],
+                        "broader_authorized_fallback_used": False,
+                        "result": "Exact-scope Palace recall was unavailable.",
+                        "error": _safe_exception_summary(exc),
+                    },
+                    self._context_budget_chars,
                 )
-            return json.dumps(
+                if "cache_key" in locals():
+                    self._cache_explicit_read(cache_key, serialized)
+                return serialized
+            trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
+            corpus_classes = {
+                str(result.get("corpus_class") or "unknown")
+                for result in annotated
+                if isinstance(result, dict)
+            }
+            corpus_class = (
+                next(iter(corpus_classes))
+                if len(corpus_classes) == 1
+                else "mixed"
+                if corpus_classes
+                else "unknown"
+            )
+            serialized = _bounded_tool_json(
                 {
                     "ok": True,
-                    "query": query,
+                    "query": request_payload["query"],
                     "scope": scope,
-                    "result": text or "No Palace of Truth memory matched this query in the active scope.",
-                }
+                    "searched_scopes": [_scope_label(scope)],
+                    "retrieval_mode": trace.get("retrieval_mode") or "hybrid",
+                    "corpus_class": corpus_class,
+                    "broader_authorized_fallback_used": False,
+                    "result": text
+                    or "No Palace of Truth memory matched this query in the active scope.",
+                },
+                self._context_budget_chars,
             )
+            self._cache_explicit_read(cache_key, serialized)
+            return serialized
 
         return json.dumps(
             {
@@ -2301,7 +2442,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 and self._prefetch_cache.get("epoch") == turn_epoch
             ):
                 return self._prefetch_cache["text"]
-        text = self._prefetch_text(query, active_session)
+        try:
+            text = self._prefetch_with_budget(query, active_session)
+        except PalaceReadBudgetError:
+            _log_retrieval_diagnostic(
+                logging.INFO,
+                "prefetch_read_budget_exhausted",
+                latch_prevented_call=True,
+            )
+            return ""
         with self._prefetch_lock:
             self._prefetch_cache = {
                 "query": query,
@@ -2330,7 +2479,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             try:
                 if turn_epoch != self._current_turn_epoch():
                     raise PalaceStaleTurnReadError()
-                text = self._prefetch_text(query, active_session)
+                text = self._prefetch_with_budget(query, active_session)
             except PalaceStaleTurnReadError:
                 _log_retrieval_diagnostic(
                     logging.INFO,
@@ -2360,6 +2509,48 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
+
+    def _prefetch_with_budget(self, query: str, session_id: str) -> str:
+        if self._semantic_prefetch_enabled:
+            request_contract = self._build_semantic_recall_payload(
+                query,
+                {
+                    "top_k": self._semantic_prefetch_top_k,
+                    "candidate_limit": self._semantic_prefetch_candidate_limit,
+                    "recall_max_tokens": self._semantic_prefetch_recall_max_tokens,
+                    "context_budget_chars": self._semantic_prefetch_context_budget_chars,
+                },
+                session_id,
+            )
+            mode = "fact_token_overlap"
+        else:
+            request_contract = {
+                "query": _trim(query, 2000),
+                "session_id": session_id,
+                "workspace": self._agent_workspace,
+                "corpus_class": "raw_capture",
+            }
+            mode = "hybrid"
+        cache_key, cached = self._reserve_explicit_read(
+            f"palace_prefetch:{mode}", request_contract
+        )
+        if cached is not None:
+            return cached
+        try:
+            text = self._prefetch_text(query, session_id)
+        except PalaceStaleTurnReadError:
+            self._abandon_explicit_read(cache_key)
+            raise
+        except Exception as exc:
+            _log_retrieval_diagnostic(
+                logging.WARNING,
+                "prefetch_failed_and_cached_for_turn",
+                error_class=exc.__class__.__name__,
+                timeout_seconds=self._timeout_seconds,
+            )
+            text = ""
+        self._cache_explicit_read(cache_key, text)
+        return text
 
     def _prefetch_text(self, query: str, session_id: str) -> str:
         try:
@@ -2671,6 +2862,54 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._turn_epoch += 1
             self._read_authorization_latch = None
             self._read_authorization_condition.notify_all()
+        with self._turn_read_budget_lock:
+            self._turn_read_fingerprints.clear()
+            self._turn_read_cache.clear()
+            self._turn_read_in_flight.clear()
+            self._turn_read_budget_lock.notify_all()
+
+    def _explicit_read_cache_key(self, tool_name: str, request: dict[str, Any]) -> str:
+        canonical_tool = (
+            FACT_RECALL_TOOL_NAME
+            if tool_name in {FACT_RECALL_TOOL_NAME, SEMANTIC_RECALL_TOOL_NAME}
+            else tool_name
+        )
+        canonical_request = json.dumps(request, sort_keys=True, separators=(",", ":"))
+        return (
+            f"{self._current_turn_epoch()}:{canonical_tool}:"
+            f"{hashlib.sha256(canonical_request.encode()).hexdigest()[:16]}"
+        )
+
+    def _reserve_explicit_read(
+        self, tool_name: str, request: dict[str, Any]
+    ) -> tuple[str, str | None]:
+        cache_key = self._explicit_read_cache_key(tool_name, request)
+        with self._turn_read_budget_lock:
+            while cache_key in self._turn_read_in_flight:
+                self._turn_read_budget_lock.wait()
+            cached = self._turn_read_cache.get(cache_key)
+            if cached is not None:
+                return cache_key, cached
+            if cache_key not in self._turn_read_fingerprints:
+                if len(self._turn_read_fingerprints) >= DEFAULT_MAX_DISTINCT_READS_PER_TURN:
+                    raise PalaceReadBudgetError(
+                        "Palace normal recall stopped after three distinct retrieval "
+                        "attempts in this turn; start a new turn before another read"
+                    )
+                self._turn_read_fingerprints.add(cache_key)
+            self._turn_read_in_flight.add(cache_key)
+        return cache_key, None
+
+    def _cache_explicit_read(self, cache_key: str, response: str) -> None:
+        with self._turn_read_budget_lock:
+            self._turn_read_cache[cache_key] = response
+            self._turn_read_in_flight.discard(cache_key)
+            self._turn_read_budget_lock.notify_all()
+
+    def _abandon_explicit_read(self, cache_key: str) -> None:
+        with self._turn_read_budget_lock:
+            self._turn_read_in_flight.discard(cache_key)
+            self._turn_read_budget_lock.notify_all()
 
     def _expected_read_epoch(self) -> int | None:
         expected = getattr(self._read_epoch_context, "expected_epoch", None)
@@ -3380,7 +3619,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         for result in _presentation_sorted_results(results):
             title = _trim(str(result.get("title") or "Untitled memory"), 120)
             score = result.get("score")
-            lines.append(f"- [{score:.2f}] {title}" if isinstance(score, (int, float)) else f"- {title}")
+            corpus_class = str(result.get("corpus_class") or "unknown").strip()
+            scope_label = _scope_label_from_result(result)
+            qualifiers = [part for part in (corpus_class, scope_label) if part]
+            rendered_title = f"{title} [{', '.join(qualifiers)}]" if qualifiers else title
+            lines.append(
+                f"- [{score:.2f}] {rendered_title}"
+                if isinstance(score, (int, float))
+                else f"- {rendered_title}"
+            )
             evidence_line = _format_result_evidence(result, base_url=self._base_url)
             if evidence_line:
                 lines.append(evidence_line)
@@ -3648,12 +3895,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def _retrieve_text(self, query: str, session_id: str) -> str:
-        text, _ = self._retrieve_text_with_scopes(query, session_id)
+        text, _, _ = self._retrieve_text_with_scopes(query, session_id)
         return text
 
     def _retrieve_text_with_scopes(
         self, query: str, session_id: str
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], dict[str, Any]]:
         """Route-aware keyword recall plus the scope labels that actually answered.
 
         The caller needs the scope list to tell "nothing matched" apart from
@@ -3671,6 +3918,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         request_payload = {
             "query": _trim(query, 2000),
             "limit": self._retrieve_limit,
+            "corpus_class": "raw_capture",
         }
         primary_scope = self._build_scope(session_id)
         discovered_scopes: list[dict[str, Any]] = []
@@ -3770,7 +4018,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     discovered_scopes=discovered_scopes,
                 )
                 if text:
-                    return text, searched_labels
+                    return text, searched_labels, {
+                        "retrieval_mode": trace.get("retrieval_mode") or "hybrid",
+                        "corpus_class": "raw_capture",
+                        "broader_authorized_fallback_used": bool(
+                            trace.get("tenant_shared_fallback_used")
+                            or trace.get("broad_corpus_searched")
+                        ),
+                        "trace": trace,
+                    }
             except (PalaceAuthorizationError, PalaceAuthorizationLatchError):
                 raise
             except Exception as exc:
@@ -3826,7 +4082,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 failed_scope_count=len(failed_scopes),
                 failed_scopes=failed_scopes,
             )
-            return "", searched_labels
+            return "", searched_labels, {
+                "retrieval_mode": "hybrid",
+                "corpus_class": "raw_capture",
+                "broader_authorized_fallback_used": False,
+                "trace": {},
+            }
 
         merged_results = _merge_retrieval_results(_annotate_retrieval_results(scope_responses))
         _log_retrieval_diagnostic(
@@ -3844,7 +4105,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             result_count=len(merged_results),
         )
         if not merged_results:
-            return "", searched_labels
+            return "", searched_labels, {
+                "retrieval_mode": "hybrid",
+                "corpus_class": "raw_capture",
+                "broader_authorized_fallback_used": False,
+                "trace": {},
+            }
 
         traces = [
             response.get("trace")
@@ -3896,7 +4162,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if chunk:
                 lines.append(f"  Snippet: {chunk}")
 
-        return "\n".join(lines), searched_labels
+        retrieval_mode = next(
+            (trace.get("retrieval_mode") for trace in traces if trace.get("retrieval_mode")),
+            "hybrid",
+        )
+        return "\n".join(lines), searched_labels, {
+            "retrieval_mode": retrieval_mode,
+            "corpus_class": "raw_capture",
+            "broader_authorized_fallback_used": len(scope_responses) > 1,
+            "trace": traces[0] if len(traces) == 1 else {"scope_traces": traces},
+        }
 
     def _build_entry_payload(
         self,

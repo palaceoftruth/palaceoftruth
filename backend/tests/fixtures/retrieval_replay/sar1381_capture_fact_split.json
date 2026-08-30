@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "query": "home RTX serving stack video",
+  "raw_capture": {
+    "item_id": "11111111-2222-4333-8444-555555555555",
+    "title": "Fast local model serving stack - Video",
+    "source_type": "media",
+    "embedding_count": 12,
+    "memory_entry_count": 0,
+    "scope": {"type": "agent", "key": "lux"}
+  },
+  "competing_curated_entries": [
+    {
+      "item_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "title": "Current preferred inference host",
+      "fact_kind": "world",
+      "valid_at": "2026-08-29T00:00:00Z",
+      "scope": {"type": "agent", "key": "lux"}
+    },
+    {
+      "item_id": "99999999-8888-4777-8666-555555555555",
+      "title": "Earlier inference host note",
+      "fact_kind": "observation",
+      "valid_at": "2026-07-01T00:00:00Z",
+      "scope": {"type": "agent", "key": "lux"}
+    }
+  ]
+}

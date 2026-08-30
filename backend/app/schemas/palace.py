@@ -382,6 +382,7 @@ class PalaceRetrieveRequest(BaseModel):
     neighbor_chunk_window: int = Field(1, ge=1, le=5)
     context_budget_chars: int | None = Field(None, ge=200, le=20000)
     include_derived_artifacts: bool = False
+    corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all"
     retrieval_lens: str | None = None
     scope_type: Literal["session", "agent", "workspace", "tenant_shared"] = "tenant_shared"
     scope_key: str | None = None

@@ -3732,6 +3732,7 @@ async def retrieve_palace(
     context_budget_chars = getattr(body, "context_budget_chars", None)
     include_derived_artifacts = getattr(body, "include_derived_artifacts", False)
     retrieval_lens = getattr(body, "retrieval_lens", None)
+    corpus_class = getattr(body, "corpus_class", "all")
     if candidate_room_ids:
         results = await service.vector_search(
             query=body.query,
@@ -3742,6 +3743,7 @@ async def retrieve_palace(
             neighbor_chunk_window=neighbor_chunk_window,
             context_budget_chars=context_budget_chars,
             include_derived_artifacts=include_derived_artifacts,
+            corpus_class=corpus_class,
             room_ids=candidate_room_ids,
             scope_type=body.scope_type,
             scope_key=body.scope_key,
@@ -3812,6 +3814,7 @@ async def retrieve_palace(
             neighbor_chunk_window=neighbor_chunk_window,
             context_budget_chars=context_budget_chars,
             include_derived_artifacts=include_derived_artifacts,
+            corpus_class=corpus_class,
             scope_type=body.scope_type,
             scope_key=body.scope_key,
             tags=body.tags,
@@ -3857,6 +3860,7 @@ async def retrieve_palace(
             neighbor_chunk_window=neighbor_chunk_window,
             context_budget_chars=context_budget_chars,
             include_derived_artifacts=include_derived_artifacts,
+            corpus_class=corpus_class,
             scope_type=body.scope_type,
             scope_key=body.scope_key,
             tags=body.tags,
@@ -3924,6 +3928,7 @@ async def retrieve_palace(
             neighbor_chunk_window=neighbor_chunk_window,
             context_budget_chars=context_budget_chars,
             include_derived_artifacts=include_derived_artifacts,
+            corpus_class=corpus_class,
             scope_type=body.scope_type,
             scope_key=body.scope_key,
             tags=body.tags,
@@ -3970,6 +3975,7 @@ async def retrieve_palace(
             neighbor_chunk_window=neighbor_chunk_window,
             context_budget_chars=context_budget_chars,
             include_derived_artifacts=include_derived_artifacts,
+            corpus_class=corpus_class,
             scope_type="tenant_shared",
             scope_key=None,
             tags=body.tags,
