@@ -73,6 +73,8 @@ class MemoryWhoAmIResponse(BaseModel):
     auth_mode: str | None = None
     mcp_client_id: uuid.UUID | None = None
     mcp_client_key: str | None = None
+    agent_scope_key: str | None = None
+    containment_mode: Literal["standard", "hermes_agent"] | None = None
     allowed_scopes: list[str] = Field(default_factory=list)
     resource: str | None = None
     audience: str | None = None

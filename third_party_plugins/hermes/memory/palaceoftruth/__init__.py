@@ -54,6 +54,9 @@ DEFAULT_MAX_WRITES_PER_SESSION = 100
 DEFAULT_MAX_BULK_CALLS_PER_TURN = 2
 DEFAULT_DEDUP_CACHE_TTL_SECONDS = 300
 DEFAULT_OAUTH_CLIENT_KEY = "default"
+GENERIC_RUNTIME_AGENT_IDENTITIES = frozenset(
+    {"agent", "assistant", "default", "hermes"}
+)
 DELEGATED_ACCESS_REASON_TEMPLATE = (
     "Hermes agent {agent_scope_key} recall of operator-configured shared memory scopes."
 )
@@ -441,6 +444,40 @@ class PalaceRateLimitError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.retryable = False
+
+
+class PalaceScopeConflictError(RuntimeError):
+    """Raised before HTTP when trusted agent identity inputs disagree."""
+
+
+class PalaceAuthorizationError(RuntimeError):
+    def __init__(self, endpoint: str, scope_label: str) -> None:
+        super().__init__(
+            "Palace of Truth memory search is unavailable because the server rejected "
+            f"the canonical scope {scope_label} at {endpoint} with HTTP 403. "
+            "Do not report this as an empty memory."
+        )
+        self.status_code = 403
+        self.retryable = False
+        self.endpoint = endpoint
+        self.scope_label = scope_label
+
+
+class PalaceAuthorizationLatchError(RuntimeError):
+    def __init__(self, endpoint: str, scope_label: str) -> None:
+        super().__init__(
+            "Palace of Truth memory search is unavailable for this turn after a prior "
+            f"canonical-scope HTTP 403 at {endpoint} for {scope_label}. "
+            "No second HTTP request was made. Do not report this as an empty memory."
+        )
+        self.status_code = 403
+        self.retryable = False
+        self.endpoint = endpoint
+        self.scope_label = scope_label
+
+
+class PalaceStaleTurnReadError(RuntimeError):
+    """Internal cancellation for background reads from a completed turn."""
 
 
 def _parse_retry_after(value: str | None) -> int | None:
@@ -1124,11 +1161,24 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._writes_disabled = False
         self._tenant_id = ""
         self._tenant_id_lock = threading.Lock()
-        self._prefetch_cache: dict[str, str] = {
+        self._server_identity_loaded = False
+        self._server_agent_scope_key = ""
+        self._server_containment_mode = ""
+        self._server_identity_lock = threading.Lock()
+        self._turn_epoch = 0
+        self._read_authorization_latch: tuple[int, str, str] | None = None
+        self._read_authorization_latch_lock = threading.Lock()
+        self._read_authorization_condition = threading.Condition(
+            self._read_authorization_latch_lock
+        )
+        self._canonical_read_in_flight_epoch: int | None = None
+        self._read_epoch_context = threading.local()
+        self._prefetch_cache: dict[str, Any] = {
             "query": "",
             "session_id": "",
             "workspace": "",
             "text": "",
+            "epoch": 0,
         }
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
@@ -1592,6 +1642,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         agent_context = str(kwargs.get("agent_context", "")).strip()
         self._writes_disabled = agent_context not in {"", "primary"}
         self._tenant_id = ""
+        self._server_identity_loaded = False
+        self._server_agent_scope_key = ""
+        self._server_containment_mode = ""
+        with self._read_authorization_condition:
+            self._turn_epoch = 0
+            self._read_authorization_latch = None
+            self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
         self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
@@ -2234,11 +2292,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         active_workspace = self._agent_workspace
         if not query or not self._has_api_auth():
             return ""
+        turn_epoch = self._current_turn_epoch()
         with self._prefetch_lock:
             if (
                 self._prefetch_cache["query"] == query
                 and self._prefetch_cache["session_id"] == active_session
                 and self._prefetch_cache["workspace"] == active_workspace
+                and self._prefetch_cache.get("epoch") == turn_epoch
             ):
                 return self._prefetch_cache["text"]
         text = self._prefetch_text(query, active_session)
@@ -2248,6 +2308,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "session_id": active_session,
                 "workspace": active_workspace,
                 "text": text,
+                "epoch": turn_epoch,
             }
         return text
 
@@ -2259,13 +2320,24 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             return
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             return
+        turn_epoch = self._current_turn_epoch()
 
         def _worker() -> None:
             # An unguarded raise here kills the daemon thread and leaves the cache
             # holding the previous turn's text, so background failures must be
             # logged and cached as empty instead of escaping the thread.
+            self._read_epoch_context.expected_epoch = turn_epoch
             try:
+                if turn_epoch != self._current_turn_epoch():
+                    raise PalaceStaleTurnReadError()
                 text = self._prefetch_text(query, active_session)
+            except PalaceStaleTurnReadError:
+                _log_retrieval_diagnostic(
+                    logging.INFO,
+                    "background_prefetch_stale_turn_cancelled",
+                    latch_prevented_call=True,
+                )
+                return
             except Exception as exc:
                 _log_retrieval_diagnostic(
                     logging.WARNING,
@@ -2274,22 +2346,28 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     timeout_seconds=self._timeout_seconds,
                 )
                 text = ""
-            with self._prefetch_lock:
-                self._prefetch_cache = {
-                    "query": query,
-                    "session_id": active_session,
-                    "workspace": active_workspace,
-                    "text": text,
-                }
+            finally:
+                self._read_epoch_context.expected_epoch = None
+            if turn_epoch == self._current_turn_epoch():
+                with self._prefetch_lock:
+                    self._prefetch_cache = {
+                        "query": query,
+                        "session_id": active_session,
+                        "workspace": active_workspace,
+                        "text": text,
+                        "epoch": turn_epoch,
+                    }
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
 
     def _prefetch_text(self, query: str, session_id: str) -> str:
-        if not self._semantic_prefetch_enabled:
-            return self._retrieve_text(query, session_id)
         try:
+            if not self._semantic_prefetch_enabled:
+                return self._retrieve_text(query, session_id)
             return self._semantic_prefetch_text(query, session_id)
+        except (PalaceAuthorizationError, PalaceAuthorizationLatchError) as exc:
+            return str(exc)
         except Exception as exc:
             if "HTTP 404" in str(exc):
                 _log_retrieval_diagnostic(
@@ -2303,16 +2381,6 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
     def _semantic_prefetch_text(self, query: str, session_id: str) -> str:
         started_at = perf_counter()
-        if (
-            self._scope_type == "agent"
-            and self._agent_identity
-            and self._scope_key
-            and self._scope_key != self._agent_identity
-        ):
-            raise ValueError(
-                "semantic prefetch agent scope must match the active Hermes agent_identity; "
-                "sibling-agent semantic recall is not exposed through pre-turn context"
-            )
         payload = self._build_semantic_recall_payload(
             query,
             {
@@ -2365,6 +2433,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
     ) -> None:
+        # Hermes calls sync_turn at the turn boundary. Advance the epoch before
+        # any early return so stale reads cannot affect the next turn.
+        self._advance_turn_epoch()
         if self._writes_disabled or not self._has_api_auth():
             return
         user_text = (user_content or "").strip()
@@ -2405,15 +2476,21 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     ) -> None:
         del parent_session_id, reset, kwargs
         self._session_id = (new_session_id or "").strip()
+        self._advance_turn_epoch()
         with self._prefetch_lock:
             self._prefetch_cache = {
                 "query": "",
                 "session_id": "",
                 "workspace": "",
                 "text": "",
+                "epoch": self._current_turn_epoch(),
             }
         with self._tenant_id_lock:
             self._tenant_id = ""
+        with self._server_identity_lock:
+            self._server_identity_loaded = False
+            self._server_agent_scope_key = ""
+            self._server_containment_mode = ""
         self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
@@ -2562,12 +2639,158 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
 
+    def _request_agent_scope_label(
+        self,
+        path: str,
+        payload: dict[str, Any] | None,
+    ) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        if path == "/api/v1/memory/retrieve-agent":
+            key = _optional_str(payload.get("agent_scope_key"))
+            return f"agent/{key}" if key else None
+        if path == "/api/v1/memory/semantic-recall":
+            if payload.get("scope_type") != "agent":
+                return None
+            key = _optional_str(payload.get("scope_key"))
+            return f"agent/{key}" if key else None
+        if path == "/api/v1/memory/retrieve":
+            scope = payload.get("scope")
+            if not isinstance(scope, dict) or scope.get("type") != "agent":
+                return None
+            key = _scope_key(scope)
+            return f"agent/{key}" if key else None
+        return None
+
+    def _current_turn_epoch(self) -> int:
+        with self._read_authorization_condition:
+            return self._turn_epoch
+
+    def _advance_turn_epoch(self) -> None:
+        with self._read_authorization_condition:
+            self._turn_epoch += 1
+            self._read_authorization_latch = None
+            self._read_authorization_condition.notify_all()
+
+    def _expected_read_epoch(self) -> int | None:
+        expected = getattr(self._read_epoch_context, "expected_epoch", None)
+        return expected if isinstance(expected, int) else None
+
+    def _raise_if_stale_read_epoch(self, expected_epoch: int | None) -> None:
+        if expected_epoch is None:
+            return
+        with self._read_authorization_condition:
+            if expected_epoch != self._turn_epoch:
+                raise PalaceStaleTurnReadError()
+
+    def _reserve_canonical_read(self, expected_epoch: int | None = None) -> int:
+        with self._read_authorization_condition:
+            while True:
+                epoch = self._turn_epoch
+                if expected_epoch is not None and expected_epoch != epoch:
+                    raise PalaceStaleTurnReadError()
+                latched = self._read_authorization_latch
+                if latched is not None and latched[0] == epoch:
+                    _, endpoint, scope_label = latched
+                    self._log_authorization_latch(endpoint, scope_label)
+                    raise PalaceAuthorizationLatchError(endpoint, scope_label)
+                if self._canonical_read_in_flight_epoch != epoch:
+                    self._canonical_read_in_flight_epoch = epoch
+                    return epoch
+                self._read_authorization_condition.wait()
+
+    def _release_canonical_read(self, epoch: int) -> None:
+        with self._read_authorization_condition:
+            if self._canonical_read_in_flight_epoch == epoch:
+                self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
+
+    def _log_authorization_latch(self, endpoint: str, scope_label: str) -> None:
+        _log_retrieval_diagnostic(
+            logging.WARNING,
+            "canonical_scope_403_latched",
+            endpoint=endpoint,
+            selected_scope=scope_label,
+            server_authorized_scope=(
+                f"agent/{self._server_agent_scope_key}"
+                if self._server_agent_scope_key
+                else None
+            ),
+            status_class="authorization",
+            latch_prevented_call=True,
+        )
+
+    def _raise_if_read_authorization_latched(self) -> None:
+        with self._read_authorization_condition:
+            latched = self._read_authorization_latch
+            epoch = self._turn_epoch
+        if latched is None or latched[0] != epoch:
+            return
+        _, endpoint, scope_label = latched
+        self._log_authorization_latch(endpoint, scope_label)
+        raise PalaceAuthorizationLatchError(endpoint, scope_label)
+
+    def _record_read_authorization_failure(
+        self,
+        epoch: int,
+        endpoint: str,
+        scope_label: str,
+    ) -> None:
+        with self._read_authorization_condition:
+            if epoch == self._turn_epoch and self._read_authorization_latch is None:
+                self._read_authorization_latch = (epoch, endpoint, scope_label)
+            if self._canonical_read_in_flight_epoch == epoch:
+                self._canonical_read_in_flight_epoch = None
+            self._read_authorization_condition.notify_all()
+        _log_retrieval_diagnostic(
+            logging.WARNING,
+            "canonical_scope_403",
+            endpoint=endpoint,
+            selected_scope=scope_label,
+            server_authorized_scope=(
+                f"agent/{self._server_agent_scope_key}"
+                if self._server_agent_scope_key
+                else None
+            ),
+            status_class="authorization",
+            latch_prevented_call=False,
+        )
+
     def _request_json(
         self,
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        expected_epoch = self._expected_read_epoch()
+        self._raise_if_stale_read_epoch(expected_epoch)
+        request_scope_label = self._request_agent_scope_label(path, payload)
+        if not request_scope_label:
+            return self._request_json_unreserved(method, path, payload, params)
+
+        authorization_epoch = self._reserve_canonical_read(expected_epoch)
+        try:
+            return self._request_json_unreserved(
+                method,
+                path,
+                payload,
+                params,
+                request_scope_label=request_scope_label,
+                authorization_epoch=authorization_epoch,
+            )
+        finally:
+            self._release_canonical_read(authorization_epoch)
+
+    def _request_json_unreserved(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        params: dict[str, Any] | None,
+        *,
+        request_scope_label: str | None = None,
+        authorization_epoch: int | None = None,
     ) -> dict[str, Any]:
         self._raise_if_circuit_open()
         body = None
@@ -2606,6 +2829,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except HTTPError as exc:
                 retry_after = _parse_retry_after(exc.headers.get("Retry-After"))
                 if not _is_retryable_http_status(exc.code):
+                    if exc.code == 403 and request_scope_label:
+                        exc.read()
+                        assert authorization_epoch is not None
+                        self._record_read_authorization_failure(
+                            authorization_epoch,
+                            path,
+                            request_scope_label,
+                        )
+                        raise PalaceAuthorizationError(path, request_scope_label) from exc
                     detail = _http_error_detail(exc)
                     raise RuntimeError(
                         f"Palace of Truth {method} {path} failed with HTTP {exc.code}{detail}"
@@ -2774,7 +3006,42 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             float(self._circuit_cooldown_seconds),
         )
 
+    def _load_server_identity(self) -> None:
+        if not self._oauth_client_secret:
+            return
+        with self._server_identity_lock:
+            if self._server_identity_loaded:
+                return
+            try:
+                response = self._request_json("GET", "/api/v1/memory/whoami")
+            except Exception as exc:
+                # Palace still enforces the request server-side. A configured
+                # local identity may continue, but no client-key convention is
+                # promoted into authority when whoami is unavailable.
+                self._server_identity_loaded = True
+                _log_retrieval_diagnostic(
+                    logging.WARNING,
+                    "server_identity_unavailable",
+                    endpoint="/api/v1/memory/whoami",
+                    error_class=exc.__class__.__name__,
+                    status_class="unavailable",
+                )
+                return
+            self._tenant_id = str(response.get("tenant_id", "")).strip()
+            self._server_agent_scope_key = str(
+                response.get("agent_scope_key", "")
+            ).strip()
+            self._server_containment_mode = str(
+                response.get("containment_mode", "")
+            ).strip()
+            self._server_identity_loaded = True
+
     def _resolve_tenant_id(self) -> str | None:
+        if self._oauth_client_secret:
+            self._load_server_identity()
+            if self._tenant_id:
+                return self._tenant_id
+
         with self._tenant_id_lock:
             if self._tenant_id:
                 return self._tenant_id
@@ -2797,16 +3064,52 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._tenant_id = tenant_id
             return tenant_id
 
+    def _canonical_agent_scope_key(self) -> str | None:
+        """Resolve one agent key without trusting an OAuth client-key convention."""
+        self._load_server_identity()
+        configured_key = self._scope_key if self._scope_type == "agent" else ""
+        runtime_key = self._agent_identity
+        if runtime_key.casefold() in GENERIC_RUNTIME_AGENT_IDENTITIES:
+            runtime_key = ""
+        server_key = self._server_agent_scope_key
+
+        candidates = {
+            "configured": configured_key,
+            "runtime": runtime_key,
+            "server": server_key,
+        }
+        selected = {value for value in candidates.values() if value}
+        if len(selected) > 1:
+            details = ", ".join(
+                f"{source}=agent/{value}"
+                for source, value in candidates.items()
+                if value
+            )
+            raise PalaceScopeConflictError(
+                "Palace canonical agent scope conflict; refusing request: " + details
+            )
+        if (
+            self._server_containment_mode == "hermes_agent"
+            and not server_key
+        ):
+            raise PalaceScopeConflictError(
+                "Palace whoami reports hermes_agent containment without an "
+                "agent_scope_key; refusing request"
+            )
+        return next(iter(selected), None)
+
     def _build_scope(self, session_id: str) -> dict[str, str] | None:
         scope_type = self._scope_type
         if scope_type == "tenant_shared":
             return {"type": "tenant_shared"}
 
-        scope_key = self._scope_key
+        scope_key = (
+            self._canonical_agent_scope_key()
+            if scope_type == "agent"
+            else self._scope_key
+        )
         if not scope_key:
-            if scope_type == "agent":
-                scope_key = self._agent_identity or "hermes"
-            elif scope_type == "workspace":
+            if scope_type == "workspace":
                 scope_key = self._agent_workspace or self._agent_identity or "workspace"
             elif scope_type == "session":
                 scope_key = session_id or self._session_id or "session"
@@ -2860,28 +3163,22 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return scopes
 
     def _is_bound_hermes_oauth_client(self) -> bool:
+        self._load_server_identity()
         return bool(
             self._oauth_client_secret
-            and self._oauth_client_key.startswith("hermes-")
+            and self._server_containment_mode == "hermes_agent"
+            and self._server_agent_scope_key
         )
 
     def _canonical_bound_agent_scope_key(
         self,
         primary_scope: dict[str, str] | None = None,
     ) -> str | None:
-        """Return the agent scope canonically bound to a hermes-* OAuth client."""
+        """Return the single resolved agent key when the server binds this client."""
+        del primary_scope
         if not self._is_bound_hermes_oauth_client():
             return None
-        if self._agent_identity:
-            return self._agent_identity
-        # Client keys conventionally use hermes-<agent>. This is only a
-        # bootstrap fallback for runtimes that omit the explicit identity.
-        client_bound_key = self._oauth_client_key.removeprefix("hermes-").strip()
-        if client_bound_key:
-            return client_bound_key
-        if primary_scope and primary_scope.get("type") == "agent":
-            return _scope_key(primary_scope) or None
-        return None
+        return self._canonical_agent_scope_key()
 
     def _delegated_recall_requested(self) -> bool:
         """True when the operator opted this agent into reach beyond its own scope."""
@@ -3362,6 +3659,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         The caller needs the scope list to tell "nothing matched" apart from
         "nothing readable was searched"; an empty string alone conflates them.
         """
+        self._raise_if_read_authorization_latched()
         started_at = perf_counter()
         searched_labels: list[str] = []
 
@@ -3473,6 +3771,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
                 if text:
                     return text, searched_labels
+            except (PalaceAuthorizationError, PalaceAuthorizationLatchError):
+                raise
             except Exception as exc:
                 fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
                 _log_retrieval_diagnostic(
@@ -3501,6 +3801,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "scope": scope,
                     },
                 )
+            except (PalaceAuthorizationError, PalaceAuthorizationLatchError):
+                raise
             except Exception as exc:
                 failed_scopes.append(_scope_label(scope))
                 logger.debug(
