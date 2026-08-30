@@ -476,6 +476,10 @@ class PalaceAuthorizationLatchError(RuntimeError):
         self.scope_label = scope_label
 
 
+class PalaceStaleTurnReadError(RuntimeError):
+    """Internal cancellation for background reads from a completed turn."""
+
+
 def _parse_retry_after(value: str | None) -> int | None:
     if not value:
         return None
@@ -1168,6 +1172,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._read_authorization_latch_lock
         )
         self._canonical_read_in_flight_epoch: int | None = None
+        self._read_epoch_context = threading.local()
         self._prefetch_cache: dict[str, Any] = {
             "query": "",
             "session_id": "",
@@ -2321,8 +2326,18 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             # An unguarded raise here kills the daemon thread and leaves the cache
             # holding the previous turn's text, so background failures must be
             # logged and cached as empty instead of escaping the thread.
+            self._read_epoch_context.expected_epoch = turn_epoch
             try:
+                if turn_epoch != self._current_turn_epoch():
+                    raise PalaceStaleTurnReadError()
                 text = self._prefetch_text(query, active_session)
+            except PalaceStaleTurnReadError:
+                _log_retrieval_diagnostic(
+                    logging.INFO,
+                    "background_prefetch_stale_turn_cancelled",
+                    latch_prevented_call=True,
+                )
+                return
             except Exception as exc:
                 _log_retrieval_diagnostic(
                     logging.WARNING,
@@ -2331,14 +2346,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     timeout_seconds=self._timeout_seconds,
                 )
                 text = ""
-            with self._prefetch_lock:
-                self._prefetch_cache = {
-                    "query": query,
-                    "session_id": active_session,
-                    "workspace": active_workspace,
-                    "text": text,
-                    "epoch": turn_epoch,
-                }
+            finally:
+                self._read_epoch_context.expected_epoch = None
+            if turn_epoch == self._current_turn_epoch():
+                with self._prefetch_lock:
+                    self._prefetch_cache = {
+                        "query": query,
+                        "session_id": active_session,
+                        "workspace": active_workspace,
+                        "text": text,
+                        "epoch": turn_epoch,
+                    }
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
@@ -2654,10 +2672,23 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._read_authorization_latch = None
             self._read_authorization_condition.notify_all()
 
-    def _reserve_canonical_read(self) -> int:
+    def _expected_read_epoch(self) -> int | None:
+        expected = getattr(self._read_epoch_context, "expected_epoch", None)
+        return expected if isinstance(expected, int) else None
+
+    def _raise_if_stale_read_epoch(self, expected_epoch: int | None) -> None:
+        if expected_epoch is None:
+            return
+        with self._read_authorization_condition:
+            if expected_epoch != self._turn_epoch:
+                raise PalaceStaleTurnReadError()
+
+    def _reserve_canonical_read(self, expected_epoch: int | None = None) -> int:
         with self._read_authorization_condition:
             while True:
                 epoch = self._turn_epoch
+                if expected_epoch is not None and expected_epoch != epoch:
+                    raise PalaceStaleTurnReadError()
                 latched = self._read_authorization_latch
                 if latched is not None and latched[0] == epoch:
                     _, endpoint, scope_label = latched
@@ -2732,11 +2763,13 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        expected_epoch = self._expected_read_epoch()
+        self._raise_if_stale_read_epoch(expected_epoch)
         request_scope_label = self._request_agent_scope_label(path, payload)
         if not request_scope_label:
             return self._request_json_unreserved(method, path, payload, params)
 
-        authorization_epoch = self._reserve_canonical_read()
+        authorization_epoch = self._reserve_canonical_read(expected_epoch)
         try:
             return self._request_json_unreserved(
                 method,

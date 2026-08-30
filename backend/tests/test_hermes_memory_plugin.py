@@ -4203,6 +4203,61 @@ def test_palaceoftruth_stale_background_prefetch_cannot_latch_new_turn(
     assert canonical_calls == 3
 
 
+def test_palaceoftruth_delayed_prefetch_cancels_before_new_turn_http(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("turn-1", hermes_home="/tmp/hermes-home", agent_identity="default")
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    paths: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        paths.append(path)
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": []})
+        return FakeJsonResponse(
+            {
+                "trace": {"searched_scopes": [{"type": "agent", "key": "lux"}]},
+                "results": [
+                    {
+                        "item_id": "lux-new-turn",
+                        "title": "Lux new-turn memory",
+                        "chunk_text": "Only the new turn reached Palace.",
+                        "score": 0.9,
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    original_prefetch_text = provider._prefetch_text
+
+    def delayed_prefetch_text(query: str, session_id: str) -> str:
+        worker_started.set()
+        assert release_worker.wait(timeout=2)
+        return original_prefetch_text(query, session_id)
+
+    provider._prefetch_text = delayed_prefetch_text  # type: ignore[method-assign]
+    provider.queue_prefetch("old queued turn", session_id="turn-1")
+    assert worker_started.wait(timeout=2)
+    provider.sync_turn("", "")
+    release_worker.set()
+    provider.shutdown()
+
+    assert paths == []
+    new_turn = json.loads(provider.handle_tool_call("palace_search", {"query": "new turn"}))
+    assert new_turn["ok"] is True
+    assert "Lux new-turn memory" in new_turn["result"]
+    assert paths.count("/api/v1/memory/retrieve-agent") == 1
+
+
 def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall(
     monkeypatch,
 ) -> None:
