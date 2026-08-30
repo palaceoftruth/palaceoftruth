@@ -49,29 +49,43 @@ runs:
         sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
         push-to-registry: true
 
-    - name: Publish registry SBOM fallback
+    - name: Wait before retrying SBOM attestation
       if: steps.github-sbom.outcome == 'failure'
       shell: bash
-      env:
-        IMAGE: ${{ inputs.image }}
-        DIGEST: ${{ inputs.digest }}
-        SBOM_PATH: /tmp/${{ inputs.sbom-name }}.spdx.json
-      run: |
-        for attempt in 1 2 3; do
-          if cosign attest --yes \
-            --predicate "$SBOM_PATH" \
-            --type https://spdx.dev/Document/v2.3 \
-            "${IMAGE}@${DIGEST}"; then
-            exit 0
-          fi
+      run: sleep 15
 
-          if [ "$attempt" -eq 3 ]; then
-            echo "Failed to publish the SBOM attestation after ${attempt} attempts." >&2
-            exit 1
-          fi
+    # Keep all attestations in the OCI referrer layout used by the GitHub
+    # verifier. A legacy .att fallback can publish successfully while remaining
+    # invisible when an OCI provenance referrer already exists for the digest.
+    - name: Retry SBOM attestation
+      id: github-sbom-retry
+      if: steps.github-sbom.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
+        push-to-registry: true
 
-          sleep $((attempt * 10))
-        done
+    - name: Wait before final SBOM attestation attempt
+      if: >-
+        steps.github-sbom.outcome == 'failure' &&
+        steps.github-sbom-retry.outcome == 'failure'
+      shell: bash
+      run: sleep 30
+
+    - name: Publish final SBOM attestation attempt
+      id: github-sbom-final
+      if: >-
+        steps.github-sbom.outcome == 'failure' &&
+        steps.github-sbom-retry.outcome == 'failure'
+      uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
+        push-to-registry: true
 
     - name: Verify registry SBOM attestation
       shell: bash
@@ -79,11 +93,8 @@ runs:
         IMAGE: ${{ inputs.image }}
         DIGEST: ${{ inputs.digest }}
       run: |
-        # A just-published attestation is not always readable at once. The
-        # GitHub-native step is immediately visible, but the cosign fallback
-        # writes a separate tag that the registry can still be serving from a
-        # stale manifest, so verification reports only the provenance
-        # predicate. Retry before treating the attestation as missing.
+        # A just-published OCI attestation is not always readable at once.
+        # Retry before treating the attestation as missing.
         for attempt in 1 2 3 4 5; do
           if cosign verify-attestation \
             --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \

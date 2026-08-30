@@ -258,18 +258,21 @@ def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
     )
 
 
-def test_sbom_attestation_has_a_bounded_registry_fallback_and_readback() -> None:
+def test_sbom_attestation_has_bounded_native_retries_and_readback() -> None:
     steps = _load_attest_image_action()["runs"]["steps"]
     github_sbom = next(step for step in steps if step.get("id") == "github-sbom")
-    fallback = next(step for step in steps if step.get("name") == "Publish registry SBOM fallback")
+    github_sbom_retry = next(step for step in steps if step.get("id") == "github-sbom-retry")
+    github_sbom_final = next(step for step in steps if step.get("id") == "github-sbom-final")
     readback = next(step for step in steps if step.get("name") == "Verify registry SBOM attestation")
 
     assert github_sbom["uses"] == "actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f"
     assert github_sbom["continue-on-error"] == "true"
-    assert fallback["if"] == "steps.github-sbom.outcome == 'failure'"
-    assert "for attempt in 1 2 3" in fallback["run"]
-    assert "cosign attest --yes" in fallback["run"]
-    assert "--type https://spdx.dev/Document/v2.3" in fallback["run"]
+    assert github_sbom_retry["uses"] == github_sbom["uses"]
+    assert github_sbom_retry["continue-on-error"] == "true"
+    assert github_sbom_retry["if"] == "steps.github-sbom.outcome == 'failure'"
+    assert github_sbom_final["uses"] == github_sbom["uses"]
+    assert "steps.github-sbom-retry.outcome == 'failure'" in github_sbom_final["if"]
+    assert all("cosign attest --yes" not in step.get("run", "") for step in steps)
     assert "cosign verify-attestation" in readback["run"]
     assert '"https://github.com/${GITHUB_WORKFLOW_REF}"' in readback["run"]
     assert "--certificate-oidc-issuer https://token.actions.githubusercontent.com" in readback["run"]
