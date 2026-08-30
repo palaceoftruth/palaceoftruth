@@ -4805,3 +4805,91 @@ def test_sar1381_identical_concurrent_failed_reads_share_one_attempt(
     assert target_calls == 1
     assert len(results) == 2
     assert results[0] == results[1]
+
+
+def test_sar1381_prefetch_and_tools_share_three_read_budget(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    target_calls: list[str] = []
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        target_calls.append(path)
+        if path == "/api/v1/memory/semantic-recall":
+            return {
+                "trace": {"searched_scope": {"type": "agent", "key": "lux"}},
+                "items": [],
+            }
+        assert path == "/api/v1/memory/retrieve"
+        return {
+            "trace": {"retrieval_mode": "hybrid"},
+            "results": [
+                {
+                    "item_id": "raw-capture",
+                    "title": "Captured source",
+                    "source_type": "media",
+                    "corpus_class": "raw_capture",
+                    "scope": {"type": "agent", "key": "lux"},
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    assert provider.prefetch("first prefetch")
+    assert json.loads(provider.handle_tool_call("palace_search", {"query": "second search"}))["ok"]
+    assert json.loads(provider.handle_tool_call("palace_fact_recall", {"query": "third fact"}))["ok"]
+    assert provider.prefetch("fourth prefetch") == ""
+    assert target_calls == [
+        "/api/v1/memory/retrieve",
+        "/api/v1/memory/retrieve",
+        "/api/v1/memory/semantic-recall",
+    ]
+
+
+def test_sar1381_identical_concurrent_failed_prefetch_shares_one_attempt(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    provider._request_json = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "agent_scope_key": "lux",
+        "containment_mode": "hermes_agent",
+    }
+    assert provider._canonical_bound_agent_scope_key() == "lux"
+    request_started = threading.Event()
+    release_request = threading.Event()
+    target_calls = 0
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        nonlocal target_calls
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        assert path == "/api/v1/memory/retrieve"
+        target_calls += 1
+        request_started.set()
+        assert release_request.wait(timeout=2)
+        raise RuntimeError("shared prefetch failure")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    results: list[str] = []
+    first = threading.Thread(target=lambda: results.append(provider.prefetch("same prefetch")))
+    second = threading.Thread(target=lambda: results.append(provider.prefetch("same prefetch")))
+    first.start()
+    assert request_started.wait(timeout=2)
+    second.start()
+    release_request.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert target_calls == 1
+    assert results == ["", ""]

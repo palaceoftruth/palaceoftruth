@@ -2442,7 +2442,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 and self._prefetch_cache.get("epoch") == turn_epoch
             ):
                 return self._prefetch_cache["text"]
-        text = self._prefetch_text(query, active_session)
+        try:
+            text = self._prefetch_with_budget(query, active_session)
+        except PalaceReadBudgetError:
+            _log_retrieval_diagnostic(
+                logging.INFO,
+                "prefetch_read_budget_exhausted",
+                latch_prevented_call=True,
+            )
+            return ""
         with self._prefetch_lock:
             self._prefetch_cache = {
                 "query": query,
@@ -2471,7 +2479,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             try:
                 if turn_epoch != self._current_turn_epoch():
                     raise PalaceStaleTurnReadError()
-                text = self._prefetch_text(query, active_session)
+                text = self._prefetch_with_budget(query, active_session)
             except PalaceStaleTurnReadError:
                 _log_retrieval_diagnostic(
                     logging.INFO,
@@ -2501,6 +2509,48 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
+
+    def _prefetch_with_budget(self, query: str, session_id: str) -> str:
+        if self._semantic_prefetch_enabled:
+            request_contract = self._build_semantic_recall_payload(
+                query,
+                {
+                    "top_k": self._semantic_prefetch_top_k,
+                    "candidate_limit": self._semantic_prefetch_candidate_limit,
+                    "recall_max_tokens": self._semantic_prefetch_recall_max_tokens,
+                    "context_budget_chars": self._semantic_prefetch_context_budget_chars,
+                },
+                session_id,
+            )
+            mode = "fact_token_overlap"
+        else:
+            request_contract = {
+                "query": _trim(query, 2000),
+                "session_id": session_id,
+                "workspace": self._agent_workspace,
+                "corpus_class": "raw_capture",
+            }
+            mode = "hybrid"
+        cache_key, cached = self._reserve_explicit_read(
+            f"palace_prefetch:{mode}", request_contract
+        )
+        if cached is not None:
+            return cached
+        try:
+            text = self._prefetch_text(query, session_id)
+        except PalaceStaleTurnReadError:
+            self._abandon_explicit_read(cache_key)
+            raise
+        except Exception as exc:
+            _log_retrieval_diagnostic(
+                logging.WARNING,
+                "prefetch_failed_and_cached_for_turn",
+                error_class=exc.__class__.__name__,
+                timeout_seconds=self._timeout_seconds,
+            )
+            text = ""
+        self._cache_explicit_read(cache_key, text)
+        return text
 
     def _prefetch_text(self, query: str, session_id: str) -> str:
         try:
@@ -2853,6 +2903,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def _cache_explicit_read(self, cache_key: str, response: str) -> None:
         with self._turn_read_budget_lock:
             self._turn_read_cache[cache_key] = response
+            self._turn_read_in_flight.discard(cache_key)
+            self._turn_read_budget_lock.notify_all()
+
+    def _abandon_explicit_read(self, cache_key: str) -> None:
+        with self._turn_read_budget_lock:
             self._turn_read_in_flight.discard(cache_key)
             self._turn_read_budget_lock.notify_all()
 
