@@ -2391,15 +2391,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     self._cache_explicit_read(cache_key, serialized)
                 return serialized
             trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
-            source_types = {
-                str(result.get("source_type") or "")
+            corpus_classes = {
+                str(result.get("corpus_class") or "unknown")
                 for result in annotated
                 if isinstance(result, dict)
             }
             corpus_class = (
-                "curated_memory_entry"
-                if source_types and source_types <= {"note", "memory_entry"}
-                else "raw_capture"
+                next(iter(corpus_classes))
+                if len(corpus_classes) == 1
+                else "mixed"
+                if corpus_classes
+                else "unknown"
             )
             serialized = _bounded_tool_json(
                 {
@@ -3562,7 +3564,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         for result in _presentation_sorted_results(results):
             title = _trim(str(result.get("title") or "Untitled memory"), 120)
             score = result.get("score")
-            lines.append(f"- [{score:.2f}] {title}" if isinstance(score, (int, float)) else f"- {title}")
+            corpus_class = str(result.get("corpus_class") or "unknown").strip()
+            scope_label = _scope_label_from_result(result)
+            qualifiers = [part for part in (corpus_class, scope_label) if part]
+            rendered_title = f"{title} [{', '.join(qualifiers)}]" if qualifiers else title
+            lines.append(
+                f"- [{score:.2f}] {rendered_title}"
+                if isinstance(score, (int, float))
+                else f"- {rendered_title}"
+            )
             evidence_line = _format_result_evidence(result, base_url=self._base_url)
             if evidence_line:
                 lines.append(evidence_line)

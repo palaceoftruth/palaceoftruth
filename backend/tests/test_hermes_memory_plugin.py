@@ -4528,6 +4528,7 @@ def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypat
                     "chunk_text": "x" * 500,
                     "scope": {"type": "agent", "key": "lux"},
                     "source_type": "media",
+                    "corpus_class": "raw_capture",
                     "score": 0.9 - index / 100,
                 }
                 for index in range(5)
@@ -4543,6 +4544,69 @@ def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypat
     assert "omitted" in result["result"]
     assert result["retrieval_mode"] == "hybrid"
     assert result["corpus_class"] == "raw_capture"
+
+
+def test_sar1381_exact_scope_reports_raw_note_and_mixed_corpus(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    responses = iter(
+        [
+            {
+                "results": [
+                    {
+                        "item_id": "raw-note",
+                        "title": "Captured note",
+                        "source_type": "note",
+                        "corpus_class": "raw_capture",
+                        "scope": {"type": "agent", "key": "lux"},
+                    }
+                ]
+            },
+            {
+                "results": [
+                    {
+                        "item_id": "raw-note",
+                        "title": "Captured note",
+                        "source_type": "note",
+                        "corpus_class": "raw_capture",
+                        "scope": {"type": "agent", "key": "lux"},
+                    },
+                    {
+                        "item_id": "curated-note",
+                        "title": "Curated fact",
+                        "source_type": "note",
+                        "corpus_class": "curated_memory_entry",
+                        "scope": {"type": "agent", "key": "lux"},
+                    },
+                ]
+            },
+        ]
+    )
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        assert path == "/api/v1/memory/retrieve"
+        return next(responses)
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    raw_note = json.loads(
+        provider.handle_tool_call("palace_exact_scope_recall", {"query": "raw note"})
+    )
+    mixed = json.loads(
+        provider.handle_tool_call("palace_exact_scope_recall", {"query": "mixed note"})
+    )
+
+    assert raw_note["corpus_class"] == "raw_capture"
+    assert "raw_capture" in raw_note["result"]
+    assert mixed["corpus_class"] == "mixed"
+    assert "raw_capture" in mixed["result"]
+    assert "curated_memory_entry" in mixed["result"]
 
 
 def test_sar1381_normal_and_canary_reads_share_one_per_turn_budget(
