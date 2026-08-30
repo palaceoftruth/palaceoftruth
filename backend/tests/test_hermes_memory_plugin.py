@@ -80,6 +80,15 @@ def request_path(request) -> str:
     return parsed.path
 
 
+def oauth_whoami(agent_scope_key: str) -> dict:
+    return {
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "agent_scope_key": agent_scope_key,
+        "containment_mode": "hermes_agent",
+    }
+
+
 def test_plugin_files_exist() -> None:
     assert PLUGIN_PATH.exists()
     assert (PLUGIN_PATH.parent / "plugin.yaml").exists()
@@ -420,6 +429,8 @@ def test_palaceoftruth_hermes_oauth_default_retrieval_stays_in_canonical_agent_s
         params: dict | None = None,
     ) -> dict:
         requests_seen.append((method, path, payload))
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("clara")
         if method == "GET" and path == "/api/v1/memory/scopes":
             assert params == {"limit": 100, "sample_limit": 5}
             return {
@@ -495,6 +506,8 @@ def test_palaceoftruth_hermes_oauth_tenant_shared_uses_constrained_agent_route(
         payload: dict | None = None,
         params: dict | None = None,
     ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("karen")
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert method == "POST"
@@ -548,6 +561,8 @@ def test_palaceoftruth_hermes_oauth_mara_sibling_patterns_are_bounded_and_audite
         payload: dict | None = None,
         params: dict | None = None,
     ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("mara")
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert method == "POST"
@@ -601,6 +616,8 @@ def test_palaceoftruth_hermes_oauth_delegated_route_fallback_is_canonical_self_o
         payload: dict | None = None,
         params: dict | None = None,
     ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("mara")
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         if path == "/api/v1/memory/retrieve-agent":
@@ -1379,7 +1396,7 @@ def test_palaceoftruth_semantic_prefetch_rejects_sibling_agent_scope(monkeypatch
 
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
 
-    with pytest.raises(ValueError, match="sibling-agent semantic recall is not exposed"):
+    with pytest.raises(module.PalaceScopeConflictError, match="canonical agent scope conflict"):
         provider.prefetch("sibling recall", session_id="session-1")
 
 
@@ -1651,6 +1668,8 @@ def test_palaceoftruth_all_permitted_agent_scopes_reaches_route_aware_recall(
         payload: dict | None = None,
         params: dict | None = None,
     ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("clara")
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert path == "/api/v1/memory/retrieve-agent"
@@ -3828,6 +3847,207 @@ def test_palaceoftruth_provider_skips_write_when_whoami_fails(
     assert "Palace of Truth tenant resolution failed; skipping write" in caplog.text
 
 
+def _lux_oauth_provider(module, monkeypatch, *, runtime_identity: str = "default"):
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-lux")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "turn-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity=runtime_identity,
+    )
+    return provider
+
+
+def test_palaceoftruth_canonical_scope_uses_server_binding_over_generic_runtime_identity(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    requests_seen: list[tuple[str, str]] = []
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        requests_seen.append((method, path))
+        assert (method, path) == ("GET", "/api/v1/memory/whoami")
+        return {
+            "tenant_id": "tenant-a",
+            "auth_mode": "mcp_oauth",
+            "mcp_client_key": "hermes-lux",
+            "agent_scope_key": "lux",
+            "containment_mode": "hermes_agent",
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    assert provider._build_scope("turn-1") == {"type": "agent", "key": "lux"}
+    assert provider._canonical_bound_agent_scope_key() == "lux"
+    assert provider._build_retrieve_scopes("turn-1") == [
+        {"type": "agent", "key": "lux"}
+    ]
+    assert requests_seen == [("GET", "/api/v1/memory/whoami")]
+
+
+def test_palaceoftruth_canonical_scope_fails_closed_on_non_generic_runtime_conflict(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch, runtime_identity="iris")
+    provider._request_json = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "agent_scope_key": "lux",
+        "containment_mode": "hermes_agent",
+    }
+
+    with pytest.raises(module.PalaceScopeConflictError, match="configured=agent/lux"):
+        provider._build_scope("turn-1")
+
+
+def test_palaceoftruth_canonical_scope_fails_closed_on_server_binding_conflict(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    provider = _lux_oauth_provider(module, monkeypatch)
+    provider._request_json = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "agent_scope_key": "iris",
+        "containment_mode": "hermes_agent",
+    }
+
+    with pytest.raises(module.PalaceScopeConflictError, match="server=agent/iris"):
+        provider._build_scope("turn-1")
+
+
+def test_palaceoftruth_oauth_client_key_is_never_agent_scope_authority(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_CLIENT_KEY", "hermes-lux")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.delenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", raising=False)
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "turn-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="default",
+    )
+    provider._request_json = lambda *_args, **_kwargs: {  # type: ignore[attr-defined]
+        "tenant_id": "tenant-a",
+        "auth_mode": "mcp_oauth",
+        "mcp_client_key": "hermes-lux",
+    }
+
+    assert provider._canonical_bound_agent_scope_key() is None
+    assert provider._build_scope("turn-1") is None
+
+
+def test_palaceoftruth_all_read_and_write_paths_use_one_canonical_agent_key(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_INCLUDE_TENANT_SHARED", "true")
+    provider = _lux_oauth_provider(module, monkeypatch)
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        requests_seen.append((method, path, payload))
+        if path == "/api/v1/memory/whoami":
+            return {
+                "tenant_id": "tenant-a",
+                "auth_mode": "mcp_oauth",
+                "agent_scope_key": "lux",
+                "containment_mode": "hermes_agent",
+            }
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        if path == "/api/v1/memory/retrieve-agent":
+            return {"trace": {"searched_scopes": []}, "results": []}
+        if path == "/api/v1/memory/retrieve":
+            return {"trace": {}, "results": []}
+        if path == "/api/v1/memory/semantic-recall":
+            return {"trace": {"searched_scope": {"type": "agent", "key": "lux"}}, "items": []}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.handle_tool_call("palace_search", {"query": "route-aware"})
+    provider.handle_tool_call("palace_semantic_recall", {"query": "semantic"})
+    provider.handle_tool_call("palace_exact_scope_recall", {"query": "exact"})
+    provider.prefetch("prefetch", session_id="turn-1")
+    write_payload = provider._build_memory_write_payload(
+        action="add",
+        target="memory",
+        content="canonical write",
+        tenant_id="tenant-a",
+    )
+
+    selected_keys: list[str] = []
+    for _method, path, payload in requests_seen:
+        if not isinstance(payload, dict):
+            continue
+        if path == "/api/v1/memory/retrieve-agent":
+            selected_keys.append(payload["agent_scope_key"])
+        elif path == "/api/v1/memory/retrieve":
+            selected_keys.append(payload["scope"]["key"])
+        elif path == "/api/v1/memory/semantic-recall":
+            selected_keys.append(payload["scope_key"])
+    selected_keys.append(write_payload["scope"]["key"])
+    requested_paths = {path for _method, path, _payload in requests_seen}
+    assert "/api/v1/memory/retrieve-agent" in requested_paths
+    assert "/api/v1/memory/retrieve" in requested_paths
+    assert selected_keys
+    assert set(selected_keys) == {"lux"}
+
+
+def test_palaceoftruth_canonical_403_latches_for_turn_and_new_turn_clears_it(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("turn-1", hermes_home="/tmp/hermes-home", agent_identity="default")
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout: int):
+        path = request_path(request)
+        calls.append(path)
+        if path == "/api/v1/memory/scopes":
+            return FakeJsonResponse({"scopes": []})
+        raise module.HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"detail":"canonical agent scope required"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    first = json.loads(provider.handle_tool_call("palace_search", {"query": "first"}))
+    second = json.loads(provider.handle_tool_call("palace_search", {"query": "second"}))
+
+    assert first["ok"] is False
+    assert first["error"]["type"] == "PalaceAuthorizationError"
+    assert second["ok"] is False
+    assert second["error"]["type"] == "PalaceAuthorizationLatchError"
+    assert calls.count("/api/v1/memory/retrieve-agent") == 1
+    assert calls.count("/api/v1/memory/retrieve") == 0
+
+    provider.sync_turn("", "")
+    third = json.loads(provider.handle_tool_call("palace_search", {"query": "third"}))
+    assert third["ok"] is False
+    assert third["error"]["type"] == "PalaceAuthorizationError"
+    assert calls.count("/api/v1/memory/retrieve-agent") == 2
+
+
 def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall(
     monkeypatch,
 ) -> None:
@@ -3855,6 +4075,8 @@ def test_palaceoftruth_all_permitted_workspace_scopes_reaches_route_aware_recall
         payload: dict | None = None,
         params: dict | None = None,
     ) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return oauth_whoami("clara")
         if method == "GET" and path == "/api/v1/memory/scopes":
             return {"scopes": [], "total": 0, "limit": 100}
         assert path == "/api/v1/memory/retrieve-agent"

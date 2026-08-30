@@ -35,7 +35,8 @@ write-back is explicitly delegated.
 - The plugin can authenticate with either the legacy tenant API key or Palace MCP OAuth client credentials. When
   `PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` is present, OAuth is preferred and API calls use a bearer token minted from
   `/api/v1/memory/mcp/oauth/token`; `PALACEOFTRUTH_API_KEY` remains a legacy fallback for hosts that have not cut over.
-- The plugin validates its tenant identity with `/api/v1/memory/whoami` and mirrors the returned `tenant_id` into durable write payloads.
+- The plugin validates its tenant identity with `/api/v1/memory/whoami` and mirrors the returned `tenant_id` into durable write payloads. For OAuth clients, the same secret-safe response supplies the server-owned `agent_scope_key` and `containment_mode`; the plugin never derives scope authority from the OAuth client-key string.
+- One canonical agent-scope resolver is used by route-aware search, fallback search, semantic recall, exact-scope recall, prefetch, and writes. An explicit configured agent key outranks generic runtime identities such as `default`. A non-generic runtime identity, configured identity, or server binding conflict fails closed before a memory request.
 - Recall is route-aware for legacy API-key clients: the plugin first asks
   `/api/v1/memory/scopes` for content-free scope metadata, then uses
   `/api/v1/memory/retrieve-agent` for configured scopes. If the new route is
@@ -123,6 +124,11 @@ write-back is explicitly delegated.
   errors, HTTP 429, and retryable 5xx responses. Permanent 4xx responses,
   validation failures, tenant mismatch, and privacy/admission rejections are not
   retried.
+- A canonical-scope HTTP 403 sets a turn-scoped authorization latch. Later
+  memory reads in that turn return one deterministic unavailable error without
+  another HTTP request. `sync_turn()` and session changes clear the latch so a
+  new turn gets one fresh attempt. The latch is separate from the transient
+  retry circuit breaker.
 - Retry and circuit-breaker knobs are local to this plugin:
   `PALACEOFTRUTH_RETRY_ATTEMPTS` (default `3`),
   `PALACEOFTRUTH_RETRY_BACKOFF_SECONDS` (default `1.0`),

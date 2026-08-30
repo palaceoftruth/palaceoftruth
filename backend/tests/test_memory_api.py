@@ -902,6 +902,8 @@ def test_memory_whoami_returns_authenticated_tenant() -> None:
         "auth_mode": "api_key",
         "mcp_client_id": None,
         "mcp_client_key": None,
+        "agent_scope_key": None,
+        "containment_mode": "standard",
         "allowed_scopes": list(LEGACY_API_KEY_SCOPES),
         "resource": None,
         "audience": None,
@@ -917,6 +919,17 @@ def test_memory_whoami_returns_mcp_oauth_scope_metadata() -> None:
         mcp_allowed_scopes=["read", "write"],
     )
 
+    async def override_verify(request: Request):
+        request.state.tenant_id = "tenant-a"
+        request.state.key_hash = "key-hash"
+        request.state.auth_mode = "mcp_oauth"
+        request.state.mcp_client_key = "hermes-lux"
+        request.state.mcp_agent_scope_key = "lux"
+        request.state.mcp_containment_mode = "hermes_agent"
+        request.state.mcp_allowed_scopes = ["read", "write"]
+        return "token"
+
+    client.app.dependency_overrides[verify_memory_auth] = override_verify
     response = client.get("/api/v1/memory/whoami")
 
     assert response.status_code == 200
@@ -925,7 +938,9 @@ def test_memory_whoami_returns_mcp_oauth_scope_metadata() -> None:
         "tenant_id": "tenant-a",
         "auth_mode": "mcp_oauth",
         "mcp_client_id": None,
-        "mcp_client_key": "codex-remote",
+        "mcp_client_key": "hermes-lux",
+        "agent_scope_key": "lux",
+        "containment_mode": "hermes_agent",
         "allowed_scopes": ["read", "write"],
         "resource": None,
         "audience": None,
@@ -4763,6 +4778,8 @@ def test_memory_facade_smoke_uses_main_app_routes(monkeypatch) -> None:
         "auth_mode": "api_key",
         "mcp_client_id": None,
         "mcp_client_key": None,
+        "agent_scope_key": None,
+        "containment_mode": "standard",
         "allowed_scopes": list(LEGACY_API_KEY_SCOPES),
         "resource": None,
         "audience": None,

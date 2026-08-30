@@ -488,6 +488,8 @@ async def whoami(request: Request) -> MemoryWhoAmIResponse:
         auth_mode=getattr(request.state, "auth_mode", None),
         mcp_client_id=getattr(request.state, "mcp_client_id", None),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
+        agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
+        containment_mode=getattr(request.state, "mcp_containment_mode", None),
         allowed_scopes=list(allowed_scopes) if isinstance(allowed_scopes, list) else [],
         resource=token_resource if isinstance(token_resource, str) else None,
         audience=token_resource if isinstance(token_resource, str) else None,
