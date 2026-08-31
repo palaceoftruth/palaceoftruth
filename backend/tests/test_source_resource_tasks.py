@@ -379,3 +379,102 @@ async def test_refresh_rechecks_lease_with_a_fresh_post_fetch_timestamp(monkeypa
 
     assert initial.lease_check_times == [before_fetch]
     assert expired.lease_check_times == [after_fetch]
+
+
+@pytest.mark.asyncio
+async def test_material_second_refresh_creates_source_drift_in_same_transaction(monkeypatch) -> None:
+    lease_token = uuid.uuid4()
+    previous_record_id = uuid.uuid4()
+    current_record_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    resource = _resource(due_at=now)
+    resource.refresh_lease_token = lease_token
+    resource.refresh_lease_expires_at = now + timedelta(minutes=5)
+    resource.last_successful_source_record_id = previous_record_id
+    resource.content_digest = "old-digest"
+
+    class _Session:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        async def scalar(self, _statement):
+            return resource
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class _Manager:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        async def __aenter__(self):
+            return self.session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    initial = _Session()
+    activation_session = _Session()
+    palace_session = _Session()
+    managers = iter((_Manager(initial), _Manager(activation_session), _Manager(palace_session)))
+    drift_calls = []
+
+    async def _fetch(**_kwargs):
+        return (
+            SimpleNamespace(
+                outcome="success",
+                body=b"new content",
+                status_code=200,
+                etag='"v2"',
+                last_modified=None,
+                final_url=None,
+            ),
+            SimpleNamespace(allowed=True, decision="robots_allowed"),
+        )
+
+    async def _activate(*_args, **_kwargs):
+        return source_resource_tasks.ResourceActivation(current_record_id, True)
+
+    async def _drift(_db, **kwargs):
+        drift_calls.append(kwargs)
+
+    async def _persist(*_args, **_kwargs):
+        return None
+
+    async def _palace_run(*_args, **_kwargs):
+        return SimpleNamespace(id=uuid.uuid4()), False
+
+    monkeypatch.setattr(source_resource_tasks, "async_session", lambda *args, **kwargs: next(managers))
+    monkeypatch.setattr(source_resource_tasks, "_fetch_with_robots", _fetch)
+    monkeypatch.setattr(source_resource_tasks, "_activate_resource_content", _activate)
+    monkeypatch.setattr(source_resource_tasks, "create_source_drift_proposal", _drift)
+    monkeypatch.setattr(source_resource_tasks, "persist_refresh_observation", _persist)
+    monkeypatch.setattr(source_resource_tasks, "record_source_refresh", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(source_resource_tasks, "create_or_get_palace_run", _palace_run)
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_allowed_hosts",
+        "example.com",
+    )
+    monkeypatch.setattr(
+        source_resource_tasks.settings,
+        "source_resource_refresh_trusted_private_hosts",
+        "",
+    )
+
+    await source_resource_tasks.refresh_source_resource(
+        {"embedder": object(), "redis": _FakeRedis()},
+        str(resource.id),
+        resource.tenant_id,
+        str(lease_token),
+    )
+
+    assert drift_calls == [
+        {
+            "tenant_id": resource.tenant_id,
+            "resource_id": resource.id,
+            "previous_source_record_id": previous_record_id,
+            "current_source_record_id": current_record_id,
+        }
+    ]
+    assert activation_session.commits == 1

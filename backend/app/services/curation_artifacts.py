@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +18,9 @@ from app.schemas.curation_artifact import (
     CandidateCurationArtifactUpdate,
     CandidateCurationArtifactOut,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 ARTIFACT_STATUSES: frozenset[str] = frozenset(
@@ -169,6 +173,17 @@ def _artifact_snapshot(artifact: CandidateCurationArtifact) -> dict[str, Any]:
         "status": artifact.status,
         "source_item_ids": list(artifact.source_item_ids or []),
         "source_digests": dict(artifact.source_digests or {}),
+        "source_resource_id": str(artifact.source_resource_id) if artifact.source_resource_id else None,
+        "previous_source_record_id": (
+            str(artifact.previous_source_record_id) if artifact.previous_source_record_id else None
+        ),
+        "current_source_record_id": (
+            str(artifact.current_source_record_id) if artifact.current_source_record_id else None
+        ),
+        "affected_item_ids": list(artifact.affected_item_ids or []),
+        "affected_claim_ids": list(artifact.affected_claim_ids or []),
+        "evidence_diff": dict(artifact.evidence_diff or {}),
+        "dedupe_key": artifact.dedupe_key,
         "candidate_body": artifact.candidate_body,
         "privacy_review": dict(artifact.privacy_review or {}),
         "eval_summary": dict(artifact.eval_summary or {}),
@@ -217,6 +232,8 @@ def _freshness_for_artifact(artifact: CandidateCurationArtifact) -> str:
 
 
 def _suggested_action(artifact: CandidateCurationArtifact) -> str:
+    if artifact.artifact_kind == "candidate_source_drift" and artifact.status in {"promoted", "rejected"}:
+        return "reopen"
     freshness = _freshness_for_artifact(artifact)
     if freshness == "needs_source":
         return "open_source"
@@ -240,7 +257,13 @@ def _review_inbox_item(artifact: CandidateCurationArtifact) -> ReviewInboxItemOu
         affected_scope=f"{artifact.target_runtime}:{artifact.target_surface}",
         pinned=review.get("pinned") is True,
         deferred=review.get("deferred") is True,
-        reversible_actions=["pin", "defer"],
+        reversible_actions=(
+            ["reopen"]
+            if artifact.artifact_kind == "candidate_source_drift" and artifact.status in {"promoted", "rejected"}
+            else ["accept", "reject", "defer"]
+            if artifact.artifact_kind == "candidate_source_drift"
+            else ["pin", "defer"]
+        ),
     )
 
 
@@ -275,13 +298,25 @@ async def list_review_inbox(
     *,
     tenant_id: str,
     include_deferred: bool = False,
+    include_resolved: bool = False,
     limit: int = 50,
 ) -> ReviewInboxResponse:
-    query = (
-        select(CandidateCurationArtifact)
-        .where(CandidateCurationArtifact.tenant_id == tenant_id)
-        .where(CandidateCurationArtifact.status.in_(REVIEW_INBOX_STATUSES))
+    status_predicate = CandidateCurationArtifact.status.in_(REVIEW_INBOX_STATUSES)
+    if include_resolved:
+        status_predicate = or_(
+            status_predicate,
+            (
+                (CandidateCurationArtifact.artifact_kind == "candidate_source_drift")
+                & CandidateCurationArtifact.status.in_(("promoted", "rejected"))
+            ),
+        )
+    query = select(CandidateCurationArtifact).where(
+        CandidateCurationArtifact.tenant_id == tenant_id,
+        status_predicate,
     )
+    if not include_resolved:
+        resolved_flag = CandidateCurationArtifact.metadata_["review_inbox"]["resolved"].as_boolean()
+        query = query.where(or_(resolved_flag.is_(None), resolved_flag.is_not(True)))
     if not include_deferred:
         deferred_flag = CandidateCurationArtifact.metadata_["review_inbox"]["deferred"].as_boolean()
         query = query.where(or_(deferred_flag.is_(None), deferred_flag.is_not(True)))
@@ -320,12 +355,68 @@ async def apply_review_inbox_action(
         artifact = await get_candidate_curation_artifact(db, tenant_id=tenant_id, artifact_id=artifact_id)
         if artifact is None:
             raise CandidateCurationArtifactError("review inbox artifact not found")
-        if artifact.status not in REVIEW_INBOX_STATUSES:
+        reopenable_source_drift = (
+            body.action == "reopen"
+            and artifact.artifact_kind == "candidate_source_drift"
+            and artifact.status in {"promoted", "rejected"}
+        )
+        if artifact.status not in REVIEW_INBOX_STATUSES and not reopenable_source_drift:
             raise CandidateCurationArtifactError("artifact is not currently reviewable in the inbox")
         artifacts.append(artifact)
 
     updated: list[CandidateCurationArtifact] = []
     for artifact in artifacts:
+        if body.action == "reopen":
+            if artifact.artifact_kind != "candidate_source_drift" or artifact.status not in {"promoted", "rejected"}:
+                raise CandidateCurationArtifactError("only resolved source drift artifacts can be reopened")
+            if not can_approve:
+                raise CandidateCurationArtifactError("curation approval scope is required")
+            locked = (
+                await db.execute(
+                    select(CandidateCurationArtifact)
+                    .where(CandidateCurationArtifact.id == artifact.id)
+                    .where(CandidateCurationArtifact.tenant_id == tenant_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if (
+                locked is None
+                or locked.artifact_kind != "candidate_source_drift"
+                or locked.status not in {"promoted", "rejected"}
+            ):
+                raise CandidateCurationArtifactError("resolved source drift artifact changed before reopen")
+            artifact = locked
+            previous_snapshot = _artifact_snapshot(artifact)
+            artifact.status = "reviewable"
+            artifact.approval = {}
+            artifact.approved_by_principal = None
+            artifact.approval_decided_at = None
+            artifact.approved_at = None
+            metadata = _review_inbox_metadata(
+                artifact,
+                action="reopen",
+                actor=principal_id,
+                note=body.note,
+            )
+            metadata["review_inbox"]["resolved"] = False
+            artifact.metadata_ = metadata
+            _record_artifact_event(
+                db,
+                artifact=artifact,
+                event_type="source_drift_reopened",
+                previous_snapshot=previous_snapshot,
+            )
+            await db.flush()
+            await db.refresh(artifact)
+            updated.append(artifact)
+            logger.info(
+                "curation_review_transition tenant_id=%s artifact_id=%s action=reopen status=%s",
+                tenant_id,
+                artifact.id,
+                artifact.status,
+            )
+            continue
         if body.action == "accept" and artifact.status not in REVIEW_INBOX_ACCEPT_STATUSES:
             raise CandidateCurationArtifactError("only reviewable or proposed inbox artifacts can be accepted")
         metadata = _review_inbox_metadata(
@@ -368,6 +459,13 @@ async def apply_review_inbox_action(
                 principal_id=principal_id,
                 can_approve=can_approve,
             )
+        )
+        logger.info(
+            "curation_review_transition tenant_id=%s artifact_id=%s action=%s status=%s",
+            tenant_id,
+            artifact.id,
+            body.action,
+            artifact.status,
         )
     return updated
 

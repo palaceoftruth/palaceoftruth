@@ -851,7 +851,7 @@ class CandidateCurationArtifact(Base):
     __tablename__ = "candidate_curation_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail', 'candidate_memory_reflection')",
+            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail', 'candidate_memory_reflection', 'candidate_source_drift')",
             name="ck_candidate_curation_artifact_kind",
         ),
         CheckConstraint(
@@ -862,6 +862,7 @@ class CandidateCurationArtifact(Base):
             "status != 'superseded' OR superseded_by_artifact_id IS NOT NULL",
             name="ck_candidate_curation_superseded_lineage",
         ),
+        UniqueConstraint("tenant_id", "dedupe_key", name="uq_candidate_curation_tenant_dedupe"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -876,6 +877,19 @@ class CandidateCurationArtifact(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="draft")
     source_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     source_digests: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    source_resource_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("source_resources.id", ondelete="RESTRICT"), nullable=True
+    )
+    previous_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("source_records.id", ondelete="RESTRICT"), nullable=True
+    )
+    current_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("source_records.id", ondelete="RESTRICT"), nullable=True
+    )
+    affected_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    affected_claim_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    evidence_diff: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    dedupe_key: Mapped[str | None] = mapped_column(String(180), nullable=True)
     candidate_body: Mapped[str] = mapped_column(Text, nullable=False)
     privacy_review: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     eval_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")

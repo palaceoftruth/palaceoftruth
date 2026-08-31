@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -30,6 +31,7 @@ router = APIRouter(
     prefix="/curation-artifacts",
     tags=["curation-artifacts"],
 )
+logger = logging.getLogger(__name__)
 
 
 def _validation_error(exc: CandidateCurationArtifactError) -> HTTPException:
@@ -87,6 +89,7 @@ async def post_curation_artifact(
 async def get_review_inbox(
     request: Request,
     include_deferred: bool = False,
+    include_resolved: bool = False,
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ) -> ReviewInboxResponse:
@@ -94,6 +97,7 @@ async def get_review_inbox(
         db,
         tenant_id=request.state.tenant_id,
         include_deferred=include_deferred,
+        include_resolved=include_resolved,
         limit=limit,
     )
 
@@ -105,7 +109,12 @@ async def post_review_inbox_action(
     db: AsyncSession = Depends(get_db),
 ) -> ReviewInboxActionResponse:
     context = get_auth_context(request)
-    if body.action in {"accept", "reject"} and not context.has_capability("curation:approve"):
+    if body.action in {"accept", "reject", "reopen"} and not context.has_capability("curation:approve"):
+        logger.warning(
+            "curation_review_denied tenant_id=%s action=%s reason=missing_approval_scope",
+            request.state.tenant_id,
+            body.action,
+        )
         raise HTTPException(status_code=403, detail="curation approval scope is required")
     try:
         artifacts = await apply_review_inbox_action(

@@ -436,6 +436,45 @@ def test_review_inbox_filters_deferred_candidates_before_limit() -> None:
     assert "limit" in normalized_sql
 
 
+def test_review_inbox_filters_resolved_by_default_and_can_include_resolved_source_drift() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="promoted")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.metadata_ = {"review_inbox": {"resolved": True}}
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    default_response = client.get("/api/v1/curation-artifacts/review-inbox")
+    resolved_response = client.get(
+        "/api/v1/curation-artifacts/review-inbox?include_resolved=true&include_deferred=true"
+    )
+
+    assert default_response.status_code == 200
+    assert resolved_response.status_code == 200
+    default_sql = " ".join(session.statements[0].lower().split())
+    resolved_sql = " ".join(session.statements[1].lower().split())
+    assert "candidate_curation_artifacts.tenant_id = :tenant_id_1" in default_sql
+    assert "candidate_curation_artifacts.metadata" in default_sql
+    assert "candidate_curation_artifacts.artifact_kind" in resolved_sql
+    assert "candidate_curation_artifacts.status in" in resolved_sql
+
+
+def test_source_drift_reopen_requires_approval_scope() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="promoted")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.created_by_principal = "system:source-drift"
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session, scopes=("read", "write"))
+
+    response = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={"action": "reopen", "artifact_ids": [str(artifact.id)]},
+    )
+
+    assert response.status_code == 403
+    assert artifact.status == "promoted"
+    assert session.commits == 0
+
+
 def test_review_inbox_safe_batch_pin_updates_metadata_without_status_change() -> None:
     first = _artifact(tenant_id="tenant-a", status="reviewable")
     second = _artifact(tenant_id="tenant-a", status="proposed")
@@ -503,6 +542,40 @@ def test_review_inbox_accept_promotes_only_source_backed_artifacts() -> None:
     assert artifact.approved_at is not None
     assert session.commits == 1
     assert session.refreshes == [artifact]
+
+
+def test_source_drift_accept_can_be_reopened_without_changing_source_records() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.created_by_principal = "system:source-drift"
+    artifact.source_resource_id = uuid.uuid4()
+    artifact.previous_source_record_id = uuid.uuid4()
+    artifact.current_source_record_id = uuid.uuid4()
+    artifact.affected_item_ids = list(artifact.source_item_ids)
+    artifact.affected_claim_ids = []
+    artifact.evidence_diff = {"format": "unified_diff", "diff": "-old\n+new"}
+    artifact.dedupe_key = "source-drift:test"
+    session = FakeSession(artifacts={artifact.id: artifact})
+    client = _client(session)
+
+    accepted = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={"action": "accept", "artifact_ids": [str(artifact.id)]},
+    )
+    reopened = client.post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={"action": "reopen", "artifact_ids": [str(artifact.id)]},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["artifacts"][0]["status"] == "promoted"
+    assert reopened.status_code == 200
+    assert reopened.json()["artifacts"][0]["status"] == "reviewable"
+    assert reopened.json()["artifacts"][0]["approval"] == {}
+    assert reopened.json()["artifacts"][0]["metadata"]["review_inbox"]["resolved"] is False
+    assert artifact.previous_source_record_id is not None
+    assert artifact.current_source_record_id is not None
+    assert session.events[-1].event_type == "source_drift_reopened"
 
 
 def test_review_inbox_accept_requires_distinct_scoped_approver() -> None:
