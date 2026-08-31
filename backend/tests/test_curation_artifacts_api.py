@@ -9,6 +9,7 @@ from app.auth import AuthContext, verify_memory_auth
 from app.mcp_scopes import LEGACY_API_KEY_SCOPES
 from app.database import get_db
 from app.models.palace import CandidateCurationArtifact, CandidateCurationArtifactEvent
+from app.models.source_resource import SourceResource
 
 
 class FakeScalarResult:
@@ -26,13 +27,14 @@ class FakeScalarResult:
 
 
 class FakeSession:
-    def __init__(self, *, artifacts=None) -> None:
+    def __init__(self, *, artifacts=None, source_resource=None) -> None:
         self.artifacts = artifacts or {}
         self.events = []
         self.statements = []
         self.commits = 0
         self.rollbacks = 0
         self.refreshes = []
+        self.source_resource = source_resource
 
     def add(self, obj):
         if isinstance(obj, CandidateCurationArtifact):
@@ -65,6 +67,9 @@ class FakeSession:
     async def execute(self, statement):
         self.statements.append(str(statement))
         return FakeScalarResult(list(self.artifacts.values()))
+
+    async def scalar(self, _statement):
+        return self.source_resource
 
     async def commit(self):
         self.commits += 1
@@ -121,6 +126,22 @@ def _artifact(*, tenant_id: str = "tenant-a", status: str = "draft") -> Candidat
         metadata_={"created_from": "test"},
         created_at=now,
         updated_at=now,
+    )
+
+
+def _source_drift_resource(artifact: CandidateCurationArtifact, *, current_record_id=None) -> SourceResource:
+    return SourceResource(
+        id=artifact.source_resource_id,
+        tenant_id=artifact.tenant_id,
+        kind="http",
+        source_class="webpage",
+        canonical_url="https://example.test/policy",
+        canonical_identity="test-source-drift",
+        refresh_policy="interval",
+        refresh_slo_seconds=3600,
+        status="active",
+        consecutive_failures=0,
+        last_successful_source_record_id=current_record_id or artifact.current_source_record_id,
     )
 
 
@@ -555,7 +576,10 @@ def test_source_drift_accept_can_be_reopened_without_changing_source_records() -
     artifact.affected_claim_ids = []
     artifact.evidence_diff = {"format": "unified_diff", "diff": "-old\n+new"}
     artifact.dedupe_key = "source-drift:test"
-    session = FakeSession(artifacts={artifact.id: artifact})
+    session = FakeSession(
+        artifacts={artifact.id: artifact},
+        source_resource=_source_drift_resource(artifact),
+    )
     client = _client(session)
 
     accepted = client.post(
@@ -576,6 +600,83 @@ def test_source_drift_accept_can_be_reopened_without_changing_source_records() -
     assert artifact.previous_source_record_id is not None
     assert artifact.current_source_record_id is not None
     assert session.events[-1].event_type == "source_drift_reopened"
+
+
+def test_source_drift_accept_rejects_superseded_source_evidence() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="reviewable")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.created_by_principal = "system:source-drift"
+    artifact.source_resource_id = uuid.uuid4()
+    artifact.previous_source_record_id = uuid.uuid4()
+    artifact.current_source_record_id = uuid.uuid4()
+    artifact.affected_item_ids = list(artifact.source_item_ids)
+    artifact.affected_claim_ids = []
+    artifact.evidence_diff = {"format": "unified_diff", "diff": "-old\n+new"}
+    artifact.dedupe_key = "source-drift:stale"
+    session = FakeSession(
+        artifacts={artifact.id: artifact},
+        source_resource=_source_drift_resource(artifact, current_record_id=uuid.uuid4()),
+    )
+
+    response = _client(session).post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={"action": "accept", "artifact_ids": [str(artifact.id)]},
+    )
+
+    assert response.status_code == 422
+    assert "evidence is stale" in response.json()["detail"]
+    assert artifact.status == "reviewable"
+    assert session.commits == 0
+
+
+def test_source_drift_reopen_rejects_superseded_source_evidence() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="promoted")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.created_by_principal = "system:source-drift"
+    artifact.source_resource_id = uuid.uuid4()
+    artifact.previous_source_record_id = uuid.uuid4()
+    artifact.current_source_record_id = uuid.uuid4()
+    artifact.affected_item_ids = list(artifact.source_item_ids)
+    artifact.affected_claim_ids = []
+    artifact.evidence_diff = {"format": "unified_diff", "diff": "-old\n+new"}
+    artifact.dedupe_key = "source-drift:stale-reopen"
+    session = FakeSession(
+        artifacts={artifact.id: artifact},
+        source_resource=_source_drift_resource(artifact, current_record_id=uuid.uuid4()),
+    )
+
+    response = _client(session).post(
+        "/api/v1/curation-artifacts/review-inbox/actions",
+        json={"action": "reopen", "artifact_ids": [str(artifact.id)]},
+    )
+
+    assert response.status_code == 422
+    assert "evidence is stale" in response.json()["detail"]
+    assert artifact.status == "promoted"
+    assert session.commits == 0
+
+
+def test_generic_patch_cannot_bypass_source_drift_reopen_action() -> None:
+    artifact = _artifact(tenant_id="tenant-a", status="promoted")
+    artifact.artifact_kind = "candidate_source_drift"
+    artifact.created_by_principal = "system:source-drift"
+    artifact.source_resource_id = uuid.uuid4()
+    artifact.previous_source_record_id = uuid.uuid4()
+    artifact.current_source_record_id = uuid.uuid4()
+    artifact.affected_item_ids = list(artifact.source_item_ids)
+    artifact.affected_claim_ids = []
+    artifact.evidence_diff = {"format": "unified_diff", "diff": "-old\n+new"}
+    artifact.dedupe_key = "source-drift:patch-bypass"
+    session = FakeSession(artifacts={artifact.id: artifact})
+
+    response = _client(session, scopes=("read", "write")).patch(
+        f"/api/v1/curation-artifacts/{artifact.id}",
+        json={"status": "reviewable"},
+    )
+
+    assert response.status_code == 422
+    assert "Review Inbox actions" in response.json()["detail"]
+    assert artifact.status == "promoted"
 
 
 def test_review_inbox_accept_requires_distinct_scoped_approver() -> None:

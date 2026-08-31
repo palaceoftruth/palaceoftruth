@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.models.item import Item
 from app.models.palace import (
@@ -18,6 +19,14 @@ from app.services.source_drift import (
     source_drift_dedupe_key,
 )
 from app.services.source_resources import canonical_http_identity
+
+
+class _NestedTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _ScalarRows:
@@ -40,6 +49,9 @@ class _Session:
     async def scalars(self, _statement):
         return _ScalarRows(next(self._scalar_rows))
 
+    def begin_nested(self):
+        return _NestedTransaction()
+
     def add(self, value) -> None:
         if getattr(value, "id", None) is None:
             value.id = uuid.uuid4()
@@ -52,6 +64,23 @@ class _Session:
                 value.created_at = now
             if hasattr(value, "updated_at") and getattr(value, "updated_at", None) is None:
                 value.updated_at = now
+
+
+class _ConflictSession(_Session):
+    def __init__(self, *, scalar_values, scalar_rows=()) -> None:
+        super().__init__(scalar_values=scalar_values, scalar_rows=scalar_rows)
+        self._conflicted = False
+
+    async def flush(self) -> None:
+        if not self._conflicted and any(
+            isinstance(value, CandidateCurationArtifact) for value in self.added
+        ):
+            self._conflicted = True
+            self.added = [
+                value for value in self.added if not isinstance(value, CandidateCurationArtifact)
+            ]
+            raise IntegrityError("insert candidate", {}, Exception("unique conflict"))
+        await super().flush()
 
 
 def _resource(previous_record_id: uuid.UUID) -> SourceResource:
@@ -196,6 +225,47 @@ async def test_source_drift_retry_returns_existing_artifact_without_duplicate_wr
 
 
 @pytest.mark.asyncio
+async def test_concurrent_source_drift_insert_returns_unique_constraint_winner() -> None:
+    item_id = uuid.uuid4()
+    previous = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="hash-1", status="stale")
+    current = _record(record_id=uuid.uuid4(), item_id=item_id, version="v2", content_hash="hash-2", status="active")
+    resource = _resource(previous.id)
+    item = Item(
+        id=item_id,
+        tenant_id="tenant-a",
+        source_type="webpage",
+        source_url=resource.canonical_url,
+        title="Policy",
+        status="ready",
+        metadata_={},
+        tags=[],
+        categories=[],
+    )
+    winner = CandidateCurationArtifact(id=uuid.uuid4(), tenant_id="tenant-a")
+    session = _ConflictSession(
+        scalar_values=(None, resource, previous, current, winner),
+        scalar_rows=(
+            [item],
+            [_chunk(previous, "Retention: 30 days")],
+            [_chunk(current, "Retention: 90 days")],
+            [],
+        ),
+    )
+
+    result = await create_source_drift_proposal(
+        session,  # type: ignore[arg-type]
+        tenant_id="tenant-a",
+        resource_id=resource.id,
+        previous_source_record_id=previous.id,
+        current_source_record_id=current.id,
+    )
+
+    assert result.artifact is winner
+    assert result.outcome == "deduplicated"
+    assert session._conflicted is True
+
+
+@pytest.mark.asyncio
 async def test_same_content_hash_creates_no_review_item() -> None:
     item_id = uuid.uuid4()
     previous = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="same", status="stale")
@@ -268,12 +338,42 @@ def test_readable_diff_redacts_private_markers_and_caps_large_evidence() -> None
     old = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="old", status="stale")
     new = _record(record_id=uuid.uuid4(), item_id=item_id, version="v2", content_hash="new", status="active")
 
-    diff, truncated = build_readable_source_diff(
+    private_diff, private_truncated = build_readable_source_diff(
         [_chunk(old, "-----BEGIN PRIVATE KEY-----\n" + "A" * 30_000)],
         [_chunk(new, "-----BEGIN PRIVATE KEY-----\n" + "B" * 30_000)],
     )
+    large_diff, large_truncated = build_readable_source_diff(
+        [_chunk(old, "\n".join(f"old line {index}" for index in range(3_000)))],
+        [_chunk(new, "\n".join(f"new line {index}" for index in range(3_000)))],
+    )
 
-    assert "PRIVATE KEY" not in diff
-    assert len(diff) <= 24_050
-    assert diff.endswith("... diff truncated for review safety")
-    assert truncated is True
+    assert "PRIVATE KEY" not in private_diff
+    assert "A" * 100 not in private_diff
+    assert "B" * 100 not in private_diff
+    assert private_truncated is False
+    assert len(large_diff) <= 24_050
+    assert large_diff.endswith("... diff truncated for review safety")
+    assert large_truncated is True
+
+
+def test_readable_diff_redacts_headers_json_secrets_and_known_tokens() -> None:
+    item_id = uuid.uuid4()
+    old = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="old", status="stale")
+    new = _record(record_id=uuid.uuid4(), item_id=item_id, version="v2", content_hash="new", status="active")
+    old_text = '\n'.join((
+        'Authorization: Bearer old-value',
+        'Cookie: session=old-cookie',
+        '{"client_secret": "old-secret"}',
+        'token ghp_123456789012345678901234567890',
+    ))
+    new_text = '\n'.join((
+        'Authorization: Bearer new-value',
+        'Set-Cookie: session=new-cookie',
+        '{"client_secret": "new-secret"}',
+        'token sk-123456789012345678901234567890',
+    ))
+
+    diff, _ = build_readable_source_diff([_chunk(old, old_text)], [_chunk(new, new_text)])
+
+    for secret in ("old-value", "new-value", "old-cookie", "new-cookie", "old-secret", "new-secret", "ghp_", "sk-"):
+        assert secret not in diff

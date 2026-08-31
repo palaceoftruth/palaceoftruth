@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     Date,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -316,6 +317,7 @@ class SourceRecord(Base):
     __tablename__ = "source_records"
     __table_args__ = (
         UniqueConstraint("tenant_id", "item_id", "source_version", name="uq_source_records_tenant_item_version"),
+        UniqueConstraint("tenant_id", "id", name="uq_source_records_tenant_id_id"),
         CheckConstraint(
             "status IN ('active', 'stale', 'failed', 'deleted', 'superseded')",
             name="ck_source_records_status",
@@ -863,6 +865,24 @@ class CandidateCurationArtifact(Base):
             name="ck_candidate_curation_superseded_lineage",
         ),
         UniqueConstraint("tenant_id", "dedupe_key", name="uq_candidate_curation_tenant_dedupe"),
+        ForeignKeyConstraint(
+            ["tenant_id", "source_resource_id"],
+            ["source_resources.tenant_id", "source_resources.id"],
+            name="fk_candidate_curation_source_resource_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "previous_source_record_id"],
+            ["source_records.tenant_id", "source_records.id"],
+            name="fk_candidate_curation_previous_source_record_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "current_source_record_id"],
+            ["source_records.tenant_id", "source_records.id"],
+            name="fk_candidate_curation_current_source_record_tenant",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -878,13 +898,13 @@ class CandidateCurationArtifact(Base):
     source_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     source_digests: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default="{}")
     source_resource_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("source_resources.id", ondelete="RESTRICT"), nullable=True
+        PG_UUID(as_uuid=True), nullable=True
     )
     previous_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("source_records.id", ondelete="RESTRICT"), nullable=True
+        PG_UUID(as_uuid=True), nullable=True
     )
     current_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("source_records.id", ondelete="RESTRICT"), nullable=True
+        PG_UUID(as_uuid=True), nullable=True
     )
     affected_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     affected_claim_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")

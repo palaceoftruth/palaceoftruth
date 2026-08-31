@@ -7,8 +7,10 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.item import Item
@@ -27,10 +29,21 @@ from app.services.source_resources import normalize_http_url
 logger = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS = 24_000
-_SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)\b(api[_-]?key|password|secret|access[_-]?token|refresh[_-]?token)\b(\s*[:=]\s*)(\S+)"
+_SENSITIVE_FIELD_LINE = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|"
+    r"api[_-]?key|client[_-]?secret|password|secret|token|credential|signature|session|"
+    r"access[_-]?token|refresh[_-]?token|private[_-]?key|signing[_-]?key|"
+    r"webhook[_-]?secret|database[_-]?url|redis[_-]?url|dsn|connection[_-]?string)"
+    r"\b[\"']?\s*[:=]"
 )
-_SENSITIVE_LINE_MARKERS = ("-----begin", "private transcript", "raw transcript")
+_CREDENTIAL_TOKEN = re.compile(
+    r"(?i)\b(?:gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|"
+    r"eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b"
+)
+_HIGH_ENTROPY_BLOB = re.compile(r"\b(?:[a-f0-9]{48,}|[a-z0-9+/=_-]{64,})\b", re.IGNORECASE)
+_PEM_BEGIN = re.compile(r"(?i)-----BEGIN [^-]*PRIVATE KEY-----")
+_PEM_END = re.compile(r"(?i)-----END [^-]*PRIVATE KEY-----")
+_SENSITIVE_LINE_MARKERS = ("private transcript", "raw transcript")
 
 
 class SourceDriftError(RuntimeError):
@@ -51,11 +64,35 @@ def source_drift_dedupe_key(
     return f"source-drift:{resource_id}:{previous_source_record_id}:{current_source_record_id}"
 
 
-def _redact_line(line: str) -> str:
-    lowered = line.lower()
-    if any(marker in lowered for marker in _SENSITIVE_LINE_MARKERS):
-        return "[sensitive source line redacted]"
-    return _SENSITIVE_ASSIGNMENT.sub("[sensitive assignment redacted]", line)
+def _redact_lines(chunks: list[SourceChunk]) -> list[str]:
+    redacted: list[str] = []
+    in_private_key = False
+    for chunk in sorted(chunks, key=lambda row: row.chunk_index):
+        for line in chunk.chunk_text.splitlines():
+            if _PEM_BEGIN.search(line):
+                in_private_key = True
+                redacted.append("[sensitive private-key block redacted]")
+                continue
+            if in_private_key:
+                if _PEM_END.search(line):
+                    in_private_key = False
+                continue
+            lowered = line.lower()
+            if (
+                any(marker in lowered for marker in _SENSITIVE_LINE_MARKERS)
+                or _SENSITIVE_FIELD_LINE.search(line)
+                or _CREDENTIAL_TOKEN.search(line)
+                or _HIGH_ENTROPY_BLOB.search(line)
+            ):
+                redacted.append("[sensitive source line redacted]")
+                continue
+            redacted.append(line)
+    return redacted
+
+
+def _review_target_url(raw_url: str) -> str:
+    parsed = urlsplit(raw_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
 def build_readable_source_diff(
@@ -64,16 +101,8 @@ def build_readable_source_diff(
 ) -> tuple[str, bool]:
     """Return a bounded, deterministic unified diff without logging source text."""
 
-    previous_lines = [
-        _redact_line(line)
-        for chunk in sorted(previous_chunks, key=lambda row: row.chunk_index)
-        for line in chunk.chunk_text.splitlines()
-    ]
-    current_lines = [
-        _redact_line(line)
-        for chunk in sorted(current_chunks, key=lambda row: row.chunk_index)
-        for line in chunk.chunk_text.splitlines()
-    ]
+    previous_lines = _redact_lines(previous_chunks)
+    current_lines = _redact_lines(current_chunks)
     rendered = "\n".join(
         difflib.unified_diff(
             previous_lines,
@@ -265,7 +294,7 @@ async def create_source_drift_proposal(
         tenant_id=tenant_id,
         artifact_kind="candidate_source_drift",
         target_runtime="palace",
-        target_surface=resource.canonical_url,
+        target_surface=_review_target_url(resource.canonical_url),
         status="reviewable",
         source_item_ids=item_id_strings,
         source_digests={str(current_record.item_id): current_record.content_hash},
@@ -318,10 +347,32 @@ async def create_source_drift_proposal(
     # an item from a different result set into the evidence map by accident.
     if set(item_by_id) != set(affected_item_ids):
         raise SourceDriftError("affected source item ACL verification failed")
-    db.add(artifact)
-    await db.flush()
-    _record_artifact_event(db, artifact=artifact, event_type="source_drift_created", previous_snapshot=None)
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            db.add(artifact)
+            await db.flush()
+            _record_artifact_event(
+                db,
+                artifact=artifact,
+                event_type="source_drift_created",
+                previous_snapshot=None,
+            )
+            await db.flush()
+    except IntegrityError as exc:
+        existing = await db.scalar(
+            select(CandidateCurationArtifact)
+            .where(CandidateCurationArtifact.tenant_id == tenant_id)
+            .where(CandidateCurationArtifact.dedupe_key == dedupe_key)
+        )
+        if existing is None:
+            raise SourceDriftError("source drift dedupe conflict has no visible winner") from exc
+        logger.info(
+            "source_drift_retry_deduplicated tenant_id=%s resource_id=%s artifact_id=%s",
+            tenant_id,
+            resource_id,
+            existing.id,
+        )
+        return SourceDriftProposalResult(artifact=existing, outcome="deduplicated")
     logger.info(
         "source_drift_created tenant_id=%s resource_id=%s artifact_id=%s affected_items=%d affected_claims=%d diff_truncated=%s",
         tenant_id,

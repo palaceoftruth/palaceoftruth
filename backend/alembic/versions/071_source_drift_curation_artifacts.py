@@ -57,27 +57,27 @@ def upgrade() -> None:
         sa.Column("dedupe_key", sa.String(length=180), nullable=True),
     )
     op.create_foreign_key(
-        "fk_candidate_curation_source_resource",
+        "fk_candidate_curation_source_resource_tenant",
         "candidate_curation_artifacts",
         "source_resources",
-        ["source_resource_id"],
-        ["id"],
+        ["tenant_id", "source_resource_id"],
+        ["tenant_id", "id"],
         ondelete="RESTRICT",
     )
     op.create_foreign_key(
-        "fk_candidate_curation_previous_source_record",
+        "fk_candidate_curation_previous_source_record_tenant",
         "candidate_curation_artifacts",
         "source_records",
-        ["previous_source_record_id"],
-        ["id"],
+        ["tenant_id", "previous_source_record_id"],
+        ["tenant_id", "id"],
         ondelete="RESTRICT",
     )
     op.create_foreign_key(
-        "fk_candidate_curation_current_source_record",
+        "fk_candidate_curation_current_source_record_tenant",
         "candidate_curation_artifacts",
         "source_records",
-        ["current_source_record_id"],
-        ["id"],
+        ["tenant_id", "current_source_record_id"],
+        ["tenant_id", "id"],
         ondelete="RESTRICT",
     )
     op.create_unique_constraint(
@@ -117,9 +117,19 @@ def downgrade() -> None:
     )
     op.drop_index("ix_candidate_curation_source_drift", table_name="candidate_curation_artifacts")
     op.drop_constraint("uq_candidate_curation_tenant_dedupe", "candidate_curation_artifacts", type_="unique")
-    op.drop_constraint("fk_candidate_curation_current_source_record", "candidate_curation_artifacts", type_="foreignkey")
-    op.drop_constraint("fk_candidate_curation_previous_source_record", "candidate_curation_artifacts", type_="foreignkey")
-    op.drop_constraint("fk_candidate_curation_source_resource", "candidate_curation_artifacts", type_="foreignkey")
+    for constraint_name in (
+        "fk_candidate_curation_current_source_record_tenant",
+        "fk_candidate_curation_previous_source_record_tenant",
+        "fk_candidate_curation_source_resource_tenant",
+        # Development databases may have applied the pre-review form of this
+        # migration. IF EXISTS keeps its rollback recoverable as well.
+        "fk_candidate_curation_current_source_record",
+        "fk_candidate_curation_previous_source_record",
+        "fk_candidate_curation_source_resource",
+    ):
+        op.execute(
+            f"ALTER TABLE candidate_curation_artifacts DROP CONSTRAINT IF EXISTS {constraint_name}"
+        )
     op.drop_column("candidate_curation_artifacts", "dedupe_key")
     op.drop_column("candidate_curation_artifacts", "evidence_diff")
     op.drop_column("candidate_curation_artifacts", "affected_claim_ids")

@@ -9,6 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.palace import CandidateCurationArtifact, CandidateCurationArtifactEvent
+from app.models.source_resource import SourceResource
 from app.schemas.curation_artifact import (
     CandidateCurationArtifactCreate,
     ReviewInboxActionRequest,
@@ -293,6 +294,31 @@ def _review_inbox_metadata(
     return metadata
 
 
+async def _lock_current_source_drift_evidence(
+    db: AsyncSession,
+    *,
+    artifact: CandidateCurationArtifact,
+    tenant_id: str,
+) -> None:
+    if artifact.artifact_kind != "candidate_source_drift":
+        return
+    if artifact.source_resource_id is None or artifact.current_source_record_id is None:
+        raise CandidateCurationArtifactError("source drift evidence provenance is incomplete")
+    resource = await db.scalar(
+        select(SourceResource)
+        .where(SourceResource.id == artifact.source_resource_id)
+        .where(SourceResource.tenant_id == tenant_id)
+        .where(SourceResource.kind == "http")
+        .with_for_update()
+    )
+    if resource is None:
+        raise CandidateCurationArtifactError("source drift watched resource is unavailable")
+    if resource.last_successful_source_record_id != artifact.current_source_record_id:
+        raise CandidateCurationArtifactError(
+            "source drift evidence is stale; review the proposal for the latest source version"
+        )
+
+
 async def list_review_inbox(
     db: AsyncSession,
     *,
@@ -387,6 +413,11 @@ async def apply_review_inbox_action(
             ):
                 raise CandidateCurationArtifactError("resolved source drift artifact changed before reopen")
             artifact = locked
+            await _lock_current_source_drift_evidence(
+                db,
+                artifact=artifact,
+                tenant_id=tenant_id,
+            )
             previous_snapshot = _artifact_snapshot(artifact)
             artifact.status = "reviewable"
             artifact.approval = {}
@@ -419,6 +450,12 @@ async def apply_review_inbox_action(
             continue
         if body.action == "accept" and artifact.status not in REVIEW_INBOX_ACCEPT_STATUSES:
             raise CandidateCurationArtifactError("only reviewable or proposed inbox artifacts can be accepted")
+        if body.action == "accept":
+            await _lock_current_source_drift_evidence(
+                db,
+                artifact=artifact,
+                tenant_id=tenant_id,
+            )
         metadata = _review_inbox_metadata(
             artifact,
             action=body.action,
@@ -458,6 +495,7 @@ async def apply_review_inbox_action(
                 body=update,
                 principal_id=principal_id,
                 can_approve=can_approve,
+                allow_source_drift_transition=True,
             )
         )
         logger.info(
@@ -581,6 +619,7 @@ async def update_candidate_curation_artifact(
     body: CandidateCurationArtifactUpdate,
     principal_id: str | None = None,
     can_approve: bool = False,
+    allow_source_drift_transition: bool = False,
 ) -> CandidateCurationArtifact:
     # Serialize every update and refresh stale identity-map state before status
     # validation. Otherwise a material PATCH can read ``reviewable``, wait
@@ -597,6 +636,15 @@ async def update_candidate_curation_artifact(
     if locked is None or locked.tenant_id != artifact.tenant_id:
         raise CandidateCurationArtifactError("candidate curation artifact not found")
     artifact = locked
+    if (
+        artifact.artifact_kind == "candidate_source_drift"
+        and body.status is not None
+        and body.status != artifact.status
+        and not allow_source_drift_transition
+    ):
+        raise CandidateCurationArtifactError(
+            "source drift lifecycle transitions require Review Inbox actions"
+        )
     if artifact.status in TERMINAL_STATUSES and body.status not in (None, artifact.status):
         raise CandidateCurationArtifactError("terminal candidate artifacts cannot move to a new lifecycle status")
     previous_snapshot = _artifact_snapshot(artifact)
