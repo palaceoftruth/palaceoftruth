@@ -73,6 +73,22 @@ _SENSITIVE_LABEL_SUFFIXES = (
     " database url",
     " redis url",
 )
+_SENSITIVE_LABEL_ANYWHERE = re.compile(r"\b(?:passwords?|secrets?|credentials?)\b")
+_SENSITIVE_LABEL_PHRASES = (
+    "api key",
+    "private key",
+    "signing key",
+    "secret access key",
+    "access token",
+    "refresh token",
+    "auth token",
+    "session token",
+    "session cookie",
+    "authorization header",
+    "connection string",
+    "database url",
+    "redis url",
+)
 _PEM_BEGIN = re.compile(r"(?i)-----BEGIN [^-]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"(?i)-----END [^-]*PRIVATE KEY-----")
 _SENSITIVE_LINE_MARKERS = ("private transcript", "raw transcript")
@@ -122,6 +138,8 @@ def _redact_lines(chunks: list[SourceChunk]) -> list[str]:
                 or (
                     normalized_label in _SENSITIVE_EXACT_LABELS
                     or normalized_label.endswith(_SENSITIVE_LABEL_SUFFIXES)
+                    or bool(_SENSITIVE_LABEL_ANYWHERE.search(normalized_label))
+                    or any(phrase in normalized_label for phrase in _SENSITIVE_LABEL_PHRASES)
                 )
                 or _CREDENTIAL_TOKEN.search(line)
                 or _HIGH_ENTROPY_BLOB.search(line)
