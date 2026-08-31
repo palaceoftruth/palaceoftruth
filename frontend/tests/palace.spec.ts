@@ -109,7 +109,7 @@ async function expectNoHorizontalOverflow(page: Parameters<typeof test>[0]["page
 
 test.describe("Palace smoke", () => {
   test("review inbox shows watched source drift evidence and accepts the proposal", async ({ page }) => {
-    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const actionBodies: Array<Record<string, unknown>> = [];
     const inboxRequests: string[] = [];
     let resolved = false;
@@ -120,13 +120,13 @@ test.describe("Palace smoke", () => {
       target_runtime: "palace",
       target_surface: "https://example.test/policy",
       status: "reviewable",
-      source_item_ids: ["22222222-2222-4222-8222-222222222222"],
-      source_digests: { "22222222-2222-4222-8222-222222222222": "hash-new" },
-      source_resource_id: "33333333-3333-4333-8333-333333333333",
-      previous_source_record_id: "44444444-4444-4444-8444-444444444444",
-      current_source_record_id: "55555555-5555-4555-8555-555555555555",
-      affected_item_ids: ["22222222-2222-4222-8222-222222222222"],
-      affected_claim_ids: ["66666666-6666-4666-8666-666666666666"],
+      source_item_ids: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+      source_digests: { "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": "hash-new" },
+      source_resource_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      previous_source_record_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      current_source_record_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      affected_item_ids: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+      affected_claim_ids: ["ffffffff-ffff-4fff-8fff-ffffffffffff"],
       evidence_diff: { format: "unified_diff", diff: "--- previous\n+++ current\n-Retention: 30 days\n+Retention: 90 days", truncated: true },
       dedupe_key: "source-drift:test",
       candidate_body: "Watched source changed.",
