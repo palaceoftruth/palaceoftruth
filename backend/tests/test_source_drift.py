@@ -365,15 +365,24 @@ def test_readable_diff_redacts_headers_json_secrets_and_known_tokens() -> None:
         'Cookie: session=old-cookie',
         '{"client_secret": "old-secret"}',
         'token ghp_123456789012345678901234567890',
+        'AWS_SECRET_ACCESS_KEY: short-old-value',
+        'Credentials: old-user:old-password',
+        'AWS Secret Access Key: words-old-value',
     ))
     new_text = '\n'.join((
         'Authorization: Bearer new-value',
         'Set-Cookie: session=new-cookie',
         '{"client_secret": "new-secret"}',
         'token sk-123456789012345678901234567890',
+        'AWS_SECRET_ACCESS_KEY: short-new-value',
+        'Credentials: new-user:new-password',
+        'AWS Secret Access Key: words-new-value',
     ))
 
     diff, _ = build_readable_source_diff([_chunk(old, old_text)], [_chunk(new, new_text)])
 
-    for secret in ("old-value", "new-value", "old-cookie", "new-cookie", "old-secret", "new-secret", "ghp_", "sk-"):
+    for secret in (
+        "old-value", "new-value", "old-cookie", "new-cookie", "old-secret", "new-secret",
+        "ghp_", "sk-", "short-old", "short-new", "old-user", "new-user", "words-old", "words-new",
+    ):
         assert secret not in diff

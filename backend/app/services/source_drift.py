@@ -41,6 +41,12 @@ _CREDENTIAL_TOKEN = re.compile(
     r"eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b"
 )
 _HIGH_ENTROPY_BLOB = re.compile(r"\b(?:[a-f0-9]{48,}|[a-z0-9+/=_-]{64,})\b", re.IGNORECASE)
+_LABELED_VALUE = re.compile(r"^\s*[\"']?([^:=]{1,100})[\"']?\s*[:=]")
+_SENSITIVE_LABEL_COMPONENT = re.compile(
+    r"(?i)(authorization|cookie|credential|password|secret|token|signature|session|"
+    r"private\s*key|signing\s*key|api\s*key|connection\s*string|database\s*url|"
+    r"redis\s*url|dsn)"
+)
 _PEM_BEGIN = re.compile(r"(?i)-----BEGIN [^-]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"(?i)-----END [^-]*PRIVATE KEY-----")
 _SENSITIVE_LINE_MARKERS = ("private transcript", "raw transcript")
@@ -78,9 +84,16 @@ def _redact_lines(chunks: list[SourceChunk]) -> list[str]:
                     in_private_key = False
                 continue
             lowered = line.lower()
+            label_match = _LABELED_VALUE.match(line)
+            normalized_label = (
+                re.sub(r"[^a-z0-9]+", " ", label_match.group(1).lower()).strip()
+                if label_match
+                else ""
+            )
             if (
                 any(marker in lowered for marker in _SENSITIVE_LINE_MARKERS)
                 or _SENSITIVE_FIELD_LINE.search(line)
+                or (normalized_label and _SENSITIVE_LABEL_COMPONENT.search(normalized_label))
                 or _CREDENTIAL_TOKEN.search(line)
                 or _HIGH_ENTROPY_BLOB.search(line)
             ):
