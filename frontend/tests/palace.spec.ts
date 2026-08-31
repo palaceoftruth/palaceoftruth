@@ -108,6 +108,93 @@ async function expectNoHorizontalOverflow(page: Parameters<typeof test>[0]["page
 }
 
 test.describe("Palace smoke", () => {
+  test("review inbox shows watched source drift evidence and accepts the proposal", async ({ page }) => {
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const actionBodies: Array<Record<string, unknown>> = [];
+    const inboxRequests: string[] = [];
+    let resolved = false;
+    const artifact = {
+      id: artifactId,
+      tenant_id: "tenant-a",
+      artifact_kind: "candidate_source_drift",
+      target_runtime: "palace",
+      target_surface: "https://example.test/policy",
+      status: "reviewable",
+      source_item_ids: ["22222222-2222-4222-8222-222222222222"],
+      source_digests: { "22222222-2222-4222-8222-222222222222": "hash-new" },
+      source_resource_id: "33333333-3333-4333-8333-333333333333",
+      previous_source_record_id: "44444444-4444-4444-8444-444444444444",
+      current_source_record_id: "55555555-5555-4555-8555-555555555555",
+      affected_item_ids: ["22222222-2222-4222-8222-222222222222"],
+      affected_claim_ids: ["66666666-6666-4666-8666-666666666666"],
+      evidence_diff: { format: "unified_diff", diff: "--- previous\n+++ current\n-Retention: 30 days\n+Retention: 90 days", truncated: true },
+      dedupe_key: "source-drift:test",
+      candidate_body: "Watched source changed.",
+      privacy_review: {},
+      eval_summary: { llm_used: false },
+      approval: {},
+      metadata: {},
+      promotion_state: "reviewable",
+      source_support_level: "single_source",
+      advisory_generated_context: true,
+      promoted_source_backed: false,
+      supersedes_artifact_id: null,
+      superseded_by_artifact_id: null,
+      deprecated_reason: null,
+      created_at: "2026-08-30T12:00:00Z",
+      updated_at: "2026-08-30T12:00:00Z",
+      approved_at: null,
+      deprecated_at: null,
+    };
+    await page.route("**/api/v1/curation-artifacts/review-inbox**", async (route) => {
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        actionBodies.push(body);
+        resolved = body.action === "accept";
+        await route.fulfill({
+          json: {
+            action: body.action,
+            artifacts: [{ ...artifact, status: resolved ? "promoted" : "reviewable" }],
+            updated: 1,
+          },
+        });
+        return;
+      }
+      inboxRequests.push(route.request().url());
+      await route.fulfill({
+        json: {
+          items: [{
+            artifact: { ...artifact, status: resolved ? "promoted" : "reviewable" },
+            suggested_action: resolved ? "reopen" : "accept",
+            confidence: null,
+            source_count: 1,
+            freshness: "fresh",
+            affected_scope: "palace:https://example.test/policy",
+            pinned: false,
+            deferred: false,
+            reversible_actions: resolved ? ["reopen"] : ["accept", "reject", "defer"],
+          }],
+          summary: { total: 1, needs_source: 0, conflicting: 0, stale: 0, pinned: 0, deferred: 0 },
+        },
+      });
+    });
+
+    await page.goto(`/palace/review-inbox?e2e=${Date.now()}`);
+
+    await expect(page.getByRole("heading", { name: "Review Inbox" })).toBeVisible();
+    await expect(page.getByLabel("Source drift diff for https://example.test/policy")).toContainText("Retention: 90 days");
+    await expect(page.getByText("1 affected item(s) · 1 affected claim(s)")).toBeVisible();
+    await expect(page.getByText("This diff was truncated. Open the source records for full evidence.")).toBeVisible();
+    await page.getByRole("button", { name: "All" }).click();
+    await expect.poll(() => inboxRequests.some((url) => url.includes("include_resolved=true"))).toBe(true);
+    await page.getByRole("button", { name: "Accept" }).click();
+    await expect.poll(() => actionBodies[0]).toMatchObject({ action: "accept", artifact_ids: [artifactId] });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await expect(page.locator("article").getByRole("button", { name: "Pin" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Reopen" }).click();
+    await expect.poll(() => actionBodies[1]).toMatchObject({ action: "reopen", artifact_ids: [artifactId] });
+  });
+
   test("palace route shows truthful empty state", async ({ page }) => {
     await mockPalaceOverview(page, {
       tenant_id: "default",

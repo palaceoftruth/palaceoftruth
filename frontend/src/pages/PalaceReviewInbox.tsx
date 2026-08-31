@@ -8,6 +8,7 @@ import {
   Pin,
   RefreshCw,
   ShieldCheck,
+  Undo2,
   X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -87,7 +88,8 @@ export default function PalaceReviewInbox() {
     setLoadError(null);
     try {
       const includeDeferred = nextFilter === "all";
-      setData(await api.getReviewInbox({ include_deferred: includeDeferred, limit: 100 }));
+      const includeResolved = nextFilter === "all";
+      setData(await api.getReviewInbox({ include_deferred: includeDeferred, include_resolved: includeResolved, limit: 100 }));
     } catch (err) {
       setLoadError(errorMessage(err));
     } finally {
@@ -113,7 +115,8 @@ export default function PalaceReviewInbox() {
   }, [items]);
 
   const selectedCount = selectedIds.length;
-  const allVisibleSelected = items.length > 0 && selectedCount === items.length;
+  const selectableItems = items.filter((item) => !item.reversible_actions.includes("reopen"));
+  const allVisibleSelected = selectableItems.length > 0 && selectedCount === selectableItems.length;
 
   const runAction = async (action: ReviewInboxAction, artifactIds: string[], note?: string) => {
     setActing(`${action}:${artifactIds.join(",")}`);
@@ -183,7 +186,7 @@ export default function PalaceReviewInbox() {
                 className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 text-sky-500 focus:ring-sky-500/30"
                 checked={allVisibleSelected}
                 onChange={(event) => {
-                  setSelectedIds(event.target.checked ? items.map((item) => item.artifact.id) : []);
+                  setSelectedIds(event.target.checked ? selectableItems.map((item) => item.artifact.id) : []);
                 }}
               />
               Select visible
@@ -238,12 +241,14 @@ export default function PalaceReviewInbox() {
               const artifact = item.artifact;
               const isSelected = selectedIds.includes(artifact.id);
               const firstSource = artifact.source_item_ids[0];
+              const isSourceDrift = artifact.artifact_kind === "candidate_source_drift";
+              const canReopen = item.reversible_actions.includes("reopen");
               return (
                 <article key={artifact.id} className="sb-list-card p-4 md:p-5">
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <label className="inline-flex cursor-pointer items-center">
+                        {!canReopen ? <label className="inline-flex cursor-pointer items-center">
                           <input
                             type="checkbox"
                             className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 text-sky-500 focus:ring-sky-500/30"
@@ -257,7 +262,7 @@ export default function PalaceReviewInbox() {
                             }}
                             aria-label={`Select ${artifact.target_surface}`}
                           />
-                        </label>
+                        </label> : null}
                         <span className={`sb-chip ${freshnessClasses(item.freshness)}`}>
                           {item.freshness.replace("_", " ")}
                         </span>
@@ -274,7 +279,28 @@ export default function PalaceReviewInbox() {
                       <h2 className="mt-4 break-words text-lg font-semibold text-zinc-50">
                         {artifact.target_surface}
                       </h2>
-                      <p className="mt-2 line-clamp-3 text-sm leading-6 text-zinc-300">{artifact.candidate_body}</p>
+                      {isSourceDrift ? (
+                        <div className="mt-3 space-y-3">
+                          <p className="text-sm leading-6 text-zinc-300">
+                            {artifact.affected_item_ids.length} affected item(s) · {artifact.affected_claim_ids.length} affected claim(s)
+                          </p>
+                          <div className="grid gap-2 text-xs text-zinc-400 sm:grid-cols-2">
+                            <p className="break-all"><span className="text-zinc-500">Old record:</span> {artifact.previous_source_record_id}</p>
+                            <p className="break-all"><span className="text-zinc-500">New record:</span> {artifact.current_source_record_id}</p>
+                          </div>
+                          <pre
+                            aria-label={`Source drift diff for ${artifact.target_surface}`}
+                            className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-zinc-800 bg-zinc-950 p-4 font-mono text-xs leading-5 text-zinc-300"
+                          >
+                            {artifact.evidence_diff.diff ?? artifact.candidate_body}
+                          </pre>
+                          {artifact.evidence_diff.truncated ? (
+                            <p className="text-xs text-amber-300">This diff was truncated. Open the source records for full evidence.</p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="mt-2 line-clamp-3 text-sm leading-6 text-zinc-300">{artifact.candidate_body}</p>
+                      )}
                       <div className="mt-4 grid gap-3 text-sm text-zinc-400 md:grid-cols-3">
                         <div>
                           <p className="text-[11px] uppercase tracking-[0.2em] text-zinc-600">Scope</p>
@@ -297,7 +323,7 @@ export default function PalaceReviewInbox() {
                           Source
                         </Link>
                       ) : null}
-                      <button
+                      {!canReopen ? <button
                         type="button"
                         className="sb-button-secondary"
                         disabled={acting !== null}
@@ -305,8 +331,8 @@ export default function PalaceReviewInbox() {
                       >
                         <Pin className="h-4 w-4" />
                         Pin
-                      </button>
-                      <button
+                      </button> : null}
+                      {!canReopen ? <button
                         type="button"
                         className="sb-button-secondary"
                         disabled={acting !== null}
@@ -314,8 +340,8 @@ export default function PalaceReviewInbox() {
                       >
                         <Clock3 className="h-4 w-4" />
                         Defer
-                      </button>
-                      <button
+                      </button> : null}
+                      {!canReopen ? <button
                         type="button"
                         className="sb-button-primary"
                         disabled={acting !== null || !canAccept(item)}
@@ -327,8 +353,8 @@ export default function PalaceReviewInbox() {
                           <Check className="h-4 w-4" />
                         )}
                         Accept
-                      </button>
-                      <button
+                      </button> : null}
+                      {!canReopen ? <button
                         type="button"
                         className="sb-button-secondary"
                         disabled={acting !== null}
@@ -336,7 +362,22 @@ export default function PalaceReviewInbox() {
                       >
                         <X className="h-4 w-4" />
                         Reject
-                      </button>
+                      </button> : null}
+                      {canReopen ? (
+                        <button
+                          type="button"
+                          className="sb-button-primary"
+                          disabled={acting !== null}
+                          onClick={() => void runAction("reopen", [artifact.id], "Reopened from Review Inbox")}
+                        >
+                          {acting === `reopen:${artifact.id}` ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Undo2 className="h-4 w-4" />
+                          )}
+                          Reopen
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 </article>
