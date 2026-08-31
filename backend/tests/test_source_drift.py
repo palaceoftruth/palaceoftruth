@@ -386,3 +386,19 @@ def test_readable_diff_redacts_headers_json_secrets_and_known_tokens() -> None:
         "ghp_", "sk-", "short-old", "short-new", "old-user", "new-user", "words-old", "words-new",
     ):
         assert secret not in diff
+
+
+def test_readable_diff_keeps_non_secret_session_and_token_labels() -> None:
+    item_id = uuid.uuid4()
+    old = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="old", status="stale")
+    new = _record(record_id=uuid.uuid4(), item_id=item_id, version="v2", content_hash="new", status="active")
+
+    diff, _ = build_readable_source_diff(
+        [_chunk(old, "Session duration: 30 minutes\nToken budget: 500")],
+        [_chunk(new, "Session duration: 60 minutes\nToken budget: 750")],
+    )
+
+    assert "-Session duration: 30 minutes" in diff
+    assert "+Session duration: 60 minutes" in diff
+    assert "-Token budget: 500" in diff
+    assert "+Token budget: 750" in diff

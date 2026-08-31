@@ -42,10 +42,36 @@ _CREDENTIAL_TOKEN = re.compile(
 )
 _HIGH_ENTROPY_BLOB = re.compile(r"\b(?:[a-f0-9]{48,}|[a-z0-9+/=_-]{64,})\b", re.IGNORECASE)
 _LABELED_VALUE = re.compile(r"^\s*[\"']?([^:=]{1,100})[\"']?\s*[:=]")
-_SENSITIVE_LABEL_COMPONENT = re.compile(
-    r"(?i)(authorization|cookie|credential|password|secret|token|signature|session|"
-    r"private\s*key|signing\s*key|api\s*key|connection\s*string|database\s*url|"
-    r"redis\s*url|dsn)"
+_SENSITIVE_EXACT_LABELS = frozenset(
+    {
+        "authorization",
+        "proxy authorization",
+        "cookie",
+        "set cookie",
+        "credentials",
+        "dsn",
+        "password",
+        "secret",
+        "session",
+        "signature",
+        "token",
+    }
+)
+_SENSITIVE_LABEL_SUFFIXES = (
+    " api key",
+    " secret key",
+    " access key",
+    " access token",
+    " refresh token",
+    " auth token",
+    " session token",
+    " private key",
+    " signing key",
+    " webhook secret",
+    " client secret",
+    " connection string",
+    " database url",
+    " redis url",
 )
 _PEM_BEGIN = re.compile(r"(?i)-----BEGIN [^-]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"(?i)-----END [^-]*PRIVATE KEY-----")
@@ -93,7 +119,10 @@ def _redact_lines(chunks: list[SourceChunk]) -> list[str]:
             if (
                 any(marker in lowered for marker in _SENSITIVE_LINE_MARKERS)
                 or _SENSITIVE_FIELD_LINE.search(line)
-                or (normalized_label and _SENSITIVE_LABEL_COMPONENT.search(normalized_label))
+                or (
+                    normalized_label in _SENSITIVE_EXACT_LABELS
+                    or normalized_label.endswith(_SENSITIVE_LABEL_SUFFIXES)
+                )
                 or _CREDENTIAL_TOKEN.search(line)
                 or _HIGH_ENTROPY_BLOB.search(line)
             ):
