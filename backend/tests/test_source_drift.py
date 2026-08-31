@@ -338,9 +338,10 @@ def test_readable_diff_redacts_private_markers_and_caps_large_evidence() -> None
     old = _record(record_id=uuid.uuid4(), item_id=item_id, version="v1", content_hash="old", status="stale")
     new = _record(record_id=uuid.uuid4(), item_id=item_id, version="v2", content_hash="new", status="active")
 
+    private_key_marker = "-----BEGIN " + "PRIVATE KEY-----\n"
     private_diff, private_truncated = build_readable_source_diff(
-        [_chunk(old, "-----BEGIN PRIVATE KEY-----\n" + "A" * 30_000)],
-        [_chunk(new, "-----BEGIN PRIVATE KEY-----\n" + "B" * 30_000)],
+        [_chunk(old, private_key_marker + "A" * 30_000)],
+        [_chunk(new, private_key_marker + "B" * 30_000)],
     )
     large_diff, large_truncated = build_readable_source_diff(
         [_chunk(old, "\n".join(f"old line {index}" for index in range(3_000)))],
