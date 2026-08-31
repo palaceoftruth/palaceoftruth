@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     Date,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -316,6 +317,7 @@ class SourceRecord(Base):
     __tablename__ = "source_records"
     __table_args__ = (
         UniqueConstraint("tenant_id", "item_id", "source_version", name="uq_source_records_tenant_item_version"),
+        UniqueConstraint("tenant_id", "id", name="uq_source_records_tenant_id_id"),
         CheckConstraint(
             "status IN ('active', 'stale', 'failed', 'deleted', 'superseded')",
             name="ck_source_records_status",
@@ -851,7 +853,7 @@ class CandidateCurationArtifact(Base):
     __tablename__ = "candidate_curation_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail', 'candidate_memory_reflection')",
+            "artifact_kind IN ('candidate_skill', 'candidate_routing_manifest', 'candidate_prompt_guardrail', 'candidate_memory_reflection', 'candidate_source_drift')",
             name="ck_candidate_curation_artifact_kind",
         ),
         CheckConstraint(
@@ -861,6 +863,25 @@ class CandidateCurationArtifact(Base):
         CheckConstraint(
             "status != 'superseded' OR superseded_by_artifact_id IS NOT NULL",
             name="ck_candidate_curation_superseded_lineage",
+        ),
+        UniqueConstraint("tenant_id", "dedupe_key", name="uq_candidate_curation_tenant_dedupe"),
+        ForeignKeyConstraint(
+            ["tenant_id", "source_resource_id"],
+            ["source_resources.tenant_id", "source_resources.id"],
+            name="fk_candidate_curation_source_resource_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "previous_source_record_id"],
+            ["source_records.tenant_id", "source_records.id"],
+            name="fk_candidate_curation_previous_source_record_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "current_source_record_id"],
+            ["source_records.tenant_id", "source_records.id"],
+            name="fk_candidate_curation_current_source_record_tenant",
+            ondelete="RESTRICT",
         ),
     )
 
@@ -876,6 +897,19 @@ class CandidateCurationArtifact(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="draft")
     source_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     source_digests: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    source_resource_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    previous_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    current_source_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    affected_item_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    affected_claim_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    evidence_diff: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    dedupe_key: Mapped[str | None] = mapped_column(String(180), nullable=True)
     candidate_body: Mapped[str] = mapped_column(Text, nullable=False)
     privacy_review: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     eval_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")

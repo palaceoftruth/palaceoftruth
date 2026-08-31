@@ -10,6 +10,7 @@ CandidateArtifactKind = Literal[
     "candidate_routing_manifest",
     "candidate_prompt_guardrail",
     "candidate_memory_reflection",
+    "candidate_source_drift",
 ]
 CandidateArtifactStatus = Literal[
     "draft",
@@ -23,7 +24,7 @@ CandidateArtifactStatus = Literal[
     "deprecated",
     "superseded",
 ]
-ReviewInboxAction = Literal["accept", "reject", "pin", "defer"]
+ReviewInboxAction = Literal["accept", "reject", "pin", "defer", "reopen"]
 
 
 def _not_blank(value: str, field_name: str) -> str:
@@ -153,6 +154,13 @@ class CandidateCurationArtifactOut(BaseModel):
     status: str
     source_item_ids: list[str]
     source_digests: dict[str, str]
+    source_resource_id: uuid.UUID | None
+    previous_source_record_id: uuid.UUID | None
+    current_source_record_id: uuid.UUID | None
+    affected_item_ids: list[str]
+    affected_claim_ids: list[str]
+    evidence_diff: dict[str, Any]
+    dedupe_key: str | None
     candidate_body: str
     privacy_review: dict[str, Any]
     eval_summary: dict[str, Any]
@@ -173,6 +181,16 @@ class CandidateCurationArtifactOut(BaseModel):
     approved_at: datetime | None
     deprecated_at: datetime | None
     model_config = {"from_attributes": True, "populate_by_name": True}
+
+    @field_validator("affected_item_ids", "affected_claim_ids", mode="before")
+    @classmethod
+    def normalize_optional_drift_id_lists(cls, value: list[str] | None) -> list[str]:
+        return value or []
+
+    @field_validator("evidence_diff", mode="before")
+    @classmethod
+    def normalize_optional_evidence_diff(cls, value: dict[str, Any] | None) -> dict[str, Any]:
+        return value or {}
 
     @model_validator(mode="after")
     def derive_promotion_labels(self) -> "CandidateCurationArtifactOut":

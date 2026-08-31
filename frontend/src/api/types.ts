@@ -1023,6 +1023,19 @@ export interface CandidateCurationArtifact {
   status: CandidateArtifactStatus;
   source_item_ids: string[];
   source_digests: Record<string, string>;
+  source_resource_id: string | null;
+  previous_source_record_id: string | null;
+  current_source_record_id: string | null;
+  affected_item_ids: string[];
+  affected_claim_ids: string[];
+  evidence_diff: {
+    format?: string;
+    diff?: string;
+    truncated?: boolean;
+    previous?: { source_record_id?: string; source_version?: string; content_hash?: string };
+    current?: { source_record_id?: string; source_version?: string; content_hash?: string };
+  };
+  dedupe_key: string | null;
   candidate_body: string;
   privacy_review: Record<string, unknown>;
   eval_summary: Record<string, unknown>;
@@ -1041,7 +1054,7 @@ export interface CandidateCurationArtifact {
   deprecated_at: string | null;
 }
 
-export type ReviewInboxAction = "accept" | "reject" | "pin" | "defer";
+export type ReviewInboxAction = "accept" | "reject" | "pin" | "defer" | "reopen";
 
 export interface ReviewInboxItem {
   artifact: CandidateCurationArtifact;

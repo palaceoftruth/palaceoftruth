@@ -33,6 +33,7 @@ from app.services.source_resource_fetch import fetch_http_resource
 from app.services.source_resource_fairness import HostFairness
 from app.services.source_resource_robots import RobotsDecision, evaluate_robots
 from app.services.source_refresh_telemetry import record_source_refresh
+from app.services.source_drift import create_source_drift_proposal
 from app.services.source_resources import (
     RefreshLease,
     RefreshObservation,
@@ -307,6 +308,7 @@ async def refresh_source_resource(
                 )
             else:
                 change_detected_at = monotonic()
+                previous_source_record_id = resource.last_successful_source_record_id
                 activation = await _activate_resource_content(
                     db,
                     resource=resource,
@@ -327,6 +329,24 @@ async def refresh_source_resource(
                     robots_decision=robots.decision,
                     robots_cached_at=now,
                 )
+                if activation.material_change and previous_source_record_id is not None:
+                    try:
+                        await create_source_drift_proposal(
+                            db,
+                            tenant_id=tenant_id,
+                            resource_id=resource.id,
+                            previous_source_record_id=previous_source_record_id,
+                            current_source_record_id=activation.source_record_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "source_drift_failed tenant_id=%s resource_id=%s previous_source_record_id=%s current_source_record_id=%s",
+                            tenant_id,
+                            resource.id,
+                            previous_source_record_id,
+                            activation.source_record_id,
+                        )
+                        raise
                 schedule_palace_run = activation.material_change
         elif result.outcome == "not_found":
             # A single 404 is often eventual consistency or a temporary edge

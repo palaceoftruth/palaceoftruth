@@ -462,9 +462,10 @@ export const api = {
   restorePalaceSourceResource: (resourceId: string) =>
     req<PalaceSourceResourceActionResponse>(`/palace/source-resources/${resourceId}/restore`, { method: "POST" }),
 
-  getReviewInbox: (params?: { include_deferred?: boolean; limit?: number }) => {
+  getReviewInbox: (params?: { include_deferred?: boolean; include_resolved?: boolean; limit?: number }) => {
     const query = new URLSearchParams();
     if (params?.include_deferred !== undefined) query.set("include_deferred", String(params.include_deferred));
+    if (params?.include_resolved !== undefined) query.set("include_resolved", String(params.include_resolved));
     if (params?.limit !== undefined) query.set("limit", String(params.limit));
     const suffix = query.toString() ? `?${query}` : "";
     return req<ReviewInboxResponse>(`/curation-artifacts/review-inbox${suffix}`);
