@@ -8,9 +8,9 @@ image:
   frontendRepository: palaceoftruth/palaceoftruth/frontend
   # Published releases set these to exact OCI manifest digests. Blank values
   # preserve tag-based local chart development only.
-  backendDigest: "sha256:33aa639be94087b8b23138b9b1f6e903e83065614e9618c09a6c9c299b5a4189"
-  workerDigest: "sha256:756fadfa4176201016d62b796e14f1a42ca28bff2153c41ad04b35da29954993"
-  frontendDigest: "sha256:72aeb6ee4053b8107b39fd905769a91f791173a78c04129df67e65dd818e0ea0"
+  backendDigest: "sha256:a5c065ba41b3a1ed0495e475fac35fb5a59040044cbb5581d5b8bad81ce90a85"
+  workerDigest: "sha256:e5c16446feb7eba3e4818828cf4912d1998d0ff453832b508f47d5f226276cdd"
+  frontendDigest: "sha256:d1a1085d184fec39f11fb220dd8939b6ef75154bc9bcc247b05f16af80aa4897"
   # Leave blank to default both app images to Chart.appVersion.
   # CI publishes a new chart with appVersion set to the immutable image SHA.
   tag: ""
