@@ -24,7 +24,7 @@ from pathlib import Path
 from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
 
@@ -44,6 +44,7 @@ DEFAULT_SOURCE = "hermes-agent"
 DEFAULT_CREATED_BY_ROLE = "assistant"
 MAX_MEMORY_BODY_CHARS = 24000
 MAX_HTTP_ERROR_DETAIL_CHARS = 600
+MAX_EVIDENCE_URL_CHARS = 512
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -130,6 +131,26 @@ def _trim(text: str, limit: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _extend_lines_within_budget(
+    lines: list[str], candidate_lines: list[str], budget: int
+) -> bool:
+    """Append complete rendered lines only when the joined output still fits."""
+    additions = [line for line in candidate_lines if line]
+    if not additions:
+        return True
+    if len("\n".join([*lines, *additions])) > budget:
+        return False
+    lines.extend(additions)
+    return True
+
+
+def _append_omission_marker(lines: list[str], marker: str, budget: int) -> None:
+    """Keep the recall heading and evict optional metadata so omission is visible."""
+    while len(lines) > 1 and not _extend_lines_within_budget(lines, [marker], budget):
+        lines.pop()
+    _extend_lines_within_budget(lines, [marker], budget)
 
 
 def _first_line(text: str, default: str) -> str:
@@ -526,7 +547,14 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
             low = midpoint
         else:
             high = midpoint - 1
-    compact["result"] = result[:low].rstrip() + marker
+    retained = result[:low].rstrip()
+    if low < len(result):
+        # Evidence fields are rendered one line at a time. Never return a
+        # partial URL or other partial provenance field when the outer tool
+        # response also needs truncation.
+        last_line_break = retained.rfind("\n")
+        retained = retained[:last_line_break].rstrip() if last_line_break >= 0 else ""
+    compact["result"] = retained + marker
     encoded = _dump()
     if len(encoded) <= budget:
         return encoded
@@ -883,6 +911,32 @@ def _item_api_url(base_url: str, item_id: str | None) -> str | None:
     return f"{base_url.rstrip('/')}/api/v1/items/{item_id}"
 
 
+def _safe_provenance_url(raw_url: Any) -> str | None:
+    """Return model-safe public provenance without bearer URL material."""
+    value = _optional_str(raw_url)
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if scheme not in {"http", "https"} or not host:
+        return None
+    rendered_host = f"[{host}]" if ":" in host else host
+    netloc = f"{rendered_host}:{port}" if port is not None else rendered_host
+    query = ""
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        for key, candidate in parse_qsl(parsed.query, keep_blank_values=False):
+            if key == "v" and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", candidate):
+                query = urlencode({"v": candidate})
+                break
+    sanitized = urlunsplit((scheme, netloc, parsed.path or "/", query, ""))
+    return sanitized if len(sanitized) <= MAX_EVIDENCE_URL_CHARS else None
+
+
 def _format_result_evidence(result: dict[str, Any], *, base_url: str) -> str:
     parts: list[str] = []
     item_id = _result_item_id(result)
@@ -891,6 +945,12 @@ def _format_result_evidence(result: dict[str, Any], *, base_url: str) -> str:
     item_url = _item_api_url(base_url, item_id)
     if item_url:
         parts.append(f"item_url={item_url}")
+    raw_source_url = _optional_str(result.get("source_url"))
+    source_url = _safe_provenance_url(raw_source_url)
+    if source_url:
+        parts.append(f"source_url={source_url}")
+    elif raw_source_url:
+        parts.append("source_url_omitted=unsafe_or_too_long")
     scope_label = _scope_label_from_result(result)
     if scope_label:
         parts.append(f"scope={scope_label}")
@@ -934,9 +994,12 @@ def _format_semantic_result_evidence(result: dict[str, Any], *, base_url: str) -
     source = _optional_str(result.get("source"))
     if source:
         parts.append(f"source={source}")
-    source_url = _optional_str(result.get("source_url"))
+    raw_source_url = _optional_str(result.get("source_url"))
+    source_url = _safe_provenance_url(raw_source_url)
     if source_url:
         parts.append(f"source_url={source_url}")
+    elif raw_source_url:
+        parts.append("source_url_omitted=unsafe_or_too_long")
     fact_kind = _optional_str(result.get("fact_kind"))
     if fact_kind:
         parts.append(f"fact_kind={fact_kind}")
@@ -3560,7 +3623,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if not isinstance(raw_results, list) or not raw_results:
             return ""
 
-        lines = ["Recalled context from Palace of Truth:"]
+        lines: list[str] = []
+        _extend_lines_within_budget(
+            lines,
+            ["Recalled context from Palace of Truth:"],
+            self._context_budget_chars,
+        )
         trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
         searched_scopes = trace.get("searched_scopes") if isinstance(trace, dict) else []
         searched_labels: list[str] = []
@@ -3569,24 +3637,40 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 if not isinstance(scope, dict) or scope.get("type") not in SCOPE_TYPES:
                     continue
                 try:
-                    searched_labels.append(_scope_label(scope))
+                    searched_labels.append(_trim(_scope_label(scope), 80))
                 except KeyError:
                     continue
         if searched_labels:
-            lines.append("- Retrieval searched scopes: " + ", ".join(searched_labels) + ".")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval searched scopes: " + ", ".join(searched_labels) + "."],
+                self._context_budget_chars,
+            )
 
         discovered_labels: list[str] = []
         for scope in discovered_scopes[:8]:
             try:
-                discovered_labels.append(_scope_label(scope))
+                discovered_labels.append(_trim(_scope_label(scope), 80))
             except KeyError:
                 continue
         if discovered_labels:
-            lines.append("- Available memory scopes include: " + ", ".join(discovered_labels) + ".")
+            _extend_lines_within_budget(
+                lines,
+                ["- Available memory scopes include: " + ", ".join(discovered_labels) + "."],
+                self._context_budget_chars,
+            )
         if trace.get("broad_corpus_searched"):
-            lines.append("- Retrieval also searched the broad non-private Palace corpus.")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval also searched the broad non-private Palace corpus."],
+                self._context_budget_chars,
+            )
         if trace.get("fallback_used"):
-            lines.append("- Retrieval fell back to a broader Palace route.")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval fell back to a broader Palace route."],
+                self._context_budget_chars,
+            )
         budget_parts = []
         for label, key in (
             ("selected candidates", "selected_scope_candidate_limit"),
@@ -3599,17 +3683,28 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if isinstance(trace.get("context_budget_chars"), int):
             budget_parts.append(f"context chars: {trace['context_budget_chars']}")
         if budget_parts:
-            lines.append("- Retrieval budgets: " + ", ".join(budget_parts) + ".")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval budgets: " + ", ".join(budget_parts) + "."],
+                self._context_budget_chars,
+            )
         if trace.get("budget_truncated") or trace.get("context_budget_truncated"):
-            lines.append("- Retrieval returned the highest-ranked memories within the configured budget.")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval returned the highest-ranked memories within the configured budget."],
+                self._context_budget_chars,
+            )
         warnings = trace.get("completeness_warnings")
         if isinstance(warnings, list):
             for warning in warnings:
                 warning_text = str(warning or "").strip()
                 if warning_text:
-                    lines.append(f"- Completeness warning: {warning_text}")
+                    _extend_lines_within_budget(
+                        lines,
+                        [f"- Completeness warning: {_trim(warning_text, 160)}"],
+                        self._context_budget_chars,
+                    )
 
-        used_chars = sum(len(line) for line in lines)
         sorted_results = _presentation_sorted_results(
             [result for result in raw_results if isinstance(result, dict)]
         )
@@ -3639,16 +3734,20 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 result_line = f"- {title_with_context}"
             evidence_line = _format_result_evidence(result, base_url=self._base_url)
             chunk_line = f"  {chunk}" if chunk else ""
-            added_chars = len(result_line) + len(evidence_line) + len(chunk_line)
-            if used_chars + added_chars > self._context_budget_chars and len(lines) > 1:
-                lines.append("- Additional memories were omitted to stay within the context budget.")
-                break
-            lines.append(result_line)
+            candidate_lines = [result_line]
             if evidence_line:
-                lines.append(evidence_line)
-            if chunk:
-                lines.append(f"  Snippet: {chunk}")
-            used_chars += added_chars
+                candidate_lines.append(evidence_line)
+            if chunk_line:
+                candidate_lines.append(f"  Snippet: {chunk}")
+            if not _extend_lines_within_budget(
+                lines, candidate_lines, self._context_budget_chars
+            ):
+                _append_omission_marker(
+                    lines,
+                    "- Additional memories were omitted to stay within the context budget.",
+                    self._context_budget_chars,
+                )
+                break
         return "\n".join(lines)
 
     def _format_exact_scope_recall(
@@ -3879,11 +3978,20 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if not isinstance(raw_items, list) or not raw_items:
             return ""
 
-        lines = ["Recalled semantic memory from Palace of Truth:"]
+        lines: list[str] = []
+        _extend_lines_within_budget(
+            lines,
+            ["Recalled semantic memory from Palace of Truth:"],
+            self._context_budget_chars,
+        )
         trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
         searched_scope = _scope_label_from_scope(trace.get("searched_scope"))
         if searched_scope:
-            lines.append(f"- Semantic recall searched scope: {searched_scope}.")
+            _extend_lines_within_budget(
+                lines,
+                [f"- Semantic recall searched scope: {_trim(searched_scope, 80)}."],
+                self._context_budget_chars,
+            )
         budget_parts = []
         for label, key in (
             ("candidates", "candidate_limit"),
@@ -3895,15 +4003,33 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         if trace.get("recall_max_tokens"):
             budget_parts.append(f"recall tokens: {trace['recall_max_tokens']}")
         if budget_parts:
-            lines.append("- Semantic recall budgets: " + ", ".join(budget_parts) + ".")
+            _extend_lines_within_budget(
+                lines,
+                ["- Semantic recall budgets: " + ", ".join(budget_parts) + "."],
+                self._context_budget_chars,
+            )
         if trace.get("valid_at"):
-            lines.append(f"- Temporal reference: valid_at={trace['valid_at']}.")
+            _extend_lines_within_budget(
+                lines,
+                [f"- Temporal reference: valid_at={_trim(str(trace['valid_at']), 80)}."],
+                self._context_budget_chars,
+            )
         if trace.get("fact_kind_filter"):
-            lines.append("- Fact kind filter: " + ", ".join(trace["fact_kind_filter"]) + ".")
+            filter_text = ", ".join(
+                _trim(str(value), 40) for value in trace["fact_kind_filter"][:8]
+            )
+            _extend_lines_within_budget(
+                lines,
+                ["- Fact kind filter: " + filter_text + "."],
+                self._context_budget_chars,
+            )
         if trace.get("budget_truncated"):
-            lines.append("- Semantic recall returned the highest-ranked memories within budget.")
+            _extend_lines_within_budget(
+                lines,
+                ["- Semantic recall returned the highest-ranked memories within budget."],
+                self._context_budget_chars,
+            )
 
-        used_chars = sum(len(line) for line in lines)
         for result in raw_items[: self._agent_display_limit]:
             if not isinstance(result, dict):
                 continue
@@ -3925,16 +4051,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             )
             evidence_line = _format_semantic_result_evidence(result, base_url=self._base_url)
             chunk_line = f"  Snippet: {chunk}" if chunk else ""
-            added_chars = len(result_line) + len(evidence_line) + len(chunk_line)
-            if used_chars + added_chars > self._context_budget_chars and len(lines) > 1:
-                lines.append("- Additional semantic memories were omitted to stay within the context budget.")
-                break
-            lines.append(result_line)
+            candidate_lines = [result_line]
             if evidence_line:
-                lines.append(evidence_line)
-            if chunk:
-                lines.append(chunk_line)
-            used_chars += added_chars
+                candidate_lines.append(evidence_line)
+            if chunk_line:
+                candidate_lines.append(chunk_line)
+            if not _extend_lines_within_budget(
+                lines, candidate_lines, self._context_budget_chars
+            ):
+                marker = "- Additional semantic memories were omitted to stay within the context budget."
+                _append_omission_marker(lines, marker, self._context_budget_chars)
+                break
         return "\n".join(lines)
 
     def _retrieve_text(self, query: str, session_id: str) -> str:
@@ -4160,22 +4287,38 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             for _, response in scope_responses
             if isinstance(response.get("trace"), dict)
         ]
-        lines = ["Recalled context from Palace of Truth:"]
+        lines: list[str] = []
+        _extend_lines_within_budget(
+            lines,
+            ["Recalled context from Palace of Truth:"],
+            self._context_budget_chars,
+        )
         if len(scope_responses) > 1:
-            lines.append(
-                "- Retrieval searched scopes: "
-                + ", ".join(_scope_label(scope) for scope, _ in scope_responses)
-                + "."
+            scope_text = ", ".join(
+                _trim(_scope_label(scope), 80) for scope, _ in scope_responses
+            )
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval searched scopes: " + scope_text + "."],
+                self._context_budget_chars,
             )
         if any(trace.get("fallback_used") for trace in traces):
-            lines.append("- Retrieval fell back to a broader Palace route.")
+            _extend_lines_within_budget(
+                lines,
+                ["- Retrieval fell back to a broader Palace route."],
+                self._context_budget_chars,
+            )
         warnings: list[str] = []
         for trace in traces:
             warning = str(trace.get("completeness_warning") or "").strip()
             if warning and warning not in warnings:
                 warnings.append(warning)
         for warning in warnings:
-            lines.append(f"- Completeness warning: {warning}")
+            _extend_lines_within_budget(
+                lines,
+                [f"- Completeness warning: {_trim(warning, 160)}"],
+                self._context_budget_chars,
+            )
 
         for result in _presentation_sorted_results(merged_results)[: self._retrieve_limit]:
             title = _trim(str(result.get("title") or "Untitled memory"), 120)
@@ -4195,15 +4338,24 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             title_with_context = title
             if qualifiers:
                 title_with_context = f"{title} [{', '.join(qualifiers)}]"
-            if isinstance(score, (int, float)):
-                lines.append(f"- [{score:.2f}] {title_with_context}")
-            else:
-                lines.append(f"- {title_with_context}")
+            result_line = (
+                f"- [{score:.2f}] {title_with_context}"
+                if isinstance(score, (int, float))
+                else f"- {title_with_context}"
+            )
             evidence_line = _format_result_evidence(result, base_url=self._base_url)
+            chunk_line = f"  Snippet: {chunk}" if chunk else ""
+            candidate_lines = [result_line]
             if evidence_line:
-                lines.append(evidence_line)
-            if chunk:
-                lines.append(f"  Snippet: {chunk}")
+                candidate_lines.append(evidence_line)
+            if chunk_line:
+                candidate_lines.append(chunk_line)
+            if not _extend_lines_within_budget(
+                lines, candidate_lines, self._context_budget_chars
+            ):
+                marker = "- Additional memories were omitted to stay within the context budget."
+                _append_omission_marker(lines, marker, self._context_budget_chars)
+                break
 
         retrieval_mode = next(
             (trace.get("retrieval_mode") for trace in traces if trace.get("retrieval_mode")),

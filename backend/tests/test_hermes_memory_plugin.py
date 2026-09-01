@@ -4490,6 +4490,7 @@ def test_sar1381_search_reports_hybrid_capture_corpus_and_scope(monkeypatch) -> 
                     "item_id": "11111111-2222-4333-8444-555555555555",
                     "title": "Fast local model serving stack - Video",
                     "source_type": "media",
+                    "source_url": "https://www.youtube.com/watch?v=Nu0TsGmreRk",
                     "scope": {"type": "agent", "key": "lux"},
                     "score": 0.98,
                 }
@@ -4503,6 +4504,174 @@ def test_sar1381_search_reports_hybrid_capture_corpus_and_scope(monkeypatch) -> 
     assert result["corpus_class"] == "raw_capture"
     assert result["searched_scopes"] == ["agent/lux"]
     assert result["broader_authorized_fallback_used"] is False
+    assert "source_url=https://www.youtube.com/watch?v=Nu0TsGmreRk" in result["result"]
+
+
+@pytest.mark.parametrize(
+    ("raw_url", "expected"),
+    [
+        (
+            "https://bucket.s3.amazonaws.com/object?X-Amz-Credential=credential&"
+            "X-Amz-Signature=signature#fragment-secret",
+            "https://bucket.s3.amazonaws.com/object",
+        ),
+        (
+            "https://example.test/callback?access_token=secret&code=secret#oauth-fragment",
+            "https://example.test/callback",
+        ),
+        (
+            "https://"
+            + "user"
+            + chr(58)
+            + "password"
+            + chr(64)
+            + "example.test/private?token=secret#fragment",
+            "https://example.test/private",
+        ),
+        (
+            "https://www.youtube.com/watch?v=Nu0TsGmreRk&access_token=secret#fragment",
+            "https://www.youtube.com/watch?v=Nu0TsGmreRk",
+        ),
+    ],
+)
+def test_sar1381_source_url_provenance_redacts_capability_material(
+    raw_url: str, expected: str
+) -> None:
+    module = load_palaceoftruth_plugin()
+
+    assert module._safe_provenance_url(raw_url) == expected
+    rendered = module._format_result_evidence(
+        {"item_id": "item-1", "source_url": raw_url},
+        base_url="https://api.palace.test",
+    )
+    semantic_rendered = module._format_semantic_result_evidence(
+        {"entry_id": "entry-1", "source_url": raw_url},
+        base_url="https://api.palace.test",
+    )
+    for output in (rendered, semantic_rendered):
+        assert f"source_url={expected}" in output
+        for secret in (
+            "credential",
+            "signature",
+            "access_token",
+            "secret",
+            "fragment",
+            "password",
+            "user@",
+        ):
+            assert secret not in output
+
+
+def test_sar1381_prefetch_omits_oversized_source_url_within_budget(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_CONTEXT_BUDGET_CHARS", "200")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        return {
+            "trace": {
+                "searched_scopes": [{"type": "agent", "key": "x" * 200}],
+            },
+            "results": [
+                {
+                    "item_id": "item-1",
+                    "title": "Bounded source capture",
+                    "source_type": "media",
+                    "source_url": "https://example.test/" + "x" * 5_000,
+                    "chunk_text": "short evidence",
+                    "score": 0.99,
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    rendered = provider.prefetch("bounded source", session_id="session-1")
+
+    assert len(rendered) <= 200
+    assert "Additional memories were omitted" in rendered
+    assert "source_url=" not in rendered
+    assert "x" * 100 not in rendered
+    semantic_rendered = module._format_semantic_result_evidence(
+        {"entry_id": "entry-1", "source_url": "https://example.test/" + "x" * 5_000},
+        base_url="https://api.palace.test",
+    )
+    assert "source_url_omitted=unsafe_or_too_long" in semantic_rendered
+    assert "x" * 100 not in semantic_rendered
+
+
+def test_sar1381_semantic_prefetch_omits_first_result_that_exceeds_budget(
+    monkeypatch,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_CONTEXT_BUDGET_CHARS", "200")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home")
+
+    rendered = provider._format_semantic_recall_response(
+        {
+            "trace": {
+                "searched_scope": {"type": "agent", "key": "x" * 200},
+            },
+            "items": [
+                {
+                    "entry_id": "entry-1",
+                    "title": "Oversized semantic source",
+                    "source_url": "https://example.test/" + "x" * 450,
+                    "body": "semantic evidence",
+                    "score": 0.99,
+                }
+            ],
+        }
+    )
+
+    assert len(rendered) <= 200
+    assert "Additional semantic memories were omitted" in rendered
+    assert "source_url=" not in rendered
+
+
+def test_sar1381_legacy_prefetch_fallback_enforces_context_budget(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "lux")
+    monkeypatch.setenv("PALACEOFTRUTH_CONTEXT_BUDGET_CHARS", "200")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="lux")
+
+    def fake_request_json(method: str, path: str, payload=None, params=None) -> dict:
+        if path == "/api/v1/memory/scopes":
+            return {"scopes": []}
+        if path == "/api/v1/memory/retrieve-agent":
+            raise RuntimeError("route unavailable")
+        assert path == "/api/v1/memory/retrieve"
+        return {
+            "trace": {"completeness_warning": "x" * 500},
+            "results": [
+                {
+                    "item_id": "item-1",
+                    "title": "Oversized fallback source",
+                    "source_type": "media",
+                    "source_url": "https://example.test/" + "x" * 450,
+                    "chunk_text": "fallback evidence",
+                    "score": 0.99,
+                }
+            ],
+        }
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    rendered = provider.prefetch("fallback source", session_id="session-1")
+
+    assert len(rendered) <= 200
+    assert "Additional memories were omitted" in rendered
+    assert "source_url=" not in rendered
 
 
 def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypatch) -> None:
@@ -4577,6 +4746,7 @@ def test_sar1381_bounded_output_drops_large_trace_before_ranked_evidence() -> No
     assert target_id in result["result"]
     assert "https://example.test/watch" in result["result"]
     assert "Additional results were omitted" in result["result"]
+    assert "Lower-ranked evidence" not in result["result"]
     assert result["retrieval_mode"] == "hybrid"
     assert result["corpus_class"] == "raw_capture"
 

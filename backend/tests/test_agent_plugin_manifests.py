@@ -45,8 +45,8 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
     ).read_text(encoding="utf-8")
 
     assert codex_manifest["version"] == "0.2.0"
-    assert "version: 1.0.35" in hermes_plugin_yaml
-    assert "`palace_semantic_recall` is the 1.0.35 compatibility alias" in root_readme
+    assert "version: 1.0.36" in hermes_plugin_yaml
+    assert "`palace_semantic_recall` is the 1.0.36 compatibility alias" in root_readme
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
     assert "tracks the Codex/Claude\nclient install surface only" in codex_readme
