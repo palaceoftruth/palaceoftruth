@@ -4553,6 +4553,7 @@ def test_sar1381_bounded_output_drops_large_trace_before_ranked_evidence() -> No
         "Recalled context from Palace of Truth:\n"
         "- Qwen capture [media, agent/lux]\n"
         f"  Evidence: Palace item {target_id}; Source: https://example.test/watch\n"
+        f"- Lower-ranked evidence: {'x' * 10_000}\n"
     )
 
     raw = module._bounded_tool_json(
@@ -4566,17 +4567,61 @@ def test_sar1381_bounded_output_drops_large_trace_before_ranked_evidence() -> No
             "trace": {"oversized_diagnostics": "x" * 20_000},
             "result": result_text,
         },
-        8000,
+        800,
     )
     result = json.loads(raw)
 
-    assert len(raw) <= 8000
+    assert len(raw) <= 800
     assert result["truncated"] is True
     assert "trace" not in result
     assert target_id in result["result"]
     assert "https://example.test/watch" in result["result"]
+    assert "Additional results were omitted" in result["result"]
     assert result["retrieval_mode"] == "hybrid"
     assert result["corpus_class"] == "raw_capture"
+
+
+@pytest.mark.parametrize(
+    ("error_type", "error_code"),
+    [
+        ("PalaceAuthorizationError", "authorization_denied"),
+        ("PalaceAuthorizationLatchError", "authorization_latched"),
+    ],
+)
+def test_sar1381_tight_budget_preserves_authorization_failure_class(
+    error_type: str, error_code: str
+) -> None:
+    module = load_palaceoftruth_plugin()
+
+    raw = module._bounded_tool_json(
+        {
+            "ok": False,
+            "query": "q" * 2_000,
+            "retrieval_mode": "hybrid",
+            "corpus_class": "raw_capture",
+            "searched_scopes": [],
+            "broader_authorized_fallback_used": False,
+            "result": "Palace raw-capture search was unavailable.",
+            "error": {
+                "type": error_type,
+                "message": "canonical agent/lux scope was rejected" * 20,
+                "status_code": 403,
+                "retryable": False,
+            },
+        },
+        200,
+    )
+    result = json.loads(raw)
+
+    assert len(raw) <= 200
+    assert result == {
+        "ok": False,
+        "truncated": True,
+        "result": "Request failed.",
+        "error_code": error_code,
+        "status_code": 403,
+        "retryable": False,
+    }
 
 
 def test_sar1381_exact_scope_reports_raw_note_and_mixed_corpus(monkeypatch) -> None:

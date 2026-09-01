@@ -36,6 +36,7 @@ def test_codex_plugin_manifest_points_to_palace_mcp_package() -> None:
 def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
     codex_manifest = load_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
     codex_readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+    root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     hermes_readme = (
         REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth" / "README.md"
     ).read_text(encoding="utf-8")
@@ -45,6 +46,7 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
 
     assert codex_manifest["version"] == "0.2.0"
     assert "version: 1.0.35" in hermes_plugin_yaml
+    assert "`palace_semantic_recall` is the 1.0.35 compatibility alias" in root_readme
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
     assert "tracks the Codex/Claude\nclient install surface only" in codex_readme

@@ -457,6 +457,25 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
     compact = dict(payload)
     compact.setdefault("truncated", False)
 
+    # Keep a fixed, privacy-safe failure class outside the verbose error object.
+    # Tight budgets may remove the message, but callers must still distinguish
+    # an authorization denial and its same-turn latch from a generic outage.
+    if compact.get("ok") is False:
+        error = compact.get("error")
+        error_type = str(error.get("type") or "") if isinstance(error, dict) else ""
+        error_codes = {
+            "PalaceAuthorizationError": "authorization_denied",
+            "PalaceAuthorizationLatchError": "authorization_latched",
+            "PalaceScopeConflictError": "scope_conflict",
+            "PalaceReadBudgetError": "read_budget_exceeded",
+        }
+        compact.setdefault("error_code", error_codes.get(error_type, "retrieval_failed"))
+        if isinstance(error, dict):
+            if isinstance(error.get("status_code"), int):
+                compact.setdefault("status_code", error["status_code"])
+            if isinstance(error.get("retryable"), bool):
+                compact.setdefault("retryable", error["retryable"])
+
     def _dump() -> str:
         return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
@@ -478,8 +497,20 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
             break
         compact.pop(optional_key, None)
     if len(_dump()) > budget:
-        compact["result"] = "More results omitted."
-        encoded = _dump()
+        if compact.get("ok") is False:
+            minimal = {
+                "ok": False,
+                "truncated": True,
+                "result": "Request failed.",
+                "error_code": compact["error_code"],
+            }
+            for key in ("status_code", "retryable"):
+                if key in compact:
+                    minimal[key] = compact[key]
+            encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+        else:
+            compact["result"] = "More results omitted."
+            encoded = _dump()
         if len(encoded) <= budget:
             return encoded
         return json.dumps(

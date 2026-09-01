@@ -467,5 +467,5 @@ For Hermes retrieval, use this decision table:
 | Request | Tool |
 |---|---|
 | Captured URL, video, transcript, document, title, or source | `palace_search` |
-| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.34 compatibility alias) |
+| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.35 compatibility alias) |
 | Exact-scope canary or containment check | `palace_exact_scope_recall` |
