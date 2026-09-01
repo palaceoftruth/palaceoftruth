@@ -457,6 +457,25 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
     compact = dict(payload)
     compact.setdefault("truncated", False)
 
+    # Keep a fixed, privacy-safe failure class outside the verbose error object.
+    # Tight budgets may remove the message, but callers must still distinguish
+    # an authorization denial and its same-turn latch from a generic outage.
+    if compact.get("ok") is False:
+        error = compact.get("error")
+        error_type = str(error.get("type") or "") if isinstance(error, dict) else ""
+        error_codes = {
+            "PalaceAuthorizationError": "authorization_denied",
+            "PalaceAuthorizationLatchError": "authorization_latched",
+            "PalaceScopeConflictError": "scope_conflict",
+            "PalaceReadBudgetError": "read_budget_exceeded",
+        }
+        compact.setdefault("error_code", error_codes.get(error_type, "retrieval_failed"))
+        if isinstance(error, dict):
+            if isinstance(error.get("status_code"), int):
+                compact.setdefault("status_code", error["status_code"])
+            if isinstance(error.get("retryable"), bool):
+                compact.setdefault("retryable", error["retryable"])
+
     def _dump() -> str:
         return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
@@ -466,6 +485,39 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
     compact["truncated"] = True
     result = str(compact.get("result") or "")
     marker = " Additional results were omitted to stay within the context budget."
+
+    # Make room for the user-visible result before trimming it. Retrieval traces
+    # can exceed the whole model budget by themselves; trimming the result while
+    # that trace is still present always converges to an empty prefix. If removing
+    # metadata makes the payload fit, the binary search below can retain the
+    # highest-ranked evidence instead of returning only the omission marker.
+    compact["result"] = marker
+    for optional_key in ("trace", "query", "scope", "fallback_used", "error"):
+        if len(_dump()) <= budget:
+            break
+        compact.pop(optional_key, None)
+    if len(_dump()) > budget:
+        if compact.get("ok") is False:
+            minimal = {
+                "ok": False,
+                "truncated": True,
+                "result": "Request failed.",
+                "error_code": compact["error_code"],
+            }
+            for key in ("status_code", "retryable"):
+                if key in compact:
+                    minimal[key] = compact[key]
+            encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+        else:
+            compact["result"] = "More results omitted."
+            encoded = _dump()
+        if len(encoded) <= budget:
+            return encoded
+        return json.dumps(
+            {"ok": bool(payload.get("ok")), "truncated": True, "result": "Output omitted."},
+            separators=(",", ":"),
+        )
+
     low, high = 0, len(result)
     while low < high:
         midpoint = (low + high + 1) // 2
@@ -478,17 +530,8 @@ def _bounded_tool_json(payload: dict[str, Any], budget: int) -> str:
     encoded = _dump()
     if len(encoded) <= budget:
         return encoded
-    for optional_key in ("query", "trace", "scope", "fallback_used", "error"):
-        compact.pop(optional_key, None)
-        encoded = _dump()
-        if len(encoded) <= budget:
-            return encoded
-    compact["result"] = "More results omitted."
-    encoded = _dump()
-    if len(encoded) <= budget:
-        return encoded
-    # This should be reachable only at the schema minimum. Keep a valid bounded
-    # response rather than sending oversized model context.
+    # Defensive schema-minimum fallback. The metadata-removal pass above should
+    # already make the marker fit for every supported explicit-read budget.
     return json.dumps(
         {"ok": bool(payload.get("ok")), "truncated": True, "result": "Output omitted."},
         separators=(",", ":"),
