@@ -67,7 +67,7 @@ write-back is explicitly delegated.
   `prefetch()` hook call strict-scope semantic recall instead. The explicit
   `palace_fact_recall` tool remains available regardless of this setting.
 - `palace_semantic_recall` is a documented compatibility alias for
-  `palace_fact_recall` for the 1.0.34 release cycle.
+  `palace_fact_recall` through the 1.0.35 stabilization release.
 - Semantic pre-turn recall uses separate operator knobs from route-aware recall:
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K` (default `5`),
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT` (default `20`),

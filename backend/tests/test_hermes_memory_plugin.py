@@ -4546,6 +4546,39 @@ def test_sar1381_exact_scope_serialized_output_respects_context_budget(monkeypat
     assert result["corpus_class"] == "raw_capture"
 
 
+def test_sar1381_bounded_output_drops_large_trace_before_ranked_evidence() -> None:
+    module = load_palaceoftruth_plugin()
+    target_id = "fixture-qwen-capture"
+    result_text = (
+        "Recalled context from Palace of Truth:\n"
+        "- Qwen capture [media, agent/lux]\n"
+        f"  Evidence: Palace item {target_id}; Source: https://example.test/watch\n"
+    )
+
+    raw = module._bounded_tool_json(
+        {
+            "ok": True,
+            "query": "bounded fixture query",
+            "retrieval_mode": "hybrid",
+            "corpus_class": "raw_capture",
+            "searched_scopes": ["agent/lux"],
+            "broader_authorized_fallback_used": False,
+            "trace": {"oversized_diagnostics": "x" * 20_000},
+            "result": result_text,
+        },
+        8000,
+    )
+    result = json.loads(raw)
+
+    assert len(raw) <= 8000
+    assert result["truncated"] is True
+    assert "trace" not in result
+    assert target_id in result["result"]
+    assert "https://example.test/watch" in result["result"]
+    assert result["retrieval_mode"] == "hybrid"
+    assert result["corpus_class"] == "raw_capture"
+
+
 def test_sar1381_exact_scope_reports_raw_note_and_mixed_corpus(monkeypatch) -> None:
     module = load_palaceoftruth_plugin()
     provider = _lux_oauth_provider(module, monkeypatch)
