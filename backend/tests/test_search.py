@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.schemas.search import SearchRequest
+from app.schemas.search import SearchRequest, split_system_provenance_tags
 from app.embedding_profile import resolve_embedding_profile
 from app.services.embedder import EmbeddingRequestError
 from app.services.retrieval_provenance import classify_retrieval_trust
@@ -24,6 +24,22 @@ class _FakeEmbedder:
 
     async def embed_single(self, _query: str) -> list[float]:
         return [0.1] * self.profile.dimensions
+
+
+def test_cron_runtime_tags_are_system_provenance() -> None:
+    system_tags, semantic_tags = split_system_provenance_tags(
+        [
+            "hermes-runtime-cron",
+            "hermes-cron-job-7b6dd3c79cf4",
+            "deployment-decision",
+        ]
+    )
+
+    assert system_tags == [
+        "hermes-runtime-cron",
+        "hermes-cron-job-7b6dd3c79cf4",
+    ]
+    assert semantic_tags == ["deployment-decision"]
 
 
 class _FakeResult:

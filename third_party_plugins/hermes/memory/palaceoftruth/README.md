@@ -67,7 +67,7 @@ write-back is explicitly delegated.
   `prefetch()` hook call strict-scope semantic recall instead. The explicit
   `palace_fact_recall` tool remains available regardless of this setting.
 - `palace_semantic_recall` is a documented compatibility alias for
-  `palace_fact_recall` through the 1.0.36 stabilization release.
+  `palace_fact_recall` through the 1.0.37 stabilization release.
 - Semantic pre-turn recall uses separate operator knobs from route-aware recall:
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_TOP_K` (default `5`),
   `PALACEOFTRUTH_SEMANTIC_PREFETCH_CANDIDATE_LIMIT` (default `20`),
@@ -145,6 +145,37 @@ write-back is explicitly delegated.
   `PALACEOFTRUTH_DEDUP_CACHE_TTL_SECONDS` (default `300`). Existing deployments
   that need temporary compatibility can explicitly opt out by setting
   `PALACEOFTRUTH_WRITE_QUOTAS_ENABLED=false`.
+- Automatic Hermes cron turns are captured by default and receive the system
+  provenance tags `hermes-runtime-cron` and
+  `hermes-cron-job-<12-character-job-id>`. To suppress routine automatic turn
+  capture for selected jobs, set `cron_automatic_capture_disabled_job_ids` in
+  `~/.hermes/palaceoftruth.json`:
+
+  ```json
+  {
+    "cron_automatic_capture_disabled_job_ids": [
+      "abc123def456",
+      "789abc012def"
+    ]
+  }
+  ```
+
+  The equivalent environment variable is
+  `PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS`, with comma-separated
+  IDs. When both sources are set, the plugin uses their union so one source
+  cannot remove a restriction from the other. The plugin matches only
+  Hermes's strict
+  `cron_<job-id>_<YYYYMMDD>_<HHMMSS>` session format. If that format cannot be
+  resolved, capture stays enabled and the plugin logs a warning without the
+  session value. This policy suppresses only automatic completed-turn sync;
+  recall and explicit `palace_remember` or `palace_remember_bulk` writes remain
+  available. Explicit cron writes and retained automatic turns include
+  `metadata.runtime`, while `metadata.capture_origin` distinguishes
+  `automatic_turn_sync` from `explicit_memory_tool`.
+  This is retention control, not an access-control boundary: direct Palace API
+  writes and explicit memory tools remain possible by design. Deployment
+  consumers must install or pin plugin `1.0.37`; an older vendored copy cannot
+  enforce this policy.
 - `palace_remember` reports write contract status honestly. A successful tool
   call can still mean accepted or queued rather than durable; inspect the
   returned `durability`, `job_id`, `poll_url`, `poll_after_seconds`, and retry

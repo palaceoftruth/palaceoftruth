@@ -346,6 +346,12 @@ healthy idle worker.
 
 Every plugin behavior change should bump `third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` so CI can publish a new release artifact.
 
+The Hermes plugin can suppress automatic completed-turn capture for selected
+cron job IDs without disabling Palace recall or explicit memory tools. Configure
+`PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS`; see the packaged
+[Hermes plugin README](third_party_plugins/hermes/memory/palaceoftruth/README.md)
+for JSON configuration, precedence, and cron provenance.
+
 Release assets are tagged as:
 
 ```text
@@ -467,5 +473,5 @@ For Hermes retrieval, use this decision table:
 | Request | Tool |
 |---|---|
 | Captured URL, video, transcript, document, title, or source | `palace_search` |
-| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.36 compatibility alias) |
+| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.37 compatibility alias) |
 | Exact-scope canary or containment check | `palace_exact_scope_recall` |
