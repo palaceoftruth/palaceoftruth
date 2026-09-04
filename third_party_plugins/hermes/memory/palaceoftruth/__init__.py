@@ -83,6 +83,10 @@ RELATIONSHIP_POLICIES = {"immediate", "deferred", "skip"}
 # Advertised in the tool schemas so the model is told the shape up front
 # instead of guessing an id and failing server-side validation.
 UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+CRON_JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
+CRON_SESSION_ID_PATTERN = re.compile(
+    r"^cron_(?P<job_id>[0-9a-f]{12})_(?P<date>\d{8})_(?P<time>\d{6})$"
+)
 PALACE_MEMORY_ROUTE_SCOPES = {
     ("GET", "/api/v1/memory/whoami"): "read",
     ("GET", "/api/v1/memory/scopes"): "read",
@@ -206,6 +210,64 @@ def _split_patterns(value: Any) -> list[str]:
         if pattern and pattern not in patterns:
             patterns.append(pattern)
     return patterns
+
+
+def _normalize_cron_job_ids(value: Any) -> frozenset[str]:
+    job_ids: set[str] = set()
+    invalid_count = 0
+    for raw in _split_patterns(value):
+        job_id = raw.casefold()
+        if CRON_JOB_ID_PATTERN.fullmatch(job_id):
+            job_ids.add(job_id)
+        else:
+            invalid_count += 1
+    if invalid_count:
+        logger.warning(
+            "Palace of Truth ignored %d invalid cron capture job id%s",
+            invalid_count,
+            "" if invalid_count == 1 else "s",
+        )
+    return frozenset(job_ids)
+
+
+def _cron_job_id(platform: str, session_id: str) -> str | None:
+    if (platform or "").strip().casefold() != "cron":
+        return None
+    match = CRON_SESSION_ID_PATTERN.fullmatch((session_id or "").strip())
+    if match is None:
+        return None
+    timestamp = f"{match.group('date')}_{match.group('time')}"
+    try:
+        parsed = datetime.strptime(timestamp, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+    if parsed.strftime("%Y%m%d_%H%M%S") != timestamp:
+        return None
+    return match.group("job_id")
+
+
+def _cron_runtime_provenance(
+    platform: str,
+    session_id: str,
+    *,
+    capture_origin: str,
+) -> tuple[list[str], dict[str, Any]]:
+    if (platform or "").strip().casefold() != "cron":
+        return [], {}
+    normalized_session_id = (session_id or "").strip()
+    job_id = _cron_job_id(platform, normalized_session_id)
+    tags = ["hermes-runtime-cron"]
+    runtime: dict[str, Any] = {
+        "kind": "cron",
+        "session_id": normalized_session_id,
+    }
+    if job_id:
+        tags.append(f"hermes-cron-job-{job_id}")
+        runtime["job_id"] = job_id
+    return tags, {
+        "capture_origin": capture_origin,
+        "runtime": runtime,
+    }
 
 
 def _split_scopes(value: Any) -> tuple[str, ...]:
@@ -1198,6 +1260,9 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
             "PALACEOFTRUTH_DEDUP_CACHE_TTL_SECONDS",
             DEFAULT_DEDUP_CACHE_TTL_SECONDS,
         ),
+        "cron_automatic_capture_disabled_job_ids": _split_patterns(
+            os.environ.get("PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS", "")
+        ),
         "source": os.environ.get("PALACEOFTRUTH_SOURCE", DEFAULT_SOURCE).strip()
         or DEFAULT_SOURCE,
         "created_by_role": os.environ.get(
@@ -1205,6 +1270,9 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
         ).strip()
         or DEFAULT_CREATED_BY_ROLE,
     }
+    environment_cron_job_ids = list(
+        config["cron_automatic_capture_disabled_job_ids"]
+    )
 
     config_path = Path(hermes_home) / "palaceoftruth.json"
     if config_path.exists():
@@ -1212,6 +1280,14 @@ def _load_config(hermes_home: str) -> dict[str, Any]:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             if isinstance(file_cfg, dict):
                 config = _merge_non_empty(config, file_cfg)
+                config["cron_automatic_capture_disabled_job_ids"] = _split_patterns(
+                    [
+                        *environment_cron_job_ids,
+                        *_split_patterns(
+                            file_cfg.get("cron_automatic_capture_disabled_job_ids")
+                        ),
+                    ]
+                )
         except Exception as exc:
             logger.warning("Palace of Truth config load failed from %s: %s", config_path, exc)
 
@@ -1314,6 +1390,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._active_skill_names: list[str] = []
         self._platform = "cli"
         self._writes_disabled = False
+        self._cron_automatic_capture_disabled_job_ids: frozenset[str] = frozenset()
         self._tenant_id = ""
         self._tenant_id_lock = threading.Lock()
         self._server_identity_loaded = False
@@ -1414,6 +1491,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             {
                 "key": "scope_key",
                 "description": "Default scope key when the scope type needs one",
+            },
+            {
+                "key": "cron_automatic_capture_disabled_job_ids",
+                "description": (
+                    "Comma-separated 12-character Hermes cron job IDs whose automatic "
+                    "completed-turn capture should be skipped"
+                ),
+                "default": "",
+                "env_var": "PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS",
             },
             {
                 "key": "retrieve_limit",
@@ -1798,6 +1884,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._active_skills = _normalize_active_skills(active_skills)
         self._active_skill_names = _active_skill_names(active_skills)
         self._platform = str(kwargs.get("platform", "cli")).strip() or "cli"
+        self._cron_automatic_capture_disabled_job_ids = _normalize_cron_job_ids(
+            self._config.get("cron_automatic_capture_disabled_job_ids")
+        )
         agent_context = str(kwargs.get("agent_context", "")).strip()
         self._writes_disabled = agent_context not in {"", "primary"}
         self._tenant_id = ""
@@ -1817,10 +1906,21 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._reset_write_quota(session=True)
 
     def system_prompt_block(self) -> str:
+        cron_job_id = _cron_job_id(self._platform, self._session_id)
+        if cron_job_id in self._cron_automatic_capture_disabled_job_ids:
+            lifecycle_notice = (
+                "Relevant long-term context may be recalled automatically before turns. "
+                "Automatic completed-turn capture is disabled for this cron session. "
+                "Explicit Palace memory writes remain available.\n"
+            )
+        else:
+            lifecycle_notice = (
+                "Relevant long-term context may be recalled automatically before turns, "
+                "and durable memory writes happen automatically after completed turns.\n"
+            )
         base = (
             "External memory provider active: Palace of Truth.\n"
-            "Relevant long-term context may be recalled automatically before turns, "
-            "and durable memory writes happen automatically after completed turns.\n"
+            f"{lifecycle_notice}"
             "Use palace_search for a captured URL, video, transcript, document, title, "
             "or source. Use palace_fact_recall for a current or historical curated "
             "memory fact with valid_at, fact_kind, or supersession semantics. Use "
@@ -2739,9 +2839,26 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         assistant_text = (assistant_content or "").strip()
         if not user_text and not assistant_text:
             return
-        active_session = session_id or self._session_id
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=1.0)
+        active_session = session_id or self._session_id
+        cron_job_id = _cron_job_id(self._platform, active_session)
+        if (
+            self._platform.casefold() == "cron"
+            and self._cron_automatic_capture_disabled_job_ids
+            and cron_job_id is None
+        ):
+            logger.warning(
+                "Palace of Truth cron capture denylist could not resolve a job id; "
+                "capture remains enabled"
+            )
+        if cron_job_id in self._cron_automatic_capture_disabled_job_ids:
+            logger.debug(
+                "Palace of Truth automatic capture suppressed for cron job %s",
+                cron_job_id,
+            )
+            self._reset_write_quota()
+            return
 
         def _worker() -> None:
             try:
@@ -4408,6 +4525,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             ).encode("utf-8")
         ).hexdigest()
 
+        runtime_tags, runtime_metadata = _cron_runtime_provenance(
+            self._platform,
+            session_id or self._session_id,
+            capture_origin="automatic_turn_sync",
+        )
         payload: dict[str, Any] = {
             "tenant_id": tenant_id,
             "title": title,
@@ -4422,12 +4544,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "agent_identity": self._agent_identity,
                 "agent_workspace": self._agent_workspace,
                 "platform": self._platform,
+                **runtime_metadata,
                 **truncation_metadata,
             },
             "idempotency_key": idempotency_key,
         }
         if scope is not None:
             payload["scope"] = scope
+        if runtime_tags:
+            payload["tags"] = runtime_tags
         return payload
 
     def _normalize_bulk_memory_entries(
@@ -4549,11 +4674,17 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             ).encode("utf-8")
         ).hexdigest()
 
+        runtime_tags, runtime_metadata = _cron_runtime_provenance(
+            self._platform,
+            self._session_id,
+            capture_origin="explicit_memory_tool",
+        )
         tags = [
             "hermes-memory-tool",
             f"hermes-memory-target-{target}",
             f"hermes-memory-action-{action}",
             *[f"{SKILL_TAG_PREFIX}{skill}" for skill in self._active_skills],
+            *runtime_tags,
         ]
         memory_tool_metadata: dict[str, Any] = {
             "action": action,
@@ -4579,6 +4710,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "agent_workspace": self._agent_workspace,
             "platform": self._platform,
             "memory_tool": memory_tool_metadata,
+            **runtime_metadata,
         }
         if self._active_skills:
             metadata["active_skills"] = list(self._active_skill_names)

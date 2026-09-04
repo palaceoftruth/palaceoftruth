@@ -30,6 +30,8 @@ SYSTEM_PROVENANCE_TAG_PREFIXES = (
     "workspace-",
     "session-",
     "hermes-memory-",
+    "hermes-runtime-",
+    "hermes-cron-job-",
 )
 
 

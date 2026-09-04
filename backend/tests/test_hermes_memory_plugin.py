@@ -37,6 +37,7 @@ def isolate_oauth_environment(monkeypatch) -> None:
         "SECONDBRAIN_MCP_OAUTH_AUDIENCE",
         "SECONDBRAIN_MCP_CLIENT_KEY",
         "SECONDBRAIN_MCP_CLIENT_SCOPES",
+        "PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -123,6 +124,20 @@ def test_palaceoftruth_provider_is_available_uses_palaceoftruth_json(
     )
 
     assert provider.is_available() is True
+
+
+def test_palaceoftruth_config_schema_exposes_cron_capture_denylist() -> None:
+    module = load_palaceoftruth_plugin()
+    provider = module.PalaceOfTruthMemoryProvider()
+
+    fields = {field["key"]: field for field in provider.get_config_schema()}
+
+    cron_field = fields["cron_automatic_capture_disabled_job_ids"]
+    assert cron_field["default"] == ""
+    assert cron_field["env_var"] == (
+        "PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS"
+    )
+    assert "12-character Hermes cron job IDs" in cron_field["description"]
 
 
 def test_palaceoftruth_provider_is_available_accepts_oauth_without_api_key(
@@ -3646,6 +3661,316 @@ def test_palaceoftruth_provider_sync_turn_uses_resolved_tenant(monkeypatch) -> N
     assert payload["tenant_id"] == "tenant-acme"
     assert payload["scope"] == {"type": "agent", "key": "orchestrator"}
     assert payload["summary"] == "I'll use staging first."
+
+
+def test_palaceoftruth_provider_skips_automatic_capture_for_disabled_cron_job(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    (tmp_path / "palaceoftruth.json").write_text(
+        json.dumps(
+            {
+                "cron_automatic_capture_disabled_job_ids": ["7b6dd3c79cf4"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "cron_7b6dd3c79cf4_20260904_120000",
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        agent_workspace="hermes",
+        platform="cron",
+    )
+
+    prompt = provider.system_prompt_block()
+    assert "Automatic completed-turn capture is disabled for this cron session" in prompt
+    assert "Explicit Palace memory writes remain available" in prompt
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        return {"tenant_id": "tenant-acme"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.sync_turn("Routine poll", "No changes.")
+    provider.shutdown()
+
+    assert requests_seen == []
+
+
+def test_palaceoftruth_provider_reads_disabled_cron_jobs_from_environment(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv(
+        "PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS",
+        "b08f9dedd98c, 7B6DD3C79CF4",
+    )
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "cron_7b6dd3c79cf4_20260904_120000",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="barbara",
+        platform="cron",
+    )
+
+    requests_seen: list[tuple[str, str, dict | None]] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        requests_seen.append((method, path, payload))
+        return {"tenant_id": "tenant-acme"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.sync_turn("Routine poll", "No changes.")
+    provider.shutdown()
+
+    assert requests_seen == []
+
+
+def test_palaceoftruth_provider_unions_environment_and_file_cron_denylists(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv(
+        "PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS",
+        "b08f9dedd98c",
+    )
+    (tmp_path / "palaceoftruth.json").write_text(
+        json.dumps(
+            {
+                "cron_automatic_capture_disabled_job_ids": ["7b6dd3c79cf4"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "cron_b08f9dedd98c_20260904_120000",
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        platform="cron",
+    )
+
+    assert provider._cron_automatic_capture_disabled_job_ids == frozenset(  # type: ignore[attr-defined]
+        {"7b6dd3c79cf4", "b08f9dedd98c"}
+    )
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "cron_7b6dd3c79cf4_20260904_120000_extra",
+        "cron_7b6dd3c79cf4evil_20260904_120000",
+        "cron_7b6dd3c79cf4_20260904_12000",
+        "cron_7b6dd3c79cf4_20261340_250061",
+        "cron_7B6DD3C79CF4_20260904_120000",
+    ],
+)
+def test_cron_capture_denylist_fails_open_when_session_id_is_unrecognized(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+    session_id: str,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    (tmp_path / "palaceoftruth.json").write_text(
+        json.dumps(
+            {
+                "cron_automatic_capture_disabled_job_ids": ["7b6dd3c79cf4"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        session_id,
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        platform="cron",
+    )
+
+    entry_payloads: list[dict] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        if method == "GET":
+            return {"tenant_id": "tenant-acme"}
+        assert payload is not None
+        entry_payloads.append(payload)
+        return {"job_id": "job-1", "status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    with caplog.at_level(logging.WARNING):
+        provider.sync_turn("Routine poll", "One durable change.")
+        provider.shutdown()
+
+    assert len(entry_payloads) == 1
+    assert entry_payloads[0]["tags"] == ["hermes-runtime-cron"]
+    assert entry_payloads[0]["metadata"]["runtime"] == {
+        "kind": "cron",
+        "session_id": session_id,
+    }
+    assert "cron capture denylist could not resolve a job id; capture remains enabled" in caplog.text
+    assert session_id not in caplog.text
+
+
+def test_invalid_cron_capture_job_ids_are_ignored_without_logging_values(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    invalid_value = "not-a-job-id-sensitive-value"
+    (tmp_path / "palaceoftruth.json").write_text(
+        json.dumps(
+            {
+                "cron_automatic_capture_disabled_job_ids": [
+                    invalid_value,
+                    "7B6DD3C79CF4",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    with caplog.at_level(logging.WARNING):
+        provider.initialize(
+            "cron_7b6dd3c79cf4_20260904_120000",
+            hermes_home=str(tmp_path),
+            agent_identity="barbara",
+            platform="cron",
+        )
+
+    assert provider._cron_automatic_capture_disabled_job_ids == frozenset(  # type: ignore[attr-defined]
+        {"7b6dd3c79cf4"}
+    )
+    assert "ignored 1 invalid cron capture job id" in caplog.text
+    assert invalid_value not in caplog.text
+
+
+def test_palaceoftruth_provider_tags_enabled_cron_automatic_capture(monkeypatch) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+
+    session_id = "cron_7b6dd3c79cf4_20260904_120000"
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        session_id,
+        hermes_home="/tmp/hermes-home",
+        agent_identity="barbara",
+        agent_workspace="hermes",
+        platform="cron",
+    )
+
+    entry_payloads: list[dict] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        if method == "GET":
+            return {"tenant_id": "tenant-acme"}
+        assert path == "/api/v1/memory/entries"
+        assert payload is not None
+        entry_payloads.append(payload)
+        return {"job_id": "job-1", "status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.sync_turn("Routine poll", "One durable change.")
+    provider.shutdown()
+
+    assert len(entry_payloads) == 1
+    payload = entry_payloads[0]
+    assert payload["tags"] == [
+        "hermes-runtime-cron",
+        "hermes-cron-job-7b6dd3c79cf4",
+    ]
+    assert payload["metadata"]["capture_origin"] == "automatic_turn_sync"
+    assert payload["metadata"]["runtime"] == {
+        "kind": "cron",
+        "job_id": "7b6dd3c79cf4",
+        "session_id": session_id,
+    }
+
+
+def test_disabled_cron_automatic_capture_preserves_explicit_memory_writes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    (tmp_path / "palaceoftruth.json").write_text(
+        json.dumps(
+            {
+                "cron_automatic_capture_disabled_job_ids": ["7b6dd3c79cf4"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session_id = "cron_7b6dd3c79cf4_20260904_120000"
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        session_id,
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        agent_workspace="hermes",
+        platform="cron",
+    )
+
+    entry_payloads: list[dict] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        if method == "GET":
+            return {"tenant_id": "tenant-acme"}
+        assert path == "/api/v1/memory/entries"
+        assert payload is not None
+        entry_payloads.append(payload)
+        return {"job_id": "job-1", "status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    provider.sync_turn("Routine poll", "No changes.")
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember",
+            {"content": "The monitored service changed state."},
+        )
+    )
+    provider.shutdown()
+
+    assert result["ok"] is True
+    assert len(entry_payloads) == 1
+    payload = entry_payloads[0]
+    assert payload["source"] == "hermes-agent-memory-tool"
+    assert payload["tags"] == [
+        "hermes-memory-tool",
+        "hermes-memory-target-memory",
+        "hermes-memory-action-add",
+        "hermes-runtime-cron",
+        "hermes-cron-job-7b6dd3c79cf4",
+    ]
+    assert payload["metadata"]["capture_origin"] == "explicit_memory_tool"
+    assert payload["metadata"]["runtime"] == {
+        "kind": "cron",
+        "job_id": "7b6dd3c79cf4",
+        "session_id": session_id,
+    }
 
 
 def test_palaceoftruth_provider_mirrors_memory_tool_writes_with_resolved_tenant(
