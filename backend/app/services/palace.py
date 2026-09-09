@@ -157,29 +157,6 @@ SUPPORTED_SYNC_EXTENSIONS = {
     ".sql",
     ".csv",
 }
-_LOW_SIGNAL_CONVERSATION_PATTERNS = (
-    "don't have any stored knowledge",
-    "do not have any stored knowledge",
-    "don't know",
-    "do not know",
-    "still no.",
-    "no memory of",
-    "doesn't appear",
-    "does not appear",
-    "not in memory",
-    "not in palace of truth",
-    "not in palaceoftruth",
-    "palace of truth recall",
-    "palaceoftruth recall",
-    "conversation turns",
-    "fact card",
-    "media layer",
-    "tenant_shared",
-    "stored as media",
-    "query the media layer",
-    "doesn't contain a separate knowledge entry",
-    "does not contain a separate knowledge entry",
-)
 DENIED_PATH_PARTS = {
     ".git",
     ".hg",
@@ -3134,21 +3111,6 @@ def _global_merge_rescued(
     )
 
 
-def _should_merge_tenant_shared_results(
-    *,
-    scope_type: str,
-    scope_key: str | None,
-    results: list[SearchResult],
-) -> bool:
-    if scope_type == "tenant_shared":
-        return False
-    if not results:
-        return True
-    if scope_type in {"workspace", "session"} and scope_key:
-        return False
-    return all(r.source_type == "note" for r in results)
-
-
 def _merge_search_results(
     primary: list[SearchResult],
     secondary: list[SearchResult],
@@ -3197,30 +3159,6 @@ def _append_rescue_results(
     if not additions:
         return results
     return [*results, *additions[: max(limit, 0)]]
-
-
-def _looks_like_conversation_turn(result: SearchResult) -> bool:
-    return result.source_type == "note" and (
-        "# Conversation Turn" in result.chunk_text or result.title.startswith("default: [")
-    )
-
-
-def _looks_like_low_signal_conversation_note(result: SearchResult) -> bool:
-    if not _looks_like_conversation_turn(result):
-        return False
-    haystack = " ".join(part for part in (result.title, result.summary, result.chunk_text) if part).lower()
-    return any(pattern in haystack for pattern in _LOW_SIGNAL_CONVERSATION_PATTERNS)
-
-
-def _suppress_low_signal_conversation_notes(
-    results: list[SearchResult],
-) -> tuple[list[SearchResult], int]:
-    if not any(result.source_type != "note" for result in results):
-        return results, 0
-    filtered = [result for result in results if not _looks_like_low_signal_conversation_note(result)]
-    if not filtered:
-        return results, 0
-    return filtered, len(results) - len(filtered)
 
 
 def _retrieval_quality_decision(query: str, results: list[SearchResult]) -> dict[str, Any]:
@@ -3723,8 +3661,6 @@ async def retrieve_palace(
         trace.embedding_failure_retryable = True
     results = []
     global_results_merged = False
-    shared_results_merged = False
-    suppressed_low_signal_notes = 0
     has_explicit_tag_filter = bool(body.tags)
     retrieve_candidate_limit = getattr(body, "candidate_limit", None)
     include_neighbor_chunks = getattr(body, "include_neighbor_chunks", False)
@@ -3961,51 +3897,6 @@ async def retrieve_palace(
             },
         )
 
-    if _should_merge_tenant_shared_results(
-        scope_type=body.scope_type,
-        scope_key=body.scope_key,
-        results=results,
-    ):
-        shared_results = await service.vector_search(
-            query=body.query,
-            limit=body.limit,
-            retrieval_lens=retrieval_lens,
-            candidate_limit=retrieve_candidate_limit,
-            include_neighbor_chunks=include_neighbor_chunks,
-            neighbor_chunk_window=neighbor_chunk_window,
-            context_budget_chars=context_budget_chars,
-            include_derived_artifacts=include_derived_artifacts,
-            corpus_class=corpus_class,
-            scope_type="tenant_shared",
-            scope_key=None,
-            tags=body.tags,
-            tags_mode=body.tags_mode,
-            date_from=body.date_from,
-            date_to=body.date_to,
-            min_score=body.min_score,
-            query_vector=query_vector,
-            query_embedding_error=query_embedding_error,
-        )
-        _append_search_ranking_trace(
-            trace,
-            service,
-            route="tenant_shared_merge",
-            limit=body.limit,
-            routing={
-                "scope_type": "tenant_shared",
-                "scope_key": None,
-                "requested_scope_type": body.scope_type,
-                "requested_scope_key": body.scope_key,
-                "display_limit": body.limit,
-                "candidate_limit": retrieve_candidate_limit,
-                "fallback_used": trace.fallback_used,
-            },
-        )
-        if shared_results:
-            results = _merge_search_results(results, shared_results, limit=body.limit)
-            shared_results_merged = True
-            results, suppressed_low_signal_notes = _suppress_low_signal_conversation_notes(results)
-
     if settings.retrieval_hint_report_enabled:
         trace.hint_report = await report_retrieval_hint_candidates(
             db,
@@ -4111,20 +4002,6 @@ async def retrieve_palace(
             PalaceTraceStep(
                 title="Tag-constrained global merge" if has_explicit_tag_filter else "Low-confidence global merge",
                 detail=detail,
-            )
-        )
-    if shared_results_merged:
-        steps.append(
-            PalaceTraceStep(
-                title="Shared memory merge",
-                detail="Merged tenant_shared results because scoped retrieval only produced note memories or came back empty.",
-            )
-        )
-    if suppressed_low_signal_notes:
-        steps.append(
-            PalaceTraceStep(
-                title="Conversation hygiene",
-                detail=f"Suppressed {suppressed_low_signal_notes} low-signal conversation-turn notes because higher-value shared knowledge was available.",
             )
         )
     if trace.quality_decision:
