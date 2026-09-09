@@ -2390,7 +2390,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": "writes are disabled for this agent context",
                     }
                 )
-            tenant_id = self._resolve_tenant_id()
+            try:
+                tenant_id = self._resolve_tenant_id()
+            except Exception as exc:
+                # A failed whoami is not a tenant fault: it is a timeout, an
+                # HTTP error, or an open circuit. Surface the real class so
+                # the agent does not chase a rotated secret that never moved.
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "target": target,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
             if not tenant_id:
                 return json.dumps(
                     {
@@ -2463,7 +2475,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "error": "writes are disabled for this agent context",
                     }
                 )
-            tenant_id = self._resolve_tenant_id()
+            try:
+                tenant_id = self._resolve_tenant_id()
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "target": target,
+                        "error": _safe_exception_summary(exc),
+                    }
+                )
             if not tenant_id:
                 return json.dumps(
                     {
@@ -3499,6 +3520,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._server_identity_loaded = True
 
     def _resolve_tenant_id(self) -> str | None:
+        """Return the tenant id, or None only when a 200 response has no tenant.
+
+        A failed whoami call must not collapse into the same None: a network
+        timeout, an HTTP 5xx/429, or this plugin's own open circuit are
+        transient conditions, and callers misreport None as a broken tenant or
+        OAuth binding. Transient failures are re-raised instead so each caller
+        can report the real failure class with its retry guidance.
+
+        The OAuth path first consults the cached server identity. When whoami
+        was unavailable at identity load time the cache stays empty, so this
+        method falls through to a direct whoami call and a transient outage
+        surfaces here as the raised exception it is.
+        """
         if self._oauth_client_secret:
             self._load_server_identity()
             if self._tenant_id:
@@ -3507,14 +3541,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         with self._tenant_id_lock:
             if self._tenant_id:
                 return self._tenant_id
-            try:
-                response = self._request_json("GET", "/api/v1/memory/whoami")
-            except Exception as exc:
-                logger.warning(
-                    "Palace of Truth tenant resolution failed; skipping write: %s",
-                    exc,
-                )
-                return None
+            response = self._request_json("GET", "/api/v1/memory/whoami")
 
             tenant_id = str(response.get("tenant_id", "")).strip()
             if not tenant_id:

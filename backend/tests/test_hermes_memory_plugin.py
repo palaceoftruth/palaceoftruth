@@ -1558,6 +1558,145 @@ def test_palaceoftruth_semantic_recall_tenant_shared_rejection_names_the_flag(
     assert "sibling-agent" not in message
 
 
+def test_palaceoftruth_remember_tool_reports_open_circuit_as_retryable_transient(
+    monkeypatch,
+) -> None:
+    """A circuit-open write must name the circuit, not the tenant binding."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def raising_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        assert (method, path) == ("GET", "/api/v1/memory/whoami")
+        raise module.PalaceCircuitOpenError(12)
+
+    provider._request_json = raising_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember the outage."})
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "PalaceCircuitOpenError"
+    assert "circuit is open" in result["error"]["message"]
+    assert result["error"]["retryable"] is True
+    assert result["error"]["retry_after_seconds"] == 12
+    # The old failure mode collapsed every error into this tenant-fault string.
+    assert result.get("error") != "could not resolve Palace of Truth tenant"
+
+
+def test_palaceoftruth_remember_tool_still_reports_empty_tenant_id_as_tenant_fault(
+    monkeypatch,
+) -> None:
+    """Only a successful response without a tenant is a real tenant fault."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        assert (method, path) == ("GET", "/api/v1/memory/whoami")
+        return {"status": "ok"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember the binding."})
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "could not resolve Palace of Truth tenant"
+
+
+def test_palaceoftruth_remember_tool_reports_http_5xx_as_retryable_transient(
+    monkeypatch,
+) -> None:
+    """A whoami 503 must surface as PalaceTransientError, not a tenant fault."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    monkeypatch.setenv("PALACEOFTRUTH_RETRY_ATTEMPTS", "1")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def fake_urlopen(_request, timeout: int):
+        raise module.HTTPError(
+            "http://palaceoftruth-backend:8000/api/v1/memory/whoami",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"detail":"unavailable"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    result = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Remember the outage."})
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "PalaceTransientError"
+    assert "503" in result["error"]["message"]
+    assert result["error"]["retryable"] is True
+    assert result["error"]["status_code"] == 503
+
+
+def test_palaceoftruth_remember_bulk_reports_open_circuit_as_retryable_transient(
+    monkeypatch,
+) -> None:
+    """The bulk write path must carry the same transient-failure contract."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-home",
+        agent_identity="clara",
+    )
+
+    def raising_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        assert (method, path) == ("GET", "/api/v1/memory/whoami")
+        raise module.PalaceCircuitOpenError(9)
+
+    provider._request_json = raising_request_json  # type: ignore[attr-defined]
+    result = json.loads(
+        provider.handle_tool_call(
+            "palace_remember_bulk",
+            {"contents": ["Remember one thing.", "Remember another."]},
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "PalaceCircuitOpenError"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["retry_after_seconds"] == 9
+
+
 def test_palaceoftruth_search_empty_result_names_the_searched_scopes(
     monkeypatch,
 ) -> None:
@@ -4173,7 +4312,10 @@ def test_palaceoftruth_provider_skips_write_when_whoami_fails(
     provider.shutdown()
 
     assert requests_seen == [("GET", "/api/v1/memory/whoami", None)]
-    assert "Palace of Truth tenant resolution failed; skipping write" in caplog.text
+    # The write is skipped, and the log now names the real failure instead of
+    # misreporting it as a tenant resolution problem (SAR-1350 bug 1).
+    assert "Palace of Truth memory mirror failed: 403 tenant lookup failed" in caplog.text
+    assert "tenant resolution failed" not in caplog.text
 
 
 def _lux_oauth_provider(module, monkeypatch, *, runtime_identity: str = "default"):

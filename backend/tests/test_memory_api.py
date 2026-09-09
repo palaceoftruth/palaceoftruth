@@ -888,6 +888,99 @@ def test_hermes_oauth_retrieve_agent_allows_workspace_reach_with_the_flag(
     assert policy.require_access_reason is True
 
 
+def test_hermes_oauth_retrieve_allows_tenant_shared_scope_with_the_flag(
+    monkeypatch,
+) -> None:
+    """The client row grants tenant-shared recall through /retrieve too."""
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=True)
+    seen_bodies: list[dict] = []
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body):
+        assert tenant_id == "tenant-a"
+        seen_bodies.append({"scope": body.scope, "corpus_class": body.corpus_class})
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type=body.scope.type,
+                requested_scope_key=body.scope.key,
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_memory", fake_retrieve_memory)
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "shared marketing context", "scope": {"type": "tenant_shared"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["scope"] == {"type": "tenant_shared", "key": None}
+    assert seen_bodies[0]["scope"].type == "tenant_shared"
+
+
+def test_hermes_oauth_retrieve_denies_tenant_shared_scope_without_the_flag(
+    monkeypatch,
+) -> None:
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=False)
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("unauthorized tenant-shared retrieval must not reach search")
+
+    monkeypatch.setattr("app.api.memory.retrieve_memory", reject_if_retrieved)
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "shared marketing context", "scope": {"type": "tenant_shared"}},
+    )
+
+    assert response.status_code == 403
+    assert "canonical agent scope" in response.json()["detail"]
+
+
+def test_hermes_oauth_retrieve_still_rejects_noncanonical_agent_scope(monkeypatch) -> None:
+    """The flag only widens tenant_shared; other scopes stay canonical-only."""
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=True)
+
+    async def reject_if_retrieved(*args, **kwargs):
+        raise AssertionError("noncanonical Hermes retrieval must not reach search")
+
+    monkeypatch.setattr("app.api.memory.retrieve_memory", reject_if_retrieved)
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "sibling scope", "scope": {"type": "agent", "key": "clara"}},
+    )
+
+    assert response.status_code == 403
+    assert "canonical agent scope" in response.json()["detail"]
+
+
+def test_hermes_oauth_retrieve_allows_canonical_agent_scope(monkeypatch) -> None:
+    client = _hermes_retrieve_agent_client(allow_tenant_shared_reads=True)
+
+    async def fake_retrieve_memory(db, *, embedder, tenant_id: str, body):
+        assert body.scope.type == "agent"
+        assert body.scope.key == "mara"
+        return MemoryRetrieveResponse(
+            scope=body.scope,
+            trace=PalaceRetrieveTrace(
+                requested_scope_type="agent",
+                requested_scope_key="mara",
+                fallback_used=False,
+            ),
+            results=[],
+            total=0,
+        )
+
+    monkeypatch.setattr("app.api.memory.retrieve_memory", fake_retrieve_memory)
+    response = client.post(
+        "/api/v1/memory/retrieve",
+        json={"query": "own scope", "scope": {"type": "agent", "key": "mara"}},
+    )
+
+    assert response.status_code == 200
+
+
 def test_memory_whoami_returns_authenticated_tenant() -> None:
     client = _build_app(FakeSession())
 
