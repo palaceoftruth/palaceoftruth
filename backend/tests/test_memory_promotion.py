@@ -97,6 +97,7 @@ def _source_item(**overrides):
         status="ready",
         deleted_at=None,
         governance_verification_state=None,
+        governance_verification_deadline=None,
         governance_superseded_by_item_id=None,
     )
     for key, value in overrides.items():
@@ -156,6 +157,7 @@ def test_promotion_copies_safe_fields_and_is_stable_on_replay(monkeypatch) -> No
         ({"status": "processing"}, 409, "not ready"),
         ({"governance_verification_state": "rejected"}, 409, "governance"),
         ({"governance_verification_state": "stale"}, 409, "governance"),
+        ({"governance_verification_deadline": datetime(2026, 1, 1, tzinfo=timezone.utc)}, 409, "expired"),
         ({"governance_superseded_by_item_id": uuid.uuid4()}, 409, "governance"),
         ({"raw_content": "   "}, 422, "no content"),
         ({"superseded_by_entry_id": uuid.uuid4()}, 409, "superseded"),
@@ -283,3 +285,18 @@ def test_route_forwards_auth_and_queue_contract(monkeypatch) -> None:
     assert forwarded["agent_scope_key"] == "agent/codex"
     assert forwarded["client_key"] == "hermes-codex"
     assert forwarded["allowed_scopes"] == _GRANTS
+
+
+@pytest.mark.parametrize("source_days, governance_days, expected_days", [(None, 2, 2), (4, 2, 2), (1, 2, 1)])
+def test_promotion_cannot_outlive_source_or_governance_deadline(monkeypatch, source_days, governance_days, expected_days):
+    now = datetime.now(timezone.utc)
+    source, item = _source_item()
+    source.valid_until = now + timedelta(days=source_days) if source_days else None
+    item.governance_verification_deadline = now + timedelta(days=governance_days)
+    captured = []
+    async def accept(_db, *, body, **kwargs):
+        captured.append(body)
+    monkeypatch.setattr(memory_promotion, "accept_canonical_memory_entry", accept)
+    asyncio.run(memory_promotion.promote_memory_entry_to_shared(
+        _PromotionDB((source, item)), entry_id=source.id, tenant_id="tenant-a", **_authority(), signing_key=None))
+    assert captured[0].valid_until == now + timedelta(days=expected_days)

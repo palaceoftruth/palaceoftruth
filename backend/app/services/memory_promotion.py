@@ -92,12 +92,21 @@ async def promote_memory_entry_to_shared(
         raise HTTPException(status_code=409, detail="Source memory entry is not ready")
     if item.governance_verification_state in {"rejected", "stale"} or item.governance_superseded_by_item_id is not None:
         raise HTTPException(status_code=409, detail="Source memory governance state does not permit promotion")
+    if item.governance_verification_deadline is not None and item.governance_verification_deadline <= now:
+        raise HTTPException(status_code=409, detail="Source memory governance verification is expired")
     if source.superseded_by_entry_id is not None:
         raise HTTPException(status_code=409, detail="Source memory entry is superseded")
     if source.valid_until is not None and source.valid_until <= now:
         raise HTTPException(status_code=409, detail="Source memory entry is expired")
     if not item.raw_content or not item.raw_content.strip():
         raise HTTPException(status_code=422, detail="Source memory entry has no content")
+
+    # A snapshot must not outlive either the source validity or its governance
+    # verification window, even when that deadline is still in the future.
+    deadlines = [value for value in (source.valid_until, item.governance_verification_deadline) if value is not None]
+    valid_until = min(deadlines) if deadlines else None
+    if valid_until is not None and source.valid_from is not None and source.valid_from > valid_until:
+        raise HTTPException(status_code=409, detail="Source memory has no promotable validity window")
 
     idempotency_key = hashlib.sha256(
         f"{tenant_id}:{source.id}:tenant_shared".encode("utf-8")
@@ -132,7 +141,7 @@ async def promote_memory_entry_to_shared(
         },
         idempotency_key=idempotency_key,
         valid_from=source.valid_from,
-        valid_until=source.valid_until,
+        valid_until=valid_until,
         fact_kind=source.fact_kind,
         relationship_policy="skip",
     )

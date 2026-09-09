@@ -11,7 +11,8 @@ sources, cross-tenant sources, and invalid or unavailable sources are denied.
 The server selects the source content, destination, idempotency key, and
 provenance. It applies memory privacy admission before storage. A shared copy is
 still agent-authored; promotion does not make it a verified fact. A job records
-the promotion time and admission audit. Copied metadata records the source's
+the promotion time and admission audit. The copy expires at the earlier of the
+source validity deadline and its governance verification deadline. Copied metadata records the source's
 update time, not a fabricated promotion time. Changes to the source cause a
 repeat request to conflict rather than silently return a different payload.
 
@@ -43,8 +44,8 @@ There is no visual UI change; the frontend change only extends an API type.
    to publish the backend/MCP/worker images and Hermes plugin 1.0.38. The workflow
    builds release images after merge; PR checks do not publish them.
 2. Promote the approved image coordinates through the existing Flux deployment
-   repo. Palace's release is `palace-sarvent` in `palace-sarvent` on `k3s-lab`.
-   Recheck that target and the installed versions before changing deployment.
+   repo. Confirm the approved environment, release, and installed versions
+   before changing deployment.
 3. Deploy the backend/MCP/worker before installing plugin 1.0.38 on intended agents.
 4. With operator authentication, call
    `PATCH /api/v1/admin/tenants/{tenant_id}/mcp-clients/{client_id}/shared-memory-promotion`
