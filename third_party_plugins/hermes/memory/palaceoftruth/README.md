@@ -318,7 +318,7 @@ Release process:
 - The same CI run also publishes the matching container image tag:
   `ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin:<commit-sha>`
 
-### Promote an existing agent memory to shared scope (1.0.38)
+### Promote an existing agent memory to shared scope (1.0.39)
 
 Call `palace_promote_to_shared({"entry_id": "<memory entry UUID>"})` to copy one
 existing memory from the caller's canonical agent scope to `tenant_shared`.
@@ -340,7 +340,7 @@ contract: an accepted or queued job is not yet a completed, indexed memory. Poll
 another authorized agent to verify visibility. Errors from an older backend or
 missing grants are returned without an alternate write attempt.
 
-Deploy the backend first, install plugin 1.0.38, then enable the grant only for the
+Deploy the backend first, install plugin 1.0.39, then enable the grant only for the
 intended clients. Use the operator-authenticated endpoint
 `PATCH /api/v1/admin/tenants/{tenant_id}/mcp-clients/{client_id}/shared-memory-promotion`
 with `{"enabled": true}`. It preserves other grants and the client credential.

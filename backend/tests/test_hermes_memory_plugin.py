@@ -5658,3 +5658,41 @@ def test_promote_tool_obeys_disabled_writes_and_surfaces_failure(monkeypatch):
     result = json.loads(provider.handle_tool_call("palace_promote_to_shared", args))
     assert result["ok"] is False
     assert result["error"]["retryable"] is True
+
+
+@pytest.mark.parametrize("oauth", [True, False])
+def test_promote_tool_traverses_real_transport_scope_mapping(monkeypatch, oauth):
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palaceoftruth.test")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "fixture-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "iris")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="iris")
+    if oauth:
+        provider._oauth_client_secret = "fixture-secret"
+        provider._bearer_token = "fixture-token"
+        provider._bearer_expires_at = datetime.now(UTC) + timedelta(hours=1)
+    seen = []
+    entry_id = "550e8400-e29b-41d4-a716-446655440031"
+    path = f"/api/v1/memory/entries/{entry_id}/promote-to-shared"
+    def transport(request, timeout):
+        if request_path(request) == "/api/v1/memory/whoami":
+            return FakeJsonResponse(oauth_whoami("iris"))
+        seen.append(request)
+        assert request_path(request) == path and request.method == "POST"
+        assert json.loads(request.data) == {}
+        if oauth:
+            assert request.get_header("Authorization") == "Bearer fixture-token"
+        else:
+            assert request.get_header("X-mcp-scope") == "memory:promote_shared"
+            assert request.get_header("X-mcp-scopes") == "memory:promote_shared,write,write:agent"
+        return FakeJsonResponse({"job_id": "job-1", "status": "queued"})
+    monkeypatch.setattr(module, "urlopen", transport)
+    result = json.loads(provider.handle_tool_call("palace_promote_to_shared", {"entry_id": entry_id}))
+    assert result["ok"] is True and result["durability"]["job_id"] == "job-1"
+    assert len(seen) == 1
+    assert module._mcp_scopes_for_memory_route("POST", path, {}) == ["memory:promote_shared", "write", "write:agent"]
+    with pytest.raises(RuntimeError, match="missing an explicit MCP scope mapping"):
+        module._mcp_scope_for_memory_route("POST", path.replace(entry_id, "invalid"))
+    with pytest.raises(RuntimeError, match="missing an explicit MCP scope mapping"):
+        module._mcp_scope_for_memory_route("GET", path)

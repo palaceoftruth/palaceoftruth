@@ -429,6 +429,10 @@ def _safe_scope_labels(scopes: list[dict[str, Any]], *, limit: int = 12) -> list
 
 
 def _mcp_scope_for_memory_route(method: str, path: str) -> str | None:
+    if method.upper() == "POST" and re.fullmatch(
+        r"/api/v1/memory/entries/" + UUID_PATTERN[1:-1] + r"/promote-to-shared", path
+    ):
+        return "memory:promote_shared"
     if method.upper() == "GET" and path.startswith("/api/v1/memory/jobs/"):
         return "read"
     scope = PALACE_MEMORY_ROUTE_SCOPES.get((method.upper(), path))
@@ -447,7 +451,9 @@ def _mcp_scopes_for_memory_route(method: str, path: str, payload: dict[str, Any]
     scopes = [scope]
     if method.upper() != "POST":
         return scopes
-    if path == "/api/v1/memory/entries":
+    if scope == "memory:promote_shared":
+        scopes.extend(("write", "write:agent"))
+    elif path == "/api/v1/memory/entries":
         scopes.extend(_scoped_write_grants_for_entry_payload(payload))
     elif path == "/api/v1/memory/entries:batch":
         if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):

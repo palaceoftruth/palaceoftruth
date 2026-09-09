@@ -21,7 +21,7 @@ The body stays unchanged, while the tenant-wide content index cannot collapse
 the copy into its private source. Only the server-owned admission record enables
 this behavior; caller metadata does not bypass normal content deduplication.
 
-This change adds no database migration. Hermes package version: **1.0.38**.
+This change adds no database migration. Hermes package version: **1.0.39**.
 
 ## Verification matrix
 
@@ -46,12 +46,12 @@ There is no visual UI change; the frontend change only extends an API type.
 ## Deployment and rollback
 
 1. Merge the reviewed application PR, then wait for the existing release workflow
-   to publish the backend/MCP/worker images and Hermes plugin 1.0.38. The workflow
+   to publish the backend/MCP/worker images and Hermes plugin 1.0.39. The workflow
    builds release images after merge; PR checks do not publish them.
 2. Promote the approved image coordinates through the existing Flux deployment
    repo. Confirm the approved environment, release, and installed versions
    before changing deployment.
-3. Deploy the backend/MCP/worker before installing plugin 1.0.38 on intended agents.
+3. Deploy the backend/MCP/worker before installing plugin 1.0.39 on intended agents.
 4. With operator authentication, call
    `PATCH /api/v1/admin/tenants/{tenant_id}/mcp-clients/{client_id}/shared-memory-promotion`
    with `{"enabled": true}` for each intended client. The endpoint requires an
