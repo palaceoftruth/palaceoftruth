@@ -1079,7 +1079,19 @@ async def retrieve_memory_artifacts(
         bound_agent_scope_key = getattr(request.state, "mcp_agent_scope_key", None)
         if not isinstance(bound_agent_scope_key, str) or not bound_agent_scope_key:
             raise HTTPException(status_code=403, detail="Hermes OAuth client has no canonical agent binding")
-        if body.scope.type != "agent" or body.scope.key != bound_agent_scope_key:
+        tenant_shared_requested = body.scope.type == "tenant_shared"
+        tenant_shared_permitted = bool(
+            getattr(request.state, "mcp_allow_tenant_shared_reads", False)
+        )
+        is_canonical_agent_scope = (
+            body.scope.type == "agent" and body.scope.key == bound_agent_scope_key
+        )
+        if not is_canonical_agent_scope and not (
+            tenant_shared_requested and tenant_shared_permitted
+        ):
+            # The DB row stays the authority: a client without the
+            # tenant-shared read flag keeps the canonical-agent-scope-only
+            # rule, matching how /retrieve-agent gates the same permission.
             raise HTTPException(
                 status_code=403,
                 detail="Hermes OAuth client must retrieve through its canonical agent scope",
