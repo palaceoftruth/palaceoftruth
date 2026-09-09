@@ -16,6 +16,11 @@ source validity deadline and its governance verification deadline. Copied metada
 update time, not a fabricated promotion time. Changes to the source cause a
 repeat request to conflict rather than silently return a different payload.
 
+The worker uses a promotion-specific deduplication key for the shared copy.
+The body stays unchanged, while the tenant-wide content index cannot collapse
+the copy into its private source. Only the server-owned admission record enables
+this behavior; caller metadata does not bypass normal content deduplication.
+
 This change adds no database migration. Hermes package version: **1.0.38**.
 
 ## Verification matrix
@@ -28,7 +33,7 @@ This change adds no database migration. Hermes package version: **1.0.38**.
 | MCP permission gate and fixed endpoint | `test_mcp_server.py` | Automated |
 | Hermes schema, invalid IDs, disabled writes, transient failure, repeat calls | `test_hermes_memory_plugin.py` | Automated |
 | Admin activation/deactivation, prerequisites and tenant boundary | `test_memory_promotion_activation.py` | Automated |
-| Real PostgreSQL concurrent promotion, replay, source preservation, tenant isolation, changed-source conflict | `test_memory_promotion_database.py` | Passed locally; CI database lane |
+| Real PostgreSQL concurrent promotion, replay, source preservation, tenant isolation, changed-source conflict, worker completion and stored embeddings | `test_memory_promotion_database.py` | Passed locally; CI database lane |
 | Real PostgreSQL reversible activation, preserved credential and read grants | `test_memory_promotion_database.py` | Passed locally; CI database lane |
 | Backend regression suite and workflow checks | Existing pytest suites | Required before PR handoff |
 | Frontend type compatibility | `npm ci && npm run build` | Passed locally |

@@ -13,6 +13,10 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.embedding_profile import resolve_embedding_profile
+from app.models.embedding import Embedding
+from app.services.item_processing import process_prebuilt_item
+from app.utils.hash import compute_content_hash
 from app.models.item import Item
 from app.models.palace import MemoryEntry
 from app.models.job import Job
@@ -39,6 +43,7 @@ def test_real_database_promotion_concurrency_isolation_and_changed_source():
             source_id = uuid.UUID(accepted.job.payload["memory_entry_id"])
             source_item = await db.get(Item, accepted.source_item_id)
             source_item.status = "ready"
+            source_item.content_hash = compute_content_hash(source_item.raw_content)
             accepted.job.status = "complete"
             await db.commit()
 
@@ -74,6 +79,20 @@ def test_real_database_promotion_concurrency_isolation_and_changed_source():
             assert "scope-tenant_shared" in copy_item.tags
             job = await db.get(Job, first.job.id)
             assert job.payload["admission"]["promotion_actor_client_key"] == "hermes-iris"
+            # Exercise the actual worker processor, not only acceptance. The
+            # shared copy intentionally has the same content as its private source.
+            class LocalEmbedder:
+                profile = resolve_embedding_profile()
+                async def embed_texts(self, texts):
+                    return [[0.1] * self.profile.dimensions for _ in texts]
+            processed = await process_prebuilt_item(
+                db, item=copy_item, job=job, tenant_id=tenant,
+                embedder=LocalEmbedder(), llm=None, enable_ai_enrichment=False,
+            )
+            assert processed.status == "completed"
+            assert copy_item.status == "ready" and job.status == "completed"
+            assert (await db.execute(select(Embedding.id).where(Embedding.item_id == copy.item_id))).scalars().all()
+            assert original.scope_type == "agent" and source_item.status == "ready"
 
         for override in ({"tenant_id": tenant + "-other"}, {"agent_scope_key": "vera"}, {"entry_id": uuid.uuid4()}):
             with pytest.raises(HTTPException) as error:
