@@ -518,3 +518,12 @@ def test_chart_publisher_reserves_every_published_oci_version_before_bump() -> N
         "python3 scripts/bump_chart_release.py"
     )
     assert script.index("python3 scripts/bump_chart_release.py") < script.index("helm push")
+
+
+def test_worker_scan_has_time_for_browser_layers_without_weakening_security_gate():
+    workflow = _load_workflow()
+    scan = next(step for step in workflow["jobs"]["build-backend"]["steps"] if step.get("name") == "Scan worker image")
+    assert scan["with"]["timeout"] == "15m"
+    assert scan["with"]["severity"] == "HIGH,CRITICAL"
+    assert scan["with"]["exit-code"] == "1"
+    assert scan["with"]["ignore-unfixed"] == "true"
