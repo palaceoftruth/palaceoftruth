@@ -750,6 +750,9 @@ jobs:
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           image-ref: ${{ steps.release.outputs.worker_image }}@${{ steps.worker.outputs.digest }}
+          # The worker image includes browser/media layers; cold analysis can
+          # exceed Trivy's default five minutes. Keep the same security gate.
+          timeout: "15m"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
