@@ -57,6 +57,20 @@ async def _set_job_progress(
     )
 
 
+def _is_shared_memory_promotion(job: Job | None) -> bool:
+    """Only the server-owned admission record authorizes an intentional copy."""
+    if job is None or job.job_type != "memory_artifact":
+        return False
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    admission = payload.get("admission")
+    promotion = admission.get("promotion") if isinstance(admission, dict) else None
+    return (
+        payload.get("scope_type") == "tenant_shared"
+        and isinstance(promotion, dict)
+        and promotion.get("kind") == "agent_memory_to_tenant_shared"
+    )
+
+
 async def process_prebuilt_item(
     db: AsyncSession,
     *,
@@ -84,6 +98,13 @@ async def process_prebuilt_item(
 
         raw_content = item.raw_content
         content_hash = compute_content_hash(raw_content)
+        # A server-authorized promotion is a separate scoped copy of identical
+        # content. Namespace its dedup key by the stable target item ID so the
+        # tenant-wide unique content index does not collapse it into its private
+        # source. Retries of this item keep the same key; ordinary writes and
+        # caller-supplied promotion metadata retain content-only deduplication.
+        if _is_shared_memory_promotion(job):
+            content_hash = compute_content_hash(f"palace:memory-promotion:{item.id}:{content_hash}")
         existing_id = await db.scalar(
             select(Item.id)
             .where(Item.content_hash == content_hash)

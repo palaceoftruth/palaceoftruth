@@ -11,6 +11,7 @@ from app.models.job import Job, JobProgressEvent
 from app.embedding_profile import resolve_embedding_profile
 from app.services.embedder import EmbeddingRequestError
 from app.services.item_processing import process_prebuilt_item
+from app.utils.hash import compute_content_hash
 
 
 class FakeEmbedder:
@@ -320,3 +321,31 @@ async def test_process_prebuilt_item_persists_original_embedding_error_on_fresh_
     failure_events = [value for value in session.added if isinstance(value, JobProgressEvent)]
     assert failure_events[-1].status == "failed"
     assert failure_events[-1].progress == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False])
+async def test_promotion_indexes_private_source_copy_but_caller_metadata_does_not_bypass_dedupe(authorized):
+    marker = {"kind": "agent_memory_to_tenant_shared", "source_entry_id": str(uuid.uuid4())}
+    item = Item(id=uuid.uuid4(), tenant_id="tenant-a", title="Copy", source_type="note",
+                status="processing", raw_content="Same body as an existing private memory.",
+                metadata_={"promotion": marker}, tags=[], categories=[], created_at=datetime.now(timezone.utc))
+    payload = {"scope_type": "tenant_shared"}
+    if authorized:
+        payload["admission"] = {"promotion": marker}
+    else:
+        payload["metadata"] = {"promotion": marker}
+    job = Job(id=uuid.uuid4(), item_id=item.id, tenant_id="tenant-a", job_type="memory_artifact",
+              status="queued", progress=0, payload=payload, created_at=datetime.now(timezone.utc))
+    session = FakeSession(item, job)
+    source_item_id = uuid.uuid4()
+    async def existing_source(statement):
+        hashed = statement.compile().params["content_hash_1"]
+        return source_item_id if hashed == compute_content_hash(item.raw_content) else None
+    session.scalar = existing_source
+    result = await process_prebuilt_item(session, item=item, embedder=FakeEmbedder(), llm=FakeLlm(),
+                                        tenant_id="tenant-a", job=job)
+    assert result.status == ("completed" if authorized else "duplicate")
+    assert item.status == ("ready" if authorized else "failed")
+    assert bool(session.embeddings) is authorized
+    assert result.duplicate_of == (None if authorized else source_item_id)
