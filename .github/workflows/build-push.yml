@@ -266,9 +266,11 @@ jobs:
             uv run --frozen --python 3.12 python ../scripts/verify_migration_roundtrip.py
           DATABASE_URL=postgresql+asyncpg://palace:palace@localhost:5432/palace_migration_gate \
           OPENAI_API_KEY=ci-placeholder OPENROUTER_API_KEY=ci-placeholder API_KEY=ci-test-key \
-            uv run --frozen --python 3.12 alembic check
-          PROMOTION_TEST_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_migration_gate \
-            uv run --frozen --python 3.12 python -m pytest tests/test_memory_promotion_database.py -q
+            sh -e -c '
+              uv run --frozen --python 3.12 alembic check
+              PROMOTION_TEST_DATABASE_URL="$DATABASE_URL" \
+                uv run --frozen --python 3.12 python -m pytest tests/test_memory_promotion_database.py -q
+            '
 
   frontend:
     name: Frontend build
