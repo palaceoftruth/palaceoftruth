@@ -72,6 +72,7 @@ DEFAULT_OAUTH_CLIENT_SCOPES = (
 SEARCH_TOOL_NAME = "palace_search"
 FACT_RECALL_TOOL_NAME = "palace_fact_recall"
 SEMANTIC_RECALL_TOOL_NAME = "palace_semantic_recall"
+PROMOTE_TOOL_NAME = "palace_promote_to_shared"
 REMEMBER_TOOL_NAME = "palace_remember"
 BULK_REMEMBER_TOOL_NAME = "palace_remember_bulk"
 MEMORY_JOB_STATUS_TOOL_NAME = "palace_memory_job_status"
@@ -2030,6 +2031,23 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 },
             },
             {
+                "name": PROMOTE_TOOL_NAME,
+                "description": (
+                    "Copy an existing memory from your canonical agent scope to "
+                    "tenant_shared, preserving the source. Requires the explicit "
+                    "memory:promote_shared grant. Use a memory entry UUID from recall, "
+                    "not a source item or job UUID. Repeat calls are safe."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entry_id": {"type": "string", "format": "uuid", "pattern": UUID_PATTERN},
+                    },
+                    "required": ["entry_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": REMEMBER_TOOL_NAME,
                 "description": (
                     "Save a concise durable memory to Palace of Truth under the "
@@ -2365,6 +2383,28 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             )
             self._cache_explicit_read(cache_key, serialized)
             return serialized
+
+        if tool_name == PROMOTE_TOOL_NAME:
+            if self._writes_disabled:
+                return json.dumps({"ok": False, "error": "writes are disabled for this agent context"})
+            try:
+                entry_id = _optional_str(args.get("entry_id"))
+                if not entry_id:
+                    raise ValueError("entry_id is required")
+                _validate_entry_uuid(entry_id, "entry_id")
+                # Resolve identity conflicts before a write, just as remember does.
+                if not self._resolve_tenant_id():
+                    raise ValueError("could not resolve Palace of Truth tenant")
+                self._canonical_agent_scope_key()
+                response = self._post_memory_entries(
+                    f"/api/v1/memory/entries/{entry_id}/promote-to-shared", {},
+                )
+            except Exception as exc:
+                return json.dumps({"ok": False, "error": _safe_exception_summary(exc)})
+            return json.dumps({
+                "ok": True, "scope": {"type": "tenant_shared"},
+                "durability": _write_contract_summary(response), "response": response,
+            })
 
         if tool_name == REMEMBER_TOOL_NAME:
             content = str(args.get("content") or "").strip()

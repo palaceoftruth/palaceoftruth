@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.job import Job
 from app.schemas.bundle import AdminImportResponse, AdminJobResponse
+from app.schemas.admin import McpOAuthClientSharedMemoryPromotionRequest
 from app.auth import hash_secret
 from app.mcp_scopes import DEFAULT_API_KEY_SCOPES, VALID_MCP_OPERATION_SCOPES
 from app.schemas.memory import (
@@ -1102,6 +1103,87 @@ async def bind_mcp_oauth_client_agent_scope(
         raise HTTPException(status_code=404, detail="MCP OAuth client not found")
     await db.commit()
     return _serialize_mcp_oauth_client(row)
+
+
+@router.patch(
+    "/tenants/{tenant_id}/mcp-clients/{client_id}/shared-memory-promotion",
+    response_model=McpOAuthClientSummary,
+    dependencies=[Depends(_verify_admin)],
+)
+async def set_mcp_oauth_client_shared_memory_promotion(
+    tenant_id: str,
+    client_id: uuid.UUID,
+    body: McpOAuthClientSharedMemoryPromotionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> McpOAuthClientSummary:
+    """Toggle promotion authority while retaining every other client grant."""
+    tenant_id = _tenant_id_from_path(tenant_id)
+    result = await db.execute(
+        text(
+            """
+            SELECT id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                   agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+                   allow_workspace_scope_reads, containment_mode, client_type, oauth_client_id,
+                   redirect_uris, allowed_resources, authorization_code_enabled,
+                   token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds,
+                   created_at, last_seen_at
+            FROM mcp_clients
+            WHERE tenant_id = :tenant_id AND id = :client_id
+            FOR UPDATE
+            """
+        ),
+        {"tenant_id": tenant_id, "client_id": client_id},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth client not found")
+
+    if body.enabled:
+        bound_agent = row.get("agent_scope_key")
+        scopes = set(row.get("allowed_scopes") or [])
+        if (
+            row.get("containment_mode") != "hermes_agent"
+            or not isinstance(bound_agent, str)
+            or not bound_agent.strip()
+            or not {"write", "write:agent"}.issubset(scopes)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Shared-memory promotion requires a canonical bound agent and "
+                    "existing write and write:agent grants"
+                ),
+            )
+
+    # jsonb operators update only this capability and preserve every other
+    # grant, including ordering and any future scope values.
+    mutation = await db.execute(
+        text(
+            """
+            UPDATE mcp_clients
+            SET allowed_scopes = CASE
+                WHEN :enabled AND NOT (allowed_scopes ? 'memory:promote_shared')
+                    THEN allowed_scopes || '["memory:promote_shared"]'::jsonb
+                WHEN NOT :enabled
+                    THEN allowed_scopes - 'memory:promote_shared'
+                ELSE allowed_scopes
+            END
+            WHERE tenant_id = :tenant_id AND id = :client_id
+            RETURNING id, tenant_id, client_key, display_name, allowed_scopes, metadata,
+                      agent_scope_key, allow_all_agent_scope_reads, allow_tenant_shared_reads,
+                      allow_workspace_scope_reads, containment_mode, client_type, oauth_client_id,
+                      redirect_uris, allowed_resources, authorization_code_enabled,
+                      token_endpoint_auth_method, oauth_revoked_at, oauth_token_ttl_seconds,
+                      created_at, last_seen_at
+            """
+        ),
+        {"enabled": body.enabled, "tenant_id": tenant_id, "client_id": client_id},
+    )
+    updated = mutation.mappings().one_or_none()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="MCP OAuth client not found")
+    await db.commit()
+    return _serialize_mcp_oauth_client(updated)
 
 
 @router.post(

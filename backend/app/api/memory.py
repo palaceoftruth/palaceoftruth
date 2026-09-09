@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import generate_webhook_signing_key, require_api_key_scope_header, require_mcp_scope
+from app.auth import generate_webhook_signing_key, get_auth_context, require_api_key_scope_header, require_mcp_scope
 from app.config import settings
 from app.database import get_db
 from app.models.job import Job
@@ -76,6 +76,7 @@ from app.services.memory_admission import evaluate_memory_write_admission
 from app.services.memory_provenance import derive_created_by_role
 from app.services.memory_telemetry import record_retrieval
 from app.services.memory_trajectory import retrieve_memory_trajectory
+from app.services.memory_promotion import promote_memory_entry_to_shared
 from app.services.job_progress import record_job_progress_event
 from app.services.queue_telemetry import build_memory_queue_hint
 from app.services.retrieval_capture import build_capture_record, capture_retrieval, query_fingerprint
@@ -629,6 +630,51 @@ async def create_memory_entry(
     if result.enqueue_requested:
         await _enqueue_memory_job_or_raise(request, db, job=result.job)
     accepted = build_memory_acceptance_response(result, poll_url=_memory_job_poll_url(request, result.job), queue=queue)
+    _set_memory_contract_headers(
+        response,
+        job_id=result.job.id,
+        contract_status=accepted.contract_status,
+        poll_after_seconds=accepted.poll_after_seconds,
+        queue=queue,
+        retry_after_seconds=accepted.retry_after_seconds,
+    )
+    return accepted
+
+
+@router.post(
+    "/entries/{entry_id}/promote-to-shared",
+    response_model=MemoryArtifactAcceptedResponse,
+    status_code=202,
+    dependencies=[Depends(require_mcp_scope("memory:promote_shared"))],
+)
+async def promote_memory_entry(
+    entry_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> MemoryArtifactAcceptedResponse:
+    """Promote one bound agent entry using the normal memory job contract."""
+    context = get_auth_context(request)
+    result = await promote_memory_entry_to_shared(
+        db,
+        entry_id=entry_id,
+        tenant_id=request.state.tenant_id,
+        auth_mode=context.auth_mode,
+        delegated_grant_id=context.delegated_grant_id,
+        client_key=context.client_key,
+        agent_scope_key=context.agent_scope_key,
+        containment_mode=context.containment_mode,
+        allowed_scopes=list(context.scopes),
+        signing_key=generate_webhook_signing_key(),
+    )
+    queue = await _memory_queue_contract_hint(request)
+    if result.enqueue_requested:
+        await _enqueue_memory_job_or_raise(request, db, job=result.job)
+    accepted = build_memory_acceptance_response(
+        result,
+        poll_url=_memory_job_poll_url(request, result.job),
+        queue=queue,
+    )
     _set_memory_contract_headers(
         response,
         job_id=result.job.id,

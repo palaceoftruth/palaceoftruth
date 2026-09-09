@@ -8,6 +8,7 @@ McpOperationScope = Literal[
     "read",
     "write",
     "write:agent",
+    "memory:promote_shared",
     "write:workspace",
     "write:session",
     "audit:write",
@@ -31,6 +32,7 @@ class McpScopeDefinition:
 MCP_SCOPE_CATALOG: tuple[McpScopeDefinition, ...] = (
     McpScopeDefinition("read", "Read memory", "Read memory, graph, claim, wakeup, and audit surfaces.", "memory"),
     McpScopeDefinition("write", "Write memory", "Create tenant-shared memory entries and run write-capable MCP tools.", "memory"),
+    McpScopeDefinition("memory:promote_shared", "Promote own memory", "Copy an existing canonical agent memory to tenant-shared scope with an audit trail.", "memory"),
     McpScopeDefinition("write:agent", "Write agent scope", "Create memory entries in explicitly requested agent scopes.", "memory"),
     McpScopeDefinition("write:workspace", "Write workspace scope", "Create memory entries in explicitly requested workspace scopes.", "memory"),
     McpScopeDefinition("write:session", "Write session scope", "Create memory entries in explicitly requested session scopes.", "memory"),
@@ -126,6 +128,7 @@ MCP_OPERATION_SCOPES: dict[str, McpOperationScope] = {
     "list_tags": "read",
     "list_items": "read",
     # write surfaces
+    "palace_promote_to_shared": "memory:promote_shared",
     "create_memory_entry": "write",
     "create_memory_entries_batch": "write",
     "capture_checkpoint": "write",

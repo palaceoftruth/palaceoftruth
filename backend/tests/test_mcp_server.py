@@ -4585,3 +4585,33 @@ def test_api_client_uses_its_own_credential_on_the_stdio_transport() -> None:
     seen = _caller_identity_scenario(forward_caller_identity=True, credential_headers=())
 
     assert seen[0]["x-api-key"] == "adapter-key"
+
+
+@pytest.mark.parametrize("granted", [True, False])
+def test_promote_tool_authorizes_and_posts_fixed_destination(granted):
+    seen = []
+    entry_id = "550e8400-e29b-41d4-a716-446655440031"
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path.endswith("/mcp/audit"):
+            return httpx.Response(201, json={"status": "recorded"})
+        assert request.url.path == f"/api/v1/memory/entries/{entry_id}/promote-to-shared"
+        assert json.loads(request.content) == {}
+        return httpx.Response(202, json={"job_id": "job-1", "replayed": False})
+    async def scenario():
+        async with httpx.AsyncClient(base_url="https://api.palaceoftruth.test", transport=httpx.MockTransport(handler)) as client:
+            settings = SecondBrainMcpSettings(
+                api_base_url="https://api.palaceoftruth.test", api_key="secret",
+                client_scopes=("read", "write", "write:agent", "memory:promote_shared") if granted else ("read", "write", "write:agent", "admin"),
+            )
+            api = SecondBrainApiClient(settings, client=client)
+            ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=SecondBrainMcpRuntime(settings=settings, api=api)))
+            if granted:
+                result = await app.mcp_server.palace_promote_to_shared(entry_id=entry_id, ctx=ctx)
+                assert result["job_id"] == "job-1"
+            else:
+                with pytest.raises(PermissionError):
+                    await app.mcp_server.palace_promote_to_shared(entry_id=entry_id, ctx=ctx)
+    asyncio.run(scenario())
+    assert any(path.endswith("/promote-to-shared") for path in seen) is granted
+    assert _required_scopes_for_call("palace_promote_to_shared", {}) == ("memory:promote_shared", "write", "write:agent")

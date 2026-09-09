@@ -475,3 +475,11 @@ For Hermes retrieval, use this decision table:
 | Captured URL, video, transcript, document, title, or source | `palace_search` |
 | Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.37 compatibility alias) |
 | Exact-scope canary or containment check | `palace_exact_scope_recall` |
+
+Hermes plugin 1.0.38 adds `palace_promote_to_shared` for an existing memory in the
+caller's canonical agent scope. It preserves the source and creates an audited,
+idempotent tenant-shared copy. The operation requires the explicit
+`memory:promote_shared` OAuth grant in addition to `write` and `write:agent`;
+normal contained writes retain their existing scope restrictions. See the
+[Hermes promotion contract](third_party_plugins/hermes/memory/palaceoftruth/README.md#promote-an-existing-agent-memory-to-shared-scope-1038)
+for activation, job verification, and rollback.
