@@ -914,6 +914,7 @@ export interface PalaceMcpActivitySummary {
 export type McpOperationScope =
   | "read"
   | "write"
+  | "memory:promote_shared"
   | "write:agent"
   | "write:workspace"
   | "write:session"

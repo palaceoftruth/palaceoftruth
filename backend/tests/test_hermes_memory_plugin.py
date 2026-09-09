@@ -857,6 +857,7 @@ def test_palaceoftruth_provider_exposes_explicit_search_and_remember_tools(
         "palace_semantic_recall",
         "palace_remember",
         "palace_remember_bulk",
+        "palace_promote_to_shared",
         "palace_memory_job_status",
         "palace_exact_scope_recall",
     }
@@ -5608,3 +5609,52 @@ def test_sar1381_identical_concurrent_failed_prefetch_shares_one_attempt(
 
     assert target_calls == 1
     assert results == ["", ""]
+
+
+def test_promote_tool_posts_only_entry_id_and_reuses_write_contract(monkeypatch):
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider._resolve_tenant_id = lambda: "tenant-a"
+    provider._canonical_agent_scope_key = lambda: "iris"
+    seen = []
+    provider._request_json = lambda method, path, payload: (
+        seen.append((method, path, payload)) or {"job_id": "job-1", "status": "queued"}
+    )
+    entry_id = "550e8400-e29b-41d4-a716-446655440031"
+    first = json.loads(provider.handle_tool_call("palace_promote_to_shared", {"entry_id": entry_id}))
+    second = json.loads(provider.handle_tool_call("palace_promote_to_shared", {"entry_id": entry_id}))
+    assert first == second
+    assert first["ok"] is True
+    assert first["durability"]["durable"] is False
+    assert first["scope"] == {"type": "tenant_shared"}
+    assert seen == [("POST", f"/api/v1/memory/entries/{entry_id}/promote-to-shared", {})] * 2
+
+
+@pytest.mark.parametrize("entry_id", [None, "", "not-a-uuid", "../other"])
+def test_promote_tool_rejects_invalid_id_without_network(monkeypatch, entry_id):
+    module = load_palaceoftruth_plugin()
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider._resolve_tenant_id = lambda: pytest.fail("invalid request made a network call")
+    result = json.loads(provider.handle_tool_call("palace_promote_to_shared", {"entry_id": entry_id}))
+    assert result["ok"] is False
+
+
+def test_promote_tool_obeys_disabled_writes_and_surfaces_failure(monkeypatch):
+    module = load_palaceoftruth_plugin()
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider._writes_disabled = True
+    args = {"entry_id": "550e8400-e29b-41d4-a716-446655440031"}
+    result = json.loads(provider.handle_tool_call("palace_promote_to_shared", args))
+    assert result["ok"] is False
+    assert "disabled" in result["error"]
+    provider._writes_disabled = False
+    provider._resolve_tenant_id = lambda: "tenant-a"
+    provider._canonical_agent_scope_key = lambda: "iris"
+    def unavailable(*args, **kwargs):
+        raise module.PalaceCircuitOpenError(10)
+    provider._post_memory_entries = unavailable
+    result = json.loads(provider.handle_tool_call("palace_promote_to_shared", args))
+    assert result["ok"] is False
+    assert result["error"]["retryable"] is True

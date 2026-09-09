@@ -1111,6 +1111,13 @@ class SecondBrainApiClient:
         assert self._tenant_id is not None
         return self._tenant_id
 
+    async def promote_memory_to_shared(self, entry_id: str) -> dict[str, Any]:
+        entry_id = str(uuid.UUID(entry_id))
+        return await self._request_json(
+            "POST", f"/api/v1/memory/entries/{entry_id}/promote-to-shared",
+            json_body={}, required_scope="memory:promote_shared",
+        )
+
     async def create_memory_entry(
         self,
         *,
@@ -1709,6 +1716,8 @@ def _required_scopes_for_call(operation: str, params: dict[str, Any]) -> tuple[M
     """
     base_scope = _operation_scope(operation)
     scopes: list[McpOperationScope] = [base_scope]
+    if operation == "palace_promote_to_shared":
+        scopes.extend(("write", "write:agent"))
     if operation == "capture_checkpoint" and params.get("queue_relationship_backfill") is True:
         scopes.append("admin")
     if base_scope.startswith("write"):
@@ -3221,6 +3230,26 @@ async def palace_semantic_recall(
             date_from=date_from,
             date_to=date_to,
         ),
+    )
+
+
+@mcp.tool()
+async def palace_promote_to_shared(
+    entry_id: str,
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+) -> dict[str, Any]:
+    """Copy an existing own-agent memory to tenant_shared, preserving the source.
+
+    Requires a bound agent and the explicit memory:promote_shared, write, and
+    write:agent grants. Use a memory entry UUID, not a source item or job UUID.
+    Repeat calls replay the same promotion; the normal job contract applies.
+    """
+    entry_id = str(uuid.UUID(entry_id))
+    return await _run_mcp_operation(
+        ctx,
+        operation="palace_promote_to_shared",
+        params={"entry_id": entry_id},
+        call=lambda: _runtime(ctx).api.promote_memory_to_shared(entry_id),
     )
 
 

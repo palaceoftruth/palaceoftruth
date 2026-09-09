@@ -317,3 +317,38 @@ Release process:
   manifest or packaged Hermes files change.
 - The same CI run also publishes the matching container image tag:
   `ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin:<commit-sha>`
+
+### Promote an existing agent memory to shared scope (1.0.38)
+
+Call `palace_promote_to_shared({"entry_id": "<memory entry UUID>"})` to copy one
+existing memory from the caller's canonical agent scope to `tenant_shared`.
+Use the `entry_id` from `palace_fact_recall`; item IDs and job IDs are different.
+The source entry remains in its original scope. The shared copy records the
+source and authenticated promoter. Ordinary `palace_remember` writes remain
+restricted to the configured scope.
+
+The backend must support `POST /api/v1/memory/entries/{entry_id}/promote-to-shared`.
+An operator must grant the bound OAuth client `memory:promote_shared`, `write`,
+and `write:agent`. The new grant is opt-in and is not in the default scope list.
+An `admin` grant or tenant-shared read access alone does not permit promotion.
+Unbound clients and delegated grants cannot use this operation. The destination
+is fixed; the caller cannot supply another scope or change the source content.
+
+Repeated calls use server-side idempotency. The response uses the existing write
+contract: an accepted or queued job is not yet a completed, indexed memory. Poll
+`palace_memory_job_status` until the job completes, then use shared recall from
+another authorized agent to verify visibility. Errors from an older backend or
+missing grants are returned without an alternate write attempt.
+
+Deploy the backend first, install plugin 1.0.38, then enable the grant only for the
+intended clients. Use the operator-authenticated endpoint
+`PATCH /api/v1/admin/tenants/{tenant_id}/mcp-clients/{client_id}/shared-memory-promotion`
+with `{"enabled": true}`. It preserves other grants and the client credential.
+Request a fresh OAuth token whose requested scopes include `memory:promote_shared`
+(or omit the requested scope list to use the client grants). If the plugin has
+`PALACEOFTRUTH_MCP_CLIENT_SCOPES` set, include the new grant there and restart the
+agent so it obtains a fresh token.
+
+Rollback: call that endpoint with `{"enabled": false}` to remove only the new grant, and
+restore the prior plugin/backend versions. Rollback does not remove shared
+copies already created.
