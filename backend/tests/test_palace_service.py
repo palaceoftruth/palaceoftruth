@@ -1512,7 +1512,7 @@ async def test_record_consolidation_candidate_events_is_non_destructive_and_dedu
 
 
 @pytest.mark.asyncio
-async def test_retrieve_palace_merges_tenant_shared_when_agent_results_are_only_notes(monkeypatch) -> None:
+async def test_retrieve_palace_agent_scope_does_not_merge_tenant_shared(monkeypatch) -> None:
     class FakeExecuteResult:
         def all(self):
             return []
@@ -1612,13 +1612,114 @@ async def test_retrieve_palace_merges_tenant_shared_when_agent_results_are_only_
     )
 
     assert [(result.source_type, result.title) for result in response.results] == [
-        ("media", "https://x.com/AlexFinn/status/2041267605747712370")
+        (
+            "note",
+            "default: [Andrew] what do you know about Henry Intelligent Machines just based on memory",
+        ),
+        (
+            "note",
+            "default: [Andrew] its not a fact card, it should be a media in tenant_shared scope",
+        ),
     ]
-    assert any(step.title == "Shared memory merge" for step in response.trace.steps)
-    assert any(step.title == "Conversation hygiene" for step in response.trace.steps)
+    assert all(step.title != "Shared memory merge" for step in response.trace.steps)
+    assert all(step.title != "Conversation hygiene" for step in response.trace.steps)
     assert embedder.calls == 1
-    assert [scope for scope, _ in FakeSearchService.calls] == ["agent", "tenant_shared"]
-    assert FakeSearchService.calls[0][1] == FakeSearchService.calls[1][1]
+    assert [scope for scope, _ in FakeSearchService.calls] == ["agent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scoped_count", [0, 1, 3])
+async def test_retrieve_palace_exact_scope_never_merges_tenant_shared(
+    monkeypatch, scoped_count: int
+) -> None:
+    class FakeExecuteResult:
+        def all(self):
+            return []
+
+    class FakeDb:
+        async def execute(self, _statement):
+            return FakeExecuteResult()
+
+        async def get(self, _model, _key):
+            return None
+
+    class FakeEmbedder:
+        async def embed_single(self, _query: str) -> list[float]:
+            return [0.1, 0.2, 0.3]
+
+    class FakeSearchService:
+        calls: list[tuple[str | None, list[float] | None]] = []
+
+        def __init__(self, db, embedder, tenant_id: str = "default"):
+            self.db = db
+            self.embedder = embedder
+            self.tenant_id = tenant_id
+
+        async def vector_search(self, *, scope_type=None, query_vector=None, **kwargs):
+            self.calls.append((scope_type, query_vector))
+            if scope_type == "agent":
+                return [
+                    SearchResult(
+                        item_id=uuid.uuid4(),
+                        title=f"agent-scoped note {i}",
+                        summary="Exact-scope memory.",
+                        source_type="note",
+                        source_url=None,
+                        tags=["scope-agent", "agent-iris"],
+                        created_at=datetime.now(timezone.utc),
+                        chunk_text="# Conversation Turn\nExact-scope memory content.",
+                        chunk_index=0,
+                        score=0.4 - i * 0.01,
+                    )
+                    for i in range(scoped_count)
+                ]
+            if scope_type == "tenant_shared":
+                return [
+                    SearchResult(
+                        item_id=uuid.uuid4(),
+                        title="tenant-shared media",
+                        summary="Shared corpus item that must not leak.",
+                        source_type="media",
+                        source_url=None,
+                        tags=["shared"],
+                        created_at=datetime.now(timezone.utc),
+                        chunk_text="Shared corpus content.",
+                        chunk_index=0,
+                        score=0.99,
+                    )
+                ]
+            return []
+
+    async def fake_ensure_tenant_state(db, tenant_id):
+        return SimpleNamespace(indexed_generation=0, active_generation=None)
+
+    monkeypatch.setattr("app.services.palace.ensure_tenant_state", fake_ensure_tenant_state)
+    monkeypatch.setattr("app.services.palace.SearchService", FakeSearchService)
+
+    response = await retrieve_palace(
+        FakeDb(),
+        tenant_id="default",
+        embedder=FakeEmbedder(),
+        body=SimpleNamespace(
+            query="scope probe",
+            room_id=None,
+            limit=5,
+            scope_type="agent",
+            scope_key="iris",
+            tags=None,
+            tags_mode="any",
+            min_score=0.1,
+            date_from=None,
+            date_to=None,
+        ),
+    )
+
+    assert [result.source_type for result in response.results] == ["note"] * scoped_count
+    assert all(trace.route != "tenant_shared_merge" for trace in response.trace.ranking_traces)
+    assert all(step.title != "Shared memory merge" for step in response.trace.steps)
+    assert [scope for scope, _ in FakeSearchService.calls] == ["agent"]
+    assert FakeSearchService.calls[0][0] == "agent"
+    assert FakeSearchService.calls[0][0] != "tenant_shared"
 
 
 @pytest.mark.asyncio
@@ -2542,8 +2643,9 @@ async def test_retrieve_palace_keeps_substantive_agent_note_when_shared_context_
         ),
     )
 
-    assert [result.source_type for result in response.results] == ["media", "note"]
+    assert [result.source_type for result in response.results] == ["note"]
     assert all(step.title != "Conversation hygiene" for step in response.trace.steps)
+    assert all(step.title != "Shared memory merge" for step in response.trace.steps)
 
 
 @pytest.mark.asyncio
