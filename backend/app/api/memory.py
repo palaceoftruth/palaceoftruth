@@ -153,6 +153,17 @@ def _record_retrieval_metrics(
         duration_ms = getattr(trace, trace_name, None)
         if isinstance(duration_ms, (int, float)):
             stage_seconds[stage] = duration_ms / 1000
+    # Only forward the fixed diagnostic stage allowlist. These are durations,
+    # so caller queries, IDs, and error response bodies never become labels.
+    for stage in ("embedding", "routing", "search", "room_loading", "result_handling", "rerank", "batched_search", "broad_search", "merge", "room_strategy_probe", "hybrid_query"):
+        duration_ms = (getattr(trace, "stage_timings_ms", {}) or {}).get(stage)
+        if isinstance(duration_ms, (int, float)):
+            stage_seconds[stage] = duration_ms / 1000
+    explicit_sql_stages = set(stage_seconds) & {"room_strategy_probe", "hybrid_query"}
+    for attempt in (getattr(trace, "search_attempts", []) or []):
+        for stage, duration_ms in (getattr(attempt, "sql_timings_ms", {}) or {}).items():
+            if stage in {"room_strategy_probe", "hybrid_query"} and stage not in explicit_sql_stages and isinstance(duration_ms, (int, float)):
+                stage_seconds[stage] = stage_seconds.get(stage, 0.0) + duration_ms / 1000
     record_retrieval(
         endpoint=endpoint,
         outcome=outcome,
@@ -408,6 +419,18 @@ def _trace_diagnostics(trace: Any) -> dict[str, Any]:
         "reuse_metrics": _trace_reuse_metrics(trace),
         "budget_truncated": getattr(trace, "context_budget_truncated", None),
         "completeness_warning": getattr(trace, "completeness_warning", None),
+        "stage_timings_ms": getattr(trace, "stage_timings_ms", {}) or {},
+        "search_attempts": [
+            {
+                "reason": getattr(attempt, "reason", None),
+                "status": getattr(attempt, "status", None),
+                "duration_ms": getattr(attempt, "duration_ms", None),
+                "error_class": getattr(attempt, "error_class", None),
+                "sql_timings_ms": getattr(attempt, "sql_timings_ms", {}) or {},
+                "candidate_strategy": getattr(attempt, "candidate_strategy", None),
+            }
+            for attempt in (getattr(trace, "search_attempts", []) or [])
+        ],
     }
     searched_scopes = getattr(trace, "searched_scopes", None)
     if searched_scopes is not None:

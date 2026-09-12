@@ -73,6 +73,7 @@ from app.schemas.palace import (
     PalaceRankingTrace,
     PalaceRankingTraceResult,
     PalaceRetrieveTrace,
+    PalaceSearchAttemptTiming,
     PalaceRoomArtifactBlocker,
     PalaceRoomArtifactHealthSummary,
     PalaceRoomDetail,
@@ -3527,7 +3528,60 @@ async def retrieve_palace(
     #   -> optional Palace room routing
     #   -> one scoped search attempt
     #   -> explicit fallback only if routing/search comes up empty
+    total_started_at = perf_counter()
+    stage_timings_ms: dict[str, float] = {}
+    search_attempts: list[PalaceSearchAttemptTiming] = []
+
+    def finish_stage(name: str, started_at: float) -> None:
+        stage_timings_ms[name] = round(max(0.0, perf_counter() - started_at) * 1000, 3)
+
+    def sql_attempt_details() -> dict[str, Any]:
+        timings = getattr(service, "last_sql_timings_ms", {}) or {}
+        strategy = getattr(service, "last_candidate_strategy", None)
+        return {
+            "sql_timings_ms": {
+                name: timings[name] for name in ("room_strategy_probe", "hybrid_query")
+                if isinstance(timings.get(name), (int, float)) and timings[name] >= 0
+            },
+            "candidate_strategy": strategy if strategy in {"standard", "selective_room"} else None,
+        }
+
+    async def timed_search(*, reason: str, **kwargs: Any) -> list[SearchResult]:
+        started_at = perf_counter()
+        try:
+            found = await service.vector_search(**kwargs)
+        except Exception as exc:
+            duration_ms = round(max(0.0, perf_counter() - started_at) * 1000, 3)
+            search_attempts.append(
+                PalaceSearchAttemptTiming(
+                    reason=reason,
+                    status="error",
+                    duration_ms=duration_ms,
+                    error_class=exc.__class__.__name__,
+                    **sql_attempt_details(),
+                )
+            )
+            # Keep logs useful without query text, tenant IDs, SQL, or result IDs.
+            logger.warning(
+                "Palace retrieval search attempt failed reason=%s status=error error_class=%s duration_ms=%.3f",
+                reason,
+                exc.__class__.__name__,
+                duration_ms,
+            )
+            raise
+        duration_ms = round(max(0.0, perf_counter() - started_at) * 1000, 3)
+        search_attempts.append(
+            PalaceSearchAttemptTiming(
+                reason=reason,
+                status="success" if found else "empty",
+                duration_ms=duration_ms,
+                **sql_attempt_details(),
+            )
+        )
+        return found
+
     await ensure_tenant_state(db, tenant_id)
+    rooms_started_at = perf_counter()
     rooms = (
         await db.execute(
             select(Room, Wing.name, RoomSnapshot.summary)
@@ -3541,6 +3595,7 @@ async def retrieve_palace(
             .where(Room.state == "active")
         )
     ).all()
+    finish_stage("room_loading", rooms_started_at)
     trace = PalaceRetrieveTrace(
         requested_scope_type=body.scope_type,
         requested_scope_key=body.scope_key,
@@ -3557,6 +3612,7 @@ async def retrieve_palace(
     global_candidate_count: int | None = None
     expanded_tunnel_target_room_ids: dict[uuid.UUID, uuid.UUID] = {}
 
+    routing_started_at = perf_counter()
     if body.room_id:
         resolved = await resolve_room(db, tenant_id, body.room_id)
         if resolved.room is not None:
@@ -3639,6 +3695,7 @@ async def retrieve_palace(
                     )
         else:
             route_abstain_reason = "no_matching_room"
+    finish_stage("routing", routing_started_at)
 
     trace.selected_wing = selected_wing
     trace.route_score = route_score
@@ -3647,6 +3704,7 @@ async def retrieve_palace(
     service = SearchService(db, embedder, tenant_id=tenant_id)
     if query_embedding_error is not None and not query_embedding_error.retryable:
         raise query_embedding_error
+    embedding_started_at = perf_counter()
     if query_vector is None and query_embedding_error is None:
         try:
             query_vector = await embedder.embed_single(body.query)
@@ -3654,6 +3712,7 @@ async def retrieve_palace(
             if not exc.retryable:
                 raise
             query_embedding_error = exc
+    finish_stage("embedding", embedding_started_at)
     if query_embedding_error is not None:
         trace.embedding_unavailable = True
         trace.retrieval_mode = "lexical_degraded"
@@ -3670,7 +3729,8 @@ async def retrieve_palace(
     retrieval_lens = getattr(body, "retrieval_lens", None)
     corpus_class = getattr(body, "corpus_class", "all")
     if candidate_room_ids:
-        results = await service.vector_search(
+        results = await timed_search(
+            reason="room_scoped",
             query=body.query,
             limit=body.limit,
             retrieval_lens=retrieval_lens,
@@ -3734,14 +3794,17 @@ async def retrieve_palace(
         results
         and candidate_room_ids
         and not body.room_id
-        and body.scope_type in {"agent", "workspace", "session"}
-        and bool(body.scope_key)
+        and (
+            (body.scope_type == "tenant_shared" and body.scope_key is None)
+            or (body.scope_type in {"agent", "workspace", "session"} and bool(body.scope_key))
+        )
         and not has_explicit_tag_filter
         and not route_low_confidence
         and quality_decision["decision"] == "rescue"
     )
     if should_rescue_explicit_scope:
-        scoped_rescue_results = await service.vector_search(
+        scoped_rescue_results = await timed_search(
+            reason="scoped_rescue",
             query=body.query,
             limit=body.limit,
             retrieval_lens=retrieval_lens,
@@ -3787,7 +3850,8 @@ async def retrieve_palace(
             )
 
     if should_merge_global_results:
-        global_results = await service.vector_search(
+        global_results = await timed_search(
+            reason="global_merge",
             query=body.query,
             limit=body.limit,
             retrieval_lens=retrieval_lens,
@@ -3855,7 +3919,8 @@ async def retrieve_palace(
                 message="Room routing was too weak, so search fell back to the whole library.",
             )
             trace.completeness_warning = trace.completeness_warning or "Global fallback used because room-scoped retrieval had low confidence."
-        results = await service.vector_search(
+        results = await timed_search(
+            reason="global_fallback",
             query=body.query,
             limit=body.limit,
             retrieval_lens=retrieval_lens,
@@ -3897,6 +3962,7 @@ async def retrieve_palace(
             },
         )
 
+    result_handling_started_at = perf_counter()
     if settings.retrieval_hint_report_enabled:
         trace.hint_report = await report_retrieval_hint_candidates(
             db,
@@ -3942,6 +4008,7 @@ async def retrieve_palace(
             f"{len(stale_results)} result(s) carry {', '.join(states)} currentness metadata; "
             "inspect last_verified_at and supersession details before reuse."
         )
+    finish_stage("result_handling", result_handling_started_at)
 
     trace.search_ranking_trace = getattr(service, "last_ranking_trace", None)
     if isinstance(trace.search_ranking_trace, dict):
@@ -3957,6 +4024,8 @@ async def retrieve_palace(
         )
     trace.route_room_candidate_count = room_candidate_count
     trace.route_global_candidate_count = global_candidate_count
+    trace.stage_timings_ms = stage_timings_ms
+    trace.search_attempts = search_attempts
 
     if routed_room_id:
         room = await db.get(Room, routed_room_id)
@@ -4023,6 +4092,8 @@ async def retrieve_palace(
         )
     )
     trace.steps = steps
+    finish_stage("total", total_started_at)
+    trace.stage_timings_ms = stage_timings_ms
 
     return PalaceRetrieveResponse(
         routed_room_id=routed_room_id,

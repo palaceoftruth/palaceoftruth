@@ -24,7 +24,10 @@ _ENDPOINTS = {"retrieve", "retrieve_agent", "semantic_recall", "other"}
 _OUTCOMES = {"success", "degraded", "error"}
 _INTENTS = {"default", "canonical_factual", "latest_status", "historical", "exploratory", "other"}
 _CONFIDENCE = {"high", "medium", "low", "none", "other"}
-_STAGES = {"embedding", "routing", "scoped_search", "broad_rescue", "rerank", "merge", "total"}
+_STAGES = {
+    "embedding", "routing", "search", "room_loading", "result_handling", "scoped_search", "batched_search", "broad_search",
+    "broad_rescue", "rerank", "merge", "total", "room_strategy_probe", "hybrid_query",
+}
 _RANK_BANDS = {"1", "2_3", "4_10", "11_plus"}
 _FRESHNESS = {"fresh", "stale", "unknown"}
 _TRUST = {"source_backed", "curated_memory", "generated_artifact", "raw", "unknown", "other"}
