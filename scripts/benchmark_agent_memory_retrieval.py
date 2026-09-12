@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import math
 import os
 import sys
 import time
@@ -37,6 +39,9 @@ DEFAULT_COMPATIBILITY_PACK = (
     REPO_ROOT / "backend" / "tests" / "fixtures" / "agent_memory_compatibility_fixture_pack.json"
 )
 DEFAULT_LIVE_ENDPOINT = "/api/v1/memory/retrieve-agent"
+MAX_LIVE_WARMUPS = 100
+MAX_LIVE_REPEATS = 1_000
+MAX_LIVE_CONCURRENCY = 32
 
 
 PUBLIC_ARTIFACT_PROFILES: dict[str, dict[str, object]] = {
@@ -270,39 +275,57 @@ def cmd_reranker_ablation(args: argparse.Namespace) -> int:
 
 def cmd_live_report(args: argparse.Namespace) -> int:
     _validate_live_base_url(args.base_url, allow_remote=args.allow_remote)
+    if not 0 <= args.warmup <= MAX_LIVE_WARMUPS:
+        raise AgentMemoryEvalInputError(f"--warmup must be between 0 and {MAX_LIVE_WARMUPS}")
+    if not 1 <= args.repeat <= MAX_LIVE_REPEATS:
+        raise AgentMemoryEvalInputError(f"--repeat must be between 1 and {MAX_LIVE_REPEATS}")
+    if not 1 <= args.concurrency <= MAX_LIVE_CONCURRENCY:
+        raise AgentMemoryEvalInputError(f"--concurrency must be between 1 and {MAX_LIVE_CONCURRENCY}")
     source_pack = read_eval_pack(Path(args.pack))
     live_cases: list[dict] = []
+    measured_samples: list[dict[str, object]] = []
+    warmup_samples: list[dict[str, object]] = []
     headers = _auth_headers(args)
     timeout = httpx.Timeout(args.timeout)
     with httpx.Client(base_url=args.base_url.rstrip("/"), headers=headers, timeout=timeout) as client:
-        for case in source_pack["cases"]:
-            endpoint = case.get("endpoint") or args.endpoint
-            request_payload = build_live_retrieval_request(
+        requests = [
+            (
                 case,
-                endpoint=endpoint,
-                top_k=args.top_k,
-                candidate_limit=args.candidate_limit,
-                broad_candidate_limit=args.broad_candidate_limit,
-                display_limit=args.display_limit,
-            )
-            started = time.perf_counter()
-            try:
-                response = client.post(endpoint, json=request_payload)
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise AgentMemoryEvalInputError(
-                    f"{case['id']}: live retrieval failed for {endpoint}: {exc}"
-                ) from exc
-            live_cases.append(
-                case_from_live_response(
+                case.get("endpoint") or args.endpoint,
+                build_live_retrieval_request(
                     case,
-                    endpoint=endpoint,
-                    request_payload=request_payload,
-                    response_payload=response.json(),
-                    latency_ms=(time.perf_counter() - started) * 1000,
-                )
+                    endpoint=case.get("endpoint") or args.endpoint,
+                    top_k=args.top_k,
+                    candidate_limit=args.candidate_limit,
+                    broad_candidate_limit=args.broad_candidate_limit,
+                    display_limit=args.display_limit,
+                ),
             )
+            for case in source_pack["cases"]
+        ]
 
+        if len(requests) * (args.warmup + args.repeat) > 10000:
+            raise AgentMemoryEvalInputError("live sampling is limited to 10000 total requests")
+        # Finish warmups before measurement. Schedule repeated samples together
+        # so even a one-case pack can exercise the requested concurrency.
+        for outcome in _run_live_batch(client, requests * args.warmup, args.concurrency):
+            warmup_samples.append(dict(outcome["sample"]))
+        outcomes = _run_live_batch(client, requests * args.repeat, args.concurrency)
+        for index, outcome in enumerate(outcomes):
+            sample = dict(outcome["sample"])
+            sample["repeat"] = index // len(requests) + 1
+            measured_samples.append(sample)
+            if outcome["case"] is not None:
+                live_cases.append(outcome["case"])
+
+    # A repeated run still has one evaluation case per source case. Use the final
+    # successful observation, while retaining every success and failure as samples.
+    latest_cases: dict[str, dict] = {}
+    for case in live_cases:
+        latest_cases[str(case["id"])] = case
+    live_cases = [latest_cases[str(case["id"])] for case in source_pack["cases"] if str(case["id"]) in latest_cases]
+
+    performance = _performance_report(measured_samples, warmup_samples, args)
     live_pack = {
         key: value
         for key, value in source_pack.items()
@@ -312,6 +335,7 @@ def cmd_live_report(args: argparse.Namespace) -> int:
         {
             "description": f"Live retrieval report for {source_pack.get('description') or source_pack.get('pack_id')}",
             "cases": live_cases,
+            "performance": performance,
         }
     )
     if args.output_live_pack:
@@ -320,13 +344,123 @@ def cmd_live_report(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-    report = evaluate_eval_pack(live_pack, top_k=args.top_k, thresholds=build_thresholds(args))
+    if live_cases:
+        report = evaluate_eval_pack(live_pack, top_k=args.top_k, thresholds=build_thresholds(args))
+    else:
+        # The evaluator requires one case. Preserve a machine-readable failure
+        # report when every live request failed, with details kept in performance.
+        report = {
+            "top_k": args.top_k,
+            "cases": [],
+            "summary": {"case_count": 0, "passed": False, "failure_counts": {"live_errors": performance["summary"]["error_count"]}},
+        }
+    report["performance"] = performance
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         Path(args.output).write_text(rendered + "\n", encoding="utf-8")
     else:
         print(rendered)
-    return 0 if report["summary"]["passed"] else 1
+    return 0 if report["summary"]["passed"] and performance["summary"]["error_count"] == 0 else 1
+
+
+def _run_live_batch(client: httpx.Client, requests: list[tuple[dict, str, dict]], concurrency: int) -> list[dict[str, object]]:
+    """Run one bounded batch and return one sanitized outcome per request."""
+    def run(request: tuple[dict, str, dict]) -> dict[str, object]:
+        case, endpoint, request_payload = request
+        started = time.perf_counter()
+        status = "ok"
+        response_payload: dict | None = None
+        http_status: int | None = None
+        try:
+            response = client.post(endpoint, json=request_payload)
+            raw_status = getattr(response, "status_code", None)
+            if isinstance(raw_status, int):
+                http_status = raw_status
+            response.raise_for_status()
+            parsed = response.json()
+            if not isinstance(parsed, dict):
+                raise ValueError("response payload is not an object")
+            response_payload = parsed
+        except httpx.TimeoutException:
+            status = "timeout"
+        except httpx.HTTPStatusError:
+            status = "http_error"
+        except httpx.HTTPError:
+            status = "transport_error"
+        except (ValueError, TypeError, json.JSONDecodeError):
+            status = "invalid_response"
+        except Exception:
+            # Keep unexpected client failures observable without exposing exception text.
+            status = "error"
+        duration_ms = round((time.perf_counter() - started) * 1000, 4)
+        sample: dict[str, object] = {"case_id": str(case["id"]), "duration_ms": duration_ms, "status": status}
+        if http_status is not None:
+            sample["http_status"] = http_status
+        normalized = None
+        if response_payload is not None:
+            try:
+                normalized = case_from_live_response(
+                    case,
+                    endpoint=endpoint,
+                    request_payload=request_payload,
+                    response_payload=response_payload,
+                    latency_ms=duration_ms,
+                )
+            except (KeyError, TypeError, ValueError):
+                sample["status"] = "invalid_response"
+        return {"sample": sample, "case": normalized}
+
+    if concurrency == 1:
+        return [run(request) for request in requests]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        return list(pool.map(run, requests))
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))]
+
+
+def _performance_report(samples: list[dict[str, object]], warmups: list[dict[str, object]], args: argparse.Namespace) -> dict[str, object]:
+    durations = [float(sample["duration_ms"]) for sample in samples]
+    error_count = sum(sample["status"] != "ok" for sample in samples)
+    error_count += sum(sample["status"] != "ok" for sample in warmups)
+    per_case: dict[str, dict[str, object]] = {}
+    for sample in samples:
+        case_id = str(sample["case_id"])
+        case_durations = [float(item["duration_ms"]) for item in samples if str(item["case_id"]) == case_id]
+        per_case[case_id] = {
+            "sample_count": len(case_durations),
+            "p50": _percentile(case_durations, 0.50),
+            "p95": _percentile(case_durations, 0.95),
+            "error_count": sum(item["status"] != "ok" for item in samples if str(item["case_id"]) == case_id),
+        }
+    summary: dict[str, object] = {
+        "sample_count": len(samples),
+        "warmup_count": len(warmups),
+        "success_count": sum(sample["status"] == "ok" for sample in samples),
+        "error_count": error_count,
+        "timeout_count": sum(sample["status"] == "timeout" for sample in samples + warmups),
+        "duration_ms": {
+            "count": len(durations),
+            "p50": _percentile(durations, 0.50),
+            "p95": _percentile(durations, 0.95),
+        },
+        "per_case": per_case,
+        "notes": [],
+    }
+    if len(durations) < 100:
+        summary["notes"] = ["p99 is insufficient with fewer than 100 measured samples"]
+    return {
+        "warmup": args.warmup,
+        "repeat": args.repeat,
+        "concurrency": args.concurrency,
+        "samples": samples,
+        "warmup_samples": warmups,
+        "summary": summary,
+    }
 
 
 def _validate_live_base_url(base_url: str, *, allow_remote: bool) -> None:
@@ -503,6 +637,18 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--min-provenance-label-accuracy", type=float, default=1.0)
     live.add_argument("--max-forbidden-hits", type=int, default=0)
     live.add_argument("--timeout", type=float, default=15.0)
+    live.add_argument(
+        "--warmup", "--warmup-count", dest="warmup", type=int, default=0,
+        help=f"Warmup batches before measured samples (0-{MAX_LIVE_WARMUPS}, default: 0).",
+    )
+    live.add_argument(
+        "--repeat", "--repeats", dest="repeat", type=int, default=1,
+        help=f"Measured batches per case (1-{MAX_LIVE_REPEATS}, default: 1).",
+    )
+    live.add_argument(
+        "--concurrency", type=int, default=1,
+        help=f"Maximum requests in flight per batch (1-{MAX_LIVE_CONCURRENCY}, default: 1).",
+    )
     live.add_argument("--allow-remote", action="store_true")
     live.add_argument("--output", default=None)
     live.add_argument("--output-live-pack", default=None)
