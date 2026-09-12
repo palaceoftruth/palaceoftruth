@@ -70,6 +70,8 @@ class _FakeDB:
 
     async def execute(self, sql, params=None):
         self.last_sql = str(sql)
+        if params and "item_probe_limit" in params:
+            return _FakeResult([SimpleNamespace(use_selective=False)])
         if params is None:
             return _FakeResult(self.hint_rows)
         if "min_chunk" in params:
@@ -1497,7 +1499,7 @@ def test_vector_search_second_stage_reranker_falls_back_on_timeout(monkeypatch) 
     monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_enabled", True)
     monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "lexical-overlap")
     monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_timeout_ms", 1)
-    perf_values = iter([0.0, 1.0])
+    perf_values = (float(value) for value in range(100))
     monkeypatch.setattr("app.services.search.time.perf_counter", lambda: next(perf_values))
     first_id = uuid.uuid4()
     second_id = uuid.uuid4()

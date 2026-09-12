@@ -181,6 +181,7 @@ class Settings(BaseSettings):
     retrieval_capture_allow_raw_queries: bool = False
     retrieval_capture_max_query_chars: int = 500
     retrieval_source_ranking_enabled: bool = True
+    retrieval_selective_room_search_enabled: bool = True
     retrieval_relationship_expansion_enabled: bool = False
     retrieval_relationship_min_confidence: float = 0.7
     retrieval_relationship_fanout_limit: int = 3
