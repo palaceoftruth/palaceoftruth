@@ -16,9 +16,12 @@ A bounded strategy probe checks at most eight requested rooms, 513 distinct
 room-member items, and 4,097 matching-profile chunks. Requests above 512 items
 or 4,096 chunks retain the standard query path, as do broad requests and requests
 with per-scope candidate caps. These values select an execution strategy, not a
-truncated result set. The main query rereads current room memberships; it does
-not use a stale list of IDs from the probe. Concurrent membership growth can
-increase the work of the selected strategy but cannot silently omit new members.
+truncated result set. The main query repeats the membership and chunk guards
+within the same database snapshot as its candidates. If a room grows between
+probe and search, the query returns a control marker instead of partial results.
+The service retries once through the standard path with the same filters and
+query embedding. Concurrent growth cannot turn a truncated member set into
+partial recall or make the selective path process an unbounded room.
 
 The existing default and supported profile-specific embedding tables are used.
 No index migration or global PostgreSQL planner setting is required.

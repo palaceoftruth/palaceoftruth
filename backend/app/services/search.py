@@ -395,6 +395,37 @@ def _embedding_search_plan(profile: EmbeddingProfile) -> _EmbeddingSearchPlan:
     )
 
 
+def _selective_room_guard_ctes(plan: _EmbeddingSearchPlan) -> str:
+    """One-snapshot, bounded eligibility probe; never use a truncated set as results."""
+    return f"""
+            eligible_room_items AS MATERIALIZED (
+                SELECT DISTINCT member.item_id
+                FROM unnest(CAST(:room_ids AS uuid[])) requested(room_id)
+                JOIN LATERAL (
+                    SELECT DISTINCT rm.item_id FROM room_memberships rm
+                    WHERE rm.tenant_id = :tenant_id AND rm.room_id = requested.room_id
+                    ORDER BY rm.item_id
+                    LIMIT :item_probe_limit
+                ) member ON true
+                LIMIT :item_probe_limit
+            ), selective_chunk_window AS MATERIALIZED (
+                SELECT e.item_id FROM eligible_room_items member
+                JOIN LATERAL (
+                    SELECT e.item_id FROM {plan.table_name} e
+                    WHERE e.tenant_id = :tenant_id AND e.item_id = member.item_id
+                    {plan.profile_filter}
+                    LIMIT :chunk_probe_limit
+                ) e ON true
+                WHERE (SELECT count(*) FROM eligible_room_items) < :item_probe_limit
+                LIMIT :chunk_probe_limit
+            ),
+            selective_guard AS MATERIALIZED (
+                SELECT (SELECT count(*) FROM eligible_room_items) < :item_probe_limit
+                    AND (SELECT count(*) FROM selective_chunk_window) < :chunk_probe_limit AS use_selective
+            )
+    """
+
+
 @dataclass(frozen=True)
 class QueryIntent:
     name: str
@@ -1546,35 +1577,14 @@ class SearchService:
     async def _can_use_selective_rooms(self, room_ids: list, plan: _EmbeddingSearchPlan) -> bool:
         """Bound the strategy probe, including chunk fanout, without fetching content.
 
-        This is a cost heuristic, not an eligibility snapshot. The search statement
-        reads memberships again, so concurrent additions are never silently omitted.
-        Broad rooms and high-fanout items retain the existing candidate path.
+        The main query repeats these guards in its own snapshot before using any
+        bounded member set. Growth between statements triggers a standard retry;
+        a truncated set can never become a partial search result.
         """
         rows = (await self._execute_candidate_sql(text(f"""
             /* selective_room_probe */
-            WITH room_item_window AS MATERIALIZED (
-                SELECT DISTINCT member.item_id
-                FROM unnest(CAST(:room_ids AS uuid[])) requested(room_id)
-                JOIN LATERAL (
-                    SELECT DISTINCT rm.item_id FROM room_memberships rm
-                    WHERE rm.tenant_id = :tenant_id AND rm.room_id = requested.room_id
-                    ORDER BY rm.item_id
-                    LIMIT :item_probe_limit
-                ) member ON true
-                LIMIT :item_probe_limit
-            ), chunk_window AS MATERIALIZED (
-                SELECT e.item_id FROM room_item_window member
-                JOIN LATERAL (
-                    SELECT e.item_id FROM {plan.table_name} e
-                    WHERE e.tenant_id = :tenant_id AND e.item_id = member.item_id
-                    {plan.profile_filter}
-                    LIMIT :chunk_probe_limit
-                ) e ON true
-                WHERE (SELECT count(*) FROM room_item_window) < :item_probe_limit
-                LIMIT :chunk_probe_limit
-            )
-            SELECT (SELECT count(*) FROM room_item_window) < :item_probe_limit
-                AND (SELECT count(*) FROM chunk_window) < :chunk_probe_limit AS use_selective
+            WITH {_selective_room_guard_ctes(plan)}
+            SELECT use_selective FROM selective_guard
         """), {
             "tenant_id": self.tenant_id, "room_ids": room_ids,
             "item_probe_limit": _SELECTIVE_ROOM_MAX_ITEMS + 1,
@@ -1620,6 +1630,7 @@ class SearchService:
         context_budget_chars: int | None = None,
         include_derived_artifacts: bool = False,
         corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all",
+        _allow_selective_rooms: bool = True,
     ) -> list[SearchResult]:
         self.last_sql_timings_ms: dict[str, float] = {}
         self.last_candidate_strategy = "standard"
@@ -1743,7 +1754,7 @@ class SearchService:
         semantic_candidates_where = f"WHERE {item_eligibility} {embedding_plan.profile_filter}"
         selective_rooms = False
         if (
-            settings.retrieval_selective_room_search_enabled
+            settings.retrieval_selective_room_search_enabled and _allow_selective_rooms
             and room_ids and len(room_ids) <= _SELECTIVE_ROOM_MAX_ROOMS
             and per_scope_candidate_cap is None and embedding_error is None
         ):
@@ -1755,17 +1766,14 @@ class SearchService:
             # Start with room membership instead of sorting every embedding before
             # selective filters. OFFSET 0 keeps each point lookup correlated.
             semantic_candidates_cte = f"""
-            WITH eligible_room_items AS MATERIALIZED (
-                SELECT DISTINCT rm.item_id FROM room_memberships rm
-                WHERE rm.tenant_id = :tenant_id
-                  AND rm.room_id = ANY(CAST(:room_ids AS uuid[]))
-            ), eligible_items AS MATERIALIZED (
+            WITH {_selective_room_guard_ctes(embedding_plan)}, eligible_items AS MATERIALIZED (
                 SELECT scoped.id FROM eligible_room_items member
                 JOIN LATERAL (
                     SELECT i.id FROM items i
                     WHERE i.id = member.item_id AND ({item_eligibility})
                     OFFSET 0
                 ) scoped ON true
+                WHERE (SELECT use_selective FROM selective_guard)
             ), semantic_candidates AS MATERIALIZED (
                 SELECT e.item_id, e.chunk_text, e.chunk_index, e.distance
                 FROM eligible_items eligible
@@ -1847,6 +1855,13 @@ class SearchService:
                 LIMIT :semantic_candidate_limit
             ),
             """
+        guarded_result_prefix = ", guarded_results AS (" if selective_rooms else ""
+        guarded_result_suffix = """
+            )
+            SELECT guard.use_selective AS selective_guard_passed, result.*
+            FROM selective_guard guard LEFT JOIN guarded_results result ON guard.use_selective
+            ORDER BY result.score DESC, result.item_id ASC
+        """ if selective_rooms else ""
         sql = text(f"""
             {semantic_candidates_cte}
             lexical_match_window AS MATERIALIZED (
@@ -1946,6 +1961,7 @@ class SearchService:
                     ) AS rn
                 FROM scored
             )
+            {guarded_result_prefix}
             SELECT
                 item_id, chunk_text, chunk_index,
                 title, summary, source_type, source_url, tags, created_at,
@@ -1961,6 +1977,7 @@ class SearchService:
             WHERE rn = 1
             ORDER BY score DESC, item_id ASC
             LIMIT :candidate_limit
+            {guarded_result_suffix}
         """)
 
         if embedding_error is not None:
@@ -2008,10 +2025,40 @@ class SearchService:
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
                     "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,
+                    "item_probe_limit": _SELECTIVE_ROOM_MAX_ITEMS + 1,
+                    "chunk_probe_limit": _SELECTIVE_ROOM_MAX_CHUNKS + 1,
                     },
                     stage="hybrid_query",
                 )
             ).fetchall()
+
+        if selective_rooms:
+            if rows and not rows[0].selective_guard_passed:
+                previous_timings = dict(self.last_sql_timings_ms)
+                try:
+                    # Preserve the full request and reuse the embedding. This retry
+                    # is standard-only, so concurrent writers cannot cause a loop.
+                    return await self.vector_search(
+                        query=query, limit=limit, source_type=source_type,
+                        retrieval_lens=retrieval_lens, item_ids=item_ids, room_ids=room_ids,
+                        scope_type=scope_type, scope_key=scope_key, scope_labels=scope_labels,
+                        per_scope_candidate_cap=per_scope_candidate_cap,
+                        tags=tags, tags_mode=tags_mode, date_from=date_from, date_to=date_to,
+                        min_score=min_score, query_vector=query_vec,
+                        query_embedding_error=embedding_error,
+                        exclude_private_memory_scopes=exclude_private_memory_scopes,
+                        candidate_limit=candidate_limit, include_neighbor_chunks=include_neighbor_chunks,
+                        neighbor_chunk_window=neighbor_chunk_window, context_budget_chars=context_budget_chars,
+                        include_derived_artifacts=include_derived_artifacts, corpus_class=corpus_class,
+                        _allow_selective_rooms=False,
+                    )
+                finally:
+                    for stage, duration in previous_timings.items():
+                        self.last_sql_timings_ms[stage] = self.last_sql_timings_ms.get(stage, 0.0) + duration
+                    if self.last_ranking_trace is not None:
+                        self.last_ranking_trace["sql_timings_ms"] = dict(self.last_sql_timings_ms)
+                        self.last_ranking_trace["selective_room_retry"] = True
+            rows = [row for row in rows if row.item_id is not None]
 
         candidates = [
             _SearchCandidate(

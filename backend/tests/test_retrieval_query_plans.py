@@ -247,6 +247,7 @@ async def rls_session() -> AsyncSession:
     suffix = uuid.uuid4().hex[:10]
     role = f"palace_gate_reader_{suffix}"
     schema = f"gate_rls_{suffix}"
+    setup_committed = False
     async with engine.connect() as connection:
         await connection.execute(text(
             f"CREATE ROLE {role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
@@ -327,13 +328,30 @@ async def rls_session() -> AsyncSession:
                 ):
                     await session.execute(text(statement))
             await session.execute(text(f"GRANT USAGE ON SCHEMA {schema} TO {role}"))
+            # Commit setup so a second privileged connection can make a
+            # deterministic growth change between probe and main SQL.
+            await session.commit()
+            await connection.commit()
+            setup_committed = True
             await session.execute(text("SET LOCAL app.tenant_id = 'tenant-a'"))
             await session.execute(text(f"SET LOCAL ROLE {role}"))
             await session.execute(text(f"SET LOCAL search_path = {schema}, public"))
+            session.info["schema"] = schema
+            session.info["role_name"] = role
             yield session
         finally:
             await session.rollback()
+            await connection.rollback()
             await session.close()
+            if setup_committed:
+                # Only the unique resources successfully created by this fixture.
+                cleanup_engine = create_async_engine(async_url)
+                try:
+                    async with cleanup_engine.begin() as cleanup_connection:
+                        await cleanup_connection.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+                        await cleanup_connection.execute(text(f"DROP ROLE {role}"))
+                finally:
+                    await cleanup_engine.dispose()
     await engine.dispose()
 
 
@@ -479,6 +497,7 @@ async def test_forced_rls_preserves_scope_and_currentness(
     assert str(await rls_session.scalar(text("SELECT md5('expired')::uuid"))) not in result_ids
     assert str(await rls_session.scalar(text("SELECT md5('superseded')::uuid"))) not in result_ids
 
+
     assert len(result_ids) == 1
     with patch("app.services.search.settings.retrieval_selective_room_search_enabled", selective_enabled):
         historical = await service.vector_search(
@@ -493,6 +512,81 @@ async def test_forced_rls_preserves_scope_and_currentness(
     for name in ("private", "other-tenant", "deleted"):
         assert str(await rls_session.scalar(text("SELECT md5(:name)::uuid"), {"name": name})) not in historical_ids
     assert mismatched_tenant == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("growth", ["memberships", "chunks"])
+async def test_selective_room_growth_race_retries_standard_query(
+    rls_session: AsyncSession, growth: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A committed growth after the probe must not make selective results stale."""
+    from unittest.mock import patch
+    from datetime import datetime, timedelta, timezone
+
+    schema = rls_session.info["schema"]
+    async_url = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)  # type: ignore[union-attr]
+    room_id = await rls_session.scalar(text("SELECT md5('rls-room')::uuid"))
+    allowed_id = await rls_session.scalar(text("SELECT md5('allowed')::uuid"))
+    writer_engine = create_async_engine(async_url)
+    original_probe = SearchService._can_use_selective_rooms
+    probe_calls = []
+
+    async def grow_after_probe(self: SearchService, room_ids: Any, embedding_plan: Any) -> bool:
+        probe_calls.append(True)
+        used_selective = await original_probe(self, room_ids, embedding_plan)
+        assert used_selective is True
+        if used_selective:
+            async with writer_engine.begin() as writer:
+                if growth == "memberships":
+                    await writer.execute(text(f"""
+                        INSERT INTO {schema}.items
+                            (id,tenant_id,status,source_type,metadata,tags,effective_date,search_vector,title)
+                        SELECT md5('growth-item-' || value::text)::uuid, 'tenant-a', 'ready', 'note',
+                               i.metadata, '{{different}}', now(), to_tsvector('english','new member'), 'New member'
+                        FROM generate_series(1,600) value
+                        CROSS JOIN {schema}.items i WHERE i.id=:item_id
+                    """), {"item_id": allowed_id})
+                    await writer.execute(text(f"""
+                        INSERT INTO {schema}.room_memberships (tenant_id, item_id, room_id)
+                        SELECT 'tenant-a', md5('growth-item-' || value::text)::uuid, :room_id
+                        FROM generate_series(1, 600) AS value
+                    """), {"room_id": room_id})
+                else:
+                    vector = "[" + ",".join(["0.1"] * EMBEDDING_DIMENSIONS) + "]"
+                    await writer.execute(text(f"""
+                        INSERT INTO {schema}.embeddings (tenant_id, item_id, chunk_text, chunk_index, embedding_half)
+                        SELECT 'tenant-a', :item_id, 'growth chunk ' || value::text, value,
+                               CAST(:vector AS halfvec({EMBEDDING_DIMENSIONS}))
+                        FROM generate_series(1, 4097) AS value
+                    """), {"item_id": allowed_id, "vector": vector})
+        return used_selective
+
+    monkeypatch.setattr(SearchService, "_can_use_selective_rooms", grow_after_probe)
+    class CountingEmbedder(_DefaultEmbedder):
+        calls = 0
+
+        async def embed_single(self, query):
+            self.calls += 1
+            return await super().embed_single(query)
+
+    embedder = CountingEmbedder()
+    service = SearchService(rls_session, embedder, tenant_id="tenant-a")
+    try:
+        with patch("app.services.search.settings.retrieval_selective_room_search_enabled", True):
+            results = await service.vector_search(
+                "allowed deployment owner", room_ids=[room_id], candidate_limit=20,
+                scope_type="tenant_shared", tags=["allowed"], tags_mode="all",
+                date_from=datetime.now(timezone.utc)-timedelta(days=1),
+                date_to=datetime.now(timezone.utc)+timedelta(days=1),
+            )
+    finally:
+        await writer_engine.dispose()
+
+    assert {str(result.item_id) for result in results} == {str(allowed_id)}
+    assert embedder.calls == 1
+    assert len(probe_calls) == 1
+    assert service.last_candidate_strategy == "standard"
+    assert service.last_ranking_trace["selective_room_retry"] is True
 
 
 @pytest.mark.asyncio

@@ -70,7 +70,7 @@ class _FakeDB:
 
     async def execute(self, sql, params=None):
         self.last_sql = str(sql)
-        if params and "item_probe_limit" in params:
+        if "selective_room_probe" in self.last_sql:
             return _FakeResult([SimpleNamespace(use_selective=False)])
         if params is None:
             return _FakeResult(self.hint_rows)
