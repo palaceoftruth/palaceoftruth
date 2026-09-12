@@ -60,7 +60,7 @@ from app.schemas.memory import (
     MemoryWakeupBriefResponse,
     TagsMode,
 )
-from app.schemas.palace import PalaceRetrieveRequest
+from app.schemas.palace import PalaceRetrieveRequest, PalaceSearchAttemptTiming
 from app.schemas.search import split_system_provenance_tags
 from app.services.job_progress import record_job_progress_event
 from app.services.item_dates import apply_effective_date
@@ -2464,9 +2464,24 @@ async def retrieve_agent_memory(
     route_results: list[list] = [[] for _ in scopes]
     selected_scope_warnings: list[str] = []
     selected_scope_fallback_used = False
+    aggregated_stage_timings_ms: dict[str, float] = {}
+    aggregated_search_attempts = []
+
+    def _accumulate_trace(trace: object) -> None:
+        """Copy bounded Palace timing data without copying request or result data."""
+        for name, duration in (getattr(trace, "stage_timings_ms", {}) or {}).items():
+            if name in {"embedding", "routing", "search", "room_loading", "result_handling", "rerank", "merge"} and isinstance(duration, (int, float)):
+                aggregated_stage_timings_ms[name] = aggregated_stage_timings_ms.get(name, 0.0) + max(0.0, float(duration))
+        for attempt in (getattr(trace, "search_attempts", []) or []):
+            try:
+                aggregated_search_attempts.append(attempt if isinstance(attempt, PalaceSearchAttemptTiming) else PalaceSearchAttemptTiming.model_validate(attempt))
+            except (TypeError, ValueError):
+                continue
+    embedding_started_at = perf_counter()
     query_vector, query_embedding_reused, query_embedding_error = await _agent_memory_query_vector(
         embedder, body.query
     )
+    aggregated_stage_timings_ms["embedding"] = aggregated_stage_timings_ms.get("embedding", 0.0) + _duration_ms(embedding_started_at)
 
     def _route_candidate_limit(scope: MemoryScope) -> int:
         if (
@@ -2520,6 +2535,7 @@ async def retrieve_agent_memory(
             allow_empty_degraded=True,
         )
         route_results[scope_index] = response.results
+        _accumulate_trace(response.trace)
         selected_scope_fallback_used = selected_scope_fallback_used or response.trace.fallback_used
         if response.trace.completeness_warning:
             warning = _agent_memory_trace_warning(response.trace.completeness_warning)
@@ -2527,6 +2543,7 @@ async def retrieve_agent_memory(
                 selected_scope_warnings.append(warning)
     if batched_indexes:
         batched_scopes = [scopes[index] for index in batched_indexes]
+        batched_started_at = perf_counter()
         batched_results = await _batched_scope_results(
             db,
             embedder=embedder,
@@ -2540,6 +2557,7 @@ async def retrieve_agent_memory(
                 for scope in batched_scopes
             },
         )
+        aggregated_stage_timings_ms["batched_search"] = aggregated_stage_timings_ms.get("batched_search", 0.0) + _duration_ms(batched_started_at)
         for scope_index in batched_indexes:
             label = _scope_label_from_memory_scope(scopes[scope_index])
             route_results[scope_index] = batched_results.get(label, [])
@@ -2579,6 +2597,7 @@ async def retrieve_agent_memory(
             allow_empty_degraded=True,
         )
         route_results.append(response.results)
+        _accumulate_trace(response.trace)
         selected_scope_result_count += len(response.results)
         tenant_shared_fallback_used = True
         selected_scope_fallback_used = selected_scope_fallback_used or response.trace.fallback_used
@@ -2637,6 +2656,7 @@ async def retrieve_agent_memory(
                 body.corpus_class,
             )
         )
+        aggregated_stage_timings_ms["broad_search"] = aggregated_stage_timings_ms.get("broad_search", 0.0) + _duration_ms(broad_started_at)
         broad_corpus_duration_ms = _duration_ms(broad_started_at)
     elif broad_policy_skip_reason is not None:
         broad_corpus_skipped_reason = broad_policy_skip_reason
@@ -2659,6 +2679,8 @@ async def retrieve_agent_memory(
             failure_kind=query_embedding_error.failure_kind,
         ) from query_embedding_error
     merge_duration_ms = _duration_ms(merge_started_at)
+    outer_total_duration_ms = _duration_ms(started_at)
+    aggregated_stage_timings_ms["total"] = float(outer_total_duration_ms)
     return AgentMemoryRetrieveResponse(
         scopes=scopes,
         trace=AgentMemoryRetrieveTrace(
@@ -2714,7 +2736,9 @@ async def retrieve_agent_memory(
             selected_scope_duration_ms=selected_scope_duration_ms,
             broad_corpus_duration_ms=broad_corpus_duration_ms,
             merge_duration_ms=merge_duration_ms,
-            total_duration_ms=_duration_ms(started_at),
+            total_duration_ms=outer_total_duration_ms,
+            stage_timings_ms=aggregated_stage_timings_ms,
+            search_attempts=aggregated_search_attempts,
             budget_truncated=len(deduped_results) > display_limit,
             context_budget_truncated=context_budget_truncated,
             fallback_used=selected_scope_fallback_used,

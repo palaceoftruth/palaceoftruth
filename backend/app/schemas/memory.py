@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.mcp_scopes import McpOperationScope
-from app.schemas.palace import PalaceRetrieveTrace
+from app.schemas.palace import PalaceRetrieveTrace, PalaceSearchAttemptTiming
 from app.schemas.search import SearchResult
 from app.services.retrieval_lenses import validate_retrieval_lens_name
 
@@ -1023,6 +1023,10 @@ class AgentMemoryRetrieveTrace(BaseModel):
     broad_corpus_duration_ms: int | None = None
     merge_duration_ms: int | None = None
     total_duration_ms: int | None = None
+    # Aggregated inner Palace timings. Values are durations only; query text,
+    # result IDs, and dependency error payloads do not cross this boundary.
+    stage_timings_ms: dict[str, float] = Field(default_factory=dict)
+    search_attempts: list[PalaceSearchAttemptTiming] = Field(default_factory=list)
     budget_truncated: bool = False
     context_budget_truncated: bool = False
     fallback_used: bool = False

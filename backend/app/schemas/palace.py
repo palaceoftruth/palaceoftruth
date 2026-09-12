@@ -471,6 +471,17 @@ class PalaceTraceStep(BaseModel):
     detail: str
 
 
+class PalaceSearchAttemptTiming(BaseModel):
+    """Bounded timing for one service search attempt."""
+
+    reason: Literal["room_scoped", "scoped_rescue", "global_merge", "global_fallback"]
+    status: Literal["success", "empty", "error"]
+    duration_ms: float = Field(ge=0)
+    error_class: str | None = None
+    sql_timings_ms: dict[Literal["room_strategy_probe", "hybrid_query"], float] = Field(default_factory=dict)
+    candidate_strategy: Literal["standard", "selective_room"] | None = None
+
+
 class PalaceRankingTraceResult(BaseModel):
     rank: int
     item_id: uuid.UUID | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -565,6 +576,10 @@ class PalaceRetrieveTrace(BaseModel):
     activated_tunnels: list[PalaceTunnelActivationTrace] = Field(default_factory=list)
     context_budget_chars: int | None = None
     context_budget_truncated: bool = False
+    # Stage durations use a monotonic clock and are diagnostic only. Nested
+    # search attempts are included in total and must not be summed as disjoint.
+    stage_timings_ms: dict[str, float] = Field(default_factory=dict)
+    search_attempts: list[PalaceSearchAttemptTiming] = Field(default_factory=list)
     steps: list[PalaceTraceStep] = Field(default_factory=list)
     ranking_traces: list[PalaceRankingTrace] = Field(default_factory=list)
 

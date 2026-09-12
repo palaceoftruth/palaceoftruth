@@ -1628,6 +1628,89 @@ async def test_retrieve_palace_agent_scope_does_not_merge_tenant_shared(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_retrieve_palace_rescues_weak_shared_room_match_without_widening_scope(monkeypatch) -> None:
+    room = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Deployment Notes",
+        stable_key="engineering:deployment-notes",
+        snapshot_generation=0,
+        membership_generation=0,
+    )
+    weak = _quality_result(title="unrelated gardening note", score=0.81)
+    strong = _quality_result(title="deployment notes", score=0.92)
+
+    class FakeDb:
+        def __init__(self) -> None:
+            self.execute_count = 0
+
+        async def execute(self, _statement):
+            self.execute_count += 1
+            if self.execute_count == 1:
+                return _RowsResult([(room, "Engineering", "Deployment notes.")])
+            return _RowsResult([])
+
+        async def get(self, model, key):
+            return room if model is Room and key == room.id else None
+
+    class FakeEmbedder:
+        calls = 0
+
+        async def embed_single(self, _query: str) -> list[float]:
+            self.calls += 1
+            return [0.1, 0.2, 0.3]
+
+    class FakeSearchService:
+        calls: list[dict] = []
+
+        def __init__(self, db, embedder, tenant_id: str = "default"):
+            self.last_ranking_trace = {"results": []}
+
+        async def vector_search(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("room_ids"):
+                return [weak]
+            assert kwargs["scope_type"] == "tenant_shared"
+            assert kwargs["scope_key"] is None
+            return [strong]
+
+    async def fake_ensure_tenant_state(db, tenant_id):
+        return SimpleNamespace(indexed_generation=0, active_generation=None)
+
+    monkeypatch.setattr("app.services.palace.ensure_tenant_state", fake_ensure_tenant_state)
+    monkeypatch.setattr("app.services.palace.SearchService", FakeSearchService)
+    embedder = FakeEmbedder()
+
+    response = await retrieve_palace(
+        FakeDb(),
+        tenant_id="default",
+        embedder=embedder,
+        body=SimpleNamespace(
+            query="deployment notes",
+            room_id=None,
+            limit=5,
+            scope_type="tenant_shared",
+            scope_key=None,
+            tags=None,
+            tags_mode="any",
+            min_score=0.1,
+            date_from=None,
+            date_to=None,
+        ),
+    )
+
+    assert response.results[0] is strong
+    assert embedder.calls == 1
+    assert len(FakeSearchService.calls) == 2
+    assert [attempt.reason for attempt in response.trace.search_attempts] == [
+        "room_scoped",
+        "scoped_rescue",
+    ]
+    assert all(attempt.status == "success" for attempt in response.trace.search_attempts)
+    assert all(duration >= 0 for duration in response.trace.stage_timings_ms.values())
+    assert response.trace.stage_timings_ms["total"] >= response.trace.stage_timings_ms["routing"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scoped_count", [0, 1, 3])
 async def test_retrieve_palace_exact_scope_never_merges_tenant_shared(
     monkeypatch, scoped_count: int

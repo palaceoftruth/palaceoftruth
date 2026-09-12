@@ -33,6 +33,9 @@ _TEXT_WEIGHT = 0.3
 _MIN_CANDIDATE_LIMIT = 20
 _MAX_CANDIDATE_LIMIT = 50
 _MAX_EXPLICIT_CANDIDATE_LIMIT = 200
+_SELECTIVE_ROOM_MAX_ROOMS = 8
+_SELECTIVE_ROOM_MAX_ITEMS = 512
+_SELECTIVE_ROOM_MAX_CHUNKS = 4096
 _SELF_MEMORY_NOTE_PENALTY = 0.05
 _NEGATIVE_SELF_MEMORY_NOTE_PENALTY = 0.18
 _EXACT_TITLE_MATCH_BONUS = 0.12
@@ -390,6 +393,37 @@ def _embedding_search_plan(profile: EmbeddingProfile) -> _EmbeddingSearchPlan:
         ),
         profile_name=profile.profile_name,
     )
+
+
+def _selective_room_guard_ctes(plan: _EmbeddingSearchPlan) -> str:
+    """One-snapshot, bounded eligibility probe; never use a truncated set as results."""
+    return f"""
+            eligible_room_items AS MATERIALIZED (
+                SELECT DISTINCT member.item_id
+                FROM unnest(CAST(:room_ids AS uuid[])) requested(room_id)
+                JOIN LATERAL (
+                    SELECT DISTINCT rm.item_id FROM room_memberships rm
+                    WHERE rm.tenant_id = :tenant_id AND rm.room_id = requested.room_id
+                    ORDER BY rm.item_id
+                    LIMIT :item_probe_limit
+                ) member ON true
+                LIMIT :item_probe_limit
+            ), selective_chunk_window AS MATERIALIZED (
+                SELECT e.item_id FROM eligible_room_items member
+                JOIN LATERAL (
+                    SELECT e.item_id FROM {plan.table_name} e
+                    WHERE e.tenant_id = :tenant_id AND e.item_id = member.item_id
+                    {plan.profile_filter}
+                    LIMIT :chunk_probe_limit
+                ) e ON true
+                WHERE (SELECT count(*) FROM eligible_room_items) < :item_probe_limit
+                LIMIT :chunk_probe_limit
+            ),
+            selective_guard AS MATERIALIZED (
+                SELECT (SELECT count(*) FROM eligible_room_items) < :item_probe_limit
+                    AND (SELECT count(*) FROM selective_chunk_window) < :chunk_probe_limit AS use_selective
+            )
+    """
 
 
 @dataclass(frozen=True)
@@ -1524,6 +1558,41 @@ class SearchService:
                 continue
         return verified
 
+    async def _execute_candidate_sql(self, statement, params: dict, *, stage: str):
+        started = time.perf_counter()
+        status = "error"
+        try:
+            result = await self.db.execute(statement, params)
+            status = "ok"
+            return result
+        finally:
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            self.last_sql_timings_ms[stage] = duration_ms
+            if status != "ok":
+                # SQLAlchemy exceptions can contain bound query and memory content.
+                logger.warning("retrieval_sql_failed", extra={
+                    "stage": stage, "duration_ms": duration_ms, "status": status,
+                })
+
+    async def _can_use_selective_rooms(self, room_ids: list, plan: _EmbeddingSearchPlan) -> bool:
+        """Bound the strategy probe, including chunk fanout, without fetching content.
+
+        The main query repeats these guards in its own snapshot before using any
+        bounded member set. Growth between statements triggers a standard retry;
+        a truncated set can never become a partial search result.
+        """
+        rows = (await self._execute_candidate_sql(text(f"""
+            /* selective_room_probe */
+            WITH {_selective_room_guard_ctes(plan)}
+            SELECT use_selective FROM selective_guard
+        """), {
+            "tenant_id": self.tenant_id, "room_ids": room_ids,
+            "item_probe_limit": _SELECTIVE_ROOM_MAX_ITEMS + 1,
+            "chunk_probe_limit": _SELECTIVE_ROOM_MAX_CHUNKS + 1,
+            "embedding_profile_name": plan.profile_name,
+        }, stage="room_strategy_probe")).fetchall()
+        return bool(rows[0].use_selective)
+
     async def vector_search(
         self,
         query: str,
@@ -1561,7 +1630,10 @@ class SearchService:
         context_budget_chars: int | None = None,
         include_derived_artifacts: bool = False,
         corpus_class: Literal["all", "raw_capture", "curated_memory_entry"] = "all",
+        _allow_selective_rooms: bool = True,
     ) -> list[SearchResult]:
+        self.last_sql_timings_ms: dict[str, float] = {}
+        self.last_candidate_strategy = "standard"
         lens_profile = resolve_retrieval_lens(retrieval_lens)
         derived_artifacts_requested = include_derived_artifacts or _tags_request_derived_artifacts(tags)
         query_intent = _apply_derived_artifact_policy(
@@ -1596,11 +1668,10 @@ class SearchService:
         # semantic_candidates_where is shared by both the flat and the per-scope
         # ranked variant below, so the candidate-generation filters can never
         # drift between them.
-        semantic_candidates_where = f"""
-                WHERE i.status = 'ready'
+        item_eligibility = """
+                i.status = 'ready'
                   AND i.deleted_at IS NULL
                   AND i.tenant_id = :tenant_id
-                  {embedding_plan.profile_filter}
                   AND (
                       CAST(:historical_mode AS boolean) IS TRUE
                       OR NOT EXISTS (
@@ -1623,7 +1694,7 @@ class SearchService:
                       )
                   )
                   AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
-                  AND (CAST(:item_ids AS uuid[]) IS NULL OR e.item_id = ANY(CAST(:item_ids AS uuid[])))
+                  AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
                   AND (
                       CAST(:room_ids AS uuid[]) IS NULL
                       OR EXISTS (
@@ -1680,7 +1751,49 @@ class SearchService:
                   AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
                   AND (CAST(:date_to   AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
         """
-        if per_scope_candidate_cap is None:
+        semantic_candidates_where = f"WHERE {item_eligibility} {embedding_plan.profile_filter}"
+        selective_rooms = False
+        if (
+            settings.retrieval_selective_room_search_enabled and _allow_selective_rooms
+            and room_ids and len(room_ids) <= _SELECTIVE_ROOM_MAX_ROOMS
+            and per_scope_candidate_cap is None and embedding_error is None
+        ):
+            selective_rooms = await self._can_use_selective_rooms(room_ids, embedding_plan)
+        lexical_item_source = "items i"
+        lexical_exists_barrier = ""
+        if selective_rooms:
+            self.last_candidate_strategy = "selective_room"
+            # Start with room membership instead of sorting every embedding before
+            # selective filters. OFFSET 0 keeps each point lookup correlated.
+            semantic_candidates_cte = f"""
+            WITH {_selective_room_guard_ctes(embedding_plan)}, eligible_items AS MATERIALIZED (
+                SELECT scoped.id FROM eligible_room_items member
+                JOIN LATERAL (
+                    SELECT i.id FROM items i
+                    WHERE i.id = member.item_id AND ({item_eligibility})
+                    OFFSET 0
+                ) scoped ON true
+                WHERE (SELECT use_selective FROM selective_guard)
+            ), semantic_candidates AS MATERIALIZED (
+                SELECT e.item_id, e.chunk_text, e.chunk_index, e.distance
+                FROM eligible_items eligible
+                JOIN LATERAL (
+                    SELECT e.item_id, e.chunk_text, e.chunk_index,
+                        e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance
+                    FROM {embedding_plan.table_name} e
+                    WHERE e.tenant_id = :tenant_id AND e.item_id = eligible.id
+                    {embedding_plan.profile_filter}
+                    OFFSET 0
+                ) e ON true
+                ORDER BY e.distance ASC
+                LIMIT :semantic_candidate_limit
+            ),
+            """
+            lexical_item_source = "eligible_items eligible JOIN items i ON i.id = eligible.id"
+            # Prevent EXISTS from becoming a full embedding-ID aggregation before
+            # the much smaller keyword/room eligibility set is considered.
+            lexical_exists_barrier = "OFFSET 0"
+        elif per_scope_candidate_cap is None:
             # No cap requested: keep the exact prior flat-LIMIT behaviour, with
             # no partitioning overhead, for every caller that doesn't ask for it.
             semantic_candidates_cte = f"""
@@ -1742,91 +1855,26 @@ class SearchService:
                 LIMIT :semantic_candidate_limit
             ),
             """
+        guarded_result_prefix = ", guarded_results AS (" if selective_rooms else ""
+        guarded_result_suffix = """
+            )
+            SELECT guard.use_selective AS selective_guard_passed, result.*
+            FROM selective_guard guard LEFT JOIN guarded_results result ON guard.use_selective
+            ORDER BY result.score DESC, result.item_id ASC
+        """ if selective_rooms else ""
         sql = text(f"""
             {semantic_candidates_cte}
             lexical_match_window AS MATERIALIZED (
                 SELECT i.id AS item_id
-                FROM items i
-                WHERE i.status = 'ready'
-                  AND i.deleted_at IS NULL
-                  AND i.tenant_id = :tenant_id
+                FROM {lexical_item_source}
+                WHERE {item_eligibility}
                   AND i.search_vector @@ plainto_tsquery('english', :query)
-                  AND (
-                      CAST(:historical_mode AS boolean) IS TRUE
-                      OR NOT EXISTS (
-                          SELECT 1 FROM memory_entries current_me
-                          WHERE current_me.tenant_id = i.tenant_id
-                            AND current_me.item_id = i.id
-                            AND (
-                                current_me.superseded_by_entry_id IS NOT NULL
-                                OR current_me.valid_until <= CURRENT_TIMESTAMP
-                            )
-                      )
-                  )
-                  AND (
-                      CAST(:historical_mode AS boolean) IS TRUE
-                      OR NOT EXISTS (
-                          SELECT 1 FROM source_records current_sr
-                          WHERE current_sr.tenant_id = i.tenant_id
-                            AND current_sr.item_id = i.id
-                            AND current_sr.status IN ('stale', 'failed', 'deleted', 'superseded')
-                      )
-                  )
-                  AND (CAST(:source_type AS varchar) IS NULL OR i.source_type = :source_type)
-                  AND (CAST(:item_ids AS uuid[]) IS NULL OR i.id = ANY(CAST(:item_ids AS uuid[])))
-                  AND (
-                      CAST(:room_ids AS uuid[]) IS NULL
-                      OR EXISTS (
-                          SELECT 1 FROM room_memberships rm
-                          WHERE rm.tenant_id = :tenant_id
-                            AND rm.item_id = i.id
-                            AND rm.room_id = ANY(CAST(:room_ids AS uuid[]))
-                      )
-                  )
-                  AND (
-                      CAST(:scope_type AS text) IS NULL
-                      OR COALESCE(
-                          i.metadata->'memory_entry'->'scope'->>'type',
-                          CASE WHEN CAST(:scope_type AS text) = 'tenant_shared' THEN 'tenant_shared' ELSE NULL END
-                      ) = CAST(:scope_type AS text)
-                  )
-                  AND (
-                      CAST(:scope_key AS text) IS NULL
-                      OR i.metadata->'memory_entry'->'scope'->>'key' = CAST(:scope_key AS text)
-                  )
-                  AND (
-                      CAST(:scope_labels AS text[]) IS NULL
-                      OR (
-                          CASE
-                              WHEN COALESCE(
-                                  NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'type'), ''),
-                                  'tenant_shared'
-                              ) = 'tenant_shared' THEN 'tenant_shared'
-                              WHEN NULLIF(BTRIM(i.metadata->'memory_entry'->'scope'->>'key'), '') IS NOT NULL
-                                  THEN BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
-                                       || '/'
-                                       || BTRIM(i.metadata->'memory_entry'->'scope'->>'key')
-                              ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
-                          END
-                      ) = ANY(CAST(:scope_labels AS text[]))
-                  )
-                  AND (
-                      CAST(:exclude_private_memory_scopes AS boolean) IS FALSE
-                      OR i.metadata->'memory_entry' IS NULL
-                      OR COALESCE(i.metadata->'memory_entry'->'scope'->>'type', 'tenant_shared') = 'tenant_shared'
-                  )
-                  AND (
-                      CAST(:tags AS text[]) IS NULL
-                      OR (CAST(:tags_mode AS text) = 'all' AND i.tags @> CAST(:tags AS text[]))
-                      OR (CAST(:tags_mode AS text) = 'any' AND i.tags && CAST(:tags AS text[]))
-                  )
-                  AND (CAST(:date_from AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) >= :date_from)
-                  AND (CAST(:date_to AS timestamptz) IS NULL OR COALESCE(i.effective_date, i.created_at) <= :date_to)
                   AND EXISTS (
                       SELECT 1
                       FROM {embedding_plan.table_name} eligible_embedding
                       WHERE eligible_embedding.item_id = i.id
                         {embedding_plan.profile_filter.replace('e.', 'eligible_embedding.')}
+                        {lexical_exists_barrier}
                   )
                 LIMIT :lexical_candidate_limit
             ),
@@ -1913,6 +1961,7 @@ class SearchService:
                     ) AS rn
                 FROM scored
             )
+            {guarded_result_prefix}
             SELECT
                 item_id, chunk_text, chunk_index,
                 title, summary, source_type, source_url, tags, created_at,
@@ -1928,6 +1977,7 @@ class SearchService:
             WHERE rn = 1
             ORDER BY score DESC, item_id ASC
             LIMIT :candidate_limit
+            {guarded_result_suffix}
         """)
 
         if embedding_error is not None:
@@ -1950,7 +2000,7 @@ class SearchService:
             )
         else:
             rows = (
-                await self.db.execute(
+                await self._execute_candidate_sql(
                 sql,
                 {
                     "vec": vec_str,
@@ -1975,9 +2025,40 @@ class SearchService:
                     "exclude_private_memory_scopes": exclude_private_memory_scopes,
                     "historical_mode": historical_mode,
                     "embedding_profile_name": embedding_plan.profile_name,
+                    "item_probe_limit": _SELECTIVE_ROOM_MAX_ITEMS + 1,
+                    "chunk_probe_limit": _SELECTIVE_ROOM_MAX_CHUNKS + 1,
                     },
+                    stage="hybrid_query",
                 )
             ).fetchall()
+
+        if selective_rooms:
+            if rows and not rows[0].selective_guard_passed:
+                previous_timings = dict(self.last_sql_timings_ms)
+                try:
+                    # Preserve the full request and reuse the embedding. This retry
+                    # is standard-only, so concurrent writers cannot cause a loop.
+                    return await self.vector_search(
+                        query=query, limit=limit, source_type=source_type,
+                        retrieval_lens=retrieval_lens, item_ids=item_ids, room_ids=room_ids,
+                        scope_type=scope_type, scope_key=scope_key, scope_labels=scope_labels,
+                        per_scope_candidate_cap=per_scope_candidate_cap,
+                        tags=tags, tags_mode=tags_mode, date_from=date_from, date_to=date_to,
+                        min_score=min_score, query_vector=query_vec,
+                        query_embedding_error=embedding_error,
+                        exclude_private_memory_scopes=exclude_private_memory_scopes,
+                        candidate_limit=candidate_limit, include_neighbor_chunks=include_neighbor_chunks,
+                        neighbor_chunk_window=neighbor_chunk_window, context_budget_chars=context_budget_chars,
+                        include_derived_artifacts=include_derived_artifacts, corpus_class=corpus_class,
+                        _allow_selective_rooms=False,
+                    )
+                finally:
+                    for stage, duration in previous_timings.items():
+                        self.last_sql_timings_ms[stage] = self.last_sql_timings_ms.get(stage, 0.0) + duration
+                    if self.last_ranking_trace is not None:
+                        self.last_ranking_trace["sql_timings_ms"] = dict(self.last_sql_timings_ms)
+                        self.last_ranking_trace["selective_room_retry"] = True
+            rows = [row for row in rows if row.item_id is not None]
 
         candidates = [
             _SearchCandidate(
@@ -2397,6 +2478,8 @@ class SearchService:
             )
 
         self.last_ranking_trace = {
+            "candidate_strategy": "selective_room" if selective_rooms else "standard",
+            "sql_timings_ms": dict(self.last_sql_timings_ms),
             "ranking_features_version": 2,
             "retrieval_mode": "lexical_degraded" if embedding_error is not None else "hybrid",
             "dependency_degradation": (
