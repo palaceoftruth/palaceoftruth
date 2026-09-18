@@ -750,6 +750,8 @@ metrics:
   serviceAnnotations: {}
   serviceMonitor:
     # Enable in clusters with the Prometheus Operator ServiceMonitor CRD.
+    # Also appends each backend's own status.podIP to its effective TRUSTED_HOSTS
+    # so direct per-pod IPv4 scrapes pass host validation. Bearer auth is unchanged.
     enabled: false
     # Preserve application metric labels such as `endpoint`; otherwise the
     # Prometheus scrape target's endpoint label rewrites them to
