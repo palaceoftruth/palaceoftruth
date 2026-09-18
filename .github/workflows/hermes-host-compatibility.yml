@@ -1,0 +1,157 @@
+name: Hermes host compatibility
+
+on:
+  schedule:
+    - cron: '23 8 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'third_party_plugins/hermes/memory/palaceoftruth/**'
+      - 'scripts/check_hermes_host_compatibility.py'
+      - 'scripts/package_hermes_memory_plugin.py'
+      - 'backend/tests/test_hermes_host*.py'
+      - 'backend/tests/test_hermes_memory*.py'
+      - '.github/workflows/hermes-host-compatibility.yml'
+      - '.github/workflows/build-push.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-host-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compatibility:
+    name: Real host (${{ matrix.canary }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - canary: supported
+            ref: e83b1d51f13a08b424636f0b519db86a35aa7bd7
+          - canary: upstream-main
+            ref: main
+    env:
+      HOST_ROOT: ${{ github.workspace }}/.ci-hermes-host
+    steps:
+      - name: Initialize disposable paths
+        shell: bash
+        run: |
+          printf 'HOST_VENV=%s/hermes-host-venv\nREPORT_DIR=%s/hermes-host-report\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Checkout Palace
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Checkout real Hermes host
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: .ci-hermes-host
+          persist-credentials: false
+      - name: Record resolved host revision
+        shell: bash
+        env:
+          CANARY: ${{ matrix.canary }}
+          HOST_REF: ${{ matrix.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPORT_DIR"
+          git -C "$HOST_ROOT" rev-parse HEAD > "$REPORT_DIR/host-sha.txt"
+          printf 'Canary: %s\nRequested ref: %s\nResolved SHA: %s\n' \
+            "$CANARY" "$HOST_REF" "$(< "$REPORT_DIR/host-sha.txt")" >> "$GITHUB_STEP_SUMMARY"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+      - name: Install isolated host gate dependencies
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python 3.12 "$HOST_VENV"
+          # Real discovery/provider imports need YAML, dotenv and HTTPX only.
+          # Use the selected host's own pins, not Palace's app dependencies.
+          # Full agent/context-helper smoke is deliberately outside this lane.
+          "$HOST_VENV/bin/python" - "$HOST_ROOT" "$REPORT_DIR" <<'PY'
+          import pathlib, re, sys, tomllib
+          host, report = map(pathlib.Path, sys.argv[1:])
+          deps = tomllib.loads((host / 'pyproject.toml').read_text())['project']['dependencies']
+          wanted = {'pyyaml', 'python-dotenv', 'httpx'}
+          selected = [dep for dep in deps if re.split(r'[\[<>=!~; ]', dep, 1)[0].lower() in wanted]
+          if len(selected) != len(wanted):
+              raise SystemExit('Host dependency declarations changed; review the minimal gate environment')
+          (report / 'requirements.txt').write_text('\n'.join(selected) + '\n')
+          PY
+          uv pip install --python "$HOST_VENV/bin/python" -r "$REPORT_DIR/requirements.txt"
+          uv pip freeze --python "$HOST_VENV/bin/python" > "$REPORT_DIR/installed.txt"
+      - name: Exercise real host discovery and lifecycle
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/hermes-empty-home"
+          # No inherited credentials/configuration. The harness additionally
+          # uses disposable profiles and denies child-process network access.
+          timeout 180s env -i \
+            PATH="$HOST_VENV/bin:/usr/bin:/bin" \
+            HOME="$RUNNER_TEMP/hermes-empty-home" \
+            HERMES_HOME="$RUNNER_TEMP/hermes-empty-home/.hermes" \
+            PYTHONNOUSERSITE=1 \
+            "$HOST_VENV/bin/python" scripts/check_hermes_host_compatibility.py \
+              --hermes-root "$HOST_ROOT" \
+              --output "$REPORT_DIR/report.json" \
+              --require-gate checkpoint
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: hermes-host-${{ matrix.canary }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hermes-host-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+  alert:
+    name: Record default-branch canary failure
+    needs: compatibility
+    if: >-
+      always() && needs.compatibility.result == 'failure' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    # Serialize schedule/manual alerts together to avoid duplicate issue creation.
+    concurrency:
+      group: hermes-host-compatibility-alert
+      cancel-in-progress: false
+    steps:
+      # No checkout, artifact ingestion, or execution of host/PR-controlled code
+      # in this privileged job. Only static text and trusted run coordinates.
+      - name: Create or update the single open failure issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Hermes host compatibility canary failed'
+          marker='<!-- hermes-host-compatibility-alert -->'
+          body=$(printf '%s\n\nReal-host compatibility failed. Inspect both canary logs and the SHA/report artifacts.\n\nLatest run: %s\n\nHuman review required; this workflow never updates hosts or merges changes.\n' "$marker" "$RUN_URL")
+          # Enumerate all open issues (not eventually consistent search), and
+          # match our bot-owned marker. Updating the body avoids comment spam.
+          number=$(gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" \
+            --jq '.[] | select(.pull_request == null and .user.login == "github-actions[bot]" and ((.body // "") | contains("<!-- hermes-host-compatibility-alert -->"))) | .number' \
+            | sort -n | { read -r first || true; printf '%s' "${first:-}"; })
+          if [ -n "$number" ]; then
+            gh api --method PATCH "repos/$GH_REPO/issues/$number" -f body="$body" > /dev/null
+          else
+            number=$(gh api --method POST "repos/$GH_REPO/issues" -f title="$title" -f body="$body" --jq '.number')
+          fi
+          gh api "repos/$GH_REPO/issues/$number" --jq '.html_url'

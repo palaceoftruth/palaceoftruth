@@ -104,7 +104,7 @@ jobs:
               case "$changed_file" in
                 backend/tests/test_helm_*.py|backend/tests/test_build_push_workflow.py)
                   ;;
-                backend/*|scripts/*)
+                backend/*|scripts/*|third_party_plugins/hermes/memory/palaceoftruth/*)
                   BACKEND_FAST=true
                   ;;
               esac
@@ -344,7 +344,8 @@ jobs:
         working-directory: backend
         run: >-
           uv run --frozen --python 3.12 python -m pytest
-          tests/test_helm_*.py tests/test_build_push_workflow.py -q
+          tests/test_helm_*.py tests/test_build_push_workflow.py
+          tests/test_hermes_host_workflow.py -q
 
   extension:
     name: Browser extension
