@@ -42,7 +42,7 @@ def isolate_oauth_environment(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def load_palaceoftruth_plugin():
+def load_palaceoftruth_plugin(*, context_thread_factory=None):
     agent_pkg = types.ModuleType("agent")
     agent_memory_provider = types.ModuleType("agent.memory_provider")
 
@@ -50,6 +50,8 @@ def load_palaceoftruth_plugin():
         pass
 
     agent_memory_provider.MemoryProvider = MemoryProvider
+    if context_thread_factory is not None:
+        agent_memory_provider.spawn_context_thread = context_thread_factory
     sys.modules["agent"] = agent_pkg
     sys.modules["agent.memory_provider"] = agent_memory_provider
 
@@ -61,6 +63,15 @@ def load_palaceoftruth_plugin():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def wait_for_provider_writes(provider) -> None:
+    """Drain a test's accepted writes without closing the provider to later work."""
+    with provider._lifecycle_lock:
+        worker = provider._sync_thread
+    if worker is not None:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
 
 
 class FakeJsonResponse:
@@ -3162,7 +3173,7 @@ def test_palaceoftruth_write_paths_send_write_scope_for_entries(
         provider.handle_tool_call("palace_remember", {"content": "Remember explicit write."})
     )
     provider.sync_turn("User asks for recall.", "Assistant answers from Palace.")
-    provider.shutdown()
+    wait_for_provider_writes(provider)
     provider.on_memory_write("add", "memory", "Remember mirrored memory.")
     provider.shutdown()
 
@@ -3389,7 +3400,7 @@ def test_palaceoftruth_write_quota_counts_sync_and_memory_mirror(
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
     caplog.set_level(logging.WARNING)
     provider.on_memory_write("add", "memory", "First write consumes the turn quota.")
-    provider.shutdown()
+    wait_for_provider_writes(provider)
     provider.sync_turn("User", "Assistant")
     provider.shutdown()
 
@@ -4262,7 +4273,7 @@ def test_palaceoftruth_provider_caches_whoami_between_writes(monkeypatch) -> Non
 
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
     provider.sync_turn("User reminder", "Assistant reply")
-    provider.shutdown()
+    wait_for_provider_writes(provider)
     provider.on_memory_write("add", "memory", "Andrew prefers idempotent deploy scripts.")
     provider.shutdown()
 
