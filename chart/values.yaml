@@ -305,6 +305,12 @@ databaseTls:
 # CloudNative-PG cluster (requires CNPG operator)
 postgres:
   enabled: true
+  # Optional application-only DB host override (including migration/RLS hooks).
+  # Empty uses the CNPG app Secret host. Credentials, port and database still
+  # come from that original Secret; the declared CNPG Cluster is not changed.
+  # For a replacement server, also set databaseTls.caSecretName to its CA.
+  # Ignored when postgres.enabled=false (existingSecret DATABASE_URL is used).
+  applicationHost: ""
   # clusterName defaults to <fullname>-postgres when empty
   clusterName: ""
   instances: 1
