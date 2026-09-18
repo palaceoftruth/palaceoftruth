@@ -1764,10 +1764,81 @@ def test_palaceoftruth_search_reports_unavailable_when_no_scope_answers(
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
     result = json.loads(provider.handle_tool_call("palace_search", {"query": "QuietFirm"}))
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["searched_scopes"] == []
     assert "search was unavailable" in result["result"]
-    assert "Do not report this as an empty memory." in result["result"]
+    assert result["error"]["type"] == "PalaceRetrievalError"
+    assert "RuntimeError" in result["error"]["message"]
+
+
+def test_palaceoftruth_search_oauth_500_is_unavailable_and_secret_safe(
+    monkeypatch, caplog,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.delenv("PALACEOFTRUTH_API_KEY", raising=False)
+    monkeypatch.setenv("PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="clara")
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request.full_url)
+        assert request.full_url.endswith("/oauth/token")
+        raise module.HTTPError(
+            request.full_url, 500, "client-secret", {},
+            io.BytesIO(b'{"detail":"private response body client-secret"}'),
+        )
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    with caplog.at_level(logging.DEBUG):
+        raw = provider.handle_tool_call("palace_search", {"query": "missing"})
+    result = json.loads(raw)
+    assert requests
+    assert result["ok"] is False
+    assert result["error"]["type"] == "PalaceRetrievalError"
+    assert result["error"]["status_code"] == 500
+    assert "HTTPError" in result["error"]["message"]
+    assert "client-secret" not in raw + caplog.text
+    assert "private response body" not in raw + caplog.text
+
+
+@pytest.mark.parametrize("route_ok,scope_ok", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("has_results", [False, True])
+def test_palaceoftruth_search_preserves_success_despite_partial_failure(
+    monkeypatch, route_ok, scope_ok, has_results,
+) -> None:
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "https://api.palace.test")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "clara")
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("session-1", hermes_home="/tmp/hermes-home", agent_identity="clara", agent_workspace="hermes")
+    calls = []
+
+    def request(method, path, payload=None, params=None):
+        calls.append((method, path))
+        if path.endswith("/scopes"):
+            return {"scopes": []}
+        if path.endswith("/retrieve-agent") and route_ok:
+            return {"results": [], "trace": {"searched_scopes": [{"type": "agent", "key": "clara"}]}}
+        if path.endswith("/retrieve") and scope_ok and payload and payload["scope"]["type"] == "agent":
+            return {"results": ([{"item_id": "note", "title": "Found memory", "chunk_text": "evidence"}]
+                                if has_results else [])}
+        raise RuntimeError("secret upstream body")
+
+    monkeypatch.setattr(provider, "_request_json", request)
+    result = json.loads(provider.handle_tool_call("palace_search", {"query": "memory"}))
+    assert result["ok"] is True
+    assert "error" not in result
+    assert "agent/clara" in result["searched_scopes"]
+    if scope_ok and has_results:
+        assert "Found memory" in result["result"]
+    assert all(path in {"/api/v1/memory/scopes", "/api/v1/memory/retrieve-agent", "/api/v1/memory/retrieve"}
+               for _, path in calls)
 
 
 def test_palaceoftruth_background_prefetch_survives_failure(monkeypatch) -> None:
