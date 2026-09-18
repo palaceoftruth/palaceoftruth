@@ -42,12 +42,17 @@ def test_real_host_legacy_contract_and_isolation(tmp_path, real_host):
     assert result.returncode == 0, (result.stderr, report)
     assert report["success"] is True
     assert report["host_sha"]
-    for name in ("isolation", "discovery", "registration", "lifecycle", "tool_dispatch"):
+    for name in ("isolation", "discovery", "registration", "lifecycle", "write_completion", "tool_dispatch"):
         assert report["gates"][name]["status"] == "passed", report
     assert report["gates"]["checkpoint"]["status"] == "supported_limitation"
     assert report["gates"]["context_helper"]["status"] == "not_requested"
     assert "on_delegation" in report["gates"]["lifecycle"]["observed_hooks"]
     assert report["gates"]["lifecycle"]["shutdown_drain"]["status"] == "drained"
+    completion = report["gates"]["write_completion"]
+    assert completion["released"]["flush_while_blocked"] is False
+    assert completion["released"]["writes"][0]["thread"].startswith("mem-sync")
+    assert completion["blocked_shutdown"]["shutdown"]["status"] == "timed_out"
+    assert completion["blocked_shutdown"]["write_completed_at_shutdown"] is False
 
 
 def test_strict_checkpoint_is_an_explicit_future_gate(tmp_path, real_host):
@@ -56,6 +61,16 @@ def test_strict_checkpoint_is_an_explicit_future_gate(tmp_path, real_host):
     assert report["success"] is False
     assert report["gates"]["checkpoint"]["status"] == "supported_limitation"
     assert report["required_gates"] == ["checkpoint"]
+
+
+def test_strict_global_drain_rejects_pinned_host_limitations(tmp_path, real_host):
+    result, report = run_gate(tmp_path, "--hermes-root", real_host, "--require-gate", "global_drain")
+    assert result.returncode == 1
+    assert report["success"] is False
+    assert report["gates"]["write_completion"]["status"] == "passed"
+    assert report["gates"]["global_drain"]["status"] == "supported_limitation"
+    assert report["gates"]["global_drain"]["limitations"]
+    assert report["required_gates"] == ["global_drain"]
 
 
 @pytest.mark.parametrize("injected,gate", [

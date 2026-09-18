@@ -58,9 +58,75 @@ reported as a pass.
 - Legacy pre-compress invocation and strict checkpoint rejection through the real
   manager, not through the provider stub.
 
-No-auth hooks can be no-ops. This is host API/lifecycle compatibility evidence,
-**not** proof of network retrieval, durable capture, credentialed identity,
-checkpoint durability, or a successful production conversation.
+The `lifecycle` gate's no-auth hooks can be no-ops. The separate
+`write_completion` gate cannot: it constructs fixture providers without initializing
+production configuration, enables a local auth predicate, supplies an offline
+tenant, and blocks `_request_json` with an event. Real payload construction, quota
+reservation, host callback threading, flush and shutdown all run. The kernel and
+audit network guards remain installed. This is **not** proof of network retrieval,
+remote persistence, credentialed identity, checkpoint durability, or a successful
+production conversation.
+
+### Write completion and the remaining host drain blocker (SAR-1403)
+
+`sync_turn` now returns only when its accepted write attempt has finished. On an
+idle provider FIFO it executes directly on Hermes' serialized worker. If a mirror
+already owns that FIFO, sync retains its captured context and quota, waits for its
+own completion, and cannot overtake that mirror. Submission-time provenance is
+snapshotted before transport. Quota buckets rotate at callback admission, not
+completion; no transport or wait holds the lifecycle lock. Direct/older callers
+must provide their own asynchronous boundary; calling `sync_turn` directly is now
+blocking. The supported host's `sync_all` remains nonblocking.
+
+The blocked-write gate verifies both paths of the host completion contract:
+
+- While transport is blocked, pre-shutdown `flush_pending(timeout=...)` returns
+  false. Release permits a successful flush and drained shutdown. Context, session
+  scope and new-session quota remain correct.
+- With one active and one queued turn, real shutdown expires with `timed_out`,
+  one active task and one abandoned queued write, **not** `drained`. The unmodified
+  host and provider each have a five-second budget (about ten seconds total).
+  Transport is then released and observed to finish. No timeout/join is mocked.
+
+**Global drain is still unsupported by the pinned host. Do not use its manager
+status as a release guarantee that all accepted provider writes completed.** The
+`global_drain` gate records these separately and `--require-gate global_drain`
+returns exit 1 while they remain. Default compatibility success accepts this
+explicit limitation, just as it accepts checkpoint v1; it is not upgrade approval.
+The actual blocked transport reproduces:
+
+1. Host `flush_pending` returns true after shutdown clears its executor reference,
+   even while a tracked callback remains active.
+2. Repeated shutdown overwrites `timed_out` with `drained` and erases abandoned
+   counts despite an active callback.
+3. Host mirror notifications run inline, outside tracked futures; the provider's
+   legacy mirror FIFO is invisible to host flush. A provider warning or exception
+   cannot fix this: host shutdown ignores the return and swallows exceptions.
+
+Minimal required **host** follow-up, not implemented by this plugin patch:
+
+- In `MemoryManager.on_memory_write`, admit mirror notifications on the same
+  tracked serialized worker as sync, capturing metadata and context at admission.
+  Then make the provider's mirror callback completion-bound as sync is; do not
+  leave a second unobserved queue. Preserve session/provenance snapshots at this
+  boundary and serialize session rebinding behind accepted writes (the host's
+  `commit_session_boundary_async` already does this for that boundary).
+- Implement `flush_pending` as a bounded wait on a snapshot of accepted futures,
+  under the same admission lock. Executor absence or a sentinel submission error
+  must never imply completion of still-tracked work.
+- On repeated shutdown, continue observing active futures and preserve abandoned
+  write counts. Distinguish quiescence after cancellation from successful drain.
+- Account for `_submit_background`'s inline fallback too: track it before execution,
+  or explicitly reject it. Otherwise executor-creation/submission failure leaves
+  another untracked write/admission race.
+
+Require blocked sync **and mirror** tests, post-timeout flush, repeated shutdown,
+late-admission rejection, and release/quiescence tests before enabling strict
+`global_drain`. Direct provider tool calls and unrelated inline hooks are not
+implicitly covered by a manager-worker barrier. No monkeypatch of the running host,
+indefinite shutdown wait, durable outbox, or v2 checkpoint is introduced here.
+Write-attempt completion is not remote persistence: legacy callbacks still log
+transport failures. Crash persistence and checkpoint receipts remain SAR-1406.
 
 ### Checkpoint limitation and future acceptance gates
 

@@ -23,7 +23,127 @@ import sys
 import tempfile
 from typing import Any
 
-GATES = ("isolation", "discovery", "registration", "lifecycle", "tool_dispatch", "checkpoint", "context_helper")
+GATES = ("isolation", "discovery", "registration", "lifecycle", "write_completion", "global_drain", "tool_dispatch", "checkpoint", "context_helper")
+
+
+def probe_write_completion(provider_type, manager_type):
+    """Exercise actual accepted writes, with offline transport and real host waits.
+
+    No initialize/config/auth lookup: only fixture instances and in-memory writes.
+    The host's five-second drain timeout and provider join are NOT patched.
+    """
+    import contextvars
+    import threading
+    from time import perf_counter
+
+    profile = contextvars.ContextVar("completion_profile", default="wrong")
+
+    def fixture():
+        provider = provider_type()
+        provider._session_id = "old-session"
+        provider._scope_type = "session"
+        provider._has_api_auth = lambda: True
+        provider._resolve_tenant_id = lambda: "offline-tenant"
+        entered, release, completed = (threading.Event() for _ in range(3))
+        seen = []
+
+        def transport(method, path, payload):
+            entered.set()
+            if not release.wait(25):
+                raise AssertionError("Offline transport was not released")
+            seen.append({"profile": profile.get(), "session": payload["metadata"]["session_id"],
+                         "scope": payload["scope"], "thread": threading.current_thread().name})
+            completed.set()
+            return {"ok": True}
+
+        provider._request_json = transport
+        manager = manager_type()
+        manager.add_provider(provider)
+        return provider, manager, entered, release, completed, seen
+
+    # A flush barrier cannot pass a still-running turn write.
+    provider, manager, entered, release, completed, seen = fixture()
+    try:
+        token = profile.set("submission-profile")
+        manager.sync_all("Offline accepted turn", "Offline answer", session_id="old-session")
+        profile.reset(token)
+        assert entered.wait(3), "Authenticated fixture never reached transport"
+        flush_blocked = manager.flush_pending(timeout=0.1)
+        assert not flush_blocked, "flush_pending reported completion while sync transport was blocked"
+        manager.on_session_switch("new-session")
+        provider._reserve_write_quota(is_bulk=False)
+        release.set()
+        assert manager.flush_pending(timeout=3), "Released write did not complete"
+        assert completed.is_set() and len(seen) == 1, seen
+        assert seen[0]["profile"] == "submission-profile", seen
+        assert seen[0]["session"] == "old-session", seen
+        assert seen[0]["scope"] == {"type": "session", "key": "old-session"}, seen
+        assert provider._session_write_count == provider._turn_write_count == 1
+        manager.shutdown_all()
+        assert manager.shutdown_drain_state["status"] == "drained"
+        released = {"flush_while_blocked": flush_blocked, "writes": seen,
+                    "new_session_write_count": provider._session_write_count,
+                    "shutdown": manager.shutdown_drain_state}
+    finally:
+        release.set()
+        manager.shutdown_all()
+
+    # The real shutdown bound must expire honestly, not orphan a hidden writer.
+    provider, manager, entered, release, completed, seen = fixture()
+    try:
+        manager.sync_all("Offline blocked shutdown", "Offline answer", session_id="old-session")
+        assert entered.wait(3)
+        manager.sync_all("Offline queued turn", "Offline answer", session_id="old-session")
+        started = perf_counter()
+        manager.shutdown_all()
+        elapsed = perf_counter() - started
+        drain = manager.shutdown_drain_state
+        assert drain["status"] == "timed_out", drain
+        assert drain["active_tasks"] == 1 and drain["abandoned_writes"] == 1, drain
+        assert not completed.is_set(), "Fixture completed before the shutdown bound"
+        assert elapsed < 15, "Shutdown exceeded the two real five-second drain budgets"
+        # Expose pinned-host shortcomings rather than call them provider fixes.
+        post_shutdown_flush = manager.flush_pending(timeout=0.1)
+        manager.shutdown_all()
+        repeated_shutdown = manager.shutdown_drain_state
+        assert not completed.is_set()
+        timed_out = {"seconds": round(elapsed, 3), "shutdown": drain,
+                     "write_completed_at_shutdown": False}
+    finally:
+        release.set()
+        assert completed.wait(3), "Released detached transport failed to finish"
+        provider.shutdown()
+
+    # Host mirrors run inline, outside its tracked executor; the provider still
+    # has a legacy asynchronous mirror FIFO. A strict global drain must reject it.
+    provider, manager, entered, release, completed, seen = fixture()
+    caller = threading.Thread(
+        target=lambda: manager.on_memory_write("add", "memory", "Offline mirrored write"),
+        daemon=True,
+    )
+    try:
+        caller.start()
+        assert entered.wait(3)
+        mirror_flush = manager.flush_pending(timeout=0.1)
+    finally:
+        release.set()
+        caller.join(3)
+        provider.shutdown()
+        manager.shutdown_all()
+    assert not caller.is_alive()
+    assert completed.is_set() and len(seen) == 1
+    limitations = []
+    if post_shutdown_flush:
+        limitations.append("Host flush returns true after clearing executor while transport remains active")
+    if repeated_shutdown["status"] == "drained":
+        limitations.append("Repeated host shutdown overwrites timeout while transport remains active")
+    if mirror_flush:
+        limitations.append("Host flush does not account for provider-owned mirror writes")
+    return ({"status": "passed", "scope": "manager-accepted sync attempts; not remote durability",
+             "released": released, "blocked_shutdown": timed_out},
+            {"status": "supported_limitation" if limitations else "passed",
+             "post_timeout_flush": post_shutdown_flush, "repeated_shutdown": repeated_shutdown,
+             "mirror_flush_while_blocked": mirror_flush, "limitations": limitations})
 
 
 def deny_network_and_exec():
@@ -156,6 +276,9 @@ def child_probe(host: Path, package_paths: list[str], context_smoke: bool) -> di
         drain = manager.shutdown_drain_state
         assert drain == {"status": "drained", "abandoned_writes": 0, "abandoned_prefetches": 0, "active_tasks": 0}, drain
         gates[current] = {"status": "passed", "observed_hooks": observed, "shutdown_drain": drain, "scope": "uncredentialed real-provider lifecycle; not remote durability"}
+
+        current = "write_completion"
+        gates[current], gates["global_drain"] = probe_write_completion(type(provider), MemoryManager)
 
         current = "tool_dispatch"
         result = json.loads(manager.handle_tool_call("palace_search", {}))

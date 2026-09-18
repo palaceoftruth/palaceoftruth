@@ -1449,8 +1449,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._sync_thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
         self._write_queue: deque[
-            tuple[contextvars.Context, Callable[[], None], _WriteQuota]
+            tuple[contextvars.Context, Callable[[], None], _WriteQuota, threading.Event]
         ] = deque()
+        self._write_idle = threading.Event()
+        self._write_idle.set()
         self._closed = False
 
     @property
@@ -2977,7 +2979,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     logger.warning("Palace of Truth sync failed: %s", exc)
 
-            self._queue_write(_worker, quota)
+            completed, run_inline = self._queue_write(_worker, quota, inline=True)
+
+        # Hermes already calls sync_turn on its serialized, tracked worker.
+        # Returning before transport finishes would make its flush/shutdown lie.
+        # Never hold the lifecycle lock while running/waiting for transport.
+        if run_inline:
+            self._drain_writes()
+        else:
+            completed.wait()
 
     def on_session_switch(
         self,
@@ -3059,33 +3069,49 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         snapshot["active_skill_names"] = tuple(self._active_skill_names)
         return snapshot
 
-    def _queue_write(self, worker: Callable[[], None], quota: _WriteQuota) -> None:
-        # One provider-owned FIFO supports older/direct callers as well as Hermes'
-        # serial executor. Capture each submitter, not just the first worker's context.
+    def _queue_write(
+        self, worker: Callable[[], None], quota: _WriteQuota, *, inline: bool = False
+    ) -> tuple[threading.Event, bool]:
+        # Mirrors still need a background worker on legacy hosts. Share FIFO order
+        # with sync, but let an idle sync run on the host worker, not a second daemon.
+        # A sync queued behind a mirror waits for its own completion before returning.
         context = contextvars.copy_context()
+        completed = threading.Event()
         with self._lifecycle_lock:
             if self._closed:
-                return
-            self._write_queue.append((context, worker, quota))
+                completed.set()
+                return completed, False
+            self._write_queue.append((context, worker, quota, completed))
+            self._write_idle.clear()
             if self._sync_thread and self._sync_thread.is_alive():
-                return
+                return completed, False
+            if inline:
+                self._sync_thread = threading.current_thread()
+                return completed, True
             self._sync_thread = spawn_context_thread(self._drain_writes, name="palace-write")
             self._sync_thread.start()
+            return completed, False
 
     def _drain_writes(self) -> None:
         while True:
             with self._lifecycle_lock:
                 if not self._write_queue:
                     self._sync_thread = None
+                    self._write_idle.set()
                     return
-                context, worker, quota = self._write_queue.popleft()
+                context, worker, quota, completed = self._write_queue.popleft()
+            previous_quota = getattr(self._write_quota_context, "quota", None)
             self._write_quota_context.quota = quota
             try:
                 context.run(worker)
             except Exception:
                 logger.exception("Palace of Truth queued write failed")
             finally:
-                del self._write_quota_context.quota
+                if previous_quota is None:
+                    del self._write_quota_context.quota
+                else:
+                    self._write_quota_context.quota = previous_quota
+                completed.set()
 
     def _active_write_quota(self) -> _WriteQuota:
         return getattr(self._write_quota_context, "quota", self._write_quota)
@@ -3232,17 +3258,20 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         # Accepted FIFO jobs drain; a timeout never forgets a still-running worker.
         with self._lifecycle_lock:
             self._closed = True
-            workers = (self._prefetch_thread, self._sync_thread)
+            prefetch, writer = self._prefetch_thread, self._sync_thread
         deadline = perf_counter() + 5.0
-        for worker in workers:
-            if worker is None or worker is threading.current_thread():
-                continue
-            worker.join(timeout=max(0.0, deadline - perf_counter()))
-            if worker.is_alive():
+        if prefetch is not None and prefetch is not threading.current_thread():
+            prefetch.join(timeout=max(0.0, deadline - perf_counter()))
+            if prefetch.is_alive():
+                logger.warning("Palace of Truth shutdown has unfinished prefetch work")
+        # The writer may be a host executor thread: join would wait for its whole
+        # lifetime, not for our FIFO. Wait for provider work, within the same budget.
+        if writer is not None and writer is not threading.current_thread():
+            if not self._write_idle.wait(timeout=max(0.0, deadline - perf_counter())):
                 logger.warning(
                     "Palace of Truth shutdown has unfinished background work: %s; "
                     "worker remains tracked and new background submissions are rejected",
-                    worker.name,
+                    writer.name,
                 )
 
     def _request_agent_scope_label(

@@ -103,4 +103,3 @@ def test_host_workflow_policy():
     text = WORKFLOW.read_text()
     for forbidden in ("pull_request_target", "contents: write", "pull-requests: write", "hermes update", "gh pr merge", "--system"):
         assert forbidden not in text
-

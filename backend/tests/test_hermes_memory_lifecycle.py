@@ -7,6 +7,14 @@ import pytest
 from .test_hermes_memory_plugin import load_palaceoftruth_plugin
 
 
+def start_sync(provider, user, assistant):
+    """The host owns the async boundary; sync_turn waits for completion."""
+    context = contextvars.copy_context()
+    thread = threading.Thread(target=lambda: context.run(provider.sync_turn, user, assistant))
+    thread.start()
+    return thread
+
+
 @pytest.fixture(params=["legacy-host", "context-aware-host"])
 def provider(monkeypatch, request):
     def host_context_thread(target, *, name, daemon=True):
@@ -52,7 +60,7 @@ def test_background_work_inherits_callers_context(provider, monkeypatch, operati
 
 @pytest.mark.parametrize("first_operation", ["sync", "mirror"])
 @pytest.mark.parametrize("second_operation", ["sync", "mirror"])
-def test_writes_are_fifo_nonblocking_and_keep_each_jobs_context(
+def test_writes_are_fifo_sync_waits_and_mirrors_keep_each_jobs_context(
     provider, monkeypatch, first_operation, second_operation
 ):
     profile = contextvars.ContextVar("queued_profile", default="wrong")
@@ -67,9 +75,10 @@ def test_writes_are_fifo_nonblocking_and_keep_each_jobs_context(
         seen.append((label, profile.get()))
 
     monkeypatch.setattr(provider, "_post_memory_entries", post)
+    first_sync = None
     token = profile.set("first-profile")
     if first_operation == "sync":
-        provider.sync_turn("first", "answer")
+        first_sync = start_sync(provider, "first", "answer")
     else:
         provider.on_memory_write("add", "memory", "first")
     profile.reset(token)
@@ -86,12 +95,19 @@ def test_writes_are_fifo_nonblocking_and_keep_each_jobs_context(
     submitter = threading.Thread(target=submit_second)
     submitter.start()
     try:
-        assert submitted.wait(0.5), "submitting must not join an in-flight write"
+        if second_operation == "sync":
+            assert not submitted.wait(0.1), "sync must not return before its transport completes"
+        else:
+            assert submitted.wait(0.5), "legacy mirror submission remains asynchronous"
         assert seen == [], "second write must not overtake the blocked first write"
     finally:
         release.set()
         submitter.join(3)
         provider.shutdown()
+        if first_sync is not None:
+            first_sync.join(3)
+            assert not first_sync.is_alive()
+    assert submitted.is_set()
     assert seen == [("first", "first-profile"), ("second", "second-profile")]
 
 
@@ -109,8 +125,9 @@ def test_queued_write_keeps_submission_session_and_scope(provider, monkeypatch, 
 
     monkeypatch.setattr(provider, "_resolve_tenant_id", tenant)
     monkeypatch.setattr(provider, "_post_memory_entries", lambda path, payload: payloads.append(payload))
+    sync = None
     if operation == "sync":
-        provider.sync_turn("user", "assistant")
+        sync = start_sync(provider, "user", "assistant")
     else:
         provider.on_memory_write("add", "memory", "content")
     try:
@@ -121,6 +138,9 @@ def test_queued_write_keeps_submission_session_and_scope(provider, monkeypatch, 
     finally:
         release.set()
         provider.shutdown()
+    if sync is not None:
+        sync.join(3)
+        assert not sync.is_alive()
     assert len(payloads) == 1
     assert payloads[0]["metadata"]["session_id"] == "old-session"
     assert payloads[0]["metadata"]["agent_workspace"] == "old-workspace"
@@ -135,7 +155,7 @@ def test_old_sync_completion_does_not_reset_new_turn_quota(provider, monkeypatch
         assert release.wait(5)
 
     monkeypatch.setattr(provider, "_post_memory_entries", post)
-    provider.sync_turn("old user", "old assistant")
+    sync = start_sync(provider, "old user", "old assistant")
     try:
         assert entered.wait(2)
         provider.sync_turn("", "")
@@ -144,6 +164,8 @@ def test_old_sync_completion_does_not_reset_new_turn_quota(provider, monkeypatch
     finally:
         release.set()
         provider.shutdown()
+    sync.join(3)
+    assert not sync.is_alive()
     assert provider._turn_write_count == 3
     assert provider._turn_bulk_call_count == 2
 
@@ -157,7 +179,7 @@ def test_sync_finishing_during_next_turn_cannot_restore_its_allowance(provider, 
 
     monkeypatch.setattr(provider, "_post_memory_entries", post)
     provider._max_writes_per_turn = 2
-    provider.sync_turn("turn A", "answer A")
+    sync = start_sync(provider, "turn A", "answer A")
     try:
         assert entered.wait(2)
         # Turn B is already active: there is no second sync_turn until it ends.
@@ -166,6 +188,8 @@ def test_sync_finishing_during_next_turn_cannot_restore_its_allowance(provider, 
     finally:
         release.set()
         provider.shutdown()
+    sync.join(3)
+    assert not sync.is_alive()
     with pytest.raises(Exception, match="per-turn write cap exceeded"):
         provider._reserve_write_quota(is_bulk=False)
 
@@ -229,7 +253,7 @@ def test_shutdown_timeout_retains_worker_and_reports_unfinished_work(provider, m
     try:
         # Simulate exhausting the join budget without a slow wall-clock test.
         with monkeypatch.context() as m:
-            m.setattr(worker, "join", lambda timeout=None: None)
+            m.setattr(provider._write_idle, "wait", lambda timeout=None: False)
             provider.shutdown()
         assert worker.is_alive()
         assert provider._sync_thread is worker
@@ -238,5 +262,7 @@ def test_shutdown_timeout_retains_worker_and_reports_unfinished_work(provider, m
     finally:
         release.set()
         provider.shutdown()
+    # Shutdown waits for FIFO work, not the lifetime of its executor thread.
+    worker.join(3)
     assert not worker.is_alive()
     assert seen == ["first", "second"]
