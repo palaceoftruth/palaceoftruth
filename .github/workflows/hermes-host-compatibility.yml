@@ -11,6 +11,7 @@ on:
       - 'scripts/package_hermes_memory_plugin.py'
       - 'backend/tests/test_hermes_host*.py'
       - 'backend/tests/test_hermes_memory*.py'
+      - 'backend/uv.lock'
       - '.github/workflows/hermes-host-compatibility.yml'
       - '.github/workflows/build-push.yml'
 
@@ -85,6 +86,10 @@ jobs:
           selected = [dep for dep in deps if re.split(r'[\[<>=!~; ]', dep, 1)[0].lower() in wanted]
           if len(selected) != len(wanted):
               raise SystemExit('Host dependency declarations changed; review the minimal gate environment')
+          # Regression runner comes from Palace's reviewed lock, not a floating install.
+          lock = tomllib.loads(pathlib.Path('backend/uv.lock').read_text())
+          pytest_pin = next(p['version'] for p in lock['package'] if p['name'] == 'pytest')
+          selected.append('pytest==' + pytest_pin)
           (report / 'requirements.txt').write_text('\n'.join(selected) + '\n')
           PY
           uv pip install --python "$HOST_VENV/bin/python" -r "$REPORT_DIR/requirements.txt"
@@ -104,8 +109,18 @@ jobs:
             PYTHONNOUSERSITE=1 \
             "$HOST_VENV/bin/python" scripts/check_hermes_host_compatibility.py \
               --hermes-root "$HOST_ROOT" \
-              --output "$REPORT_DIR/report.json" \
-              --require-gate checkpoint
+              --output "$REPORT_DIR/report.json"
+      - name: Verify harness detects swallowed regressions
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          timeout 120s env -i \
+            PATH="$HOST_VENV/bin:/usr/bin:/bin" \
+            HOME="$RUNNER_TEMP/hermes-empty-home" \
+            HERMES_HOME="$RUNNER_TEMP/hermes-empty-home/.hermes" \
+            HERMES_COMPAT_TEST_ROOT="$HOST_ROOT" \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            "$HOST_VENV/bin/python" -m pytest backend/tests/test_hermes_host_compatibility.py -q
       - name: Upload compatibility evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

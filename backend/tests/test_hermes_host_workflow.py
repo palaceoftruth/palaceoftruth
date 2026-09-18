@@ -72,10 +72,12 @@ def test_host_workflow_policy():
     assert 'uv pip install --python "$HOST_VENV/bin/python"' in runs
     assert '"$HOST_VENV/bin/python" scripts/check_hermes_host_compatibility.py' in runs
     assert '--hermes-root "$HOST_ROOT"' in runs
-    assert '--require-gate checkpoint' in runs
+    assert '--require-gate checkpoint' not in runs, "v1 limitation must not demand SAR-1406 v2"
     assert '--context-helper-smoke' not in runs
     assert 'timeout 180s env -i' in runs
     assert 'host-sha.txt' in runs
+    assert 'HERMES_COMPAT_TEST_ROOT="$HOST_ROOT"' in runs
+    assert '-m pytest backend/tests/test_hermes_host_compatibility.py' in runs
     uploads = [s for s in steps if s.get("uses", "").startswith("actions/upload-artifact@")]
     assert len(uploads) == 1 and uploads[0]["if"] == "always()"
     assert uploads[0]["with"]["retention-days"] == "14"
