@@ -74,6 +74,31 @@ def test_prepared_publication_invalidates_cache_once(provider, monkeypatch):
                 "new text", "new-tenant", True, "new-agent", "new-mode")
 
 
+def test_direct_switch_is_not_overwritten_by_prepared_completion(provider, monkeypatch):
+    # A direct switch must not silently reattribute queued old-session work.
+    seen = []
+    monkeypatch.setattr(provider, "on_session_end", lambda messages: seen.append(
+        provider._session_id), raising=False)
+    publish, complete = provider.prepare_session_boundary([], new_session_id="prepared")
+    publish()
+    provider.on_session_switch("direct-newer")
+    complete()
+    assert seen == ["old-session"]
+    assert provider._session_id == "direct-newer"
+    assert provider._snapshot_write_context()["session_id"] == "direct-newer"
+
+
+def test_direct_switch_during_completion_is_not_overwritten(provider, monkeypatch):
+    def finish(messages):
+        provider.on_session_switch("direct-during-completion")
+    monkeypatch.setattr(provider, "on_session_end", finish, raising=False)
+    publish, complete = provider.prepare_session_boundary([], new_session_id="prepared")
+    publish()
+    complete()
+    assert provider._session_id == "direct-during-completion"
+    assert provider._snapshot_write_context()["session_id"] == "direct-during-completion"
+
+
 def test_closed_session_publication_fails(provider):
     publish, _ = provider.prepare_session_boundary([], new_session_id="new")
     provider.shutdown()
