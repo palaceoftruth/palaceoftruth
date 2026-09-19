@@ -99,6 +99,47 @@ def test_direct_switch_during_completion_is_not_overwritten(provider, monkeypatc
     assert provider._snapshot_write_context()["session_id"] == "direct-during-completion"
 
 
+@pytest.mark.parametrize("final_session", ["direct-concurrent", "old-session"])
+def test_concurrent_direct_switch_survives_prepared_completion(
+    provider, monkeypatch, final_session,
+):
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+
+    def finish(messages):
+        entered.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr(provider, "on_session_end", finish, raising=False)
+    publish, complete = provider.prepare_session_boundary([], new_session_id="prepared")
+    publish()
+
+    def run():
+        try:
+            complete()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        provider.on_session_switch("intermediate")
+        provider.on_session_switch(final_session)
+        quota = provider._write_quota
+    finally:
+        release.set()
+        worker.join(2)
+    assert not worker.is_alive()
+    assert not errors
+    assert provider._session_id == final_session
+    assert provider._snapshot_write_context()["session_id"] == final_session
+    assert provider._write_quota is quota
+
+
 def test_closed_session_publication_fails(provider):
     publish, _ = provider.prepare_session_boundary([], new_session_id="new")
     provider.shutdown()

@@ -1412,6 +1412,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
         self._session_id = ""
+        self._direct_session_generation = 0
         self._admitted_session_id: str | None = None
         self._agent_identity = ""
         self._agent_workspace = ""
@@ -3065,6 +3066,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 raise RuntimeError("Palace provider is closed")
             quota = self._write_quota
             epoch = self._current_turn_epoch()
+            direct_generation = self._direct_session_generation
             context = contextvars.copy_context()
         published = False
         completed = False
@@ -3118,7 +3120,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                             self._write_quota_context.quota = previous
                     if new_session_id:
                         with self._lifecycle_lock:
-                            self._session_id = new_session_id.strip()
+                            # A legacy direct switch supersedes queued execution
+                            # state. Prepared FIFO publications do not: each must
+                            # still advance execution for the next queued callback.
+                            if self._direct_session_generation == direct_generation:
+                                self._session_id = new_session_id.strip()
 
                 context.copy().run(execute)
                 completed = True
@@ -3137,6 +3143,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if self._closed:
                 return
             del parent_session_id, reset, kwargs
+            self._direct_session_generation += 1
             self._session_id = (new_session_id or "").strip()
             self._admitted_session_id = self._session_id
             self._advance_turn_epoch()
