@@ -43,6 +43,12 @@ p._max_writes_per_turn = 20
 p._max_writes_per_session = 20
 observed, quotas, extractions, execution_order = [], [], [], []
 p._build_memory_write_payload = lambda **kwargs: kwargs
+p._build_entry_payload = lambda user, assistant, session, **kwargs: {
+    'content': 'sync', 'snapshot': kwargs['snapshot']}
+if mode == 'sync-caps':
+    # The ending turn has one mirror plus its capture. The next turn must
+    # have its own allowance, not inherit this full two-write bucket.
+    p._max_writes_per_turn = 2
 
 def record(route, payload):
     quota = p._active_write_quota()
@@ -112,6 +118,14 @@ try:
         finally:
             m._sync_executor.submit = submit
         m.on_memory_write('add', 'memory', 'after rejection')
+    elif mode in ('sync-quotas', 'sync-caps', 'sync-control'):
+        m.sync_all('ending old turn', 'reply', session_id='old')
+        if mode == 'sync-control':
+            # Positive control: once sync executes, the same real quota code
+            # correctly gives the next mirror a new turn bucket.
+            release.set()
+            assert m.flush_pending(timeout=3)
+        m.on_memory_write('add', 'memory', 'next turn')
     elif mode != 'concurrent':
         assert m.commit_session_boundary_async([], new_session_id='new') is True
         m.on_memory_write('add', 'memory', 'after new')
@@ -129,6 +143,8 @@ finally:
 result = dict(drained=drained, writes=observed, extractions=extractions,
               execution_order=execution_order,
               distinct_buckets=len({id(q.session_writes) for q in quotas}),
+              distinct_turn_buckets=len({id(q) for q in quotas}),
+              turn_counts=[q.turn_writes for q in quotas],
               session_counts=[q.session_writes[0] for q in quotas])
 print(json.dumps(result, sort_keys=True))
 assert drained
@@ -141,6 +157,15 @@ elif mode in ('reject', 'orphan'):
     assert observed == [('before', 'old'), ('after rejection', 'old')]
     assert result['distinct_buckets'] == 1
     assert result['session_counts'] == [2, 2]
+elif mode in ('sync-quotas', 'sync-caps', 'sync-control'):
+    assert extractions == []
+    assert observed == [('before', 'old'), ('sync', 'old'), ('next turn', 'old')], (
+        'Next-turn mirror was lost against the ending turn quota')
+    assert result['distinct_buckets'] == 1, 'Turn rotation must retain session total'
+    assert result['session_counts'] == [3, 3, 3]
+    assert result['distinct_turn_buckets'] == 2, 'Queued sync did not publish next-turn quota'
+    assert quotas[0] is quotas[1] and quotas[1] is not quotas[2]
+    assert result['turn_counts'] == [2, 2, 1]
 else:
     assert extractions == ['old', 'new']
     assert len(quotas) == 3
@@ -152,7 +177,10 @@ else:
 '''
 
 
-@pytest.mark.parametrize('mode', ['sessions', 'quotas', 'reject', 'orphan', 'concurrent'])
+@pytest.mark.parametrize('mode', [
+    'sessions', 'quotas', 'reject', 'orphan', 'concurrent',
+    'sync-quotas', 'sync-caps', 'sync-control',
+])
 def test_real_paired_boundary_admission(tmp_path, mode):
     host = os.environ.get('HERMES_COMPAT_TEST_ROOT')
     if not host:
