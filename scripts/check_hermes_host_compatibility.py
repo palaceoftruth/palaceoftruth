@@ -240,42 +240,64 @@ def child_probe(host: Path, package_paths: list[str], context_smoke: bool) -> di
         current = "lifecycle"
         # Observe real methods (not stub replacements). Manager deliberately
         # swallows provider exceptions; observations make swallowed errors fail.
-        observed, errors = [], []
-        def observe(name):
-            original = getattr(provider, name)
+        observed, completed, errors = [], [], []
+        def wrap_observation(name, original, prepared=False):
             @functools.wraps(original)
             def wrapped(*args, **kwargs):
                 observed.append(name)
                 try:
-                    return original(*args, **kwargs)
+                    result = original(*args, **kwargs)
+                    if prepared and result is not None:
+                        if callable(result):
+                            result = wrap_observation(name + ".complete", result)
+                        else:
+                            publish, complete = result
+                            result = (wrap_observation(name + ".publish", publish),
+                                      wrap_observation(name + ".complete", complete))
+                    completed.append(name)
+                    return result
                 except Exception as exc:
                     errors.append(f"{name}: {type(exc).__name__}: {exc}")
                     raise
-            setattr(provider, name, wrapped)
+            return wrapped
 
         hooks = ("on_turn_start", "prefetch", "queue_prefetch", "sync_turn", "on_memory_write", "on_delegation", "on_session_switch", "on_session_end", "shutdown")
         for hook in hooks:
-            observe(hook)
-        if callable(getattr(provider, "prepare_memory_write", None)):
-            observe("prepare_memory_write")
+            setattr(provider, hook, wrap_observation(hook, getattr(provider, hook)))
+        for hook in ("prepare_memory_write", "prepare_sync_turn", "prepare_session_boundary"):
+            original = getattr(provider, hook, None)
+            if callable(original):
+                setattr(provider, hook, wrap_observation(hook, original, prepared=True))
         messages = [{"role": "user", "content": "Offline compatibility fixture"}, {"role": "assistant", "content": "Fixture response"}]
         manager.on_turn_start(1, messages[0]["content"], author_id="fixture", author_name="Fixture", author_is_bot=False)
         assert isinstance(manager.prefetch_all("Offline compatibility fixture", session_id="compat-session"), str)
         manager.sync_all(messages[0]["content"], messages[1]["content"], session_id="compat-session", messages=messages, turn_author={"id": "fixture"})
         manager.queue_prefetch_all("Offline compatibility fixture", session_id="compat-session")
         assert manager.flush_pending(timeout=3), "Background hooks did not drain"
+        # Admit an actual mirror using only in-memory transport. A no-auth
+        # prepare returning None cannot prove that its completion is tracked.
+        provider._has_api_auth = lambda: True
+        provider._resolve_tenant_id = lambda: "offline-tenant"
+        provider._request_json = lambda *args, **kwargs: {"ok": True}
         manager.on_memory_write("add", "memory", "Offline fixture", metadata={"source": "contract-test"})
+        assert manager.flush_pending(timeout=3)
         manager.on_delegation("Offline fixture task", "Offline fixture result", child_session_id="compat-child")
         manager.on_session_switch("compat-resumed", parent_session_id="compat-session", rewound=True)
         assert provider._session_id == "compat-resumed"
         manager.commit_session_boundary_async(messages, new_session_id="compat-new", parent_session_id="compat-resumed")
         assert manager.flush_pending(timeout=3)
+        assert not errors, errors
         assert provider._session_id == "compat-new"
         manager.shutdown_all()
         assert not errors, errors
-        assert set(hooks) - {"on_memory_write"} <= set(observed), observed
-        assert {"on_memory_write", "prepare_memory_write"} & set(observed), observed
-        assert observed[-3:] == ["on_session_end", "on_session_switch", "shutdown"], observed
+        assert set(hooks) - {"on_memory_write", "sync_turn"} <= set(completed), completed
+        assert "sync_turn" in completed or {"prepare_sync_turn.publish", "prepare_sync_turn.complete"} <= set(completed), completed
+        assert "on_memory_write" in completed or "prepare_memory_write.complete" in completed, completed
+        if "prepare_session_boundary.publish" in completed:
+            assert "prepare_session_boundary.complete" in completed, completed
+            assert completed.index("on_session_end") < completed.index("prepare_session_boundary.complete") < completed.index("shutdown"), completed
+        else:
+            assert completed[-3:] == ["on_session_end", "on_session_switch", "shutdown"], completed
         drain = manager.shutdown_drain_state
         assert drain == {"status": "drained", "abandoned_writes": 0, "abandoned_prefetches": 0, "active_tasks": 0}, drain
         gates[current] = {"status": "passed", "observed_hooks": observed, "shutdown_drain": drain, "scope": "uncredentialed real-provider lifecycle; not remote durability"}
