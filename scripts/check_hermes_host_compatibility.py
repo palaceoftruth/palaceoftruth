@@ -256,6 +256,8 @@ def child_probe(host: Path, package_paths: list[str], context_smoke: bool) -> di
         hooks = ("on_turn_start", "prefetch", "queue_prefetch", "sync_turn", "on_memory_write", "on_delegation", "on_session_switch", "on_session_end", "shutdown")
         for hook in hooks:
             observe(hook)
+        if callable(getattr(provider, "prepare_memory_write", None)):
+            observe("prepare_memory_write")
         messages = [{"role": "user", "content": "Offline compatibility fixture"}, {"role": "assistant", "content": "Fixture response"}]
         manager.on_turn_start(1, messages[0]["content"], author_id="fixture", author_name="Fixture", author_is_bot=False)
         assert isinstance(manager.prefetch_all("Offline compatibility fixture", session_id="compat-session"), str)
@@ -271,7 +273,8 @@ def child_probe(host: Path, package_paths: list[str], context_smoke: bool) -> di
         assert provider._session_id == "compat-new"
         manager.shutdown_all()
         assert not errors, errors
-        assert set(hooks) <= set(observed), observed
+        assert set(hooks) - {"on_memory_write"} <= set(observed), observed
+        assert {"on_memory_write", "prepare_memory_write"} & set(observed), observed
         assert observed[-3:] == ["on_session_end", "on_session_switch", "shutdown"], observed
         drain = manager.shutdown_drain_state
         assert drain == {"status": "drained", "abandoned_writes": 0, "abandoned_prefetches": 0, "active_tasks": 0}, drain

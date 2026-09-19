@@ -3020,6 +3020,41 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
+        # Legacy hosts need an asynchronous callback, but share the same snapshot.
+        with self._lifecycle_lock:
+            prepared = self._prepare_memory_write(action, target, content)
+            if prepared is not None:
+                worker, quota = prepared
+                self._queue_write(worker, quota)
+
+    def prepare_memory_write(
+        self, action: str, target: str, content: str, *, metadata: dict | None = None
+    ) -> Callable[[], None] | None:
+        """Freeze admission state without IO; return a completion-bound attempt.
+
+        Metadata support is reserved for the provenance change. Completion means
+        the transport attempt finished, not that remote storage is durable.
+        """
+        with self._lifecycle_lock:
+            prepared = self._prepare_memory_write(action, target, content)
+            if prepared is None:
+                return None
+            worker, quota = prepared
+            context = contextvars.copy_context()
+
+        def complete() -> None:
+            def execute() -> None:
+                completed, drain = self._queue_write(worker, quota, inline=True)
+                if drain:
+                    self._drain_writes()
+                completed.wait()
+            context.copy().run(execute)
+
+        return complete
+
+    def _prepare_memory_write(
+        self, action: str, target: str, content: str
+    ) -> tuple[Callable[[], None], _WriteQuota] | None:
         with self._lifecycle_lock:
             if self._closed:
                 return
@@ -3052,7 +3087,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     logger.warning("Palace of Truth memory mirror failed: %s", exc)
 
-            self._queue_write(_worker, self._write_quota)
+            return _worker, self._write_quota
 
     def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
         """Copy submission-time provenance; resolve server identity only in the worker."""
