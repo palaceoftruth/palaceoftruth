@@ -3247,7 +3247,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     logger.warning("Palace of Truth memory mirror failed: %s", exc)
 
-            return _worker, self._write_quota
+            return _worker, self._active_write_quota()
 
     def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
         """Copy submission-time provenance; resolve server identity only in the worker."""

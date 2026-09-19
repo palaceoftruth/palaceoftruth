@@ -2,6 +2,8 @@
 import contextvars
 import threading
 
+import pytest
+
 from .test_hermes_memory_lifecycle import provider  # noqa: F401
 
 
@@ -54,3 +56,70 @@ def test_prepared_mirror_filters_and_rejects_after_shutdown(provider, monkeypatc
     completion()
     assert provider.prepare_memory_write("add", "memory", "x") is None
     assert seen == []
+
+
+@pytest.mark.parametrize("mode", ["legacy", "prepared"])
+def test_callback_mirror_inside_old_session_completion_binds_old_quota(
+    provider, monkeypatch, mode
+):
+    """Completion callbacks must debit the ending session's quota, not the new one.
+
+    ``publish()`` admits the newer session and rotates admission before
+    ``complete()`` runs extraction. A mirror issued inside that completion
+    (legacy ``on_memory_write`` or a prepared completion token) must still be
+    bound to the snapshot/ending quota; newer admission counters stay untouched.
+    """
+    observed = []
+    completion_binding = []
+    pending = []
+    old_quota = provider._write_quota
+    monkeypatch.setattr(provider, "_write_quotas_enabled", True)
+
+    def post(method, path, payload, **kwargs):  # noqa: ARG001
+        observed.append((
+            payload["metadata"]["session_id"],
+            provider._active_write_quota() is old_quota,
+            provider._turn_write_count,
+            provider._session_write_count,
+        ))
+        return {}
+
+    # Restore the real transport wrapper (the shared fixture stubs it) but stub
+    # only the HTTP call, so quota reservation still happens as in production.
+    monkeypatch.setattr(
+        provider, "_post_memory_entries", type(provider)._post_memory_entries.__get__(provider)
+    )
+    monkeypatch.setattr(provider, "_request_json", post)
+
+    def finish(messages):  # noqa: ARG001
+        completion_binding.append(provider._active_write_quota() is old_quota)
+        if mode == "legacy":
+            provider.on_memory_write("add", "memory", "callback-origin write")
+        else:
+            pending.append(
+                provider.prepare_memory_write("add", "memory", "callback-origin write")
+            )
+
+    provider.on_session_end = finish
+    publish, complete = provider.prepare_session_boundary([], new_session_id="new-session")
+    publish()
+    newer = provider._write_quota
+    assert newer is not old_quota
+    newer_counters = (newer.turn_writes, newer.session_writes[0])
+    complete()
+    for completion in pending:
+        assert callable(completion)
+        completion()
+    # Legacy mirrors run on the shared FIFO worker; wait for it to drain.
+    assert provider._write_idle.wait(5)
+
+    assert completion_binding == [True]
+    assert [(session, is_old) for session, is_old, _, _ in observed] == [("old-session", True)]
+    # Reservation landed on the ending quota; the newer admission counters are
+    # byte-for-byte unchanged.
+    assert [(turn, session) for _, _, turn, session in observed] == [(1, 1)]
+    assert old_quota.turn_writes == 1
+    assert provider._active_write_quota() is newer
+    assert (provider._write_quota.turn_writes, provider._write_quota.session_writes[0]) == (
+        newer_counters
+    )
