@@ -3082,6 +3082,19 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 if new_session_id:
                     self._admitted_session_id = new_session_id.strip()
                     self._advance_turn_epoch()
+                    # Invalidate at admission, never at delayed completion: that
+                    # completion may run after a newer session populated caches.
+                    with self._prefetch_lock:
+                        self._prefetch_cache = {
+                            "query": "", "session_id": "", "workspace": "",
+                            "text": "", "epoch": self._current_turn_epoch(),
+                        }
+                    with self._tenant_id_lock:
+                        self._tenant_id = ""
+                    with self._server_identity_lock:
+                        self._server_identity_loaded = False
+                        self._server_agent_scope_key = ""
+                        self._server_containment_mode = ""
                     self._reset_write_quota(session=True)
                 published = True
 

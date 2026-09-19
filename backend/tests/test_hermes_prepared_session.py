@@ -43,6 +43,37 @@ def test_discarded_and_stale_session_tokens(provider):
     assert provider._snapshot_write_context()["session_id"] == "other"
 
 
+def test_prepared_publication_invalidates_cache_once(provider, monkeypatch):
+    monkeypatch.setattr(provider, "on_session_end", lambda messages: None, raising=False)
+    provider._prefetch_cache = {"text": "old"}
+    provider._tenant_id = "old-tenant"
+    provider._server_identity_loaded = True
+    provider._server_agent_scope_key = "old-agent"
+    provider._server_containment_mode = "old-mode"
+    publish, complete = provider.prepare_session_boundary([], new_session_id="new")
+    assert provider._prefetch_cache["text"] == "old"
+    publish()
+    assert provider._prefetch_cache == {
+        "query": "", "session_id": "", "workspace": "", "text": "",
+        "epoch": provider._current_turn_epoch(),
+    }
+    assert (provider._tenant_id, provider._server_identity_loaded,
+            provider._server_agent_scope_key, provider._server_containment_mode) == (
+                "", False, "", "")
+    # Repeated publication and delayed completion must preserve newer cache data.
+    provider._prefetch_cache["text"] = "new text"
+    provider._tenant_id = "new-tenant"
+    provider._server_identity_loaded = True
+    provider._server_agent_scope_key = "new-agent"
+    provider._server_containment_mode = "new-mode"
+    publish()
+    complete()
+    assert (provider._prefetch_cache["text"], provider._tenant_id,
+            provider._server_identity_loaded, provider._server_agent_scope_key,
+            provider._server_containment_mode) == (
+                "new text", "new-tenant", True, "new-agent", "new-mode")
+
+
 def test_closed_session_publication_fails(provider):
     publish, _ = provider.prepare_session_boundary([], new_session_id="new")
     provider.shutdown()
