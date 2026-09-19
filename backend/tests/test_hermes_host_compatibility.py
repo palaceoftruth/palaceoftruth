@@ -92,7 +92,7 @@ def test_prepared_host_reaches_strict_global_drain(tmp_path, prepared_host):
     assert report["success"] is True
 
 
-@pytest.mark.parametrize("hook", ["prepare_sync_turn", "prepare_session_boundary"])
+@pytest.mark.parametrize("hook", ["prepare_sync_turn", "prepare_session_boundary", "prepare_memory_write"])
 def test_prepared_completion_errors_are_observed(tmp_path, prepared_host, hook):
     package = tmp_path / "prepared-fixture-plugin"
     shutil.copytree(ROOT / "third_party_plugins/hermes/memory/palaceoftruth", package)
@@ -102,9 +102,14 @@ def test_prepared_completion_errors_are_observed(tmp_path, prepared_host, hook):
 _original_prepared = PalaceOfTruthMemoryProvider.{hook}
 @_fixture_functools.wraps(_original_prepared)
 def broken_prepared(self, *args, **kwargs):
-    publish, complete = _original_prepared(self, *args, **kwargs)
+    prepared = _original_prepared(self, *args, **kwargs)
+    if prepared is None:
+        return None
     def broken_complete():
         raise RuntimeError({marker!r})
+    if callable(prepared):
+        return broken_complete
+    publish, complete = prepared
     return publish, broken_complete
 PalaceOfTruthMemoryProvider.{hook} = broken_prepared
 ''')

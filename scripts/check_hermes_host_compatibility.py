@@ -300,7 +300,7 @@ def child_probe(host: Path, package_paths: list[str], context_smoke: bool) -> di
             assert completed[-3:] == ["on_session_end", "on_session_switch", "shutdown"], completed
         drain = manager.shutdown_drain_state
         assert drain == {"status": "drained", "abandoned_writes": 0, "abandoned_prefetches": 0, "active_tasks": 0}, drain
-        gates[current] = {"status": "passed", "observed_hooks": observed, "shutdown_drain": drain, "scope": "uncredentialed real-provider lifecycle; not remote durability"}
+        gates[current] = {"status": "passed", "observed_hooks": observed, "shutdown_drain": drain, "scope": "real-provider lifecycle with simulated auth and in-memory transport; no credentials or remote durability"}
 
         current = "write_completion"
         gates[current], gates["global_drain"] = probe_write_completion(type(provider), MemoryManager)
