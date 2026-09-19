@@ -2925,8 +2925,64 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._agent_display_limit = original_display_limit
             self._context_budget_chars = original_context_budget
 
+    def prepare_sync_turn(
+        self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Prepare (publish, complete) without IO or admission-state mutation.
+
+        The host must serialize preparation/enqueue/publication against other
+        admissions, publish only after tracked enqueue, and gate execution until
+        publication succeeds. Dropping an unpublished token leaves state intact.
+        Completion is an attempt, not a durable remote-storage receipt.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Palace provider is closed")
+            quota = self._write_quota
+            epoch = self._current_turn_epoch()
+            snapshot = self._snapshot_write_context(session_id or self._session_id)
+            context = contextvars.copy_context()
+        published = False
+        completed = False
+        completion_lock = threading.Lock()
+
+        def publish() -> None:
+            nonlocal published
+            with self._lifecycle_lock:
+                if published:
+                    return
+                if self._closed:
+                    raise RuntimeError("Palace provider is closed")
+                if self._write_quota is not quota or self._current_turn_epoch() != epoch:
+                    raise RuntimeError("Palace sync admission token is stale")
+                next_epoch = self._advance_turn_epoch()
+                self._reset_write_quota(expected_epoch=next_epoch)
+                published = True
+
+        def complete() -> None:
+            nonlocal completed
+            with completion_lock:
+                with self._lifecycle_lock:
+                    if not published:
+                        raise RuntimeError("Palace sync admission token is not published")
+                if completed:
+                    return
+                context.copy().run(
+                    self._sync_turn, user_content, assistant_content,
+                    session_id=snapshot["session_id"], prepared=(quota, snapshot),
+                )
+                completed = True
+
+        return publish, complete
+
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> None:
+        self._sync_turn(user_content, assistant_content, session_id=session_id)
+
+    def _sync_turn(
+        self, user_content: str, assistant_content: str, *, session_id: str = "",
+        prepared: tuple[_WriteQuota, dict[str, Any]] | None = None,
     ) -> None:
         with self._lifecycle_lock:
             if self._closed:
@@ -2935,9 +2991,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             # any early return so stale reads cannot affect the next turn.
             # This sync belongs to the turn that just ended. Later work gets a
             # fresh bucket immediately; worker completion never resets it.
-            quota = self._write_quota
-            turn_epoch = self._advance_turn_epoch()
-            self._reset_write_quota(expected_epoch=turn_epoch)
+            if prepared is None:
+                quota = self._write_quota
+                turn_epoch = self._advance_turn_epoch()
+                self._reset_write_quota(expected_epoch=turn_epoch)
+            else:
+                quota, _ = prepared
             if self._writes_disabled or not self._has_api_auth():
                 return
             user_text = (user_content or "").strip()
@@ -2945,8 +3004,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             if not user_text and not assistant_text:
                 return
             active_session = session_id or self._session_id
-            snapshot = self._snapshot_write_context(active_session)
-            cron_job_id = _cron_job_id(self._platform, active_session)
+            snapshot = prepared[1] if prepared is not None else self._snapshot_write_context(active_session)
+            cron_job_id = _cron_job_id(snapshot["platform"], active_session)
             if (
                 self._platform.casefold() == "cron"
                 and self._cron_automatic_capture_disabled_job_ids
