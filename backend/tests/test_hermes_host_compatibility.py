@@ -73,6 +73,50 @@ def test_strict_global_drain_rejects_pinned_host_limitations(tmp_path, real_host
     assert report["required_gates"] == ["global_drain"]
 
 
+@pytest.fixture
+def prepared_host():
+    root = os.environ.get("HERMES_PREPARED_COMPAT_TEST_ROOT")
+    if not root:
+        pytest.skip("Set HERMES_PREPARED_COMPAT_TEST_ROOT to the paired prepared-admission host")
+    return root
+
+
+def test_prepared_host_reaches_strict_global_drain(tmp_path, prepared_host):
+    result, report = run_gate(
+        tmp_path, "--hermes-root", prepared_host, "--require-gate", "global_drain"
+    )
+    assert report["gates"]["lifecycle"]["status"] == "passed", report
+    assert report["gates"]["write_completion"]["status"] == "passed", report
+    assert report["gates"]["global_drain"]["status"] == "passed", report
+    assert result.returncode == 0, (result.stderr, report)
+    assert report["success"] is True
+
+
+@pytest.mark.parametrize("hook", ["prepare_sync_turn", "prepare_session_boundary"])
+def test_prepared_completion_errors_are_observed(tmp_path, prepared_host, hook):
+    package = tmp_path / "prepared-fixture-plugin"
+    shutil.copytree(ROOT / "third_party_plugins/hermes/memory/palaceoftruth", package)
+    init = package / "__init__.py"
+    marker = f"injected-{hook}-completion-failure"
+    init.write_text(init.read_text() + f'''\nimport functools as _fixture_functools
+_original_prepared = PalaceOfTruthMemoryProvider.{hook}
+@_fixture_functools.wraps(_original_prepared)
+def broken_prepared(self, *args, **kwargs):
+    publish, complete = _original_prepared(self, *args, **kwargs)
+    def broken_complete():
+        raise RuntimeError({marker!r})
+    return publish, broken_complete
+PalaceOfTruthMemoryProvider.{hook} = broken_prepared
+''')
+    result, report = run_gate(
+        tmp_path, "--hermes-root", prepared_host, "--plugin-root", str(package)
+    )
+    assert result.returncode == 1, report
+    assert report["gates"]["lifecycle"]["status"] == "failed", report
+    # A missing-hook assertion is not proof that a swallowed failure was seen.
+    assert marker in report["gates"]["lifecycle"]["error"], report
+
+
 @pytest.mark.parametrize("injected,gate", [
     ("import socket\ntry:\n    socket.create_connection(('127.0.0.1', 9))\nexcept Exception:\n    pass\n", "isolation"),
     ("def broken_sync(self, *args, **kwargs):\n    raise TypeError('regression fixture')\nPalaceOfTruthMemoryProvider.sync_turn = broken_sync\n", "lifecycle"),
