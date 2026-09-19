@@ -1,5 +1,7 @@
 """Execute the real classifier; enforce the read-only host-canary boundary."""
+import json
 import os
+import sys
 from pathlib import Path
 import subprocess
 
@@ -40,6 +42,49 @@ def test_plugin_only_pr_selects_backend_fast(tmp_path, changed):
     selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert selected["backend_fast"] == "true"
     assert all(selected[lane] == "false" for lane in ("backend_database", "frontend", "browser", "extension", "chart_release_only"))
+
+
+@pytest.mark.parametrize("existing,fail_list", [(0, False), (2, False), (20000, False), (0, True)])
+def test_alert_shell_deduplicates_and_fails_closed(tmp_path, existing, fail_list):
+    """Run production shell without credentials or any real GitHub client."""
+    client = tmp_path / "gh"
+    calls = tmp_path / "calls.jsonl"
+    client.write_text(f"#!{sys.executable}\n" + '''
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["CALLS"], "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+if "--paginate" in args:
+    if os.environ["FAIL_LIST"] == "1":
+        sys.exit(23)
+    for number in range(int(os.environ["EXISTING"]), 0, -1):
+        print(number)
+elif "POST" in args:
+    print(42)
+elif "PATCH" not in args:
+    print("https://github.invalid/issues/42")
+''')
+    client.chmod(0o700)
+    script = load(WORKFLOW)["jobs"]["alert"]["steps"][0]["run"]
+    result = subprocess.run(["/bin/bash", "-c", script], text=True, capture_output=True,
+        timeout=10, env={"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path),
+        "CALLS": str(calls), "EXISTING": str(existing), "FAIL_LIST": str(int(fail_list)),
+        "GH_REPO": "offline/fixture", "RUN_URL": "https://github.invalid/run/123"})
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    mutations = [args for args in recorded if "--method" in args]
+    if fail_list:
+        assert result.returncode != 0
+        assert mutations == []
+        return
+    assert result.returncode == 0, result.stderr
+    assert len(mutations) == 1
+    mutation = mutations[0]
+    assert mutation[mutation.index("--method") + 1] == ("PATCH" if existing else "POST")
+    target = "repos/offline/fixture/issues" + ("/1" if existing else "")
+    assert target in mutation
+    expected = "repos/offline/fixture/issues/" + ("1" if existing else "42")
+    assert expected in recorded[-1] and "--method" not in recorded[-1]
+    assert any("https://github.invalid/run/123" in arg for arg in mutation)
 
 
 def test_host_workflow_policy():

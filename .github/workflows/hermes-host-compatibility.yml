@@ -163,7 +163,15 @@ jobs:
           # match our bot-owned marker. Updating the body avoids comment spam.
           number=$(gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" \
             --jq '.[] | select(.pull_request == null and .user.login == "github-actions[bot]" and ((.body // "") | contains("<!-- hermes-host-compatibility-alert -->"))) | .number' \
-            | sort -n | { read -r first || true; printf '%s' "${first:-}"; })
+            | sort -n | {
+                # Drain every line: closing after the first can SIGPIPE sort
+                # and abort this pipefail-enabled job before its alert write.
+                first=''
+                while IFS= read -r candidate; do
+                  if [ -z "$first" ]; then first="$candidate"; fi
+                done
+                printf '%s' "$first"
+              })
           if [ -n "$number" ]; then
             gh api --method PATCH "repos/$GH_REPO/issues/$number" -f body="$body" > /dev/null
           else
