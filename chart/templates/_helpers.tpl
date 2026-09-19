@@ -701,10 +701,14 @@ When postgres.enabled=false: reads DATABASE_URL directly from existingSecret.
       name: {{ include "palaceoftruth.postgresSecretName" . }}
       key: password
 - name: DB_HOST
+  {{- if .Values.postgres.applicationHost }}
+  value: {{ .Values.postgres.applicationHost | quote }}
+  {{- else }}
   valueFrom:
     secretKeyRef:
       name: {{ include "palaceoftruth.postgresSecretName" . }}
       key: host
+  {{- end }}
 - name: DB_PORT
   valueFrom:
     secretKeyRef:
