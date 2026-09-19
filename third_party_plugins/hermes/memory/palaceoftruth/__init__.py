@@ -1412,6 +1412,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
         self._session_id = ""
+        self._admitted_session_id: str | None = None
         self._agent_identity = ""
         self._agent_workspace = ""
         self._active_skills: list[str] = []
@@ -1882,6 +1883,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             or DEFAULT_CREATED_BY_ROLE
         )
         self._session_id = session_id
+        self._admitted_session_id = None
         self._agent_identity = str(kwargs.get("agent_identity", "")).strip()
         self._agent_workspace = str(kwargs.get("agent_workspace", "")).strip()
         self._include_tenant_shared = _config_bool(
@@ -2940,7 +2942,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 raise RuntimeError("Palace provider is closed")
             quota = self._write_quota
             epoch = self._current_turn_epoch()
-            snapshot = self._snapshot_write_context(session_id or self._session_id)
+            snapshot = self._snapshot_write_context(session_id or self._admitted_session_id or self._session_id)
             context = contextvars.copy_context()
         published = False
         completed = False
@@ -3048,6 +3050,68 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         else:
             completed.wait()
 
+    def prepare_session_boundary(
+        self, messages: list[dict[str, Any]], *, new_session_id: str,
+        parent_session_id: str = "", reason: str = "",
+    ) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Publish admission separately from ordered old-session extraction.
+
+        The host gates FIFO completion until publication succeeds. An abandoned
+        token has no effect; completion must not reset newer admission quotas.
+        """
+        del parent_session_id, reason
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Palace provider is closed")
+            quota = self._write_quota
+            epoch = self._current_turn_epoch()
+            context = contextvars.copy_context()
+        published = False
+        completed = False
+        completion_lock = threading.Lock()
+
+        def publish() -> None:
+            nonlocal published
+            with self._lifecycle_lock:
+                if published:
+                    return
+                if self._closed:
+                    raise RuntimeError("Palace provider is closed")
+                if self._write_quota is not quota or self._current_turn_epoch() != epoch:
+                    raise RuntimeError("Palace session admission token is stale")
+                if new_session_id:
+                    self._admitted_session_id = new_session_id.strip()
+                    self._advance_turn_epoch()
+                    self._reset_write_quota(session=True)
+                published = True
+
+        def complete() -> None:
+            nonlocal completed
+            with completion_lock:
+                if not published:
+                    raise RuntimeError("Palace session admission token is not published")
+                if completed:
+                    return
+
+                def execute() -> None:
+                    previous = getattr(self._write_quota_context, "quota", None)
+                    self._write_quota_context.quota = quota
+                    try:
+                        self.on_session_end(messages)
+                    finally:
+                        if previous is None:
+                            del self._write_quota_context.quota
+                        else:
+                            self._write_quota_context.quota = previous
+                    if new_session_id:
+                        with self._lifecycle_lock:
+                            self._session_id = new_session_id.strip()
+
+                context.copy().run(execute)
+                completed = True
+
+        return publish, complete
+
     def on_session_switch(
         self,
         new_session_id: str,
@@ -3061,6 +3125,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 return
             del parent_session_id, reset, kwargs
             self._session_id = (new_session_id or "").strip()
+            self._admitted_session_id = self._session_id
             self._advance_turn_epoch()
             with self._prefetch_lock:
                 self._prefetch_cache = {
@@ -3157,6 +3222,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 "agent_workspace", "platform", "source", "created_by_role",
             )
         }
+        if self._admitted_session_id is not None:
+            snapshot["session_id"] = self._admitted_session_id
         if session_id is not None:
             snapshot["session_id"] = session_id
         snapshot["active_skills"] = tuple(self._active_skills)
