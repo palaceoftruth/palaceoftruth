@@ -342,9 +342,10 @@ jobs:
 
       - name: Verify Helm network policy
         working-directory: backend
-        run: >-
-          uv run --frozen --python 3.12 python -m pytest
-          tests/test_helm_*.py tests/test_build_push_workflow.py -q
+        run: |
+          uv run --frozen --python 3.12 python -m pytest \
+            tests/test_helm_*.py tests/test_build_push_workflow.py -q
+          uv run --frozen --python 3.12 python ../scripts/test_chart_database_host.py
 
   extension:
     name: Browser extension
