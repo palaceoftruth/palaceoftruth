@@ -110,8 +110,12 @@ def test_concurrent_direct_switch_survives_prepared_completion(
     errors = []
 
     def finish(messages):
+        assert provider._session_id == "old-session"
+        assert provider._snapshot_write_context()["session_id"] == "old-session"
         entered.set()
         assert release.wait(2)
+        assert provider._session_id == "old-session"
+        assert provider._snapshot_write_context()["session_id"] == "old-session"
 
     monkeypatch.setattr(provider, "on_session_end", finish, raising=False)
     publish, complete = provider.prepare_session_boundary([], new_session_id="prepared")
@@ -138,6 +142,26 @@ def test_concurrent_direct_switch_survives_prepared_completion(
     assert provider._session_id == final_session
     assert provider._snapshot_write_context()["session_id"] == final_session
     assert provider._write_quota is quota
+
+
+def test_callback_snapshot_is_frozen_and_restored_after_failure(provider, monkeypatch):
+    seen = []
+    original = provider._snapshot_write_context()
+
+    def finish(messages):
+        seen.append((provider._session_id, provider._snapshot_write_context()))
+        raise ValueError("extraction failed")
+
+    monkeypatch.setattr(provider, "on_session_end", finish, raising=False)
+    publish, complete = provider.prepare_session_boundary([], new_session_id="prepared")
+    publish()
+    provider.on_session_switch("direct-newer")
+    for _ in range(2):
+        with pytest.raises(ValueError, match="extraction failed"):
+            complete()
+        assert provider._session_id == "direct-newer"
+        assert provider._snapshot_write_context()["session_id"] == "direct-newer"
+    assert seen == [("old-session", original)] * 2
 
 
 def test_closed_session_publication_fails(provider):

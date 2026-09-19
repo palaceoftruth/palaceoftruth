@@ -1411,6 +1411,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._dedup_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
+        self._execution_snapshot: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+            "palace_execution_snapshot", default=None,
+        )
         self._session_id = ""
         self._direct_session_generation = 0
         self._admitted_session_id: str | None = None
@@ -3051,6 +3054,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         else:
             completed.wait()
 
+    @property
+    def _session_id(self) -> str:
+        snapshot = self._execution_snapshot.get()
+        return snapshot["session_id"] if snapshot is not None else self._execution_session_id
+
+    @_session_id.setter
+    def _session_id(self, value: str) -> None:
+        # Direct transitions update shared state, never the callback's binding.
+        self._execution_session_id = value
+
     def prepare_session_boundary(
         self, messages: list[dict[str, Any]], *, new_session_id: str,
         parent_session_id: str = "", reason: str = "",
@@ -3067,6 +3080,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             quota = self._write_quota
             epoch = self._current_turn_epoch()
             direct_generation = self._direct_session_generation
+            snapshot = self._snapshot_write_context()
             context = contextvars.copy_context()
         published = False
         completed = False
@@ -3111,9 +3125,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 def execute() -> None:
                     previous = getattr(self._write_quota_context, "quota", None)
                     self._write_quota_context.quota = quota
+                    binding = self._execution_snapshot.set(snapshot)
                     try:
                         self.on_session_end(messages)
                     finally:
+                        self._execution_snapshot.reset(binding)
                         if previous is None:
                             del self._write_quota_context.quota
                         else:
@@ -3145,7 +3161,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             del parent_session_id, reset, kwargs
             self._direct_session_generation += 1
             self._session_id = (new_session_id or "").strip()
-            self._admitted_session_id = self._session_id
+            self._admitted_session_id = (new_session_id or "").strip()
             self._advance_turn_epoch()
             with self._prefetch_lock:
                 self._prefetch_cache = {
@@ -3235,6 +3251,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
     def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
         """Copy submission-time provenance; resolve server identity only in the worker."""
+        bound = self._execution_snapshot.get()
+        if bound is not None:
+            snapshot = dict(bound)
+            if session_id is not None:
+                snapshot["session_id"] = session_id
+            return snapshot
         snapshot = {
             name: getattr(self, "_" + name)
             for name in (
