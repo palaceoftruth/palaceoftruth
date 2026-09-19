@@ -41,7 +41,7 @@ p._resolve_tenant_id = lambda: 'offline-tenant'
 p._write_quotas_enabled = True
 p._max_writes_per_turn = 20
 p._max_writes_per_session = 20
-observed, quotas, extractions = [], [], []
+observed, quotas, extractions, execution_order = [], [], [], []
 p._build_memory_write_payload = lambda **kwargs: kwargs
 
 def record(route, payload):
@@ -49,9 +49,13 @@ def record(route, payload):
     p._reserve_write_quota(is_bulk=False)
     quotas.append(quota)
     observed.append((payload['content'], payload['snapshot']['session_id']))
+    execution_order.append('mirror')
 
 p._post_memory_entries = record
-p.on_session_end = lambda messages: extractions.append(p._session_id)
+def extract(messages):
+    extractions.append(p._session_id)
+    execution_order.append('extract')
+p.on_session_end = extract
 m = MemoryManager()
 m._providers = [p]
 entered, release = threading.Event(), threading.Event()
@@ -62,7 +66,40 @@ assert m._submit_background(block)
 orphans = []
 try:
     assert entered.wait(2)
-    m.on_memory_write('add', 'memory', 'before')
+    if mode == 'concurrent':
+        prepared, resume_prepare = threading.Event(), threading.Event()
+        boundary_started, boundary_finished = threading.Event(), threading.Event()
+        prepare = p.prepare_memory_write
+        results = []
+        def paused_prepare(*args, **kwargs):
+            completion = prepare(*args, **kwargs)
+            prepared.set()
+            assert resume_prepare.wait(3)
+            return completion
+        p.prepare_memory_write = paused_prepare
+        mirror = threading.Thread(target=lambda: m.on_memory_write('add', 'memory', 'before'))
+        def boundary():
+            boundary_started.set()
+            results.append(m.commit_session_boundary_async([], new_session_id='new'))
+            boundary_finished.set()
+        switch = threading.Thread(target=boundary)
+        mirror.start()
+        try:
+            assert prepared.wait(2)
+            switch.start()
+            assert boundary_started.wait(2)
+            # Atomic admission blocks the boundary until mirror enqueue.
+            # A broken host can finish here; always release and join both.
+            boundary_finished.wait(0.2)
+        finally:
+            resume_prepare.set()
+            mirror.join(3)
+            if switch.ident is not None:
+                switch.join(3)
+        assert not mirror.is_alive() and not switch.is_alive()
+        assert results == [True]
+    else:
+        m.on_memory_write('add', 'memory', 'before')
     if mode in ('reject', 'orphan'):
         submit = m._sync_executor.submit
         def reject(fn):
@@ -75,7 +112,7 @@ try:
         finally:
             m._sync_executor.submit = submit
         m.on_memory_write('add', 'memory', 'after rejection')
-    else:
+    elif mode != 'concurrent':
         assert m.commit_session_boundary_async([], new_session_id='new') is True
         m.on_memory_write('add', 'memory', 'after new')
         assert m.commit_session_boundary_async([], new_session_id='newer') is True
@@ -90,11 +127,16 @@ finally:
     m.shutdown_all()
 
 result = dict(drained=drained, writes=observed, extractions=extractions,
+              execution_order=execution_order,
               distinct_buckets=len({id(q.session_writes) for q in quotas}),
               session_counts=[q.session_writes[0] for q in quotas])
 print(json.dumps(result, sort_keys=True))
 assert drained
-if mode in ('reject', 'orphan'):
+if mode == 'concurrent':
+    assert observed == [('before', 'old')]
+    assert extractions == ['old']
+    assert execution_order == ['mirror', 'extract'], 'Boundary overtook prepared mirror'
+elif mode in ('reject', 'orphan'):
     assert extractions == []
     assert observed == [('before', 'old'), ('after rejection', 'old')]
     assert result['distinct_buckets'] == 1
@@ -110,7 +152,7 @@ else:
 '''
 
 
-@pytest.mark.parametrize('mode', ['sessions', 'quotas', 'reject', 'orphan'])
+@pytest.mark.parametrize('mode', ['sessions', 'quotas', 'reject', 'orphan', 'concurrent'])
 def test_real_paired_boundary_admission(tmp_path, mode):
     host = os.environ.get('HERMES_COMPAT_TEST_ROOT')
     if not host:
