@@ -56,11 +56,10 @@ class Settings(BaseSettings):
     # fixed-duration coin flip.
     database_rls_lock_timeout_ms: int = 10_000
     database_rls_lock_attempts: int = 5
-    # Hard ceiling for the whole 52-table hook, independent of how many tables
-    # are contended. Retries stop once this elapses and the hook fails loudly
-    # with the remaining table, so it can never outlive the chart's
-    # migrations.activeDeadlineSeconds (840s). Keep this below that value.
-    database_rls_total_budget_seconds: int = 720
+    # Budget for enforcement, including SQL waits and retry backoff. Leave
+    # headroom within the portable chart's 300-second Job deadline for init
+    # containers and cleanup. Custom values must fit the deployment's deadline.
+    database_rls_total_budget_seconds: int = 120
 
     # Redis — standard connection
     redis_url: str = "redis://localhost:6379"
