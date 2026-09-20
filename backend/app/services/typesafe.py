@@ -39,6 +39,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1"
 DEFAULT_TYPESAFE_MODEL = "jev-latest"
 
+# httpx defaults keepalive_expiry to 5 seconds, which is shorter than the gap
+# between most searches. Every search that arrived after an idle period paid a
+# fresh TLS handshake -- measured at about 300ms from the cluster to
+# api.typesafe.ai -- on top of two ~520ms request waves, so it overran the
+# 1200ms reranker budget and fell back to baseline ranking while still being
+# billed for the discarded answers. Holding idle connections longer keeps the
+# pool warm between searches.
+#
+# The ceiling is the far side: expiring later than the server closes would hand
+# out dead connections. An idle connection to api.typesafe.ai was observed open
+# past 200 seconds and was not seen to close, so this stays under the window
+# that was actually measured rather than the one the upstream might allow.
+KEEPALIVE_EXPIRY_SECONDS = 180.0
+
 # Jev accepts 64k tokens total with 32k reserved for state plus the longest
 # question. Palace never needs anything close to that: the documented failure
 # mode is the opposite direction -- "accuracy falls as the state grows with
@@ -211,6 +225,7 @@ class TypeSafeClient:
                 limits=httpx.Limits(
                     max_connections=self._config.max_concurrency,
                     max_keepalive_connections=self._config.max_concurrency,
+                    keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS,
                 ),
             )
         return self._client
