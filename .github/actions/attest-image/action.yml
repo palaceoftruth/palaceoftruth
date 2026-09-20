@@ -39,6 +39,21 @@ runs:
         subject-digest: ${{ inputs.digest }}
         push-to-registry: true
 
+    # Keep all attestations in the OCI referrer layout used by the GitHub
+    # verifier. A legacy .att fallback can publish successfully while remaining
+    # invisible when an OCI provenance referrer already exists for the digest.
+    #
+    # Rekor outages cause most failures here and can last several minutes; one
+    # on 2026-09-20 ran past the previous three-attempt ladder and failed the
+    # release. Each attempt spends about 50 seconds before its own network
+    # timeout, so 15/30/60/120s of backoff keeps trying for roughly eight
+    # minutes. build-backend attests five images, so a total outage costs about
+    # 40 minutes before the job gives up, inside its 90-minute timeout.
+    #
+    # Every attempt tests only the one directly before it: a skipped step
+    # reports outcome "skipped" rather than "failure", so the chain stops on the
+    # first success. The last attempt is not continue-on-error, so a real outage
+    # still fails the release instead of publishing an unattested image.
     - name: Publish SBOM attestation
       id: github-sbom
       continue-on-error: true
@@ -49,14 +64,11 @@ runs:
         sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
         push-to-registry: true
 
-    - name: Wait before retrying SBOM attestation
+    - name: Wait before the second SBOM attestation attempt
       if: steps.github-sbom.outcome == 'failure'
       shell: bash
       run: sleep 15
 
-    # Keep all attestations in the OCI referrer layout used by the GitHub
-    # verifier. A legacy .att fallback can publish successfully while remaining
-    # invisible when an OCI provenance referrer already exists for the digest.
     - name: Retry SBOM attestation
       id: github-sbom-retry
       if: steps.github-sbom.outcome == 'failure'
@@ -68,18 +80,46 @@ runs:
         sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
         push-to-registry: true
 
-    - name: Wait before final SBOM attestation attempt
-      if: >-
-        steps.github-sbom.outcome == 'failure' &&
-        steps.github-sbom-retry.outcome == 'failure'
+    - name: Wait before the third SBOM attestation attempt
+      if: steps.github-sbom-retry.outcome == 'failure'
       shell: bash
       run: sleep 30
 
+    - name: Retry SBOM attestation a third time
+      id: github-sbom-retry-3
+      if: steps.github-sbom-retry.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
+        push-to-registry: true
+
+    - name: Wait before the fourth SBOM attestation attempt
+      if: steps.github-sbom-retry-3.outcome == 'failure'
+      shell: bash
+      run: sleep 60
+
+    - name: Retry SBOM attestation a fourth time
+      id: github-sbom-retry-4
+      if: steps.github-sbom-retry-3.outcome == 'failure'
+      continue-on-error: true
+      uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        sbom-path: /tmp/${{ inputs.sbom-name }}.spdx.json
+        push-to-registry: true
+
+    - name: Wait before the final SBOM attestation attempt
+      if: steps.github-sbom-retry-4.outcome == 'failure'
+      shell: bash
+      run: sleep 120
+
     - name: Publish final SBOM attestation attempt
       id: github-sbom-final
-      if: >-
-        steps.github-sbom.outcome == 'failure' &&
-        steps.github-sbom-retry.outcome == 'failure'
+      if: steps.github-sbom-retry-4.outcome == 'failure'
       uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
       with:
         subject-name: ${{ inputs.image }}
