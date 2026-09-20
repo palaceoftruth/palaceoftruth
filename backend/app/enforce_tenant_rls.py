@@ -110,12 +110,21 @@ async def _enforce_table(
     Waiting once with a fixed timeout is a coin flip against long semantic-search
     scans, so each attempt waits the full lock_timeout and retries with linear
     backoff. Only the lock timeout is retried; any other error fails immediately.
-    A shared monotonic ``deadline`` caps the whole hook so retries can never
-    outlive the chart's migration deadline. Exhausting either bound raises with
-    the table name and keeps the release visibly failed -- it never skips a table
-    silently and never disables the RLS control to get a green run.
+    A shared monotonic ``deadline`` caps table enforcement, including SQL and
+    backoff. The Job deadline remains the outer limit for init/setup/cleanup.
+    Exhausting either bound keeps the release visibly failed: no table is
+    skipped and the RLS control is never disabled to obtain a green run.
     """
 
+    if asyncio.get_running_loop().time() >= deadline:
+        raise TimeoutError(f"tenant RLS total lock budget exhausted before {table}")
+    # Cancellation reaches the transaction context first, so an unfinished
+    # policy replacement rolls back before TimeoutError escapes to the caller.
+    async with asyncio.timeout_at(deadline):
+        await _enforce_table_attempts(connection, table, lock_timeout_ms, attempts)
+
+
+async def _enforce_table_attempts(connection, table, lock_timeout_ms, attempts):
     quoted = f'"{table}"'
     for attempt in range(1, attempts + 1):
         try:
@@ -133,11 +142,6 @@ async def _enforce_table(
                 raise RuntimeError(
                     f"tenant RLS enforcement could not take the ACCESS EXCLUSIVE lock on "
                     f"{quoted} after {attempts} attempts of {lock_timeout_ms}ms"
-                ) from error
-            if asyncio.get_event_loop().time() >= deadline:
-                raise RuntimeError(
-                    f"tenant RLS enforcement ran out of its total lock budget before "
-                    f"{quoted}; remaining tables were not enforced"
                 ) from error
             await asyncio.sleep(attempt * (lock_timeout_ms / 1000))
 
