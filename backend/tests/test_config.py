@@ -524,3 +524,75 @@ def test_settings_require_verified_database_tls_in_deployment_cluster() -> None:
                 credential_pepper="a-real-pepper-value",
             )
         )
+
+
+def test_typesafe_settings_are_inert_by_default() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.typesafe_api_key == ""
+    assert settings.typesafe_base_url == "https://api.typesafe.ai/v1"
+    assert settings.typesafe_model == "jev-latest"
+    assert settings.retrieval_second_stage_reranker_allow_external_content is False
+
+
+def test_jev_reranker_requires_a_typesafe_api_key() -> None:
+    with pytest.raises(ValidationError, match="TYPESAFE_API_KEY"):
+        config.Settings(
+            **_settings_kwargs(
+                retrieval_second_stage_reranker_enabled=True,
+                retrieval_second_stage_reranker_provider="jev",
+                retrieval_second_stage_reranker_allow_external_content=True,
+            )
+        )
+
+
+def test_jev_reranker_requires_external_content_acknowledgement() -> None:
+    with pytest.raises(ValidationError, match="ALLOW_EXTERNAL_CONTENT"):
+        config.Settings(
+            **_settings_kwargs(
+                retrieval_second_stage_reranker_enabled=True,
+                retrieval_second_stage_reranker_provider="jev",
+                typesafe_api_key="ts-test-key",
+            )
+        )
+
+
+def test_jev_reranker_rejects_a_non_http_typesafe_base_url() -> None:
+    with pytest.raises(ValidationError, match="TYPESAFE_BASE_URL"):
+        config.Settings(
+            **_settings_kwargs(
+                retrieval_second_stage_reranker_enabled=True,
+                retrieval_second_stage_reranker_provider="jev",
+                retrieval_second_stage_reranker_allow_external_content=True,
+                typesafe_api_key="ts-test-key",
+                typesafe_base_url="ftp://api.typesafe.ai/v1",
+            )
+        )
+
+
+def test_jev_reranker_accepts_a_complete_configuration() -> None:
+    settings = config.Settings(
+        **_settings_kwargs(
+            retrieval_second_stage_reranker_enabled=True,
+            retrieval_second_stage_reranker_provider="jev",
+            retrieval_second_stage_reranker_allow_external_content=True,
+            retrieval_second_stage_reranker_timeout_ms=1200,
+            typesafe_api_key="ts-test-key",
+        )
+    )
+
+    assert settings.retrieval_second_stage_reranker_provider == "jev"
+    assert settings.retrieval_second_stage_reranker_timeout_ms == 1200
+
+
+def test_typesafe_settings_are_not_validated_while_the_reranker_is_off() -> None:
+    # A blank key must not block boot for every deployment that never selects
+    # the jev provider.
+    settings = config.Settings(
+        **_settings_kwargs(
+            retrieval_second_stage_reranker_enabled=False,
+            retrieval_second_stage_reranker_provider="jev",
+        )
+    )
+
+    assert settings.typesafe_api_key == ""

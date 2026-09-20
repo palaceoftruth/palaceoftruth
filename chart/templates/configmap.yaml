@@ -110,6 +110,11 @@ data:
   RETRIEVAL_SECOND_STAGE_RERANKER_CANDIDATE_LIMIT: {{ .Values.config.retrievalSecondStageRerankerCandidateLimit | quote }}
   RETRIEVAL_SECOND_STAGE_RERANKER_TIMEOUT_MS: {{ .Values.config.retrievalSecondStageRerankerTimeoutMs | quote }}
   RETRIEVAL_SECOND_STAGE_RERANKER_MAX_BONUS: {{ .Values.config.retrievalSecondStageRerankerMaxBonus | quote }}
+  RETRIEVAL_SECOND_STAGE_RERANKER_ALLOW_EXTERNAL_CONTENT: {{ .Values.config.retrievalSecondStageRerankerAllowExternalContent | quote }}
+  TYPESAFE_BASE_URL: {{ .Values.config.typesafeBaseUrl | quote }}
+  TYPESAFE_MODEL: {{ .Values.config.typesafeModel | quote }}
+  TYPESAFE_TIMEOUT_SECONDS: {{ .Values.config.typesafeTimeoutSeconds | quote }}
+  TYPESAFE_MAX_CONCURRENCY: {{ .Values.config.typesafeMaxConcurrency | quote }}
   PALACEOFTRUTH_DELEGATED_AGENT_MEMORY_READ_POLICIES: {{ default .Values.config.agentMemoryDelegatedReadPoliciesJson .Values.config.palaceoftruthDelegatedAgentMemoryReadPolicies | quote }}
   FEED_POLL_MIN_INTERVAL: {{ .Values.config.feedPollMinInterval | quote }}
   FEED_MAX_FAILURES: {{ .Values.config.feedMaxFailures | quote }}
