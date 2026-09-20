@@ -3102,3 +3102,259 @@ def test_vector_search_excludes_governance_superseded_items_in_current_mode() ->
     assert successor_id in {result.item_id for result in results}
     assert service.last_ranking_trace["excluded_governance_counts"] == {"superseded": 1}
     assert service.last_ranking_trace["governance_state_counts"].get("current") == 1
+
+
+# --- jev (TypeSafe System One) second-stage reranker -------------------------
+
+
+def _jev_reranker(handler, **config_overrides):
+    """Build a jev reranker whose TypeSafe calls are served by ``handler``."""
+
+    import httpx
+
+    from app.services.search import _JevRuntimeReranker
+    from app.services.typesafe import TypeSafeClient, TypeSafeConfig
+
+    config = TypeSafeConfig(
+        api_key="ts-test-key",
+        base_url="https://api.typesafe.example/v1",
+        **config_overrides,
+    )
+    client = TypeSafeClient(config, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return _JevRuntimeReranker(config, client=client)
+
+
+def _jev_rows(now, decoy_id, target_id):
+    return [
+        SimpleNamespace(
+            item_id=decoy_id,
+            title="Helm chart release notes",
+            summary=None,
+            source_type="note",
+            source_url=None,
+            tags=[],
+            created_at=now,
+            chunk_text="The chart version was bumped in the release pipeline.",
+            chunk_index=0,
+            score=0.90,
+            item_metadata={},
+        ),
+        SimpleNamespace(
+            item_id=target_id,
+            title="Chart promotion runbook",
+            summary=None,
+            source_type="note",
+            source_url=None,
+            tags=[],
+            created_at=now,
+            chunk_text="Publishing a chart does not deploy it; bump the tag by hand.",
+            chunk_index=0,
+            score=0.62,
+            item_metadata={},
+        ),
+    ]
+
+
+def test_jev_reranker_builds_state_from_title_summary_and_chunk() -> None:
+    from app.services.search import _JevRuntimeReranker
+
+    candidate = _SearchCandidate(
+        item_id=uuid.uuid4(),
+        title="Chart promotion",
+        summary="How promotion works",
+        source_type="note",
+        source_url=None,
+        tags=[],
+        created_at=datetime.now(timezone.utc),
+        effective_date=None,
+        effective_date_source=None,
+        effective_date_quality=None,
+        chunk_text="Publishing does not deploy.",
+        chunk_index=0,
+        score=0.5,
+        item_metadata={},
+    )
+
+    state = _JevRuntimeReranker._candidate_state(candidate)
+
+    assert state == (
+        "Title: Chart promotion\n\n"
+        "Summary: How promotion works\n\n"
+        "Passage: Publishing does not deploy."
+    )
+
+
+def test_jev_reranker_omits_blank_state_sections() -> None:
+    from app.services.search import _JevRuntimeReranker
+
+    candidate = _SearchCandidate(
+        item_id=uuid.uuid4(),
+        title="Chart promotion",
+        summary="   ",
+        source_type="note",
+        source_url=None,
+        tags=[],
+        created_at=datetime.now(timezone.utc),
+        effective_date=None,
+        effective_date_source=None,
+        effective_date_quality=None,
+        chunk_text="",
+        chunk_index=0,
+        score=0.5,
+        item_metadata={},
+    )
+
+    assert _JevRuntimeReranker._candidate_state(candidate) == "Title: Chart promotion"
+
+
+def test_jev_reranker_promotes_the_candidate_with_the_higher_noul(monkeypatch) -> None:
+    import json
+
+    import httpx
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_enabled", True)
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_max_bonus", 0.4)
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_timeout_ms", 5_000)
+
+    seen_instructions: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_instructions.append(body["questions"]["q"]["instructions"])
+        # The runbook passage is the one that actually answers the query.
+        noul = 0.95 if "does not deploy" in body["state"] else 0.10
+        return httpx.Response(
+            200,
+            json={"answers": {"q": {"type": "noul", "noul": noul}}, "usage": {}},
+        )
+
+    monkeypatch.setattr(
+        "app.services.search._runtime_reranker_from_settings",
+        lambda: _jev_reranker(handler),
+    )
+
+    target_id = uuid.uuid4()
+    decoy_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(rows=_jev_rows(now, decoy_id, target_id))
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="does publishing a chart deploy it", limit=2))
+
+    assert [result.item_id for result in results] == [target_id, decoy_id]
+    trace = service.last_ranking_trace["second_stage_reranker"]
+    assert trace["status"] == "applied"
+    assert trace["provider"] == "jev"
+    assert trace["changed_top_k"] is True
+    target_trace = next(
+        row for row in service.last_ranking_trace["results"] if row["item_id"] == str(target_id)
+    )
+    assert target_trace["reranker_reason"] == "jev_noul_answers_query"
+    assert target_trace["reranker_score"] == 0.95
+    # One request per candidate, each carrying the query in the question.
+    assert len(seen_instructions) == 2
+    assert all("does publishing a chart deploy it" in text for text in seen_instructions)
+
+
+def test_jev_reranker_falls_back_to_baseline_when_typesafe_rejects_every_pair(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_enabled", True)
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_timeout_ms", 5_000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid api key"})
+
+    monkeypatch.setattr(
+        "app.services.search._runtime_reranker_from_settings",
+        lambda: _jev_reranker(handler),
+    )
+
+    target_id = uuid.uuid4()
+    decoy_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(rows=_jev_rows(now, decoy_id, target_id))
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="does publishing a chart deploy it", limit=2))
+
+    # Baseline ranking survives: the higher raw vector score stays on top.
+    assert [result.item_id for result in results] == [decoy_id, target_id]
+    assert service.last_ranking_trace["second_stage_reranker"]["status"] == "no_decisions"
+
+
+def test_jev_reranker_falls_back_when_typesafe_exceeds_the_budget(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_enabled", True)
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_timeout_ms", 20)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.5)
+        return httpx.Response(200, json={"answers": {"q": {"type": "noul", "noul": 0.99}}})
+
+    monkeypatch.setattr(
+        "app.services.search._runtime_reranker_from_settings",
+        lambda: _jev_reranker(handler),
+    )
+
+    target_id = uuid.uuid4()
+    decoy_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    db = _FakeDB(rows=_jev_rows(now, decoy_id, target_id))
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    results = asyncio.run(service.vector_search(query="does publishing a chart deploy it", limit=2))
+
+    assert [result.item_id for result in results] == [decoy_id, target_id]
+    trace = service.last_ranking_trace["second_stage_reranker"]
+    assert trace["status"] == "fallback_timeout"
+    # The deadline is enforced, not merely measured after the call returned.
+    assert trace["latency_ms"] < 500
+
+
+def test_jev_provider_requires_external_content_acknowledgement(monkeypatch) -> None:
+    from app.services.search import _runtime_reranker_from_settings
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.typesafe_api_key", "ts-test-key")
+    monkeypatch.setattr(
+        "app.services.search.settings.retrieval_second_stage_reranker_allow_external_content",
+        False,
+    )
+
+    with pytest.raises(ValueError, match="allow_external_content"):
+        _runtime_reranker_from_settings()
+
+
+def test_jev_provider_requires_an_api_key(monkeypatch) -> None:
+    from app.services.search import _runtime_reranker_from_settings
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.typesafe_api_key", "")
+    monkeypatch.setattr(
+        "app.services.search.settings.retrieval_second_stage_reranker_allow_external_content",
+        True,
+    )
+
+    with pytest.raises(ValueError, match="TYPESAFE_API_KEY"):
+        _runtime_reranker_from_settings()
+
+
+def test_jev_provider_is_selected_when_fully_configured(monkeypatch) -> None:
+    from app.services.search import _JevRuntimeReranker, _runtime_reranker_from_settings
+
+    monkeypatch.setattr("app.services.search.settings.retrieval_second_stage_reranker_provider", "jev")
+    monkeypatch.setattr("app.services.search.settings.typesafe_api_key", "ts-test-key")
+    monkeypatch.setattr(
+        "app.services.search.settings.retrieval_second_stage_reranker_allow_external_content",
+        True,
+    )
+
+    reranker = _runtime_reranker_from_settings()
+
+    assert isinstance(reranker, _JevRuntimeReranker)
+    assert reranker.name == "jev"
