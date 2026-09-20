@@ -10,8 +10,11 @@ from app.config import Settings
 
 SOURCE = Path(enforce_tenant_rls.__file__).read_text()
 
-# chart/values.yaml migrations.activeDeadlineSeconds — the hook's hard deadline.
-CHART_HOOK_DEADLINE_SECONDS = 840
+# Read the portable default, not an environment-specific 840-second override.
+import yaml
+CHART_HOOK_DEADLINE_SECONDS = yaml.safe_load(
+    (Path(__file__).parents[2] / "chart/values.yaml").read_text()
+)["migrations"]["activeDeadlineSeconds"]
 
 
 def _settings(overrides: dict[str, object]) -> Settings:
@@ -179,9 +182,9 @@ async def test_enforce_table_stops_at_the_total_budget(monkeypatch) -> None:
     _patch(monkeypatch)
     connection = _Conn(fail_times=99)
     deadline = asyncio.get_event_loop().time() - 1
-    with pytest.raises(RuntimeError, match="total lock budget"):
+    with pytest.raises(TimeoutError, match="total lock budget"):
         await enforce_tenant_rls._enforce_table(connection, "embeddings", 10_000, 5, deadline)
-    assert connection.calls == 1
+    assert connection.calls == 0
 
 
 @pytest.mark.asyncio
