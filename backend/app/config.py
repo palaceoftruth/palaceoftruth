@@ -45,6 +45,22 @@ class Settings(BaseSettings):
     database_pool_recycle_seconds: int = 1800
     database_statement_timeout_ms: int = 30_000
     database_idle_transaction_timeout_ms: int = 60_000
+    # app.enforce_tenant_rls runs as the post-upgrade Helm hook and must take
+    # ACCESS EXCLUSIVE on every tenant table. That lock conflicts with any
+    # concurrent reader: the 2 GiB embeddings table (HNSW index) is scanned by
+    # live semantic search whose AccessShareLock transactions routinely outlast a
+    # fixed 5s wait, which failed the hook with LockNotAvailableError and left
+    # the release Stalled (RetriesExceeded). Each table now waits under this
+    # bounded, configurable lock_timeout and retries a bounded number of times,
+    # so contention surfaces as a loud terminal failure instead of a
+    # fixed-duration coin flip.
+    database_rls_lock_timeout_ms: int = 10_000
+    database_rls_lock_attempts: int = 5
+    # Hard ceiling for the whole 52-table hook, independent of how many tables
+    # are contended. Retries stop once this elapses and the hook fails loudly
+    # with the remaining table, so it can never outlive the chart's
+    # migrations.activeDeadlineSeconds (840s). Keep this below that value.
+    database_rls_total_budget_seconds: int = 720
 
     # Redis — standard connection
     redis_url: str = "redis://localhost:6379"
@@ -399,6 +415,12 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_STATEMENT_TIMEOUT_MS must be at least 1")
         if self.database_idle_transaction_timeout_ms < 1:
             raise ValueError("DATABASE_IDLE_TRANSACTION_TIMEOUT_MS must be at least 1")
+        if self.database_rls_lock_timeout_ms < 1:
+            raise ValueError("DATABASE_RLS_LOCK_TIMEOUT_MS must be at least 1")
+        if self.database_rls_lock_attempts < 1:
+            raise ValueError("DATABASE_RLS_LOCK_ATTEMPTS must be at least 1")
+        if self.database_rls_total_budget_seconds < 1:
+            raise ValueError("DATABASE_RLS_TOTAL_BUDGET_SECONDS must be at least 1")
         if self.doc_extraction_per_tenant_concurrency < 1:
             raise ValueError("DOC_EXTRACTION_PER_TENANT_CONCURRENCY must be at least 1")
         if self.tenant_llm_max_concurrent_requests < 1:
