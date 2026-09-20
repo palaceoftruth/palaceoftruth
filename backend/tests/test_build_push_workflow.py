@@ -258,20 +258,48 @@ def test_image_builds_are_parallel_attested_and_digest_bound() -> None:
     )
 
 
+# Each attempt is chained to the one before it, so a skipped step ends the
+# ladder. The trailing backoff values give the sequence roughly eight minutes of
+# tolerance, which is what a Rekor outage costs in practice.
+SBOM_ATTEMPT_IDS = [
+    "github-sbom",
+    "github-sbom-retry",
+    "github-sbom-retry-3",
+    "github-sbom-retry-4",
+    "github-sbom-final",
+]
+SBOM_BACKOFF_SECONDS = [15, 30, 60, 120]
+
+
 def test_sbom_attestation_has_bounded_native_retries_and_readback() -> None:
     steps = _load_attest_image_action()["runs"]["steps"]
-    github_sbom = next(step for step in steps if step.get("id") == "github-sbom")
-    github_sbom_retry = next(step for step in steps if step.get("id") == "github-sbom-retry")
-    github_sbom_final = next(step for step in steps if step.get("id") == "github-sbom-final")
+    attempts = [
+        next(step for step in steps if step.get("id") == attempt_id)
+        for attempt_id in SBOM_ATTEMPT_IDS
+    ]
     readback = next(step for step in steps if step.get("name") == "Verify registry SBOM attestation")
 
-    assert github_sbom["uses"] == "actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f"
-    assert github_sbom["continue-on-error"] == "true"
-    assert github_sbom_retry["uses"] == github_sbom["uses"]
-    assert github_sbom_retry["continue-on-error"] == "true"
-    assert github_sbom_retry["if"] == "steps.github-sbom.outcome == 'failure'"
-    assert github_sbom_final["uses"] == github_sbom["uses"]
-    assert "steps.github-sbom-retry.outcome == 'failure'" in github_sbom_final["if"]
+    action = "actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f"
+    assert [step["uses"] for step in attempts] == [action] * len(SBOM_ATTEMPT_IDS)
+
+    # The first attempt always runs; every later attempt runs only when the one
+    # directly before it failed.
+    assert "if" not in attempts[0]
+    for previous_id, step in zip(SBOM_ATTEMPT_IDS, attempts[1:]):
+        assert step["if"] == f"steps.{previous_id}.outcome == 'failure'"
+
+    # Only the last attempt is allowed to fail the job, so a real outage never
+    # publishes an unattested image.
+    assert all(step["continue-on-error"] == "true" for step in attempts[:-1])
+    assert "continue-on-error" not in attempts[-1]
+
+    waits = [step for step in steps if step.get("name", "").startswith("Wait before ")]
+    assert [step["run"] for step in waits] == [
+        f"sleep {seconds}" for seconds in SBOM_BACKOFF_SECONDS
+    ]
+    for previous_id, step in zip(SBOM_ATTEMPT_IDS, waits):
+        assert step["if"] == f"steps.{previous_id}.outcome == 'failure'"
+
     assert all("cosign attest --yes" not in step.get("run", "") for step in steps)
     assert "cosign verify-attestation" in readback["run"]
     assert '"https://github.com/${GITHUB_WORKFLOW_REF}"' in readback["run"]
