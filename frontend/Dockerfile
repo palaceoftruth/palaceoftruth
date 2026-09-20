@@ -21,7 +21,7 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 # under /tmp, and listens on 8080, so the pod needs neither uid 0 nor
 # NET_BIND_SERVICE. Keep the mutable tag visible for maintainability but bind
 # the build to the reviewed digest.
-FROM nginxinc/nginx-unprivileged:alpine@sha256:a6c3ec0c0d249d68b0682df854d4a9e222b90fb607dc3fcf2f1d2fcbc85d347e
+FROM nginxinc/nginx-unprivileged:alpine@sha256:901e944d1f4fc2bd077e8f5568b98c1f6f8cdacf6b97a87747c43134a339b9a7
 # Apply Alpine security updates the pinned base image predates, mirroring the
 # backend runtime stage. The digest stays pinned for reproducibility, so
 # without this the frontend keeps shipping whatever was current when that
