@@ -199,6 +199,12 @@ class Settings(BaseSettings):
     retrieval_second_stage_reranker_candidate_limit: int = 20
     retrieval_second_stage_reranker_timeout_ms: int = 150
     retrieval_second_stage_reranker_max_bonus: float = 0.08
+    # Separate, explicit acknowledgement that a reranker provider may send
+    # candidate text off-box. The "lexical-overlap" provider is local and
+    # ignores this; "jev" posts chunk text to TypeSafe. Enabling a reranker
+    # must not quietly become egress of tenant memory content, so the two
+    # decisions stay two switches.
+    retrieval_second_stage_reranker_allow_external_content: bool = False
     palaceoftruth_delegated_agent_memory_read_policies: str = ""
 
     # Feed polling
@@ -231,6 +237,20 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""
     firecrawl_timeout_seconds: float = 60.0
     firecrawl_only_main_content: bool = True
+
+    # TypeSafe System One (Jev). Typed, non-generative decisions used by the
+    # second-stage retrieval reranker. Inert until an API key is present and a
+    # caller opts in; see RETRIEVAL_SECOND_STAGE_RERANKER_PROVIDER=jev.
+    typesafe_base_url: str = "https://api.typesafe.ai/v1"
+    typesafe_api_key: str = ""
+    typesafe_model: str = "jev-latest"
+    typesafe_timeout_seconds: float = 2.0
+    # Published limits are 1,200 requests/minute account-wide. One rerank
+    # issues one request per candidate, so this gate is what keeps a burst of
+    # searches from spending the whole minute's budget at once. Measured
+    # against the live API at 20 candidates: 8 -> ~640ms median, 12 -> ~522ms,
+    # 20 -> ~373ms. 12 trades a little latency for rate-limit headroom.
+    typesafe_max_concurrency: int = 12
 
     # Palace sync
     palace_sync_allowed_roots: str = ""
@@ -322,6 +342,28 @@ class Settings(BaseSettings):
                 raise ValueError("FIRECRAWL_TIMEOUT_SECONDS must be greater than 0")
             if webpage_scraper_provider == "firecrawl-cloud" and not self.firecrawl_api_key.strip():
                 raise ValueError("FIRECRAWL_API_KEY is required when WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud")
+
+        # Fail at boot rather than degrade silently at query time: a reranker
+        # that is enabled but unusable would fall back on every single search
+        # while still reporting itself as configured.
+        reranker_provider = self.retrieval_second_stage_reranker_provider.strip().lower()
+        if self.retrieval_second_stage_reranker_enabled and reranker_provider == "jev":
+            if not self.typesafe_api_key.strip():
+                raise ValueError(
+                    "TYPESAFE_API_KEY is required when RETRIEVAL_SECOND_STAGE_RERANKER_PROVIDER=jev"
+                )
+            if not self.retrieval_second_stage_reranker_allow_external_content:
+                raise ValueError(
+                    "RETRIEVAL_SECOND_STAGE_RERANKER_ALLOW_EXTERNAL_CONTENT must be true to use "
+                    "the jev reranker: it sends retrieved chunk text to the TypeSafe API"
+                )
+            parsed = urlparse(self.typesafe_base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("TYPESAFE_BASE_URL must be an http(s) URL")
+            if self.typesafe_timeout_seconds <= 0:
+                raise ValueError("TYPESAFE_TIMEOUT_SECONDS must be greater than 0")
+            if self.typesafe_max_concurrency < 1:
+                raise ValueError("TYPESAFE_MAX_CONCURRENCY must be at least 1")
 
         # B-03 / M-05: refuse to boot on a known-placeholder credential rather
         # than silently seeding it as a live secret. Checked after every other

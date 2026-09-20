@@ -686,6 +686,66 @@ config:
 
 Any [OpenRouter-compatible model](https://openrouter.ai/models) can be used.
 
+### TypeSafe / Jev (Optional Second-Stage Retrieval Reranker)
+
+[Jev](https://docs.typesafe.ai/models) is a TypeSafe "System One" model. It does
+not generate text: it takes a `state` plus typed questions and returns typed
+answers in one pass. Palace uses one primitive, `noul` — the model's 0–1
+probability that a claim about the state is true.
+
+The `jev` reranker scores every shortlisted candidate against the query with one
+TypeSafe request per candidate, then reorders the shortlist by that probability.
+It is off by default and never required.
+
+**This provider sends retrieved content off-box.** Each request carries one
+candidate's title, summary, and chunk text to `api.typesafe.ai`. That is why it
+needs a second, explicit acknowledgement beyond enabling the reranker:
+
+```yaml
+config:
+  retrievalSecondStageRerankerEnabled: "true"
+  retrievalSecondStageRerankerProvider: "jev"
+  retrievalSecondStageRerankerAllowExternalContent: "true"
+  # One HTTPS request per candidate. Measured against the live API at 20
+  # candidates: ~522ms median, ~679ms worst case. The in-process default of
+  # 150ms would fall back on every search.
+  retrievalSecondStageRerankerTimeoutMs: "1200"
+  retrievalSecondStageRerankerCandidateLimit: "20"
+  typesafeMaxConcurrency: "12"
+
+externalSecrets:
+  # The Bitwarden field holding the key. Read from appSecretItemId unless
+  # typesafeSecretItemId names a different item.
+  typesafeApiKeyProperty: "typesafe-api-key"
+  typesafeSecretItemId: ""
+```
+
+Leave `typesafeApiKeyProperty` blank until the field exists on the resolved
+item. External Secrets fails the whole ExternalSecret when a property is not
+found, so a name that does not resolve takes `OPENAI_API_KEY`, `API_KEY`, and
+the admin secret down with it.
+
+The backend refuses to start if the provider is `jev` without both
+`TYPESAFE_API_KEY` and the acknowledgement, rather than degrading to a silent
+per-query fallback.
+
+Cost is negligible: input is $0.042 per million tokens and output is free, so a
+20-candidate rerank costs roughly $0.0003. The binding limit is the account rate
+ceiling of 1,200 requests/minute — at 20 candidates per search that is about 60
+searches/minute before TypeSafe starts returning 429.
+
+Every failure mode degrades to baseline ranking rather than failing the search:
+transport errors, non-200 responses, malformed answers, and exceeding the
+timeout all leave the existing ranking untouched. The outcome is recorded in the
+`second_stage_reranker` block of the ranking trace (`status`, `latency_ms`,
+`changed_top_k`), which is the right place to tune the timeout from.
+
+Jev is deliberately **not** used for date, ordering, counting, or summarization
+work anywhere in Palace: the published
+[jaggedness notes](https://docs.typesafe.ai/model-jaggedness/jev-1.13) record
+that it reads dates as text rather than ordered values and does not count
+reliably.
+
 ---
 
 ## API Authentication
@@ -733,6 +793,13 @@ The search service projects the eight governance columns through to `_SearchCand
 
 - `governance_expired_high_risk = -0.35` is applied to items whose deadline has passed and whose `risk_class` is `high` or `critical`. Lower-risk expired items stay visible without a penalty so the warning reaches the wire.
 - Items in `governance_currentness_state = superseded` are excluded from `current`-mode search results. The count is recorded as `excluded_governance_counts["superseded"]` on the ranking trace, alongside `governance_state_counts` for the four-state distribution.
+
+After these adjustments an optional second-stage reranker may reorder the
+shortlist. Providers are `lexical-overlap` (in-process token overlap) and `jev`
+(TypeSafe System One; see [TypeSafe / Jev](#typesafe--jev-optional-second-stage-retrieval-reranker)).
+Both are bounded by `retrievalSecondStageRerankerTimeoutMs` and contribute at
+most `retrievalSecondStageRerankerMaxBonus` to a candidate's score, so a
+reranker can reorder near-ties but cannot override a decisive baseline gap.
 
 ---
 

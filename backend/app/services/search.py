@@ -1,4 +1,5 @@
 """Vector + hybrid search service using pgvector halfvec and PostgreSQL full-text."""
+import asyncio
 import logging
 import re
 import time
@@ -25,6 +26,13 @@ from app.services.memory_entries import source_project_from_memory_metadata
 from app.services.retrieval_provenance import build_retrieval_provenance, classify_retrieval_trust
 from app.services.retrieval_hints import report_retrieval_hint_candidates, score_retrieval_hints_for_items
 from app.services.retrieval_lenses import resolve_retrieval_lens
+from app.services.typesafe import (
+    NoulRequest,
+    TypeSafeClient,
+    TypeSafeConfig,
+    get_shared_typesafe_client,
+    typesafe_config_from_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -551,14 +559,14 @@ class _RuntimeRerankDecision:
 class _RuntimeReranker(Protocol):
     name: str
 
-    def rerank(self, *, query: str, candidates: list[_SearchCandidate]) -> list[_RuntimeRerankDecision]:
+    async def rerank(self, *, query: str, candidates: list[_SearchCandidate]) -> list[_RuntimeRerankDecision]:
         ...
 
 
 class _LexicalOverlapRuntimeReranker:
     name = "lexical-overlap"
 
-    def rerank(self, *, query: str, candidates: list[_SearchCandidate]) -> list[_RuntimeRerankDecision]:
+    async def rerank(self, *, query: str, candidates: list[_SearchCandidate]) -> list[_RuntimeRerankDecision]:
         query_tokens = _token_set(query)
         if not query_tokens:
             return []
@@ -581,12 +589,100 @@ class _LexicalOverlapRuntimeReranker:
         return decisions
 
 
+# The query is echoed into every per-candidate question. Jev reads
+# instructions literally and loses accuracy when the decision is buried in
+# unrelated text, so an overlong query is trimmed rather than sent whole.
+_JEV_MAX_QUERY_CHARS = 500
+
+
+class _JevRuntimeReranker:
+    """Scores each candidate against the query with one TypeSafe noul call.
+
+    This mirrors TypeSafe's own re-ranking recipe: the candidate is the
+    ``state``, the query rides in the question, and the returned probability
+    is the rank key. One request per candidate is deliberate -- packing every
+    candidate into a single state triggers the documented "large state with
+    irrelevant detail" failure mode, because all but one candidate is noise
+    for any given judgement.
+    """
+
+    name = "jev"
+
+    def __init__(self, config: TypeSafeConfig, *, client: TypeSafeClient | None = None) -> None:
+        self._config = config
+        self._client = client
+
+    @staticmethod
+    def _candidate_state(candidate: _SearchCandidate) -> str:
+        # Title and summary carry signal the raw chunk often lacks, and the
+        # chunk carries the detail the title lacks. Blank parts are dropped so
+        # the state never contains empty labelled sections.
+        parts = [
+            ("Title", (candidate.title or "").strip()),
+            ("Summary", (candidate.summary or "").strip()),
+            ("Passage", (candidate.chunk_text or "").strip()),
+        ]
+        return "\n\n".join(f"{label}: {value}" for label, value in parts if value)
+
+    async def rerank(self, *, query: str, candidates: list[_SearchCandidate]) -> list[_RuntimeRerankDecision]:
+        cleaned_query = " ".join(query.split())[:_JEV_MAX_QUERY_CHARS]
+        if not cleaned_query or not candidates:
+            return []
+
+        instructions = (
+            "The passage contains information that directly answers this search query: "
+            f"{cleaned_query}"
+        )
+        requests = []
+        for candidate in candidates:
+            state = self._candidate_state(candidate)
+            if not state:
+                continue
+            requests.append(
+                NoulRequest(
+                    key=candidate.item_id,
+                    state=state,
+                    instructions=instructions,
+                    true_meaning="The passage states information that answers the query.",
+                    false_meaning=(
+                        "The passage is only on a similar topic, or mentions the subject "
+                        "without answering the query."
+                    ),
+                )
+            )
+        if not requests:
+            return []
+
+        client = self._client or await get_shared_typesafe_client(self._config)
+        results = await client.score_noul_batch(requests)
+        return [
+            _RuntimeRerankDecision(
+                item_id=result.key,
+                score=round(result.noul, 6),
+                reason="jev_noul_answers_query",
+            )
+            for result in results
+        ]
+
+
 def _runtime_reranker_from_settings() -> _RuntimeReranker | None:
     provider = settings.retrieval_second_stage_reranker_provider.strip().lower()
     if not provider:
         return None
     if provider == "lexical-overlap":
         return _LexicalOverlapRuntimeReranker()
+    if provider == "jev":
+        # Config validation already rejects a boot with jev enabled and no key,
+        # but the guard is repeated here because tests and operators can flip
+        # the provider at runtime without re-running that validator.
+        if not settings.retrieval_second_stage_reranker_allow_external_content:
+            raise ValueError(
+                "jev reranker requires retrieval_second_stage_reranker_allow_external_content"
+            )
+        config = typesafe_config_from_settings(settings)
+        if not config.enabled:
+            raise ValueError("jev reranker requires TYPESAFE_API_KEY")
+        return _JevRuntimeReranker(config)
     raise ValueError(f"unsupported second-stage reranker provider: {provider}")
 
 
@@ -1249,7 +1345,7 @@ def _build_disabled_reranker_trace(*, reason: str = "disabled") -> dict[str, Any
     }
 
 
-def _apply_second_stage_reranker(
+async def _apply_second_stage_reranker(
     *,
     query: str,
     limit: int,
@@ -1290,12 +1386,27 @@ def _apply_second_stage_reranker(
         trace["status"] = "missing_provider"
         return scored_candidates, trace, {}
 
+    # A provider that reaches the network must be cancelled at the budget, not
+    # merely measured after the fact. wait_for enforces the deadline for any
+    # provider that awaits; the elapsed-time check below still catches a purely
+    # synchronous provider that never yields to the loop.
+    timeout_ms = settings.retrieval_second_stage_reranker_timeout_ms
     start = time.perf_counter()
     try:
-        decisions = reranker.rerank(
-            query=query,
-            candidates=[candidate for _, _, candidate in candidate_rows],
+        decisions = await asyncio.wait_for(
+            reranker.rerank(
+                query=query,
+                candidates=[candidate for _, _, candidate in candidate_rows],
+            ),
+            timeout=max(timeout_ms, 1) / 1000,
         )
+    except asyncio.TimeoutError:
+        trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 3)
+        trace["status"] = "fallback_timeout"
+        logger.warning(
+            "Second-stage reranker exceeded %sms; falling back to baseline ranking", timeout_ms
+        )
+        return scored_candidates, trace, {}
     except Exception as exc:  # pragma: no cover - exercised through monkeypatched tests
         trace["latency_ms"] = round((time.perf_counter() - start) * 1000, 3)
         trace["status"] = "fallback_error"
@@ -1305,7 +1416,7 @@ def _apply_second_stage_reranker(
 
     latency_ms = round((time.perf_counter() - start) * 1000, 3)
     trace["latency_ms"] = latency_ms
-    if latency_ms > settings.retrieval_second_stage_reranker_timeout_ms:
+    if latency_ms > timeout_ms:
         trace["status"] = "fallback_timeout"
         return scored_candidates, trace, {}
 
@@ -2172,7 +2283,7 @@ class SearchService:
             key=lambda pair: pair[0],
             reverse=True,
         )
-        reranked, second_stage_trace, second_stage_item_trace = _apply_second_stage_reranker(
+        reranked, second_stage_trace, second_stage_item_trace = await _apply_second_stage_reranker(
             query=query,
             limit=limit,
             effective_candidate_limit=effective_candidate_limit,

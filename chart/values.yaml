@@ -132,10 +132,30 @@ config:
   retrievalHintReportEnabled: "false"
   retrievalHintReportLimit: "5"
   retrievalSecondStageRerankerEnabled: "false"
+  # "lexical-overlap" runs in-process. "jev" posts each candidate's title,
+  # summary, and chunk text to the TypeSafe API, so it additionally requires
+  # retrievalSecondStageRerankerAllowExternalContent=true and a
+  # TYPESAFE_API_KEY from externalSecrets.typesafeApiKeyProperty.
   retrievalSecondStageRerankerProvider: ""
   retrievalSecondStageRerankerCandidateLimit: "20"
+  # 150ms suits the in-process provider. "jev" issues one HTTPS request per
+  # candidate: measured at ~522ms median and ~679ms worst case for 20
+  # candidates. Use "1200" for jev and tune from the second_stage_reranker
+  # latency in the ranking trace.
   retrievalSecondStageRerankerTimeoutMs: "150"
   retrievalSecondStageRerankerMaxBonus: "0.08"
+  # Separate acknowledgement that reranking may send retrieved tenant content
+  # off-box. Enabling a reranker must not imply this by itself.
+  retrievalSecondStageRerankerAllowExternalContent: "false"
+  # TypeSafe System One (Jev). Inert unless a reranker selects the jev
+  # provider; TYPESAFE_API_KEY arrives through the app ExternalSecret.
+  typesafeBaseUrl: "https://api.typesafe.ai/v1"
+  typesafeModel: "jev-latest"
+  typesafeTimeoutSeconds: "2.0"
+  # Published TypeSafe limit is 1,200 requests/minute across the account. One
+  # rerank sends one request per candidate. Measured at 20 candidates:
+  # 8 -> ~640ms median, 12 -> ~522ms, 20 -> ~373ms.
+  typesafeMaxConcurrency: "12"
   # JSON list of deployment-owned delegated agent memory read policies.
   # Hermes orchestrator may read only the allowlisted specialist agent scopes.
   palaceoftruthDelegatedAgentMemoryReadPolicies: >-
@@ -259,6 +279,14 @@ externalSecrets:
   embeddingLocalHttpApiKeyProperty: ""
   # Optional AssemblyAI API key property for hosted diarized transcription.
   assemblyaiApiKeyProperty: ""
+  # Optional TypeSafe (Jev) API key for the jev retrieval reranker. The key
+  # may live on its own secret-manager item; set typesafeSecretItemId to that
+  # item, or leave it blank to read the property from appSecretItemId.
+  # Leave typesafeApiKeyProperty blank unless the field really exists on the
+  # resolved item: a property that is not found fails the whole ExternalSecret,
+  # taking every other key in it down too, not just this one.
+  typesafeApiKeyProperty: ""
+  typesafeSecretItemId: ""
   # Optional bearer token property for the self-hosted llm-gateway. Required
   # when config.transcriptionProvider=local_whisperx.
   llmGatewayTokenProperty: ""
