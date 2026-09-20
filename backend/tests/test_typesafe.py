@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.services.typesafe import (
+    KEEPALIVE_EXPIRY_SECONDS,
     MAX_STATE_CHARS,
     NoulRequest,
     TypeSafeClient,
@@ -302,3 +303,34 @@ def test_score_noul_batch_respects_max_concurrency() -> None:
     asyncio.run(run())
 
     assert peak <= 2
+
+
+def test_owned_client_holds_idle_connections_past_the_reranker_budget() -> None:
+    """The pool must survive the gap between searches, not httpx's 5s default.
+
+    A connection that expires between searches costs a fresh TLS handshake
+    (~300ms from the cluster) inside the reranker deadline, which pushes the
+    whole rerank over budget and discards answers the account already paid for.
+    """
+
+    client = TypeSafeClient(_config(max_concurrency=6))
+    try:
+        keepalive_expiry = client._ensure_client()._transport._pool._keepalive_expiry
+    finally:
+        asyncio.run(client.aclose())
+
+    assert keepalive_expiry == KEEPALIVE_EXPIRY_SECONDS
+    # The measured cold-connection penalty only pays off if idle connections
+    # outlive a realistic gap between user searches.
+    assert KEEPALIVE_EXPIRY_SECONDS >= 60.0
+
+
+def test_owned_client_pool_matches_configured_concurrency() -> None:
+    client = TypeSafeClient(_config(max_concurrency=6))
+    try:
+        pool = client._ensure_client()._transport._pool
+    finally:
+        asyncio.run(client.aclose())
+
+    assert pool._max_connections == 6
+    assert pool._max_keepalive_connections == 6
