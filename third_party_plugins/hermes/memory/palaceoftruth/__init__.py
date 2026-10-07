@@ -504,6 +504,23 @@ def _log_retrieval_diagnostic(level: int, event: str, **fields: Any) -> None:
     logger.log(level, "Palace of Truth retrieval diagnostic event=%s fields=%s", event, payload)
 
 
+class PalaceRetrievalError(RuntimeError):
+    """No retrieval route answered; never expose upstream messages or bodies."""
+
+    def __init__(self, cause: Exception | None) -> None:
+        # OAuth wraps HTTPError in a secret-safe RuntimeError. Inspect only
+        # typed metadata on that explicit cause, never its message or body.
+        if cause is not None and isinstance(cause.__cause__, Exception):
+            cause = cause.__cause__
+        error_class = type(cause).__name__ if cause is not None else "NoReadableRoute"
+        status = getattr(cause, "status_code", None)
+        if isinstance(cause, HTTPError):
+            status = cause.code
+        self.status_code = status if isinstance(status, int) else None
+        status_hint = f", HTTP {self.status_code}" if self.status_code is not None else ""
+        super().__init__(f"Palace raw-capture search was unavailable ({error_class}{status_hint}).")
+
+
 class PalaceTransientError(RuntimeError):
     def __init__(
         self,
@@ -4269,6 +4286,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._raise_if_read_authorization_latched()
         started_at = perf_counter()
         searched_labels: list[str] = []
+        retrieval_succeeded = False
+        last_error: Exception | None = None
 
         def _record_searched(labels: list[str]) -> None:
             for label in labels:
@@ -4352,6 +4371,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         **({"access_reason": access_reason} if access_reason else {}),
                     },
                 )
+                retrieval_succeeded = True
                 trace = response.get("trace") if isinstance(response.get("trace"), dict) else {}
                 searched_scopes = trace.get("searched_scopes") if isinstance(trace, dict) else []
                 searched_scope_labels = _safe_scope_labels(
@@ -4390,6 +4410,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except (PalaceAuthorizationError, PalaceAuthorizationLatchError):
                 raise
             except Exception as exc:
+                last_error = exc
                 fallback_scopes = self._build_retrieve_scopes(session_id, discovered_scopes)
                 _log_retrieval_diagnostic(
                     logging.WARNING,
@@ -4420,11 +4441,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except (PalaceAuthorizationError, PalaceAuthorizationLatchError):
                 raise
             except Exception as exc:
+                last_error = exc
                 failed_scopes.append(_scope_label(scope))
                 logger.debug(
                     "Palace of Truth retrieve failed for scope %s: %s",
                     _scope_label(scope),
-                    exc,
+                    type(exc).__name__,
                 )
                 continue
             scope_responses.append((scope, response))
@@ -4442,6 +4464,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 failed_scope_count=len(failed_scopes),
                 failed_scopes=failed_scopes,
             )
+            if not retrieval_succeeded:
+                raise PalaceRetrievalError(last_error) from last_error
             return "", searched_labels, {
                 "retrieval_mode": "hybrid",
                 "corpus_class": "raw_capture",
