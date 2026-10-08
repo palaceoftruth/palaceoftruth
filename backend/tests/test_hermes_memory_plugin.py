@@ -5696,3 +5696,82 @@ def test_promote_tool_traverses_real_transport_scope_mapping(monkeypatch, oauth)
         module._mcp_scope_for_memory_route("POST", path.replace(entry_id, "invalid"))
     with pytest.raises(RuntimeError, match="missing an explicit MCP scope mapping"):
         module._mcp_scope_for_memory_route("GET", path)
+
+
+def test_cron_agent_context_keeps_explicit_writes_available(monkeypatch, tmp_path: Path) -> None:
+    """Hermes core passes agent_context="cron" for scheduled jobs.
+
+    That context must suppress only the *automatic* lifecycle (turn sync and the
+    built-in-memory mirror). Explicit operator tool calls - the whole point of
+    the cron retention policy - must still reach Palace.
+    """
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_TYPE", "agent")
+    monkeypatch.setenv("PALACEOFTRUTH_DEFAULT_SCOPE_KEY", "barbara")
+    (tmp_path / "palaceoftruth.json").write_text(json.dumps({}), encoding="utf-8")
+
+    session_id = "cron_385c3dd86abe_20261008_083022"
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        session_id,
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        agent_workspace="hermes",
+        platform="cron",
+        agent_context="cron",
+    )
+
+    posts: list[dict] = []
+
+    def fake_request_json(method: str, path: str, payload: dict | None = None) -> dict:
+        if method == "GET" and path == "/api/v1/memory/whoami":
+            return {"tenant_id": "tenant-acme"}
+        posts.append({"method": method, "path": path, "payload": payload})
+        return {"job_id": "job-1", "status": "queued"}
+
+    provider._request_json = fake_request_json  # type: ignore[attr-defined]
+
+    # Automatic turn capture stays suppressed for the cron context.
+    provider.sync_turn("prompt", "response")
+    if provider._sync_thread is not None:
+        provider._sync_thread.join(timeout=2.0)
+
+    # An explicit operator write still lands.
+    result = json.loads(
+        provider.handle_tool_call("palace_remember", {"content": "Daily review summary."})
+    )
+    provider.shutdown()
+
+    assert result["ok"] is True, result
+    assert result.get("error") != "writes are disabled for this agent context"
+    entry_posts = [p for p in posts if p["path"] == "/api/v1/memory/entries"]
+    assert len(entry_posts) == 1, posts
+    assert entry_posts[0]["payload"]["scope"] == {"type": "agent", "key": "barbara"}
+    assert entry_posts[0]["payload"]["metadata"]["capture_origin"] == "explicit_memory_tool"
+
+
+def test_subagent_context_keeps_explicit_writes_disabled(monkeypatch, tmp_path: Path) -> None:
+    """A genuinely delegated context must keep explicit writes fully disabled."""
+    module = load_palaceoftruth_plugin()
+    monkeypatch.setenv("PALACEOFTRUTH_BASE_URL", "http://palaceoftruth-backend:8000")
+    monkeypatch.setenv("PALACEOFTRUTH_API_KEY", "tenant-key")
+    (tmp_path / "palaceoftruth.json").write_text(json.dumps({}), encoding="utf-8")
+
+    provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize(
+        "subagent-session-1",
+        hermes_home=str(tmp_path),
+        agent_identity="barbara",
+        platform="cli",
+        agent_context="subagent",
+    )
+    posted: list[str] = []
+    provider._request_json = lambda method, path, payload=None: (  # type: ignore[attr-defined]
+        posted.append(path) or {"job_id": "job-1", "status": "queued"}
+    )
+    result = json.loads(provider.handle_tool_call("palace_remember", {"content": "should not land"}))
+    assert result["ok"] is False
+    assert result["error"] == "writes are disabled for this agent context"
+    assert posted == []
