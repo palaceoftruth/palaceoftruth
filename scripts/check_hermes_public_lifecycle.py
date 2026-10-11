@@ -42,6 +42,7 @@ def main() -> int:
     spec = importlib.util.spec_from_file_location("offline_palace_contract", plugin)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     assert module.spawn_context_thread is spawn_context_thread
     assert issubclass(module.PalaceOfTruthMemoryProvider, MemoryProvider)

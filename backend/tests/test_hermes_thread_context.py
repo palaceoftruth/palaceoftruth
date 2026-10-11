@@ -84,6 +84,7 @@ from agent.memory_provider import MemoryProvider, spawn_context_thread
 assert pathlib.Path(inspect.getfile(MemoryProvider)).resolve() == host / "agent/memory_provider.py"
 spec = importlib.util.spec_from_file_location("offline_palace", plugin)
 module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 assert module.spawn_context_thread is spawn_context_thread
 marker = contextvars.ContextVar("real-host-profile", default="wrong-profile")

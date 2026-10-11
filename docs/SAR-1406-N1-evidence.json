@@ -1,0 +1,130 @@
+{
+  "receipts": {
+    "original-repro.xml": {
+      "sha256": "a3559c98ed8f2015a70a4d92516467e9d3fbcc49f959ab1cd24d23b7dbd42d82",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "4",
+          "time": "3.068",
+          "timestamp": "2026-10-10T23:57:58.523984-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "inverse-red-final.xml": {
+      "sha256": "e5a9595c05e08ef5dcfcbb29c33b49f8c7f13315c8d2bbf4f8992f73564dbf2f",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "1",
+          "skipped": "0",
+          "tests": "1",
+          "time": "3.113",
+          "timestamp": "2026-10-10T23:59:36.987710-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "inverse-green.xml": {
+      "sha256": "1b3f040fd52996ca498d019e378c933041bd5029fd60758072ec994ef0dd6624",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "10",
+          "time": "2.983",
+          "timestamp": "2026-10-10T23:59:40.998975-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "baseline146.xml": {
+      "sha256": "e598d7300374529c2bd3316a5f1dab9d0c47d07536083550fff519272db01b1e",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "146",
+          "time": "25.786",
+          "timestamp": "2026-10-11T00:00:22.411946-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "selection157.xml": {
+      "sha256": "25f66f9ba153f86446a2ff5598cb11b1bf00b09cfb8cce5734149e514598b08b",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "157",
+          "time": "13.987",
+          "timestamp": "2026-10-11T00:00:49.272198-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "backend-fast.xml": {
+      "sha256": "c9775c058706d00b7005f2e4e955a433234dab25f3e0817a6a7266e1f165a98b",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "3",
+          "tests": "2419",
+          "time": "57.394",
+          "timestamp": "2026-10-11T00:01:04.386365-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    }
+  },
+  "original_repro_sha256": "0da622744539240135b15d741370b0199d91c3ba030bac567d73344f461014b1",
+  "original_unchanged": true,
+  "normal_loader_bytes_equal": true,
+  "issue": "SAR-1406",
+  "finding": "N1",
+  "reviewed_parent": "384e916371757000a2a4ef5715389a9800ef978e",
+  "dependency_sha": "545dd75a584523ed8247f9a2c88c6cfab155cd40",
+  "status": "narrow repair tested; normal PR554 push pending",
+  "repair": "Per-generation Event selected under lifecycle lock. State transition sets old notification before replacing it. No caller clears a selected notification. Timed lock admission/reacquisition and checkpoint deadlines unchanged.",
+  "tests": {
+    "unchanged_original": "4 passed at reviewed parent; one asserts the defect, not approval",
+    "inverse_red": "1 failed, 9 deselected on exact old provider; safe teardown",
+    "inverse_green": "10 passed, including 6 three-waiter success/failure completion/admission/close cases",
+    "baseline146": "146 passed in 25.79s",
+    "existing157selection": "157 passed in 13.99s",
+    "full_backend_fast": "2416 passed, 2 skipped, 1 xfailed in 57.42s"
+  },
+  "harness_notes": [
+    "Initial external unchanged reproduction collection lacked fixture Settings; corrected to reviewer offline fixture environment, then 4 passed. Not a product failure.",
+    "First extended multiple-waiter fixture gated MainThread inadvertently; scheduling controller corrected without changing assertions. Final 10 pass."
+  ],
+  "provenance": {
+    "sha": "61cf1621e33a73874a94ddff4a52c1ce93bb1f7e",
+    "composed": false
+  },
+  "hostglobalgap": "MANDATORY BLOCKED",
+  "hostedCI": "absent on dependent base; verify after push, no release retarget",
+  "guardrails": [
+    "no coreedit",
+    "no delegation",
+    "no other worktree edits",
+    "no forcepush",
+    "no merge/deploy/Done",
+    "no livecanary",
+    "parent independently rereviews before composite"
+  ]
+}
