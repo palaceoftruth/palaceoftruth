@@ -44,6 +44,12 @@ jobs:
         run: |
           cd backend
           ../.contract-venv/bin/python -m pytest tests/test_hermes_supported_lifecycle.py tests/test_hermes_thread_context.py tests/test_hermes_memory_plugin.py tests/test_agent_plugin_manifests.py tests/test_detect_hermes_plugin_release.py -q -o addopts='' --junitxml=../contract-evidence/provider-tests.xml
+      - name: Record public hook feasibility (not full-contract acceptance)
+        env:
+          HOME: ${{ github.workspace }}/offline-home
+          HERMES_HOME: ${{ github.workspace }}/offline-home
+        run: |
+          .contract-venv/bin/python scripts/check_hermes_public_hooks.py --host official-host --receipt contract-evidence/hooks-receipt.json
       - name: Strict real-host admission and drain gate
         env:
           HOME: ${{ github.workspace }}/offline-home

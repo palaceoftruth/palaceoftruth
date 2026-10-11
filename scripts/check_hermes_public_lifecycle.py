@@ -10,9 +10,12 @@ import contextvars
 import importlib.util
 import inspect
 import json
+import os
 import pathlib
 import sys
 import threading
+from types import SimpleNamespace
+from typing import Any
 
 
 def main() -> int:
@@ -24,6 +27,7 @@ def main() -> int:
     sys.path.insert(0, str(host))
     from agent.memory_provider import MemoryProvider, spawn_context_thread
     from agent.memory_manager import MemoryManager
+    from hermes_cli.cli_commands_mixin import _sync_agent_to_session
 
     def deny_network(event, args):
         if event.startswith("socket."):
@@ -31,6 +35,9 @@ def main() -> int:
     sys.addaudithook(deny_network)
 
     assert pathlib.Path(inspect.getfile(MemoryManager)).resolve() == host / "agent/memory_manager.py"
+    assert pathlib.Path(inspect.getfile(_sync_agent_to_session)).resolve() == host / "hermes_cli/cli_commands_mixin.py"
+    os.environ["PALACEOFTRUTH_DEFAULT_SCOPE_TYPE"] = "session"
+    os.environ["PALACEOFTRUTH_DEFAULT_SCOPE_KEY"] = ""
     plugin = pathlib.Path(__file__).resolve().parents[1] / "third_party_plugins/hermes/memory/palaceoftruth/__init__.py"
     spec = importlib.util.spec_from_file_location("offline_palace_contract", plugin)
     assert spec is not None and spec.loader is not None
@@ -39,10 +46,10 @@ def main() -> int:
     assert module.spawn_context_thread is spawn_context_thread
     assert issubclass(module.PalaceOfTruthMemoryProvider, MemoryProvider)
     provider = module.PalaceOfTruthMemoryProvider()
+    provider.initialize("offline-session", hermes_home=str(args.receipt.parent / "offline-home"),
+                        agent_identity="offline-agent", platform="cli")
     provider._has_api_auth = lambda: True
     provider._resolve_tenant_id = lambda: "offline-tenant"
-    provider._scope_type = "session"
-    provider._session_id = "offline-session"
     entered, release = threading.Event(), threading.Event()
     marker = contextvars.ContextVar("official-profile", default="incorrect")
     seen = []
@@ -79,44 +86,56 @@ def main() -> int:
         marker.reset(token)
     receipt["provider_shutdown"] = provider.shutdown_drain_state
     # Block the official executor using a provider hook, not private host APIs.
-    # This tests whether submission scope can reach the plugin before dispatch.
-    delayed = module.PalaceOfTruthMemoryProvider()
+    # Use the unchanged official /resume-/branch boundary. Agent/CLI objects are
+    # offline application fixtures; do not mutate private scope configuration.
+    delayed: Any = module.PalaceOfTruthMemoryProvider()
+    delayed.initialize("old-session", hermes_home=str(args.receipt.parent / "offline-home"),
+                       agent_identity="offline-agent", platform="cli")
     delayed._has_api_auth = lambda: True
     delayed._resolve_tenant_id = lambda: "offline-tenant"
-    delayed._scope_type = "session"
-    delayed._session_id = "old-session"
     entered, release = threading.Event(), threading.Event()
     payloads = []
     def blocked_prefetch(*args, **kwargs):
         entered.set()
         assert release.wait(5)
     delayed.queue_prefetch = blocked_prefetch
-    delayed._post_memory_entries = lambda path, payload: payloads.append(payload) or {"ok": True}
+    # Retain the real quota/accounting path; substitute only HTTP transport.
+    delayed._request_json = lambda method, path, payload: payloads.append(payload) or {"ok": True}
     manager = MemoryManager()
     manager.add_provider(delayed)
+    cli = SimpleNamespace(agent=SimpleNamespace(session_id="old-session", _memory_manager=manager,
+                                                reset_session_state=lambda: None), conversation_history=[])
     try:
         manager.queue_prefetch_all("offline blocker", session_id="old-session")
         assert entered.wait(3)
         manager.sync_all("offline delayed", "answer", session_id="old-session")
-        delayed.on_session_switch("new-session")
-        delayed._scope_type = "workspace"
-        delayed._scope_key = "new-workspace"
+        _sync_agent_to_session(cli, "new-session", parent_session_id="", reason="resume")
+        quota_before_dispatch = delayed._session_write_count
         release.set()
         assert manager.flush_pending(timeout=3)
         assert delayed.flush_pending(timeout=3)
         assert len(payloads) == 1
         receipt["host_submission_snapshot"] = (
             "passed" if payloads[0]["scope"] == {"type": "session", "key": "old-session"}
+            and payloads[0]["metadata"]["session_id"] == "old-session"
             else "unsupported"
         )
         receipt["delayed_scope_observed"] = payloads[0]["scope"]
+        receipt["supported_boundary"] = "hermes_cli.cli_commands_mixin._sync_agent_to_session"
+        receipt["private_scope_mutation"] = False
+        receipt["new_session_quota_before_old_dispatch"] = quota_before_dispatch
+        receipt["new_session_quota_after_old_dispatch"] = delayed._session_write_count
+        receipt["stale_host_submission_quota_isolation"] = (
+            "passed" if delayed._session_write_count == quota_before_dispatch else "unsupported"
+        )
     finally:
         release.set()
         manager.shutdown_all()
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
-    return 2 if "unsupported" in (receipt["host_global_drain"], receipt["host_submission_snapshot"]) else 0
+    return 2 if "unsupported" in (receipt["host_global_drain"], receipt["host_submission_snapshot"],
+                                   receipt["stale_host_submission_quota_isolation"]) else 0
 
 
 if __name__ == "__main__":
