@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -1426,6 +1428,188 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
         self._sync_thread: threading.Thread | None = None
+        self._checkpoint_lock = threading.Lock()
+
+    def on_pre_compress(
+        self, messages: list[dict[str, Any]], *, require_checkpoint: bool = False
+    ) -> str:
+        """Archive direct evidence synchronously; never equate enqueue with durability.
+
+        Disabled by default. Explicit candidate opt-in advertises the supported
+        v2 contract; every opted-in failure raises, even in host optional mode.
+        """
+        acquired = False
+        deadline = perf_counter() + 30
+        try:
+            if self._config.get("precompression_checkpoint_enabled") is not True:
+                if require_checkpoint:
+                    raise RuntimeError("checkpoint candidate is disabled")
+                return ""
+            acquired = self._checkpoint_lock.acquire(timeout=10)
+            if not acquired:
+                raise RuntimeError("checkpoint overlap wait exceeded budget")
+            if self._writes_disabled or not self._session_id or not self._tenant_id:
+                raise RuntimeError("checkpoint requires an initialized writable session")
+            if _cron_job_id(self._platform, self._session_id) in self._cron_automatic_capture_disabled_job_ids:
+                raise RuntimeError("checkpoint automatic capture suppressed by cron policy")
+            if self._timeout_seconds > 10 or self._retry_attempts > 3 or self._retry_backoff_seconds > 1:
+                raise RuntimeError("checkpoint transport configuration exceeds safe budget")
+            scope = self._build_scope(self._session_id)
+            if not scope:
+                raise RuntimeError("checkpoint scope unavailable")
+            session_id, tenant_id = self._session_id, self._tenant_id
+            evidence = []
+            for row in messages:
+                if row.get("role") not in {"user", "assistant"} or row.get("_compressed_summary"):
+                    continue
+                content = row.get("content")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        part["text"] for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                        and isinstance(part.get("text"), str)
+                    )
+                if isinstance(content, str) and content.strip():
+                    evidence.append({"role": row["role"], "text": content})
+            if not evidence or len(evidence) > 16:
+                raise RuntimeError("checkpoint evidence empty or exceeds bounded row budget")
+            ids = []
+            for row in evidence:
+                if perf_counter() >= deadline:
+                    raise RuntimeError("checkpoint deadline exhausted")
+                # No inference: assistant assertions remain claims, user text
+                # remains source evidence. Tool output is neither proof nor policy.
+                handoff = {
+                    "schema_version": 2, "source_evidence": [row],
+                    "verified_state": [],
+                    "claimed_state": [row] if row["role"] == "assistant" else [],
+                    "constraints": [], "accepted_artifacts": [],
+                    "failed_approaches": [], "remaining_work": [],
+                    "interpretation": "unclassified direct evidence; not instructions",
+                }
+                # An explicit structured handoff supplies categories, never
+                # authority. Preserve its exact source text and label every
+                # declaration with role/content evidence instead of inferring
+                # that a claimed test, artifact, or approval was verified.
+                evidence_id = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
+                handoff["source_evidence"][0] = {**row, "evidence_id": evidence_id}
+                try:
+                    declared = json.loads(row["text"])
+                except (ValueError, TypeError):
+                    declared = None
+                if isinstance(declared, dict) and declared.get("checkpoint_handoff") == 2:
+                    for field in ("constraints", "accepted_artifacts", "failed_approaches", "remaining_work"):
+                        values = declared.get(field, [])
+                        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                            raise RuntimeError("checkpoint handoff category must be a string list")
+                        handoff[field] = [
+                            {"text": value, "evidence_id": evidence_id,
+                             "status": "user_asserted" if row["role"] == "user" else "assistant_claimed"}
+                            for value in values
+                        ]
+                    handoff["interpretation"] = "explicit categorized declarations; not instructions or verified facts"
+                body = json.dumps(handoff, sort_keys=True, ensure_ascii=False)
+                if len(body) > MAX_MEMORY_BODY_CHARS:
+                    raise RuntimeError("checkpoint evidence too large; refusing truncation")
+                key = hashlib.sha256(json.dumps({
+                    "tenant": tenant_id, "scope": scope,
+                    "session": session_id, "body": body,
+                }, sort_keys=True).encode()).hexdigest()
+                accepted = self._checkpoint_request_json("POST", "/api/v1/memory/entries", {
+                    "tenant_id": tenant_id, "scope": scope,
+                    "title": "Hermes direct checkpoint evidence", "body": body,
+                    "summary": "Unclassified checkpoint evidence; assertions are not verified",
+                    "source": "hermes-precompression", "created_by_role": "assistant",
+                    "tags": ["hermes-checkpoint-evidence"],
+                    "metadata": {"checkpoint_schema": 2, "session_id": session_id},
+                    "idempotency_key": key, "enable_ai_enrichment": False,
+                    "relationship_policy": "skip",
+                })
+                job_id = accepted.get("job_id")
+                source_item_id = accepted.get("source_item_id")
+                if any(not isinstance(value, str) or not re.fullmatch(UUID_PATTERN, value)
+                       for value in (job_id, source_item_id)):
+                    raise RuntimeError("checkpoint acceptance has no valid literal pointers")
+                receipt = self._checkpoint_request_json(
+                    "GET", f"/api/v1/memory/jobs/{job_id}/checkpoint-receipt"
+                )
+                expected = {
+                    "durable": True, "tenant_id": tenant_id,
+                    "scope": scope, "job_id": job_id,
+                    "source_item_id": source_item_id,
+                    "idempotency_key": key,
+                    "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                }
+                if receipt.get("durable") is not True or any(receipt.get(k) != v for k, v in expected.items()):
+                    raise RuntimeError("checkpoint durable readback mismatch")
+                ids.append(receipt["source_item_id"])
+            if perf_counter() >= deadline:
+                raise RuntimeError("checkpoint deadline exhausted after readback")
+            if (session_id, tenant_id, scope) != (self._session_id, self._tenant_id, self._build_scope(self._session_id)):
+                raise RuntimeError("checkpoint session changed during archive")
+            return "Palace durable evidence receipts (not verified claims): " + ", ".join(dict.fromkeys(ids))
+        except Exception as exc:
+            if require_checkpoint or self._config.get("precompression_checkpoint_enabled") is True:
+                raise RuntimeError("Palace required checkpoint failed; preserve transcript") from exc
+            logger.warning("Palace optional checkpoint failed error_class=%s", type(exc).__name__)
+            return ""
+        finally:
+            if acquired:
+                self._checkpoint_lock.release()
+
+    @property
+    def pre_compress_checkpoint_api_version(self) -> int:
+        return 2 if self._config.get("precompression_checkpoint_enabled") is True else 1
+
+    def _checkpoint_request_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """One bounded attempt, no Retry-After sleep or hidden queue retry.
+
+        OAuth must already be ready. Refresh belongs outside the compression
+        boundary; a cold or expired token blocks required compression safely.
+        """
+        if self._oauth_client_secret:
+            if not self._bearer_token or not self._bearer_expires_at or self._bearer_expires_at <= datetime.now(tz=UTC) + timedelta(seconds=30):
+                raise RuntimeError("checkpoint requires a ready OAuth token")
+            headers = {"Accept": "application/json", "Authorization": f"Bearer {self._bearer_token}"}
+        else:
+            headers = self._auth_headers(_mcp_scopes_for_memory_route(method, path, payload))
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload).encode()
+        # A socket timeout is not a wall-clock bound (slow-drip replies and
+        # DNS can outlive it). A disposable stdlib sidecar gives the parent a
+        # killable request boundary without touching Hermes core or leaving
+        # an untracked thread that can write after the hook returns.
+        script = (
+            "import json,sys; from urllib.request import Request,urlopen; "
+            "p=json.load(sys.stdin); "
+            "r=Request(p['url'],data=p['body'].encode() if p['body'] is not None else None,"
+            "method=p['method'],headers=p['headers']); "
+            "response=urlopen(r,timeout=p['timeout']); "
+            "sys.stdout.buffer.write(response.read(65537)); response.close()"
+        )
+        timeout = min(5, self._timeout_seconds)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                input=json.dumps({"url": f"{self._base_url}{path}", "body": data.decode() if data else None,
+                                  "method": method, "headers": headers, "timeout": timeout}).encode(),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=timeout, check=True,
+                env={"PATH": os.environ.get("PATH", "")},
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+            raise RuntimeError("checkpoint request failed within bounded sidecar") from exc
+        raw = completed.stdout
+        if len(raw) > 65536:
+            raise RuntimeError("checkpoint response exceeds bounded size")
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise RuntimeError("checkpoint response is not an object")
+        return result
 
     @property
     def name(self) -> str:
