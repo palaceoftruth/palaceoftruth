@@ -30,6 +30,17 @@ from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
 
+try:
+    from agent.memory_provider import spawn_context_thread
+except ImportError:
+    # Older supported hosts lack the public helper. Preserve caller context
+    # locally without changing host internals or interpreter defaults.
+    from contextvars import copy_context
+
+    def spawn_context_thread(target, *, name: str, daemon: bool = True):
+        context = copy_context()
+        return threading.Thread(target=lambda: context.run(target), name=name, daemon=daemon)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRIEVE_LIMIT = 5
@@ -1396,7 +1407,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._active_skills: list[str] = []
         self._active_skill_names: list[str] = []
         self._platform = "cli"
+        # Two write gates. ``_writes_disabled`` guards the deliberate operator
+        # tools (palace_remember / palace_remember_bulk / palace_promote_to_shared);
+        # ``_lifecycle_writes_disabled`` guards the automatic lifecycle
+        # (completed-turn sync + the built-in-memory mirror). They agree for every
+        # context except cron: Hermes core passes agent_context="cron" to signal a
+        # non-primary lifecycle-skip context, and the documented cron retention
+        # policy suppresses routine *automatic* capture while keeping explicit
+        # operator writes available.
         self._writes_disabled = False
+        self._lifecycle_writes_disabled = False
         self._cron_automatic_capture_disabled_job_ids: frozenset[str] = frozenset()
         self._tenant_id = ""
         self._tenant_id_lock = threading.Lock()
@@ -1895,7 +1915,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._config.get("cron_automatic_capture_disabled_job_ids")
         )
         agent_context = str(kwargs.get("agent_context", "")).strip()
-        self._writes_disabled = agent_context not in {"", "primary"}
+        non_primary_context = agent_context not in {"", "primary"}
+        # Automatic completed-turn capture and the built-in-memory mirror are
+        # suppressed for every non-primary context.
+        self._lifecycle_writes_disabled = non_primary_context
+        # Explicit operator tools stay available in the cron context - the
+        # documented retention policy - and are disabled only for genuinely
+        # delegated contexts such as subagent.
+        self._writes_disabled = non_primary_context and agent_context != "cron"
         self._tenant_id = ""
         self._server_identity_loaded = False
         self._server_agent_scope_key = ""
@@ -2780,7 +2807,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "epoch": turn_epoch,
                     }
 
-        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
+        self._prefetch_thread = spawn_context_thread(_worker, name="palace-prefetch")
         self._prefetch_thread.start()
 
     def _prefetch_with_budget(self, query: str, session_id: str) -> str:
@@ -2900,7 +2927,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         # Hermes calls sync_turn at the turn boundary. Advance the epoch before
         # any early return so stale reads cannot affect the next turn.
         self._advance_turn_epoch()
-        if self._writes_disabled or not self._has_api_auth():
+        if self._lifecycle_writes_disabled or not self._has_api_auth():
             return
         user_text = (user_content or "").strip()
         assistant_text = (assistant_content or "").strip()
@@ -2944,7 +2971,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             finally:
                 self._reset_write_quota()
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
+        self._sync_thread = spawn_context_thread(_worker, name="palace-sync")
         self._sync_thread.start()
 
     def on_session_switch(
@@ -2975,7 +3002,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        if self._writes_disabled or not self._has_api_auth():
+        if self._lifecycle_writes_disabled or not self._has_api_auth():
             return
         normalized_action = (action or "").strip().lower()
         normalized_target = (target or "").strip().lower()
@@ -3004,7 +3031,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except Exception as exc:
                 logger.warning("Palace of Truth memory mirror failed: %s", exc)
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
+        self._sync_thread = spawn_context_thread(_worker, name="palace-memory-mirror")
         self._sync_thread.start()
 
     def _reset_write_quota(self, *, session: bool = False) -> None:
