@@ -3078,11 +3078,19 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
             except Exception:
                 self._write_queue.pop()
                 self._release_quota_job(key)
+                self._publish_work_change()
                 raise
             self._sync_thread = thread
             self._writer_running = True
         self._accepted_writes += 1
         self._prune_session_quotas()
+        self._publish_work_change()
+
+    def _publish_work_change(self) -> None:
+        # Caller owns the lifecycle lock. Selected generations are immutable:
+        # publish the old notification before replacing it, and never clear it.
+        self._work_changed.set()
+        self._work_changed = threading.Event()
 
     def _drain_writes(self) -> None:
         while True:
@@ -3090,28 +3098,31 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
                 if not self._write_queue:
                     self._writer_running = False
                     self._work_condition.notify_all()
-                    self._work_changed.set()
+                    self._publish_work_change()
                     return
                 context, worker, quota = self._write_queue.popleft()
                 self._active_writes = 1
+                self._publish_work_change()
             self._write_quota_context.quota = quota
             try:
                 context.run(worker)
             except Exception as exc:
                 with self._work_condition:
                     self._failed_writes += 1
+                    self._publish_work_change()
                 # Avoid serializing raw transport errors, which can carry secrets.
                 logger.warning("Palace queued write failed: %s", type(exc).__name__)
             else:
                 with self._work_condition:
                     self._completed_writes += 1
+                    self._publish_work_change()
             finally:
                 del self._write_quota_context.quota
                 with self._work_condition:
                     self._release_quota_job(quota.owner.session_id)
                     self._active_writes = 0
                     self._work_condition.notify_all()
-                    self._work_changed.set()
+                    self._publish_work_change()
 
     def _active_write_quota(self) -> _WriteQuota:
         quota = getattr(self._write_quota_context, "quota", None)
@@ -3295,13 +3306,13 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
             try:
                 pending = bool(self._write_queue or self._active_writes)
                 prefetch = self._prefetch_thread
-                self._work_changed.clear()
+                notification = self._work_changed
             finally:
                 self._lifecycle_lock.release()
             if not pending:
                 break
             remaining = deadline - perf_counter()
-            if remaining <= 0 or not self._work_changed.wait(remaining):
+            if remaining <= 0 or not notification.wait(remaining):
                 return False
         if prefetch is not None and prefetch is not threading.current_thread():
             prefetch.join(max(0.0, deadline - perf_counter()))
@@ -3340,6 +3351,7 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
             return
         try:
             self._closed = True
+            self._publish_work_change()
         finally:
             self._lifecycle_lock.release()
         if not self.flush_pending(timeout=max(0.0, deadline - perf_counter())):
