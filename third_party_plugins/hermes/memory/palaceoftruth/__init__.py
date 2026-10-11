@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import contextvars
-from collections import deque
+from collections import OrderedDict, deque
 import json
 import logging
 import os
@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import perf_counter, sleep
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -46,13 +46,20 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class _SessionQuota(NamedTuple):
+    """Session identity never changes; counters remain shared across its turns."""
+    session_id: str
+    writes: list[int]
+
+
 class _WriteQuota:
     """Immutable ownership, mutable counters; old jobs retain their own bucket."""
 
-    def __init__(self, session_writes: list[int] | None = None):
+    def __init__(self, owner: _SessionQuota | None = None):
+        self.owner = owner if owner is not None else _SessionQuota("", [0])
         self.turn_writes = 0
         self.bulk_calls = 0
-        self.session_writes = session_writes if session_writes is not None else [0]
+        self.session_writes = self.owner.writes
 
 DEFAULT_RETRIEVE_LIMIT = 5
 DEFAULT_AGENT_CANDIDATE_LIMIT = 20
@@ -1408,6 +1415,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._write_quota = _WriteQuota()
         self._write_quota_context = threading.local()
         self._lifecycle_lock = threading.RLock()
+        self._session_quota_retention_limit = 64
+        self._session_quotas: OrderedDict[str, _WriteQuota] = OrderedDict()
+        self._session_quota_jobs: dict[str, int] = {}
         self._work_condition = threading.Condition(self._lifecycle_lock)
         self._write_queue = deque()
         self._closed = False
@@ -1416,10 +1426,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._accepted_writes = 0
         self._completed_writes = 0
         self._failed_writes = 0
+        self._session_id = ""
         self._turn_write_count = 0
         self._turn_bulk_call_count = 0
         self._session_write_count = 0
-        self._write_quota_lock = threading.Lock()
+        # One reentrant lock prevents lifecycle/quota lock-order inversions.
+        self._write_quota_lock = self._lifecycle_lock
         self._dedup_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
@@ -2956,7 +2968,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         with self._lifecycle_lock:
             self._assert_open()
             snapshot = self._snapshot_write_context(session_id or self._session_id)
-            quota = self._write_quota
+            quota = self._quota_for_session(snapshot["session_id"])
             user_text = (user_content or "").strip()
             assistant_text = (assistant_content or "").strip()
             cron_job_id = _cron_job_id(snapshot["platform"], snapshot["session_id"])
@@ -2981,7 +2993,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 self._queue_write(_worker, quota)
             # Rotate only after successful admission, never on worker completion.
             self._advance_turn_epoch()
-            self._reset_write_quota()
+            self._reset_write_quota(session_id=snapshot["session_id"])
 
     def on_session_switch(
         self, new_session_id: str, *, parent_session_id: str = "",
@@ -3002,7 +3014,6 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._reset_write_quota(session=True)
 
     def on_memory_write(self, action: str, target: str, content: str, *, metadata: dict[str, Any] | None = None) -> None:
-        del metadata
         with self._lifecycle_lock:
             self._assert_open()
             if self._lifecycle_writes_disabled or not self._has_api_auth():
@@ -3012,7 +3023,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             content = (content or "").strip()
             if action not in {"add", "replace"} or target not in {"memory", "user"} or not content:
                 return
-            snapshot = self._snapshot_write_context()
+            submitted_session = (metadata or {}).get("session_id")
+            snapshot = self._snapshot_write_context(
+                submitted_session if isinstance(submitted_session, str) and submitted_session else None
+            )
 
             def _worker() -> None:
                 tenant_id = self._resolve_tenant_id()
@@ -3024,7 +3038,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 )
                 self._post_memory_entries("/api/v1/memory/entries", payload)
 
-            self._queue_write(_worker, self._write_quota)
+            self._queue_write(_worker, self._quota_for_session(snapshot["session_id"]))
 
     def _assert_open(self) -> None:
         if self._closed:
@@ -3047,16 +3061,20 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._assert_open()
         job = (contextvars.copy_context(), worker, quota)
         self._write_queue.append(job)
+        key = quota.owner.session_id
+        self._session_quota_jobs[key] = self._session_quota_jobs.get(key, 0) + 1
         if not self._writer_running:
             try:
                 thread = spawn_context_thread(self._drain_writes, name="palace-write")
                 thread.start()
             except Exception:
                 self._write_queue.pop()
+                self._release_quota_job(key)
                 raise
             self._sync_thread = thread
             self._writer_running = True
         self._accepted_writes += 1
+        self._prune_session_quotas()
 
     def _drain_writes(self) -> None:
         while True:
@@ -3081,11 +3099,45 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             finally:
                 del self._write_quota_context.quota
                 with self._work_condition:
+                    self._release_quota_job(quota.owner.session_id)
                     self._active_writes = 0
                     self._work_condition.notify_all()
 
     def _active_write_quota(self) -> _WriteQuota:
-        return getattr(self._write_quota_context, "quota", self._write_quota)
+        quota = getattr(self._write_quota_context, "quota", None)
+        if quota is not None:
+            return quota
+        with self._lifecycle_lock:
+            return self._quota_for_session(self._session_id)
+
+    def _quota_for_session(self, session_id: str) -> _WriteQuota:
+        # Caller owns the lifecycle/quota lock. Delayed host submissions use
+        # their explicit session, never whichever session is currently active.
+        quota = self._session_quotas.get(session_id)
+        if quota is None:
+            quota = _WriteQuota(_SessionQuota(session_id, [0]))
+            self._session_quotas[session_id] = quota
+        self._session_quotas.move_to_end(session_id)
+        if session_id == self._session_id:
+            self._write_quota = quota
+        return quota
+
+    def _release_quota_job(self, key: str) -> None:
+        remaining = self._session_quota_jobs[key] - 1
+        if remaining:
+            self._session_quota_jobs[key] = remaining
+        else:
+            del self._session_quota_jobs[key]
+        self._prune_session_quotas()
+
+    def _prune_session_quotas(self) -> None:
+        # Bound idle history; active/queued owners and current session are pinned.
+        # Jobs retain direct owner references even after their final unpin.
+        for key in list(self._session_quotas):
+            if len(self._session_quotas) <= self._session_quota_retention_limit:
+                break
+            if key != self._session_id and not self._session_quota_jobs.get(key):
+                del self._session_quotas[key]
 
     @property
     def _turn_write_count(self) -> int:
@@ -3111,9 +3163,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def _session_write_count(self, value: int) -> None:
         self._active_write_quota().session_writes[0] = value
 
-    def _reset_write_quota(self, *, session: bool = False) -> None:
+    def _reset_write_quota(self, *, session: bool = False, session_id: str | None = None) -> None:
+        del session  # Switching/rewinding never replenishes a retained session cap.
         with self._write_quota_lock:
-            self._write_quota = _WriteQuota(None if session else self._write_quota.session_writes)
+            key = self._session_id if session_id is None else session_id
+            previous = self._quota_for_session(key)
+            self._session_quotas[key] = _WriteQuota(previous.owner)
+            if key == self._session_id:
+                self._write_quota = self._session_quotas[key]
+            self._prune_session_quotas()
 
     def _write_dedup_cache_key(self, path: str, payload: dict[str, Any]) -> str:
         idempotency_key = payload.get("idempotency_key")
