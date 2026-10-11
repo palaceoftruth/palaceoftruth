@@ -6,7 +6,6 @@ It imports the official ABC/helper, not a fork or a runtime replacement.
 from __future__ import annotations
 
 import contextvars
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -86,6 +85,7 @@ assert pathlib.Path(inspect.getfile(MemoryProvider)).resolve() == host / "agent/
 spec = importlib.util.spec_from_file_location("offline_palace", plugin)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+assert module.spawn_context_thread is spawn_context_thread
 marker = contextvars.ContextVar("real-host-profile", default="wrong-profile")
 token = marker.set("official-helper-control")
 seen = []
