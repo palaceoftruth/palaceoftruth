@@ -30,6 +30,17 @@ from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
 
+try:
+    from agent.memory_provider import spawn_context_thread
+except ImportError:
+    # Older supported hosts lack the public helper. Preserve caller context
+    # locally without changing host internals or interpreter defaults.
+    from contextvars import copy_context
+
+    def spawn_context_thread(target, *, name: str, daemon: bool = True):
+        context = copy_context()
+        return threading.Thread(target=lambda: context.run(target), name=name, daemon=daemon)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRIEVE_LIMIT = 5
@@ -2780,7 +2791,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "epoch": turn_epoch,
                     }
 
-        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
+        self._prefetch_thread = spawn_context_thread(_worker, name="palace-prefetch")
         self._prefetch_thread.start()
 
     def _prefetch_with_budget(self, query: str, session_id: str) -> str:
@@ -2944,7 +2955,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             finally:
                 self._reset_write_quota()
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
+        self._sync_thread = spawn_context_thread(_worker, name="palace-sync")
         self._sync_thread.start()
 
     def on_session_switch(
@@ -3004,7 +3015,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             except Exception as exc:
                 logger.warning("Palace of Truth memory mirror failed: %s", exc)
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
+        self._sync_thread = spawn_context_thread(_worker, name="palace-memory-mirror")
         self._sync_thread.start()
 
     def _reset_write_quota(self, *, session: bool = False) -> None:
