@@ -960,7 +960,8 @@ def test_palaceoftruth_on_session_switch_resets_session_cache_and_tenant(monkeyp
     provider.on_session_switch("session-2", parent_session_id="session-1", reset=True)
 
     assert provider._session_id == "session-2"
-    assert provider._tenant_id == ""
+    # Session rotation does not change the authenticated tenant/profile.
+    assert provider._tenant_id == "tenant-a"
     assert provider._prefetch_cache == {
         "query": "",
         "session_id": "",
@@ -3162,7 +3163,7 @@ def test_palaceoftruth_write_paths_send_write_scope_for_entries(
         provider.handle_tool_call("palace_remember", {"content": "Remember explicit write."})
     )
     provider.sync_turn("User asks for recall.", "Assistant answers from Palace.")
-    provider.shutdown()
+    assert provider.flush_pending()
     provider.on_memory_write("add", "memory", "Remember mirrored memory.")
     provider.shutdown()
 
@@ -3389,7 +3390,7 @@ def test_palaceoftruth_write_quota_counts_sync_and_memory_mirror(
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
     caplog.set_level(logging.WARNING)
     provider.on_memory_write("add", "memory", "First write consumes the turn quota.")
-    provider.shutdown()
+    assert provider.flush_pending()
     provider.sync_turn("User", "Assistant")
     provider.shutdown()
 
@@ -3398,8 +3399,9 @@ def test_palaceoftruth_write_quota_counts_sync_and_memory_mirror(
         for method, path, _ in requests_seen
         if method == "POST"
     ] == [("POST", "/api/v1/memory/entries")]
-    assert "per-turn write cap exceeded" in caplog.text
-    assert "Palace of Truth sync failed" in caplog.text
+    assert "Palace write cap reached: 1/1 writes this turn" in caplog.text
+    assert provider.shutdown_drain_state["failed_writes"] == 1
+    assert "Palace queued write failed: PalaceRateLimitError" in caplog.text
 
 
 def test_palaceoftruth_remember_uses_client_side_dedup(monkeypatch) -> None:
@@ -4262,7 +4264,7 @@ def test_palaceoftruth_provider_caches_whoami_between_writes(monkeypatch) -> Non
 
     provider._request_json = fake_request_json  # type: ignore[attr-defined]
     provider.sync_turn("User reminder", "Assistant reply")
-    provider.shutdown()
+    assert provider.flush_pending()
     provider.on_memory_write("add", "memory", "Andrew prefers idempotent deploy scripts.")
     provider.shutdown()
 
@@ -4315,7 +4317,9 @@ def test_palaceoftruth_provider_skips_write_when_whoami_fails(
     assert requests_seen == [("GET", "/api/v1/memory/whoami", None)]
     # The write is skipped, and the log now names the real failure instead of
     # misreporting it as a tenant resolution problem (SAR-1350 bug 1).
-    assert "Palace of Truth memory mirror failed: 403 tenant lookup failed" in caplog.text
+    assert "Palace queued write failed: RuntimeError" in caplog.text
+    assert provider.shutdown_drain_state["failed_writes"] == 1
+    assert "403 tenant lookup failed" not in caplog.text  # Transport text can contain credentials.
     assert "tenant resolution failed" not in caplog.text
 
 
