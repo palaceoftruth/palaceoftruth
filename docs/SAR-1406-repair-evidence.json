@@ -1,0 +1,119 @@
+{
+  "receipts": {
+    "red.xml": {
+      "sha256": "e0a69618421172b603e8c04dc706b2eb445e79c49b2f7ab2128114bccc2055c2",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "2",
+          "skipped": "0",
+          "tests": "3",
+          "time": "2.690",
+          "timestamp": "2026-10-10T23:30:20.313597-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "flush-red.xml": {
+      "sha256": "b66cb5eb2fe4fc0e668478c4b76dc088e85704ef3414ea3e5342ef689ec4354e",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "1",
+          "skipped": "0",
+          "tests": "1",
+          "time": "1.866",
+          "timestamp": "2026-10-10T23:36:07.736051-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "backend-fast-complete-final.xml": {
+      "sha256": "80d10ce3f0b4cb0ca5ad302186bfe5fa26c309476df3b76940adae98c7296ae8",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "3",
+          "tests": "2409",
+          "time": "58.800",
+          "timestamp": "2026-10-10T23:42:16.203517-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "normal-loader-complete-final.xml": {
+      "sha256": "90c09114740622cc98a066c6023794502dc22c4b4b2fcac794391e72e9aab81e",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "157",
+          "time": "14.198",
+          "timestamp": "2026-10-10T23:43:28.323111-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    },
+    "official-pin-final.xml": {
+      "sha256": "a6f7f4a4cfb83f4a83073ead0b026fd8832bea21fd8f30acb50fd5df781b06ef",
+      "suites": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "2",
+          "time": "11.226",
+          "timestamp": "2026-10-10T23:39:13.728279-04:00",
+          "hostname": "barbara"
+        }
+      ]
+    }
+  },
+  "source_hashes": {
+    "third_party_plugins/hermes/memory/palaceoftruth/__init__.py": "7927fb4d226295c7557c53f80cf204ccde15f56ed8e110d07c1a9ffb48c50611",
+    "third_party_plugins/hermes/memory/palaceoftruth/checkpoint.py": "44f995a860aacb13901f74cc7dbdcc03807bc09e6f9e6f63062280b6dfd50730",
+    "backend/tests/fixtures/checkpoint_review/repaired-independent.py.txt": "713a7a600d642ebb7de43a1947faf795a701eed9f3024a89453e7747d276b1a1"
+  },
+  "normal_loader_copy_equal": true,
+  "issue": "SAR-1406",
+  "status": "final tested dependent candidate; no release approval",
+  "dependency_sha": "545dd75a584523ed8247f9a2c88c6cfab155cd40",
+  "superseded_candidate": "00970c30cf2d229a0ed205bd38661935be954228",
+  "actual_export": "CheckpointMixin in normal native provider; legacy fallback removed; no fixture-composed product classes",
+  "normal_loader": "official plugins.memory.load_memory_provider with isolated HERMES_HOME; 157 passed with no skips",
+  "full_backend_fast": "2406 passed, 2 skipped, 1 xfailed in 58.82s",
+  "official_hosts": [
+    "1f2b9e08644c6de4a5b5c50d0e4676a19c5577c5",
+    "c57331677d7fc46298a7159cf3a650853f0966c5"
+  ],
+  "F1": "repaired actual native export ancestry; context FIFO immutable quota pin closed/cron policy and prefetch start fix preserved",
+  "F2": "no legacy cleanup; caller deadline and eventual native counter accuracy under contention; flush Condition unbounded reacquire separately red then repaired with Event/timed lock",
+  "R1_R3_R5": "real route/replay, exact committed-only readback, redirect refusal, ordered occurrence/prevalidation regressions retained",
+  "host_global_gap": "MANDATORY BLOCKED; actual official host failure probe remains red as expected, not release acceptance",
+  "provenance": {
+    "PR": 553,
+    "user_reference": "740a68 (literal abbreviated reference)",
+    "observed_head": "61cf1621e33a73874a94ddff4a52c1ce93bb1f7e",
+    "composed": false,
+    "conflicts": [
+      "third_party_plugins/hermes/memory/palaceoftruth/__init__.py",
+      "backend/tests/test_hermes_session_quota.py"
+    ]
+  },
+  "hosted_CI": "dependent PR base not main; workflow filters exclude it; no prior CI substituted; no release workflow dispatch",
+  "guards": [
+    "no coreedit",
+    "no delegate",
+    "no livecanary",
+    "no merge/deploy/Done",
+    "no forcepush",
+    "no original/provenance worktree changes"
+  ]
+}
