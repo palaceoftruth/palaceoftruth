@@ -3273,7 +3273,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         submitted = raw.get("session_id")
         snapshot = copy.deepcopy(self._snapshot_write_context(submitted if isinstance(submitted, str) and submitted else None))
         caller_context = contextvars.copy_context()
-        foreground_session = self._session_id
+        # Eligibility uses only the atomic entry snapshot, never a live read.
+        foreground_session = snapshot["foreground_session"]  # Replaces foreground_session = self._session_id
         with self._lifecycle_lock:
             self._assert_open()
             if self._lifecycle_writes_disabled or self._writes_disabled or snapshot["writes_disabled"] or snapshot["lifecycle_writes_disabled"] or not self._has_api_auth():
@@ -3321,18 +3322,22 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             raise RuntimeError("Palace provider is closed; admission rejected")
 
     def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
-        snapshot = {name: getattr(self, "_" + name) for name in (
-            "session_id", "scope_type", "scope_key", "agent_identity",
-            "agent_workspace", "platform", "source", "created_by_role",
-        )}
-        if session_id is not None:
-            snapshot["session_id"] = session_id
-        snapshot["active_skills"] = tuple(self._active_skills)
-        snapshot["active_skill_names"] = tuple(self._active_skill_names)
-        snapshot["turn_author"] = copy.deepcopy(self._turn_author)
-        snapshot["writes_disabled"] = self._writes_disabled
-        snapshot["lifecycle_writes_disabled"] = self._lifecycle_writes_disabled
-        return snapshot
+        # Session rotation and participant updates use this same lock. Capture
+        # the foreground identity before overriding the requested write scope.
+        with self._lifecycle_lock:
+            snapshot = {name: getattr(self, "_" + name) for name in (
+                "session_id", "scope_type", "scope_key", "agent_identity",
+                "agent_workspace", "platform", "source", "created_by_role",
+            )}
+            snapshot["foreground_session"] = snapshot["session_id"]
+            if session_id is not None:
+                snapshot["session_id"] = session_id
+            snapshot["active_skills"] = tuple(self._active_skills)
+            snapshot["active_skill_names"] = tuple(self._active_skill_names)
+            snapshot["turn_author"] = copy.deepcopy(self._turn_author)
+            snapshot["writes_disabled"] = self._writes_disabled
+            snapshot["lifecycle_writes_disabled"] = self._lifecycle_writes_disabled
+            return snapshot
 
     def _queue_write(self, worker, quota: _WriteQuota, *, context: contextvars.Context | None = None) -> None:
         # Caller holds the admission lock: context, queue order, tracking and
