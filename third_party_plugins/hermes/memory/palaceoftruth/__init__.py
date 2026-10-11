@@ -3056,8 +3056,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "epoch": turn_epoch,
                     }
 
-        self._prefetch_thread = spawn_context_thread(_worker, name="palace-prefetch")
-        self._prefetch_thread.start()
+        # The caller holds the lifecycle lock. Publish only successful startup,
+        # so rejection leaves prior tracking intact and never exposes an
+        # unstarted thread to flush/shutdown.
+        thread = spawn_context_thread(_worker, name="palace-prefetch")
+        thread.start()
+        self._prefetch_thread = thread
 
     def _prefetch_with_budget(self, query: str, session_id: str) -> str:
         if self._semantic_prefetch_enabled:
@@ -3407,7 +3411,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._prune_session_quotas()
 
     def _prune_session_quotas(self) -> None:
-        # Bound idle history; active/queued owners and current session are pinned.
+        # Target 64 total retained records, including pins, not 64 extra idle
+        # records. Active/queued owners and current session cannot be evicted.
         # Jobs retain direct owner references even after their final unpin.
         for key in list(self._session_quotas):
             if len(self._session_quotas) <= self._session_quota_retention_limit:

@@ -253,3 +253,35 @@ def test_failed_write_retry_preserves_idempotency(provider, monkeypatch):
     assert len(keys) == 2 and keys[0] == keys[1]
     assert provider.shutdown_drain_state["failed_writes"] == 1
     assert provider.shutdown_drain_state["completed_writes"] == 1
+
+
+@pytest.mark.parametrize("completed_prior", [False, True])
+def test_prefetch_start_failure_flush_retry_shutdown(provider, monkeypatch, completed_prior):
+    reads = []
+    monkeypatch.setattr(provider, "_prefetch_with_budget", lambda query, session: reads.append(query) or "offline recall")
+    if completed_prior:
+        provider.queue_prefetch("prior")
+        assert provider.flush_pending(timeout=3)
+    prior = provider._prefetch_thread
+    module_globals = provider._queue_prefetch.__func__.__globals__
+    original = module_globals["spawn_context_thread"]
+
+    def failed_factory(target, **kwargs):
+        thread = threading.Thread(target=target)
+        def fail():
+            raise RuntimeError("offline prefetch start failure")
+        thread.start = fail
+        return thread
+
+    monkeypatch.setitem(module_globals, "spawn_context_thread", failed_factory)
+    with pytest.raises(RuntimeError, match="prefetch start failure"):
+        provider.queue_prefetch("rejected")
+    assert provider._prefetch_thread is prior
+    assert provider.flush_pending(timeout=0.1)
+    monkeypatch.setitem(module_globals, "spawn_context_thread", original)
+    provider.queue_prefetch("retry")
+    assert provider.flush_pending(timeout=3)
+    assert reads == (["prior", "retry"] if completed_prior else ["retry"])
+    provider.shutdown(timeout=0.1)
+    assert provider.shutdown_drain_state["status"] == "drained"
+    assert provider.shutdown_drain_state["active_prefetches"] == 0
