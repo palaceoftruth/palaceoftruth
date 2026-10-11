@@ -1,0 +1,65 @@
+name: Hermes public lifecycle contract
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  official-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - b65cd56cfcdc33cbf6657326b5711a7c23cd1485
+          - main
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Checkout official Hermes only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.host }}
+          path: official-host
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      - name: Prepare isolated official-host environment
+        run: |
+          uv venv --python 3.14 .contract-venv
+          uv pip install --python .contract-venv/bin/python -e ./official-host pytest==9.0.2
+          mkdir -p contract-evidence offline-home
+          git -C official-host rev-parse HEAD > contract-evidence/host-sha.txt
+          git -C official-host status --porcelain > contract-evidence/host-status.txt
+      - name: Provider compatibility and lifecycle regressions
+        env:
+          HOME: ${{ github.workspace }}/offline-home
+          HERMES_HOME: ${{ github.workspace }}/offline-home
+          HERMES_CONTRACT_ROOT: ${{ github.workspace }}/official-host
+        run: |
+          cd backend
+          ../.contract-venv/bin/python -m pytest tests/test_hermes_session_quota.py tests/test_hermes_supported_lifecycle.py tests/test_hermes_thread_context.py tests/test_hermes_memory_plugin.py tests/test_agent_plugin_manifests.py tests/test_detect_hermes_plugin_release.py -q -o addopts='' --junitxml=../contract-evidence/provider-tests.xml
+      - name: Record public hook feasibility (not full-contract acceptance)
+        env:
+          HOME: ${{ github.workspace }}/offline-home
+          HERMES_HOME: ${{ github.workspace }}/offline-home
+        run: |
+          .contract-venv/bin/python scripts/check_hermes_public_hooks.py --host official-host --receipt contract-evidence/hooks-receipt.json
+      - name: Strict real-host admission and drain gate
+        env:
+          HOME: ${{ github.workspace }}/offline-home
+          HERMES_HOME: ${{ github.workspace }}/offline-home
+        run: |
+          .contract-venv/bin/python scripts/check_hermes_public_lifecycle.py --host official-host --receipt contract-evidence/strict-receipt.json
+      - name: Keep exact contract evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: hermes-contract-${{ matrix.host }}
+          path: contract-evidence
+          if-no-files-found: error

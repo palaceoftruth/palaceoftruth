@@ -13,6 +13,8 @@ endpoints.
 from __future__ import annotations
 
 import hashlib
+import contextvars
+from collections import OrderedDict, deque
 import json
 import logging
 import os
@@ -22,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import perf_counter, sleep
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -30,7 +32,34 @@ from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
 
+try:
+    from agent.memory_provider import spawn_context_thread
+except ImportError:
+    # Older supported hosts lack the public helper. Preserve caller context
+    # locally without changing host internals or interpreter defaults.
+    from contextvars import copy_context
+
+    def spawn_context_thread(target, *, name: str, daemon: bool = True):
+        context = copy_context()
+        return threading.Thread(target=lambda: context.run(target), name=name, daemon=daemon)
+
 logger = logging.getLogger(__name__)
+
+
+class _SessionQuota(NamedTuple):
+    """Session identity never changes; counters remain shared across its turns."""
+    session_id: str
+    writes: list[int]
+
+
+class _WriteQuota:
+    """Immutable ownership, mutable counters; old jobs retain their own bucket."""
+
+    def __init__(self, owner: _SessionQuota | None = None):
+        self.owner = owner if owner is not None else _SessionQuota("", [0])
+        self.turn_writes = 0
+        self.bulk_calls = 0
+        self.session_writes = self.owner.writes
 
 DEFAULT_RETRIEVE_LIMIT = 5
 DEFAULT_AGENT_CANDIDATE_LIMIT = 20
@@ -1383,10 +1412,26 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._max_writes_per_session = DEFAULT_MAX_WRITES_PER_SESSION
         self._max_bulk_calls_per_turn = DEFAULT_MAX_BULK_CALLS_PER_TURN
         self._dedup_cache_ttl_seconds = DEFAULT_DEDUP_CACHE_TTL_SECONDS
+        self._write_quota = _WriteQuota()
+        self._write_quota_context = threading.local()
+        self._lifecycle_lock = threading.RLock()
+        self._session_quota_retention_limit = 64
+        self._session_quotas: OrderedDict[str, _WriteQuota] = OrderedDict()
+        self._session_quota_jobs: dict[str, int] = {}
+        self._work_condition = threading.Condition(self._lifecycle_lock)
+        self._write_queue = deque()
+        self._closed = False
+        self._active_writes = 0
+        self._writer_running = False
+        self._accepted_writes = 0
+        self._completed_writes = 0
+        self._failed_writes = 0
+        self._session_id = ""
         self._turn_write_count = 0
         self._turn_bulk_call_count = 0
         self._session_write_count = 0
-        self._write_quota_lock = threading.Lock()
+        # One reentrant lock prevents lifecycle/quota lock-order inversions.
+        self._write_quota_lock = self._lifecycle_lock
         self._dedup_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._source = DEFAULT_SOURCE
         self._created_by_role = DEFAULT_CREATED_BY_ROLE
@@ -1396,7 +1441,16 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._active_skills: list[str] = []
         self._active_skill_names: list[str] = []
         self._platform = "cli"
+        # Two write gates. ``_writes_disabled`` guards the deliberate operator
+        # tools (palace_remember / palace_remember_bulk / palace_promote_to_shared);
+        # ``_lifecycle_writes_disabled`` guards the automatic lifecycle
+        # (completed-turn sync + the built-in-memory mirror). They agree for every
+        # context except cron: Hermes core passes agent_context="cron" to signal a
+        # non-primary lifecycle-skip context, and the documented cron retention
+        # policy suppresses routine *automatic* capture while keeping explicit
+        # operator writes available.
         self._writes_disabled = False
+        self._lifecycle_writes_disabled = False
         self._cron_automatic_capture_disabled_job_ids: frozenset[str] = frozenset()
         self._tenant_id = ""
         self._tenant_id_lock = threading.Lock()
@@ -1895,7 +1949,14 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._config.get("cron_automatic_capture_disabled_job_ids")
         )
         agent_context = str(kwargs.get("agent_context", "")).strip()
-        self._writes_disabled = agent_context not in {"", "primary"}
+        non_primary_context = agent_context not in {"", "primary"}
+        # Automatic completed-turn capture and the built-in-memory mirror are
+        # suppressed for every non-primary context.
+        self._lifecycle_writes_disabled = non_primary_context
+        # Explicit operator tools stay available in the cron context - the
+        # documented retention policy - and are disabled only for genuinely
+        # delegated contexts such as subagent.
+        self._writes_disabled = non_primary_context and agent_context != "cron"
         self._tenant_id = ""
         self._server_identity_loaded = False
         self._server_agent_scope_key = ""
@@ -2735,6 +2796,11 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return text
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        with self._lifecycle_lock:
+            self._assert_open()
+            self._queue_prefetch(query, session_id=session_id)
+
+    def _queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         query = (query or "").strip()
         active_session = session_id or self._session_id
         active_workspace = self._agent_workspace
@@ -2780,8 +2846,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                         "epoch": turn_epoch,
                     }
 
-        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
-        self._prefetch_thread.start()
+        # The caller holds the lifecycle lock. Publish only successful startup,
+        # so rejection leaves prior tracking intact and never exposes an
+        # unstarted thread to flush/shutdown.
+        thread = spawn_context_thread(_worker, name="palace-prefetch")
+        thread.start()
+        self._prefetch_thread = thread
 
     def _prefetch_with_budget(self, query: str, session_id: str) -> str:
         if self._semantic_prefetch_enabled:
@@ -2897,122 +2967,216 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def sync_turn(
         self, user_content: str, assistant_content: str, *, session_id: str = ""
     ) -> None:
-        # Hermes calls sync_turn at the turn boundary. Advance the epoch before
-        # any early return so stale reads cannot affect the next turn.
-        self._advance_turn_epoch()
-        if self._writes_disabled or not self._has_api_auth():
-            return
-        user_text = (user_content or "").strip()
-        assistant_text = (assistant_content or "").strip()
-        if not user_text and not assistant_text:
-            return
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=1.0)
-        active_session = session_id or self._session_id
-        cron_job_id = _cron_job_id(self._platform, active_session)
-        if (
-            self._platform.casefold() == "cron"
-            and self._cron_automatic_capture_disabled_job_ids
-            and cron_job_id is None
-        ):
-            logger.warning(
-                "Palace of Truth cron capture denylist could not resolve a job id; "
-                "capture remains enabled"
+        # Public hook remains nonblocking on older/direct callers. Provider-owned
+        # flush/shutdown, not the host executor sentinel, accounts for completion.
+        with self._lifecycle_lock:
+            self._assert_open()
+            snapshot = self._snapshot_write_context(session_id or self._session_id)
+            quota = self._quota_for_session(snapshot["session_id"])
+            user_text = (user_content or "").strip()
+            assistant_text = (assistant_content or "").strip()
+            cron_job_id = _cron_job_id(snapshot["platform"], snapshot["session_id"])
+            if snapshot["platform"].casefold() == "cron" and self._cron_automatic_capture_disabled_job_ids and cron_job_id is None:
+                logger.warning("Palace of Truth cron capture denylist could not resolve a job id; capture remains enabled")
+            suppressed = (
+                self._lifecycle_writes_disabled or not self._has_api_auth()
+                or not (user_text or assistant_text)
+                or cron_job_id in self._cron_automatic_capture_disabled_job_ids
             )
-        if cron_job_id in self._cron_automatic_capture_disabled_job_ids:
-            logger.debug(
-                "Palace of Truth automatic capture suppressed for cron job %s",
-                cron_job_id,
-            )
-            self._reset_write_quota()
-            return
+            if not suppressed:
+                def _worker() -> None:
+                    tenant_id = self._resolve_tenant_id()
+                    if not tenant_id:
+                        raise RuntimeError("Palace turn tenant resolution failed")
+                    payload = self._build_entry_payload(
+                        user_text, assistant_text, snapshot["session_id"],
+                        tenant_id=tenant_id, snapshot=snapshot,
+                    )
+                    self._post_memory_entries("/api/v1/memory/entries", payload)
 
-        def _worker() -> None:
-            try:
-                tenant_id = self._resolve_tenant_id()
-                if not tenant_id:
-                    return
-                payload = self._build_entry_payload(
-                    user_text,
-                    assistant_text,
-                    active_session,
-                    tenant_id=tenant_id,
-                )
-                self._post_memory_entries("/api/v1/memory/entries", payload)
-            except Exception as exc:
-                logger.warning("Palace of Truth sync failed: %s", exc)
-            finally:
-                self._reset_write_quota()
-
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
-        self._sync_thread.start()
+                self._queue_write(_worker, quota)
+            # Rotate only after successful admission, never on worker completion.
+            self._advance_turn_epoch()
+            self._reset_write_quota(session_id=snapshot["session_id"])
 
     def on_session_switch(
-        self,
-        new_session_id: str,
-        *,
-        parent_session_id: str = "",
-        reset: bool = False,
-        **kwargs,
+        self, new_session_id: str, *, parent_session_id: str = "",
+        reset: bool = False, **kwargs,
     ) -> None:
         del parent_session_id, reset, kwargs
-        self._session_id = (new_session_id or "").strip()
-        self._advance_turn_epoch()
-        with self._prefetch_lock:
-            self._prefetch_cache = {
-                "query": "",
-                "session_id": "",
-                "workspace": "",
-                "text": "",
-                "epoch": self._current_turn_epoch(),
-            }
-        with self._tenant_id_lock:
-            self._tenant_id = ""
-        with self._server_identity_lock:
-            self._server_identity_loaded = False
-            self._server_agent_scope_key = ""
-            self._server_containment_mode = ""
-        self._reset_write_quota(session=True)
+        with self._lifecycle_lock:
+            self._assert_open()
+            self._session_id = (new_session_id or "").strip()
+            self._advance_turn_epoch()
+            with self._prefetch_lock:
+                self._prefetch_cache = {
+                    "query": "", "session_id": "", "workspace": "",
+                    "text": "", "epoch": self._current_turn_epoch(),
+                }
+            # Tenant/auth identity is profile-bound, not session-bound. Do not
+            # wait for a network-held identity lock on the session-switch caller.
+            self._reset_write_quota(session=True)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
-        if self._writes_disabled or not self._has_api_auth():
-            return
-        normalized_action = (action or "").strip().lower()
-        normalized_target = (target or "").strip().lower()
-        content_text = (content or "").strip()
-        if normalized_action not in {"add", "replace"}:
-            return
-        if normalized_target not in {"memory", "user"}:
-            return
-        if not content_text:
-            return
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=1.0)
+    def on_memory_write(self, action: str, target: str, content: str, *, metadata: dict[str, Any] | None = None) -> None:
+        with self._lifecycle_lock:
+            self._assert_open()
+            if self._lifecycle_writes_disabled or not self._has_api_auth():
+                return
+            action = (action or "").strip().lower()
+            target = (target or "").strip().lower()
+            content = (content or "").strip()
+            if action not in {"add", "replace"} or target not in {"memory", "user"} or not content:
+                return
+            submitted_session = (metadata or {}).get("session_id")
+            snapshot = self._snapshot_write_context(
+                submitted_session if isinstance(submitted_session, str) and submitted_session else None
+            )
 
-        def _worker() -> None:
-            try:
+            def _worker() -> None:
                 tenant_id = self._resolve_tenant_id()
                 if not tenant_id:
-                    return
+                    raise RuntimeError("Palace mirror tenant resolution failed")
                 payload = self._build_memory_write_payload(
-                    action=normalized_action,
-                    target=normalized_target,
-                    content=content_text,
-                    tenant_id=tenant_id,
+                    action=action, target=target, content=content,
+                    tenant_id=tenant_id, snapshot=snapshot,
                 )
                 self._post_memory_entries("/api/v1/memory/entries", payload)
+
+            self._queue_write(_worker, self._quota_for_session(snapshot["session_id"]))
+
+    def _assert_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Palace provider is closed; admission rejected")
+
+    def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
+        snapshot = {name: getattr(self, "_" + name) for name in (
+            "session_id", "scope_type", "scope_key", "agent_identity",
+            "agent_workspace", "platform", "source", "created_by_role",
+        )}
+        if session_id is not None:
+            snapshot["session_id"] = session_id
+        snapshot["active_skills"] = tuple(self._active_skills)
+        snapshot["active_skill_names"] = tuple(self._active_skill_names)
+        return snapshot
+
+    def _queue_write(self, worker, quota: _WriteQuota) -> None:
+        # Caller holds the admission lock: context, queue order, tracking and
+        # successful thread start are atomic against shutdown/session rotation.
+        self._assert_open()
+        job = (contextvars.copy_context(), worker, quota)
+        self._write_queue.append(job)
+        key = quota.owner.session_id
+        self._session_quota_jobs[key] = self._session_quota_jobs.get(key, 0) + 1
+        if not self._writer_running:
+            try:
+                thread = spawn_context_thread(self._drain_writes, name="palace-write")
+                thread.start()
+            except Exception:
+                self._write_queue.pop()
+                self._release_quota_job(key)
+                raise
+            self._sync_thread = thread
+            self._writer_running = True
+        self._accepted_writes += 1
+        self._prune_session_quotas()
+
+    def _drain_writes(self) -> None:
+        while True:
+            with self._work_condition:
+                if not self._write_queue:
+                    self._writer_running = False
+                    self._work_condition.notify_all()
+                    return
+                context, worker, quota = self._write_queue.popleft()
+                self._active_writes = 1
+            self._write_quota_context.quota = quota
+            try:
+                context.run(worker)
             except Exception as exc:
-                logger.warning("Palace of Truth memory mirror failed: %s", exc)
+                with self._work_condition:
+                    self._failed_writes += 1
+                # Avoid serializing raw transport errors, which can carry secrets.
+                logger.warning("Palace queued write failed: %s", type(exc).__name__)
+            else:
+                with self._work_condition:
+                    self._completed_writes += 1
+            finally:
+                del self._write_quota_context.quota
+                with self._work_condition:
+                    self._release_quota_job(quota.owner.session_id)
+                    self._active_writes = 0
+                    self._work_condition.notify_all()
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True)
-        self._sync_thread.start()
+    def _active_write_quota(self) -> _WriteQuota:
+        quota = getattr(self._write_quota_context, "quota", None)
+        if quota is not None:
+            return quota
+        with self._lifecycle_lock:
+            return self._quota_for_session(self._session_id)
 
-    def _reset_write_quota(self, *, session: bool = False) -> None:
+    def _quota_for_session(self, session_id: str) -> _WriteQuota:
+        # Caller owns the lifecycle/quota lock. Delayed host submissions use
+        # their explicit session, never whichever session is currently active.
+        quota = self._session_quotas.get(session_id)
+        if quota is None:
+            quota = _WriteQuota(_SessionQuota(session_id, [0]))
+            self._session_quotas[session_id] = quota
+        self._session_quotas.move_to_end(session_id)
+        if session_id == self._session_id:
+            self._write_quota = quota
+        return quota
+
+    def _release_quota_job(self, key: str) -> None:
+        remaining = self._session_quota_jobs[key] - 1
+        if remaining:
+            self._session_quota_jobs[key] = remaining
+        else:
+            del self._session_quota_jobs[key]
+        self._prune_session_quotas()
+
+    def _prune_session_quotas(self) -> None:
+        # Target 64 total retained records, including pins, not 64 extra idle
+        # records. Active/queued owners and current session cannot be evicted.
+        # Jobs retain direct owner references even after their final unpin.
+        for key in list(self._session_quotas):
+            if len(self._session_quotas) <= self._session_quota_retention_limit:
+                break
+            if key != self._session_id and not self._session_quota_jobs.get(key):
+                del self._session_quotas[key]
+
+    @property
+    def _turn_write_count(self) -> int:
+        return self._active_write_quota().turn_writes
+
+    @_turn_write_count.setter
+    def _turn_write_count(self, value: int) -> None:
+        self._active_write_quota().turn_writes = value
+
+    @property
+    def _turn_bulk_call_count(self) -> int:
+        return self._active_write_quota().bulk_calls
+
+    @_turn_bulk_call_count.setter
+    def _turn_bulk_call_count(self, value: int) -> None:
+        self._active_write_quota().bulk_calls = value
+
+    @property
+    def _session_write_count(self) -> int:
+        return self._active_write_quota().session_writes[0]
+
+    @_session_write_count.setter
+    def _session_write_count(self, value: int) -> None:
+        self._active_write_quota().session_writes[0] = value
+
+    def _reset_write_quota(self, *, session: bool = False, session_id: str | None = None) -> None:
+        del session  # Switching/rewinding never replenishes a retained session cap.
         with self._write_quota_lock:
-            self._turn_write_count = 0
-            self._turn_bulk_call_count = 0
-            if session:
-                self._session_write_count = 0
+            key = self._session_id if session_id is None else session_id
+            previous = self._quota_for_session(key)
+            self._session_quotas[key] = _WriteQuota(previous.owner)
+            if key == self._session_id:
+                self._write_quota = self._session_quotas[key]
+            self._prune_session_quotas()
 
     def _write_dedup_cache_key(self, path: str, payload: dict[str, Any]) -> str:
         idempotency_key = payload.get("idempotency_key")
@@ -3114,11 +3278,45 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._dedup_cache_put(cache_key, response)
         return response
 
-    def shutdown(self) -> None:
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=2.0)
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=5.0)
+    def flush_pending(self, timeout: float = 5.0) -> bool:
+        """External barrier for provider-owned work; NOT a remote durability receipt."""
+        deadline = perf_counter() + max(0.0, timeout)
+        with self._work_condition:
+            while self._write_queue or self._active_writes:
+                remaining = deadline - perf_counter()
+                if remaining <= 0:
+                    return False
+                self._work_condition.wait(remaining)
+            prefetch = self._prefetch_thread
+        if prefetch is not None and prefetch is not threading.current_thread():
+            prefetch.join(max(0.0, deadline - perf_counter()))
+            if prefetch.is_alive():
+                return False
+        with self._work_condition:
+            return not (self._write_queue or self._active_writes)
+
+    @property
+    def shutdown_drain_state(self) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            prefetches = int(self._prefetch_thread is not None and self._prefetch_thread.is_alive())
+            pending = bool(self._active_writes or self._write_queue or prefetches)
+            status = "timed_out" if self._closed and pending else "pending" if pending else (
+                "failed" if self._failed_writes else "drained"
+            )
+            return {
+                "status": status, "admission_closed": self._closed,
+                "active_tasks": self._active_writes, "queued_writes": len(self._write_queue),
+                "active_prefetches": prefetches, "accepted_writes": self._accepted_writes,
+                "completed_writes": self._completed_writes, "failed_writes": self._failed_writes,
+            }
+
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        with self._lifecycle_lock:
+            self._closed = True
+        self.flush_pending(timeout=timeout)
+        state = self.shutdown_drain_state
+        if state["status"] != "drained":
+            logger.warning("Palace shutdown has unfinished or failed work: %s", state)
 
     def _request_agent_scope_label(
         self,
@@ -3599,11 +3797,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._tenant_id = tenant_id
             return tenant_id
 
-    def _canonical_agent_scope_key(self) -> str | None:
+    def _canonical_agent_scope_key(self, snapshot: dict[str, Any] | None = None) -> str | None:
         """Resolve one agent key without trusting an OAuth client-key convention."""
         self._load_server_identity()
-        configured_key = self._scope_key if self._scope_type == "agent" else ""
-        runtime_key = self._agent_identity
+        snapshot = snapshot if snapshot is not None else self._snapshot_write_context()
+        configured_key = snapshot["scope_key"] if snapshot["scope_type"] == "agent" else ""
+        runtime_key = snapshot["agent_identity"]
         if runtime_key.casefold() in GENERIC_RUNTIME_AGENT_IDENTITIES:
             runtime_key = ""
         server_key = self._server_agent_scope_key
@@ -3633,21 +3832,22 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             )
         return next(iter(selected), None)
 
-    def _build_scope(self, session_id: str) -> dict[str, str] | None:
-        scope_type = self._scope_type
+    def _build_scope(self, session_id: str, *, snapshot: dict[str, Any] | None = None) -> dict[str, str] | None:
+        snapshot = snapshot if snapshot is not None else self._snapshot_write_context(session_id or self._session_id)
+        scope_type = snapshot["scope_type"]
         if scope_type == "tenant_shared":
             return {"type": "tenant_shared"}
 
         scope_key = (
-            self._canonical_agent_scope_key()
+            self._canonical_agent_scope_key(snapshot)
             if scope_type == "agent"
-            else self._scope_key
+            else snapshot["scope_key"]
         )
         if not scope_key:
             if scope_type == "workspace":
-                scope_key = self._agent_workspace or self._agent_identity or "workspace"
+                scope_key = snapshot["agent_workspace"] or snapshot["agent_identity"] or "workspace"
             elif scope_type == "session":
-                scope_key = session_id or self._session_id or "session"
+                scope_key = snapshot["session_id"] or "session"
 
         if not scope_key:
             return None
@@ -4565,10 +4765,12 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         session_id: str,
         *,
         tenant_id: str,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        scope = self._build_scope(session_id)
+        snapshot = snapshot if snapshot is not None else self._snapshot_write_context(session_id or self._session_id)
+        scope = self._build_scope(snapshot["session_id"], snapshot=snapshot)
         title_seed = _first_line(user_content, _first_line(assistant_content, "Conversation turn"))
-        title = _trim(f"{self._agent_identity or 'hermes'}: {title_seed}", 160)
+        title = _trim(f"{snapshot['agent_identity'] or 'hermes'}: {title_seed}", 160)
         body = "\n\n".join(
             [
                 "# Conversation Turn",
@@ -4588,9 +4790,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         idempotency_key = hashlib.sha256(
             json.dumps(
                 {
-                    "session_id": session_id or self._session_id,
+                    "session_id": snapshot["session_id"],
                     "scope": scope,
-                    "agent_identity": self._agent_identity,
+                    "agent_identity": snapshot["agent_identity"],
                     "user": user_content,
                     "assistant": assistant_content,
                 },
@@ -4599,8 +4801,8 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         ).hexdigest()
 
         runtime_tags, runtime_metadata = _cron_runtime_provenance(
-            self._platform,
-            session_id or self._session_id,
+            snapshot["platform"],
+            snapshot["session_id"],
             capture_origin="automatic_turn_sync",
         )
         payload: dict[str, Any] = {
@@ -4608,15 +4810,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             "title": title,
             "body": body_text,
             "summary": summary,
-            "source": self._source,
+            "source": snapshot["source"],
             "created_at": _utc_now(),
-            "created_by_role": self._created_by_role,
+            "created_by_role": snapshot["created_by_role"],
             "metadata": {
                 "provider": "palaceoftruth",
-                "session_id": session_id or self._session_id,
-                "agent_identity": self._agent_identity,
-                "agent_workspace": self._agent_workspace,
-                "platform": self._platform,
+                "session_id": snapshot["session_id"],
+                "agent_identity": snapshot["agent_identity"],
+                "agent_workspace": snapshot["agent_workspace"],
+                "platform": snapshot["platform"],
                 **runtime_metadata,
                 **truncation_metadata,
             },
@@ -4706,7 +4908,9 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         fact_kind: str | None = None,
         enable_ai_enrichment: bool = False,
         relationship_policy: str = "immediate",
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        snapshot = snapshot if snapshot is not None else self._snapshot_write_context()
         _reject_oversized_explicit_write(content)
         if fact_kind and fact_kind not in FACT_KINDS:
             raise ValueError("fact_kind is unsupported")
@@ -4719,10 +4923,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         # idempotency key and break client-side dedup of repeated writes.
         _validate_temporal_window(valid_from, valid_until)
         _validate_entry_uuid(supersedes_entry_id, "supersedes_entry_id")
-        scope = self._build_scope(self._session_id)
+        scope = self._build_scope(snapshot["session_id"], snapshot=snapshot)
         target_label = "user profile" if target == "user" else "memory"
         title = _trim(
-            f"{self._agent_identity or 'hermes'} {target_label}: "
+            f"{snapshot['agent_identity'] or 'hermes'} {target_label}: "
             f"{_first_line(content, 'Memory entry')}",
             160,
         )
@@ -4734,7 +4938,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     "action": action,
                     "target": target,
                     "scope": scope,
-                    "agent_identity": self._agent_identity,
+                    "agent_identity": snapshot["agent_identity"],
                     "content": content,
                     "valid_from": valid_from,
                     "valid_until": valid_until,
@@ -4748,15 +4952,15 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         ).hexdigest()
 
         runtime_tags, runtime_metadata = _cron_runtime_provenance(
-            self._platform,
-            self._session_id,
+            snapshot["platform"],
+            snapshot["session_id"],
             capture_origin="explicit_memory_tool",
         )
         tags = [
             "hermes-memory-tool",
             f"hermes-memory-target-{target}",
             f"hermes-memory-action-{action}",
-            *[f"{SKILL_TAG_PREFIX}{skill}" for skill in self._active_skills],
+            *[f"{SKILL_TAG_PREFIX}{skill}" for skill in snapshot["active_skills"]],
             *runtime_tags,
         ]
         memory_tool_metadata: dict[str, Any] = {
@@ -4778,22 +4982,22 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
 
         metadata: dict[str, Any] = {
             "provider": "palaceoftruth",
-            "session_id": self._session_id,
-            "agent_identity": self._agent_identity,
-            "agent_workspace": self._agent_workspace,
-            "platform": self._platform,
+            "session_id": snapshot["session_id"],
+            "agent_identity": snapshot["agent_identity"],
+            "agent_workspace": snapshot["agent_workspace"],
+            "platform": snapshot["platform"],
             "memory_tool": memory_tool_metadata,
             **runtime_metadata,
         }
-        if self._active_skills:
-            metadata["active_skills"] = list(self._active_skill_names)
+        if snapshot["active_skills"]:
+            metadata["active_skills"] = list(snapshot["active_skill_names"])
 
         payload: dict[str, Any] = {
             "tenant_id": tenant_id,
             "title": title,
             "body": content,
             "summary": summary,
-            "source": f"{self._source}-memory-tool",
+            "source": f"{snapshot['source']}-memory-tool",
             "created_at": _utc_now(),
             "created_by_role": "system",
             "tags": tags,
