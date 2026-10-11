@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import unquote, urlparse
 
 _DATE_KEY_PRECEDENCE = (
@@ -130,3 +130,40 @@ def apply_effective_date(
     item.effective_date = effective.value
     item.effective_date_source = effective.source
     item.effective_date_quality = effective.quality
+
+
+class SourceDateEvidence(TypedDict, total=False):
+    published_at: str
+    event_at: str
+    captured_at: str
+
+
+def source_date_evidence(metadata: dict[str, Any] | None) -> SourceDateEvidence:
+    """Return explicit source dates without ranking fallbacks or invented timezone.
+
+    A diary filename, generic frontmatter.date, memory creation and effective_date
+    do not establish publication/capture/event dates. Preserve date-only precision.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    result: SourceDateEvidence = {}
+    for label, paths in (
+        ("published_at", ("published_at", "frontmatter.published_at", "frontmatter.published")),
+        ("event_at", ("event_at", "event_date")),
+        ("captured_at", ("captured_at",)),
+    ):
+        for path in paths:
+            value = _nested_value(metadata, path)
+            if isinstance(value, datetime):
+                value = value.isoformat()
+            if not isinstance(value, str) or len(value) > 40 or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?", value
+            ):
+                continue
+            try:
+                datetime.fromisoformat(value)
+            except ValueError:
+                continue
+            result[label] = value
+            break
+    return result

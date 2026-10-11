@@ -90,6 +90,10 @@ class SearchResult(BaseModel):
     source_span: dict | None = Field(default=None, exclude_if=lambda value: value is None)
     created_at: datetime
     chunk_text: str
+    # Explicit source-date evidence only; absent values are not record creation.
+    published_at: str | None = Field(default=None, max_length=40, exclude_if=lambda value: value is None)
+    event_at: str | None = Field(default=None, max_length=40, exclude_if=lambda value: value is None)
+    captured_at: str | None = Field(default=None, max_length=40, exclude_if=lambda value: value is None)
     chunk_index: int
     score: float
     artifact_citation: ArtifactCitation | None = Field(default=None, exclude_if=lambda value: value is None)

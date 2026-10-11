@@ -15,6 +15,7 @@ from app.models.item import Item
 from app.models.palace import RetrievalHintArtifact, Room, RoomMembership
 from app.schemas.search import SearchResult
 from app.services.memory_entries import source_project_from_memory_metadata
+from app.services.item_dates import source_date_evidence
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9.-]*")
 _MAX_HINT_TEXT_CHARS = 900
@@ -317,6 +318,7 @@ async def retrieve_retrieval_hint_rescue_results(
             tags=list(item.tags or []),
             source_project=source_project_from_memory_metadata(item.metadata_),
             created_at=item.created_at,
+            **source_date_evidence(item.metadata_),
             chunk_text=chunk_text,
             chunk_index=chunk_index,
             score=round(score, 6),
