@@ -31,6 +31,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
+from .checkpoint import CheckpointMixin
 
 try:
     from agent.memory_provider import spawn_context_thread
@@ -1365,7 +1366,7 @@ def _empty_keyword_recall_message(searched_scopes: list[str]) -> str:
     )
 
 
-class PalaceOfTruthMemoryProvider(MemoryProvider):
+class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
     """Minimal Hermes memory plugin backed by Palace of Truth."""
 
     def __init__(self) -> None:
@@ -1419,8 +1420,10 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._session_quotas: OrderedDict[str, _WriteQuota] = OrderedDict()
         self._session_quota_jobs: dict[str, int] = {}
         self._work_condition = threading.Condition(self._lifecycle_lock)
+        self._work_changed = threading.Event()
         self._write_queue = deque()
         self._closed = False
+        self._admission_closed = threading.Event()
         self._active_writes = 0
         self._writer_running = False
         self._accepted_writes = 0
@@ -1480,6 +1483,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
         self._sync_thread: threading.Thread | None = None
+        self._init_checkpoint()
 
     @property
     def name(self) -> str:
@@ -3045,7 +3049,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
             self._queue_write(_worker, self._quota_for_session(snapshot["session_id"]))
 
     def _assert_open(self) -> None:
-        if self._closed:
+        if self._closed or self._admission_closed.is_set():
             raise RuntimeError("Palace provider is closed; admission rejected")
 
     def _snapshot_write_context(self, session_id: str | None = None) -> dict[str, Any]:
@@ -3086,6 +3090,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                 if not self._write_queue:
                     self._writer_running = False
                     self._work_condition.notify_all()
+                    self._work_changed.set()
                     return
                 context, worker, quota = self._write_queue.popleft()
                 self._active_writes = 1
@@ -3106,6 +3111,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
                     self._release_quota_job(quota.owner.session_id)
                     self._active_writes = 0
                     self._work_condition.notify_all()
+                    self._work_changed.set()
 
     def _active_write_quota(self) -> _WriteQuota:
         quota = getattr(self._write_quota_context, "quota", None)
@@ -3281,42 +3287,63 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
     def flush_pending(self, timeout: float = 5.0) -> bool:
         """External barrier for provider-owned work; NOT a remote durability receipt."""
         deadline = perf_counter() + max(0.0, timeout)
-        with self._work_condition:
-            while self._write_queue or self._active_writes:
-                remaining = deadline - perf_counter()
-                if remaining <= 0:
-                    return False
-                self._work_condition.wait(remaining)
-            prefetch = self._prefetch_thread
+        # Condition.wait(timeout) reacquires its lock WITHOUT a timeout. Use a
+        # lock-independent wakeup, then explicitly budget each lock admission.
+        while True:
+            if not self._lifecycle_lock.acquire(timeout=max(0.0, deadline - perf_counter())):
+                return False
+            try:
+                pending = bool(self._write_queue or self._active_writes)
+                prefetch = self._prefetch_thread
+                self._work_changed.clear()
+            finally:
+                self._lifecycle_lock.release()
+            if not pending:
+                break
+            remaining = deadline - perf_counter()
+            if remaining <= 0 or not self._work_changed.wait(remaining):
+                return False
         if prefetch is not None and prefetch is not threading.current_thread():
             prefetch.join(max(0.0, deadline - perf_counter()))
             if prefetch.is_alive():
                 return False
-        with self._work_condition:
+        if not self._work_condition.acquire(timeout=max(0.0, deadline - perf_counter())):
+            return False
+        try:
             return not (self._write_queue or self._active_writes)
+        finally:
+            self._work_condition.release()
 
     @property
     def shutdown_drain_state(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             prefetches = int(self._prefetch_thread is not None and self._prefetch_thread.is_alive())
             pending = bool(self._active_writes or self._write_queue or prefetches)
-            status = "timed_out" if self._closed and pending else "pending" if pending else (
+            closed = self._closed or self._admission_closed.is_set()
+            status = "timed_out" if closed and pending else "pending" if pending else (
                 "failed" if self._failed_writes else "drained"
             )
             return {
-                "status": status, "admission_closed": self._closed,
+                "status": status, "admission_closed": closed,
                 "active_tasks": self._active_writes, "queued_writes": len(self._write_queue),
                 "active_prefetches": prefetches, "accepted_writes": self._accepted_writes,
                 "completed_writes": self._completed_writes, "failed_writes": self._failed_writes,
             }
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
-        with self._lifecycle_lock:
+        deadline = perf_counter() + max(0.0, timeout)
+        # Close the lock-independent gate first. A contended admission lock must
+        # not extend shutdown's budget or admit new work after timeout.
+        self._admission_closed.set()
+        if not self._lifecycle_lock.acquire(timeout=max(0.0, deadline - perf_counter())):
+            logger.warning("Palace shutdown admission lock timed out; gate closed")
+            return
+        try:
             self._closed = True
-        self.flush_pending(timeout=timeout)
-        state = self.shutdown_drain_state
-        if state["status"] != "drained":
-            logger.warning("Palace shutdown has unfinished or failed work: %s", state)
+        finally:
+            self._lifecycle_lock.release()
+        if not self.flush_pending(timeout=max(0.0, deadline - perf_counter())):
+            logger.warning("Palace shutdown has unfinished work; drain timed out")
 
     def _request_agent_scope_label(
         self,
