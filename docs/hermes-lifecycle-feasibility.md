@@ -1,5 +1,15 @@
 # SAR-1403 / SAR-1404: supported lifecycle feasibility decision
 
+## Targeted quota repair follow-up
+
+The delayed-host-submission quota defect described below is historical at head378ccc71ae3e09ded61b6677f92fb2d86e3f4e7f and is now repaired. Quota ownership follows the explicit submitted session, not the current session at delayed dispatch. Immutable owner identity shares cumulative session counters across turn buckets; returning to a retained session or rewinding does not replenish that session's cap. Explicit mirror metadata uses the same ownership rule. Concurrent queued/active jobs pin their owner until completion or admission rollback.
+
+Idle LRU history is bounded to 64 records. Current and active/queued owners are never evicted; all-active overflow is pruned after drain. Idle evicted sessions start a new retention window when revisited. This is not an infinite session ledger or a claim that unobserved host-queued work can be pinned. New tests retain the real official resume fixture and assert quota PASS with host drain still FAIL/exit2. No host contract or strict gate was changed. The remaining host-global gap and entrypoint feasibility decision below still apply.
+
+The exact minimal semantic upstream proposal is preserved separately in [hermes-upstream-lifecycle-api-proposal.md](hermes-upstream-lifecycle-api-proposal.md). It introduces no imaginary symbol/signature and no upstream issue was opened.
+
+## Historical feasibility evidence at head378ccc71
+
 ## Result
 
 No full-contract candidate is established within the approved plugin/external-only boundary for the existing production entrypoints. Keep PR550 a draft and keep strict CI red. This is a bounded feasibility gate for the inspected official versions and documented APIs, not a claim that no future upstream API or replacement application can solve it.
