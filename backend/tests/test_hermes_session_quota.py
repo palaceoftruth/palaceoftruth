@@ -38,8 +38,10 @@ def test_shared_session_cap_survives_resume_and_rewind(provider, monkeypatch):
     provider.on_session_switch('old', rewound=True)
     provider.on_memory_write('add', 'memory', 'second')
     assert provider.flush_pending()
-    assert len(writes) == 1
+    facts = [payload for payload in writes if 'session_audit' not in payload['metadata']]
+    assert len(facts) == 1
     assert provider._session_write_count == 1
+    assert provider._session_quotas['new'].owner.writes == [1]  # Rewind audit owns its previous session.
     assert provider.shutdown_drain_state['failed_writes'] == 1
 
 
@@ -117,7 +119,9 @@ def test_queued_concurrent_jobs_share_session_cap_across_switch(provider, monkey
         provider.on_session_switch('old', rewound=True)
         release.set()
         assert provider.flush_pending()
-        assert len(writes) == provider._session_write_count == 3
+        facts = [payload for payload in writes if 'session_audit' not in payload['metadata']]
+        assert len(facts) == provider._session_write_count == 3
+        assert provider._session_quotas['new'].owner.writes == [1]
         assert provider.shutdown_drain_state['failed_writes'] == 3
     finally:
         release.set()
