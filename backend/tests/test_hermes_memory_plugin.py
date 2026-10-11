@@ -43,6 +43,13 @@ def isolate_oauth_environment(monkeypatch) -> None:
 
 
 def load_palaceoftruth_plugin():
+    import os
+    if os.environ.get('SAR1406_NORMAL_LOADER'):
+        from plugins.memory import load_memory_provider
+        provider = load_memory_provider('palaceoftruth', register_skills=False)
+        assert provider is not None
+        assert type(provider).__module__.startswith('_hermes_user_memory.')
+        return sys.modules[type(provider).__module__]
     agent_pkg = types.ModuleType("agent")
     agent_memory_provider = types.ModuleType("agent.memory_provider")
 
@@ -59,6 +66,7 @@ def load_palaceoftruth_plugin():
         raise RuntimeError(f"Unable to load plugin from {PLUGIN_PATH}")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
