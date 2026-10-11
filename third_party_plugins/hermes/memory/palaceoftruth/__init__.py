@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -29,6 +31,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from agent.memory_provider import MemoryProvider
+from .checkpoint import CheckpointMixin
 
 logger = logging.getLogger(__name__)
 
@@ -1336,7 +1339,7 @@ def _empty_keyword_recall_message(searched_scopes: list[str]) -> str:
     )
 
 
-class PalaceOfTruthMemoryProvider(MemoryProvider):
+class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
     """Minimal Hermes memory plugin backed by Palace of Truth."""
 
     def __init__(self) -> None:
@@ -1426,6 +1429,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
         self._sync_thread: threading.Thread | None = None
+        self._init_checkpoint()
 
     @property
     def name(self) -> str:
@@ -3115,6 +3119,7 @@ class PalaceOfTruthMemoryProvider(MemoryProvider):
         return response
 
     def shutdown(self) -> None:
+        self._checkpoint_close_and_drain(timeout_seconds=5.0)
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=2.0)
         if self._sync_thread and self._sync_thread.is_alive():
