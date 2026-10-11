@@ -59,6 +59,7 @@ def load_palaceoftruth_plugin():
         raise RuntimeError(f"Unable to load plugin from {PLUGIN_PATH}")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 

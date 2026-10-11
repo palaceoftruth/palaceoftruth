@@ -1,95 +1,134 @@
-# SAR-1406 checkpoint candidate — review only
+# SAR-1406 checkpoint repair candidate — review only
 
-This is not a release approval or a production canary receipt. Default behavior
-is unchanged: `precompression_checkpoint_enabled` is absent/false and the
-provider advertises API v1. No fleet configuration was changed.
+This candidate is not a release approval, deployment, or production canary.
+`precompression_checkpoint_enabled` defaults absent/false: API v1, no automatic
+checkpoint writes. Literal `true` selects the tested API v2 contract. No fleet
+configuration, installed host, core source, or sibling source tree was changed.
 
 ## Supported upstream boundary
 
 Official documentation:
 https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin#pre-compress-checkpoints-fail-closed
 
-Verified against upstream commit `c57331677d7fc46298a7159cf3a650853f0966c5`:
+Unmodified upstream source tested: `c57331677d7fc46298a7159cf3a650853f0966c5`.
 
 - `MemoryManager.on_pre_compress(messages, *, evidence_messages=None,
-  require_checkpoint=False, checkpoint_api_version=2)` selects normalized evidence
-  only for API v2 providers and propagates their required-mode failures.
-- Provider signature is `on_pre_compress(messages, *, require_checkpoint=False)`.
-- The opt-in file configuration `precompression_checkpoint_enabled: true`
-  selects API v2 in this candidate. Enable it only in isolated acceptance tests
-  until independent review and the scoped backend canary approve release.
-- No upstream code, installed host, other worktree, or profile was changed.
+  require_checkpoint=False, checkpoint_api_version=2)` routes normalized evidence
+  to v2 providers and propagates required-mode failures.
+- Provider signature: `on_pre_compress(messages, *, require_checkpoint=False)`.
+- `_direct_messages_for_pre_compress_memory` preserves source `message_uid` and
+  `timestamp` while excluding tool/system/summary material. The official-host
+  subprocess test exercises this real normalizer, MemoryManager, source metadata
+  helpers and restart replay, without provider initialization or live API calls.
+- `stamp_message_timestamp` records source append-time Unix seconds;
+  `stamp_message_uid` creates the durable logical-event ID at first insertion.
+  This checkpoint never calls either helper, invents source time, or mints IDs.
+  Missing metadata fails safely. Restored metadata must come from durable source
+  records, not from a retry-time adapter that stamps old text as a new event.
 
-## Actual durability boundary
+## Backend durable boundary
 
-`backend/app/services/memory.py`, `accept_memory_entry`, commits Item.raw_content,
-MemoryEntry, and Job together before enqueue. A queued job is not itself proof.
-The existing MCP checkpoint helper reads job status only; this candidate does not
-reinterpret that status as a durable checkpoint.
+`accept_memory_entry` commits Item.raw_content, MemoryEntry and Job together
+before enqueue. Queue acceptance/completion is not a checkpoint receipt.
 
-The added GET `/api/v1/memory/jobs/{job_id}/checkpoint-receipt` independently reads
-the committed canonical entry and source Item and checks tenant, pointers, scope,
-idempotency key and deletion state. Its response binds the exact raw-body SHA-256
-to the job/item/scope. Queue/index/enrichment completion is not required for raw
-archive durability. Missing records or mismatches fail, regardless of job status.
-Contained clients can read only their bound agent; delegated scope grants are
-also enforced. No raw archive text is returned through the receipt endpoint.
+GET `/api/v1/memory/jobs/{job_id}/checkpoint-receipt` independently reads committed
+canonical records and checks tenant, pointers, scope, idempotency and deletion
+state. It binds exact raw-body SHA-256 to the job/item/scope. Missing, foreign or
+mismatched records fail, regardless of queue status. Contained-agent and delegated
+read restrictions apply; the receipt does not return raw evidence text.
 
-## Evidence and handoff
+The repair acceptance test submits the actual provider payload through the real
+FastAPI POST model, provenance/admission and canonical acceptance/replay algorithm.
+A fresh mock read handle exposes committed records only. Two POSTs replay one
+canonical archive and one job. No PostgreSQL/Redis/production initialization is
+performed; this is not a real database concurrency canary.
 
-The provider preserves exact direct user/assistant text with content evidence
-IDs. Tools, tool_calls, system rows and marked compaction summaries are excluded.
-Each row is content-keyed with tenant, session and scope, so identical retries and
-shared rows in overlapping attempts reuse backend idempotency keys. Parallel
-calls on one provider serialize; every attempt still reads the durable receipt.
-No local accepted-response cache can bypass readback.
+## R1 and R5: stable source time and ordered occurrences
 
-Assistant prose is a claim, never verified task state. A direct text row can
-contain a JSON object with `checkpoint_handoff: 2` and string-list categories
-`constraints`, `accepted_artifacts`, `failed_approaches`, and `remaining_work`.
-These declarations carry source evidence IDs and `assistant_claimed` or
-`user_asserted` status. `verified_state` remains empty without independent task
-verification evidence; a supplied `verified_state` assertion cannot manufacture
-proof. Ordinary prose remains unclassified direct evidence. No LLM invents a
-handoff. Only fixed receipt labels and validated UUID pointers reach the summary
-prompt, never raw archive text or tool content.
+One fully validated manifest is one atomic canonical archive. It preserves all
+included direct normalized source rows, their exact text, order, role, stable
+source-event ID, source timestamp and source-linked evidence ID. Repeated text
+with distinct source IDs remains distinct. Event identity does not depend on
+window position. Overlapping windows retain common IDs; reordered windows have
+different manifest keys. Exact retries/restarts reuse the complete manifest key
+and still require a fresh durable receipt.
 
-## Failure and resource limits
+`created_at` means the latest included source-event time, not archive-operation
+or retry time. Each source row retains its own time. Unix-second and timezone-aware
+ISO source timestamps normalize to UTC; missing/nonfinite/invalid/naive values
+fail before POST. Host absorbed-message identity witnesses remain recorded without
+inventing separate constituent text. Duplicate logical IDs are rejected.
 
-- Default optional hook does no writes.
-- Opted-in API v2 never returns success after a failed archive or readback;
-  it raises even when called in optional mode. The supported host decides whether
-  to suppress that exception or block compression.
-- Writable initialized session, tenant, scope and ready OAuth token are required.
-  No token refresh or indefinite token-lock wait occurs inside the boundary.
-- Subagent write suppression and the existing cron automatic-capture denylist
-  remain effective. Session change during archiving blocks success.
-- At most 16 direct rows and 24,000 body characters per row. Excess evidence
-  blocks rather than truncates. This conservative limit is a usability constraint,
-  not an archive-completeness exception.
-- Each network operation is a disposable stdlib subprocess, synchronously waited
-  and killed/reaped on its five-second wall-clock timeout. Credentials travel on
-  stdin, not process arguments; stderr is discarded. No retry or Retry-After sleep.
-  A 30-second hook budget is checked between rows and before success; at most the
-  current POST/readback pair can extend a failed attempt beyond that budget.
-  Lock admission has a ten-second limit included in the hook budget.
-- A timed-out POST can already have committed at the backend. Compression still
-  fails; retry uses the same key and requires fresh exact readback.
+Every included row and declared category is validated before any write. At most
+16 direct source rows and 24,000 characters for the whole manifest are allowed.
+Excess rows, oversized bodies or a malformed later row cause no archive write;
+the whole transcript must be preserved. No partial archive is called complete.
 
-## Evidence and remaining gates
+Assistant statements remain claims. Explicit JSON `checkpoint_handoff: 2` string
+lists can categorize constraints, accepted_artifacts, failed_approaches and
+remaining_work, but remain source-linked user assertions/assistant claims.
+`verified_state` stays empty. Tool calls/output, system text and compressed
+summaries never become instructions or verification. Only a fixed label and
+validated literal archive UUID enter the summary handoff.
 
-TDD: eleven initial product failures (missing hook) before implementation.
-An earlier import/collection mistake was fixed before that run and is not product
-failure evidence.
+## R2 and R3: immutable ready state and bounded transport
 
-The focused fixtures cover raw-tool filtering, exact receipt mismatches, required
-and optional failures, content retries/overlaps/restarted callers, parallel calls,
-session switching, size rejection, unauthorized receipts, and no retry sleep.
-A real stdlib child is exercised against a loopback mock server. A subprocess
-loads the unmodified upstream ABC and MemoryManager with HOME/HERMES_HOME isolated;
-no production provider initialization or live Palace call occurs.
+- Snapshot cached session, tenant, canonical scope, base URL and ready auth values
+  under bounded locks. No legacy scope/identity/header helper, whoami, refresh,
+  retries or Retry-After sleep runs inside the hook.
+- OAuth must already have a valid cached binding and token covering the remaining
+  total budget. Cold/conflicting state fails safely. API-key scope declarations
+  are still authorized by the backend; headers do not manufacture a grant.
+- One 30-second deadline covers serialization locks, cached-state locks,
+  prevalidation, native queue wait, quota lock, POST, GET and final snapshot check.
+  Each child receives at most five seconds AND at most the remaining total budget.
+  Deadline exhaustion blocks success. A timed-out POST might already have committed;
+  only a same-key retry with exact fresh readback can claim durability.
+- Disposable children are killed/reaped on timeout; credentials use stdin, not
+  argv, and stderr is discarded. All redirects are rejected before following,
+  including cross-origin and HTTPS downgrade. Real HTTP/TLS loopback tests prove
+  the origin received authenticated requests and redirect targets received none.
+- TLS verification remains enabled. `checkpoint_ca_file`, when operator-supplied,
+  supplies a trusted CA file; the regression uses a temporary fixture CA. HTTP is
+  accepted only for localhost/loopback fixtures, never for remote production hosts.
 
-Remaining release gates: independent review, real backend concurrency/commit and
-correct-scope canary, SAR-1403 lifecycle integration, SAR-1404 approved host matrix,
-and release/rollback work owned outside this task. Those gates are not claimed
-complete by mocked backend fixtures. No merge, deploy, release bump, or Done.
+## R4: minimal native lifecycle integration contract
+
+Tests load immutable source fixtures exported from these exact PR550 revisions:
+
+- Review revision: `a368363dedf547da667c7b8eab32f3ecdd1f73ea`.
+- Latest session-quota repair: `40b5bac85026ba754d410af973e0b09c6e4e9b64`.
+
+Composition adds `CheckpointMixin` before the provider base and calls
+`_init_checkpoint()` once after the native constructor. It does not replace native
+policy, quota, queue, session-switch, flush or shutdown methods. This is an
+explicit tested integration contract, not a merge into the sibling source tree.
+
+Checkpoint admission checks automatic lifecycle suppression, cron suppression and
+closed admission under the native lifecycle lock. Explicit cron palace_remember
+remains allowed. Work enters pure local `_queue_write(worker, quota)` as one
+native accepted/active/completed/failed task. For the latest revision, quota is
+selected by `_quota_for_session(snapshot.session_id)`, never a stale current
+bucket, and owner identity is checked. Turn/session limits use the admitted task's
+captured quota under the remaining-time-bounded quota lock. Turn rotation cannot
+charge a new bucket; an unrelated bucket cannot bypass an exhausted source cap.
+
+Expired pending work never writes later and is counted as failed. Active work
+remains visible to flush/shutdown. A drained barrier is NOT remote durability or
+proof that writes succeeded; `shutdown_drain_state` separately reports failures
+and timeouts. Successful checkpoint return requires its own exact durable receipt.
+The legacy base has checkpoint close/drain accounting without a background writer.
+
+## Verification and remaining gates
+
+Original independent-review defect reproductions are preserved unchanged as test
+input. Repaired acceptance fixtures cover R1-R5, real route/backend replay,
+child timeouts/reaping, redirects, source-order identity, entire-manifest validation,
+exact old/latest sibling composition, session-quota ownership and official host.
+See `SAR-1406-repair-evidence.json` for red/green results and fixture hashes.
+
+Release remains blocked on independent review, actual scoped backend persistence
+and concurrency canary, SAR-1403/1404 integration/host matrix, and SAR-1407 rollout.
+In particular, the parent host-drain requirement remains UNRESOLVED: native provider
+accounting does not prove every real host exit invokes and respects that barrier.
+No host/core changes are made here, and no merge/deploy/Done is claimed.

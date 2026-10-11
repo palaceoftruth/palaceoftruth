@@ -1,0 +1,40 @@
+{
+  "issue": "SAR-1406",
+  "reviewed_parent_sha": "9631120d087c0f95c3fbbc60503d5230c47d8a05",
+  "status": "repaired local candidate tested; publication evidence is recorded separately after push",
+  "upstream_sha": "c57331677d7fc46298a7159cf3a650853f0966c5",
+  "sibling_composition": {
+    "original_sha": "a368363dedf547da667c7b8eab32f3ecdd1f73ea",
+    "original_source_sha256": "4788e87107f0d16fda519f94f2cbbe3a1641e01e980d52fcad6a608627ffc9cd",
+    "latest_sha": "40b5bac85026ba754d410af973e0b09c6e4e9b64",
+    "latest_source_sha256": "72c39468b6e05738d1a046359bb8ed39bf247b39e9fdae0b190ddc27351ccc74",
+    "contract": "CheckpointMixin before the native base; _init_checkpoint once; pure local _queue_write(worker, quota) under native lifecycle lock; latest quota selected with _quota_for_session(snapshot.session_id). Native policy/queue/flush/shutdown methods are not replaced.",
+    "source_tree_mutations": false
+  },
+  "red": {
+    "original_review_script_sha256": "4dc8dd72c5044600451e35f27eac9d81cce038e2332b4231358d22a59fa3ff41",
+    "original_review_script_result": "22 passed in 2.92s at reviewed parent: these assert defects, not repaired acceptance",
+    "new_acceptance_before_fix": "14 failures, 1 pass; one failure was fixture setup, so that count is not claimed as 14 product defects. Other failures reproduced timestamp omission, legacy lookup, lock budget, closed/automatic admission, content-keyed order loss and partial writes.",
+    "latest_quota_before_fix": "2 failed, 4 passed in 1.88s: wrong session bucket charged and exhausted source-session cap bypassed",
+    "latest_quota_receipt": "repair-receipts/session-quota-red.xml",
+    "latest_quota_receipt_sha256": "b499a2c99704d01629bde16ba95143283194dacf8d609221e4f5730c2179a97d"
+  },
+  "green": {
+    "backend_fast": "2336 passed, 2 skipped, 1 xfailed in 42.93s",
+    "backend_fast_receipt": "repair-receipts/backend-fast-final.xml",
+    "backend_fast_receipt_sha256": "dccf9711eb35a05958659850ce56d1113433cbee799983f9a38d1bd29bd78b1a",
+    "acceptance_and_official_host": "104 passed, no skips/failures in 9.33s",
+    "acceptance_receipt": "repair-receipts/acceptance-host-final.xml",
+    "acceptance_receipt_sha256": "d67532d0acef3f1333975b9c7605315a2bf58d83a5edf10dbc41666ee2ee0ee2",
+    "real_redirect_cases": 40,
+    "official_host_cases": 1,
+    "initial_full_runner_error": "41 fixture-auth failures from overriding PALACEOFTRUTH_ADMIN_SECRET with the wrong fixture value; runner corrected to sanitized repository conftest defaults, no product auth changes"
+  },
+  "R1": {"disposition": "repaired", "evidence": "test_R1_real_fastapi_post_and_backend_replay and source-time rejection cases; actual FastAPI model/admission/acceptance/replay plus committed-only fresh reader", "semantics": "latest included source-event timestamp; never now per retry; source Unix/aware ISO supported"},
+  "R2": {"disposition": "repaired", "evidence": "no legacy helpers, cold OAuth rejection, contended locks, real slow-drip child remaining budget and reap; common immutable snapshot/deadline passed to POST and GET"},
+  "R3": {"disposition": "repaired", "evidence": "40 real authenticated HTTP/TLS origin requests, zero target requests across GET/POST, key/bearer, 301/302/303/307/308 and cross-origin/downgrade"},
+  "R4": {"disposition": "repaired in explicit integration contract", "evidence": "latest exact sibling active/failure/closed/automatic cron accounting, explicit palace_remember allowed, pending expiration; source quota ownership/cap/turn-rotation tests plus original exact sibling compatibility", "host_drain_gate": "UNRESOLVED: provider accounting does not prove every real host exit invokes and respects drain"},
+  "R5": {"disposition": "repaired", "evidence": "one ordered whole-source-occurrence manifest; event IDs preserve repeated text/order/restart/overlap; all categories/time/IDs/body/row count validated before POST", "limit": "more than 16 source rows or more than 24000 manifest chars fails without partial archive; preserve entire transcript"},
+  "remaining_release_gates": ["independent acceptance review", "real backend scoped commit/concurrency canary", "parent host-drain unresolved gate", "SAR-1403/1404 approved integration/host matrix", "SAR-1407 rollout/rollback"],
+  "guardrails": ["no production initialization", "no live API durability probe", "no core edit/fork/monkeypatch", "no sibling source-tree edits", "no delegate", "no force push", "no merge/deploy/Done", "default v1/checkpoint disabled"]
+}
