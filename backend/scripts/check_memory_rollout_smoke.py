@@ -20,6 +20,8 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.check_redis_sentinel_rollout_gate import check_rollout_gate
+from scripts import smoke_control
+from scripts import smoke_preflight
 
 
 TERMINAL_SUCCESS = {"complete", "completed", "duplicate"}
@@ -58,11 +60,21 @@ class HttpClient:
         self.client_key = client_key
         self.client_scopes = client_scopes
         self.timeout = timeout
+        self.safe_transport = False
+
+    def _open(self, request):
+        if not self.safe_transport:
+            return urllib.request.urlopen(request, timeout=self.timeout)
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                raise urllib.error.URLError("redirect forbidden")
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=self.timeout)
 
     def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
         normalized = method.upper(), path
         if normalized in {
             ("GET", "/memory/whoami"),
+            ("GET", "/memory/entries"),
             ("GET", "/memory/jobs"),
         } or (normalized[0] == "GET" and path.startswith("/memory/jobs/")):
             return {"X-MCP-Scope": "read", "X-MCP-Scopes": "read"}
@@ -103,7 +115,7 @@ class HttpClient:
             headers.update(self._mcp_scope_headers(method, path, body))
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 payload = response.read()
                 return HttpResult(response.status, _decode_payload(payload))
         except urllib.error.HTTPError as exc:
@@ -274,7 +286,10 @@ def _client_scopes() -> list[str]:
     return [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
 
 
-def _memory_entry(*, tenant_id: str, target_name: str, run_id: str, scope_key: str) -> dict[str, Any]:
+def _memory_entry(*, tenant_id: str, target_name: str, run_id: str, scope_key: str, created_at: str | None = None) -> dict[str, Any]:
+    # Compatibility fixture construction only: never regenerate a fingerprinted timestamp.
+    if created_at is None:
+        created_at = datetime.strptime(run_id, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "tenant_id": tenant_id,
         "title": f"Rollout memory smoke {target_name} {run_id}",
@@ -284,7 +299,7 @@ def _memory_entry(*, tenant_id: str, target_name: str, run_id: str, scope_key: s
             "This non-sensitive memory verifies post-sync write, queue, worker, and retrieval dependencies."
         ),
         "source": "palace-rollout-smoke",
-        "created_at": utc_now().isoformat().replace("+00:00", "Z"),
+        "created_at": created_at,
         "tags": ["palace-rollout-smoke", f"palace-rollout-smoke-{target_name}", f"palace-rollout-smoke-{run_id}"],
         "scope": {"type": "workspace", "key": scope_key},
         "created_by_role": "automation",
@@ -336,7 +351,7 @@ def _passed_check(report: dict[str, Any], name: str) -> dict[str, Any] | None:
 
 def check_api_health(client: HttpClient, report: dict[str, Any]) -> None:
     result = client.request("GET", "/health")
-    if result.status >= 400:
+    if not 200 <= result.status < 300 or not isinstance(result.payload, dict) or result.payload.get("status") != "ok":
         _alert(report, "api_health_failed", f"API health returned HTTP {result.status}", response=result.payload)
         _record_check(report, "api_health", "failed", http_status=result.status)
         return
@@ -725,6 +740,9 @@ def resolve_tenant_identity(client: HttpClient, report: dict[str, Any], args: ar
         return None
     tenant_id = str(whoami.payload["tenant_id"])
     report["tenant_id"] = tenant_id
+    report["identity"] = {key: whoami.payload.get(key) for key in (
+        "tenant_id", "auth_mode", "credential_id", "mcp_client_id", "mcp_client_key", "allowed_scopes"
+    )}
     if args is not None:
         _check_expected_whoami(whoami.payload, report, args)
     _record_check(report, "tenant_identity", "passed", tenant_id=tenant_id)
@@ -756,66 +774,10 @@ def _check_expected_whoami(payload: dict[str, Any], report: dict[str, Any], args
 
 
 def check_memory_write(client: HttpClient, report: dict[str, Any], args: argparse.Namespace) -> None:
-    tenant_id = report.get("tenant_id")
-    if not isinstance(tenant_id, str) or not tenant_id:
-        tenant_id = resolve_tenant_identity(client, report, args)
-    if tenant_id is None:
-        _record_check(report, "memory_write", "skipped", reason="tenant identity unavailable")
-        return
-    run_id = args.run_id or utc_now().strftime("%Y%m%dT%H%M%SZ")
-    entry = _memory_entry(tenant_id=tenant_id, target_name=args.target_name, run_id=run_id, scope_key=args.scope_key)
-    accepted = client.request("POST", "/memory/entries", body=entry)
-    accepted_payload = accepted.payload if isinstance(accepted.payload, dict) else {}
-    job_id = str(accepted_payload.get("job_id") or "")
-    contract_status = accepted_payload.get("contract_status") or accepted_payload.get("status")
-    if accepted.status >= 400 or not job_id:
-        _alert(
-            report,
-            "memory_write_not_accepted",
-            f"memory write returned HTTP {accepted.status}",
-            contract_status=contract_status,
-            response=accepted.payload,
-        )
-        _record_check(report, "memory_write", "failed", http_status=accepted.status, contract_status=contract_status)
-        return
-    _record_check(report, "memory_write", "passed", job_id=job_id, contract_status=contract_status)
-
-    deadline = time.monotonic() + args.job_timeout_seconds
-    last_payload: dict[str, Any] | None = None
-    while time.monotonic() <= deadline:
-        job = client.request("GET", f"/memory/jobs/{job_id}")
-        payload = job.payload if isinstance(job.payload, dict) else {}
-        last_payload = payload
-        status = str(payload.get("status") or "")
-        if status in TERMINAL_SUCCESS:
-            _record_check(report, "memory_job_completion", "passed", job_id=job_id, job_status=status)
-            break
-        if status in TERMINAL_FAILURE:
-            _alert(report, "memory_job_failed", f"memory job {job_id} ended with {status}", job_id=job_id)
-            _record_check(report, "memory_job_completion", "failed", job_id=job_id, job_status=status)
-            break
-        time.sleep(args.job_interval_seconds)
-    else:
-        _alert(
-            report,
-            "accepted_but_not_completed",
-            f"memory job {job_id} did not complete before timeout",
-            job_id=job_id,
-            last_status=(last_payload or {}).get("status"),
-        )
-        _record_check(report, "memory_job_completion", "failed", job_id=job_id, last_payload=last_payload)
-
-    jobs = client.request("GET", "/memory/jobs", query={"page": 1, "per_page": args.job_list_limit})
-    if isinstance(jobs.payload, dict) and isinstance(jobs.payload.get("jobs"), list):
-        counts: dict[str, int] = {}
-        for row in jobs.payload["jobs"]:
-            if isinstance(row, dict):
-                status = str(row.get("status") or "unknown")
-                counts[status] = counts.get(status, 0) + 1
-        _record_check(report, "memory_jobs_listing", "passed", returned=len(jobs.payload["jobs"]), status_counts=counts)
-    else:
-        _alert(report, "memory_jobs_unqueryable", "memory jobs listing did not return jobs", response=jobs.payload)
-        _record_check(report, "memory_jobs_listing", "failed")
+    # Kept as a refusal boundary for callers of the former unbounded helper.
+    # Only run_reserved, after all read-only prerequisites, can dispatch a POST.
+    _alert(report, "unreserved_memory_write_forbidden", "use the explicit bounded runner with an approved manifest and durable store")
+    _record_check(report, "memory_write", "failed")
 
 
 def check_kubernetes(report: dict[str, Any], args: argparse.Namespace, kube: KubernetesClient | None = None) -> None:
@@ -997,27 +959,31 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
         "checks": [],
         "alerts": [],
     }
-    client = HttpClient(
-        base_url=args.api_base_url.rstrip("/"),
-        api_key=_api_key(),
-        bearer_token=_bearer_token(),
-        oauth_client_secret=_oauth_client_secret(),
-        oauth_token_url=_oauth_token_url(),
-        oauth_resource=_oauth_resource(),
-        client_key=_client_key(),
-        client_scopes=_client_scopes(),
-        timeout=args.request_timeout,
-    )
-    check_api_health(client, report)
-    check_runtime_dependencies(client, report, args, kube=kube)
-    resolve_tenant_identity(client, report, args)
-    if not any(alert["code"].startswith("runtime_dependencies_") for alert in report["alerts"]):
-        check_memory_write(client, report, args)
-    else:
-        _record_check(report, "memory_write", "skipped", reason="runtime dependencies unavailable")
-    asyncio.run(check_sentinel(report))
-    check_mcp_reachable(args.mcp_url, report, timeout=args.request_timeout)
-    check_kubernetes(report, args, kube=kube)
+    try:
+        if args.skip_kubernetes or args.skip_log_scan or args.restart_alert_threshold != 3 or args.log_since_seconds < 3600 or args.run_id is not None:
+            raise smoke_control.ControlError("required mode forbids weaker gates")
+        approval = smoke_control.Approval.load(args.manifest, args.manifest_sha256, now=utc_now())
+        client = HttpClient(base_url=args.api_base_url.rstrip("/"), api_key=_api_key(),
+            bearer_token=_bearer_token(), oauth_client_secret=None, oauth_token_url=None,
+            oauth_resource=None, client_key=_client_key(), client_scopes=_client_scopes(),
+            timeout=min(args.request_timeout, 10))
+        client.safe_transport = True
+        kube = kube or KubernetesClient(namespace=args.namespace, timeout=min(args.request_timeout, 10))
+        reader = smoke_preflight.ReadOnlyTransport(client)
+        def preflight():
+            return smoke_preflight.preflight(sys.modules[__name__], reader, args, kube, approval)
+        if args.mode == "read-only":
+            pre = preflight()
+            report.update(pre)
+            smoke_control.require_checks(pre)
+            receipt = smoke_preflight.readonly_receipt(sys.modules[__name__], reader, args, approval)
+            smoke_control.require_checks(preflight())
+        else:
+            journal = smoke_control.Journal(Path(args.control_store_root), approval, host_id=smoke_control.control_host_id())
+            receipt = smoke_control.run_reserved(approval, journal, client, preflight, preflight, clock=utc_now)
+        _record_check(report, "canonical_campaign_receipt", "passed", **receipt)
+    except Exception as exc:
+        _alert(report, "control_approval_failed", "required contract failed", error_class=type(exc).__name__)
     report["status"] = "passed" if not report["alerts"] else "failed"
     report["alert_count"] = len(report["alerts"])
     return report
@@ -1025,6 +991,11 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run post-sync Palace memory dependency smoke checks.")
+    parser.add_argument("--mode", choices=["read-only", "bounded"], default="read-only")
+    parser.add_argument("--manifest")
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--receipt-file")
+    parser.add_argument("--control-store-root")
     parser.add_argument("--target-name", default=os.getenv("PALACE_ROLLOUT_SMOKE_TARGET", "palaceoftruth"))
     parser.add_argument("--namespace", default=os.getenv("POD_NAMESPACE"))
     parser.add_argument("--run-id", default=None)
