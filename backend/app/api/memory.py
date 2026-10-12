@@ -74,6 +74,7 @@ from app.services.memory import (
 from app.services.mcp_containment import request_containment_mode, request_is_contained_agent_client
 from app.services.memory_admission import evaluate_memory_write_admission
 from app.services.memory_provenance import derive_created_by_role
+from app.services.checkpoint_receipt import read_checkpoint_receipt
 from app.services.memory_telemetry import record_retrieval
 from app.services.memory_trajectory import retrieve_memory_trajectory
 from app.services.memory_promotion import promote_memory_entry_to_shared
@@ -510,6 +511,7 @@ async def whoami(request: Request) -> MemoryWhoAmIResponse:
     return MemoryWhoAmIResponse(
         tenant_id=request.state.tenant_id,
         auth_mode=getattr(request.state, "auth_mode", None),
+        credential_id=getattr(getattr(request.state, "auth_context", None), "subject_id", None),
         mcp_client_id=getattr(request.state, "mcp_client_id", None),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
         agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),
@@ -1064,6 +1066,30 @@ async def get_memory_job(
     if not job or job.tenant_id != request.state.tenant_id or job.job_type != MEMORY_JOB_TYPE:
         raise HTTPException(status_code=404, detail="Memory job not found")
     return serialize_memory_job(job)
+
+
+@router.get("/jobs/{job_id}/checkpoint-receipt", dependencies=[Depends(require_mcp_scope("read"))])
+async def get_checkpoint_receipt(
+    job_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    job = await db.get(Job, job_id)
+    if not job or job.tenant_id != request.state.tenant_id or job.job_type != MEMORY_JOB_TYPE:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    payload = job.payload or {}
+    scope_type, scope_key = payload.get("scope_type"), payload.get("scope_key")
+    if scope_type not in {"agent", "workspace", "session", "tenant_shared"} or (scope_type != "tenant_shared" and not isinstance(scope_key, str)):
+        raise HTTPException(status_code=409, detail="Checkpoint scope missing")
+    _enforce_delegated_grant_retrieval(
+        request, agent_scope_keys=[scope_key] if scope_type == "agent" and isinstance(scope_key, str) else [],
+        workspace_scope_keys=[scope_key] if scope_type == "workspace" and isinstance(scope_key, str) else [],
+        tenant_shared=scope_type == "tenant_shared", broad=scope_type not in {"agent", "workspace"},
+    )
+    if request_is_contained_agent_client(request):
+        if scope_type != "agent" or scope_key != getattr(request.state, "mcp_agent_scope_key", None):
+            raise HTTPException(status_code=403, detail="Checkpoint outside bound agent scope")
+    return await read_checkpoint_receipt(db, job=job, tenant_id=request.state.tenant_id)
 
 
 @router.get("/jobs", response_model=MemoryJobListResponse, dependencies=[Depends(require_mcp_scope("read"))])
