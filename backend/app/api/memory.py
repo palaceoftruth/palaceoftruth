@@ -511,6 +511,7 @@ async def whoami(request: Request) -> MemoryWhoAmIResponse:
     return MemoryWhoAmIResponse(
         tenant_id=request.state.tenant_id,
         auth_mode=getattr(request.state, "auth_mode", None),
+        credential_id=getattr(getattr(request.state, "auth_context", None), "subject_id", None),
         mcp_client_id=getattr(request.state, "mcp_client_id", None),
         mcp_client_key=getattr(request.state, "mcp_client_key", None),
         agent_scope_key=getattr(request.state, "mcp_agent_scope_key", None),

@@ -1,0 +1,71 @@
+{
+  "base_sha": "56543242d6c1a50dacec0cea5a810544c883f41c",
+  "results": {
+    "supported-final": {
+      "tests": 289,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 289,
+      "sha256": "2904f712a23ee1261a341c533bffb1a4c05b065e56b3c205822881cb4731a971",
+      "outbox_cases": 43,
+      "outbox_passed": 43
+    },
+    "pin-final": {
+      "tests": 289,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 289,
+      "sha256": "1938ef3524d9d480d403292b9d532e7b25e52dcdc7cc52be25e6057fe779b6d6",
+      "outbox_cases": 43,
+      "outbox_passed": 43
+    },
+    "backend-fast-supported-final": {
+      "tests": 2526,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 5,
+      "passed": 2521,
+      "sha256": "83e765c5246036bd2c6ab4d0be2fe5c99c299aa64c79999468fdf29175ed6102",
+      "outbox_cases": 43,
+      "outbox_passed": 41
+    }
+  },
+  "source_sha256": {
+    "third_party_plugins/hermes/memory/palaceoftruth/__init__.py": "4d5cbeb1a6f9d9aab55f9f2db0e656b8770cc7060e3bfb6dc5ae44804be95482",
+    "third_party_plugins/hermes/memory/palaceoftruth/outbox.py": "9551c564b0a8e067c6b0b21323e67a38e58a2b9a1d73339e2a24ad52d6b3d24b",
+    "third_party_plugins/hermes/memory/palaceoftruth/checkpoint.py": "44f995a860aacb13901f74cc7dbdcc03807bc09e6f9e6f63062280b6dfd50730",
+    "scripts/recover_hermes_outbox.py": "dbe247f3669a2f52ae0eeb0f964f4d055ac64c85f044232c2e3cf87477f2bdd2"
+  },
+  "strict": [
+    {
+      "host": "official-host",
+      "returncode": 2,
+      "receipt": "receipts/strict-supported.json"
+    },
+    {
+      "host": "official-pin",
+      "returncode": 2,
+      "receipt": "receipts/strict-pin.json"
+    }
+  ],
+  "preservation": {
+    "_snapshot_write_context": true,
+    "_queue_write": true,
+    "_drain_writes": true,
+    "_publish_work_change": true,
+    "flush_pending": true,
+    "shutdown": true,
+    "on_turn_start": true,
+    "on_session_switch": true,
+    "third_party_plugins/hermes/memory/palaceoftruth/checkpoint.py": "byte-identical to approved composite",
+    "scripts/check_hermes_public_lifecycle.py": "byte-identical to approved composite",
+    ".github/workflows/hermes-public-lifecycle.yml": "byte-identical to approved composite",
+    "backend/tests/test_hermes_checkpoint_N1.py": "byte-identical to approved composite"
+  },
+  "outbox_adverse_cases": 43,
+  "host_global": "MANDATORY BLOCKED",
+  "independent_review": "pending",
+  "scope": "offline source prototype; no production changes"
+}
