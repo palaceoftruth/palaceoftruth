@@ -7,7 +7,7 @@ from app.database import get_db
 from app.schemas.memory import MemoryQueueHint
 from tests.test_backend_checkpoint_auth import AuthDatabase,CommittedStore,API_SECRET,OAUTH_SECRET,CLIENT_KEY,STAMP
 @pytest.mark.parametrize('mode',['api_key','mcp_oauth'])
-@pytest.mark.parametrize('shape',['pointer_int','pointer_float','pointer_bool','pointer_null','pointer_list','pointer_object','pointer_empty','pointer_compact','pointer_braces','payload_int','payload_null','payload_list','payload_string','payload_bool','scope_list','scope_object'])
+@pytest.mark.parametrize('shape',['pointer_int','pointer_float','pointer_bool','pointer_null','pointer_list','pointer_object','pointer_empty','pointer_compact','pointer_braces','payload_int','payload_null','payload_list','payload_string','payload_bool','payload_float','payload_object','payload_empty','scope_list','scope_object','scope_bool','scope_int','scope_null','scope_string'])
 @pytest.mark.parametrize('deny',[False,True])
 def test_all_json_shapes_and_auth_precedence(monkeypatch,mode,shape,deny):
  adb=AuthDatabase();store=CommittedStore();app=FastAPI();app.include_router(memory.router,prefix='/api/v1');app.include_router(mcp_oauth.router,prefix='/api/v1')
