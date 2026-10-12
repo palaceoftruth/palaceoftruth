@@ -45,4 +45,8 @@ packages = []
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "python-dotenv==1.2.2",
+    "requests==2.33.0",
+    "rich==14.3.3",
+    "ruamel-yaml==0.18.16",
 ]
