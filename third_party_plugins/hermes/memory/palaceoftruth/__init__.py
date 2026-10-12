@@ -1689,6 +1689,9 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
         self._sync_thread: threading.Thread | None = None
         self._init_checkpoint()
         self._turn_author: dict[str, Any] = {}
+        self._outbox_store = None
+        self._outbox_home = None
+        self.last_outbox_receipt = None
 
     @property
     def name(self) -> str:
@@ -1911,6 +1914,10 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home", ""))
+        if self._outbox_store is not None and Path(hermes_home).absolute() != self._outbox_home:
+            from .outbox import OutboxError
+            raise OutboxError('outbox provider cannot change initialized profile home')
+        self._outbox_home = Path(hermes_home).absolute() if hermes_home else None
         self._config = _load_config(hermes_home)
         self._base_url = str(self._config.get("base_url", "")).strip().rstrip("/")
         self._api_key = str(self._config.get("api_key", "")).strip()
@@ -3204,7 +3211,7 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
             )
             if not suppressed:
                 def _worker() -> None:
-                    tenant_id = self._resolve_tenant_id()
+                    tenant_id = self._capture_tenant_id()
                     if not tenant_id:
                         raise RuntimeError("Palace turn tenant resolution failed")
                     payload = self._build_entry_payload(
@@ -3259,7 +3266,7 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
                  "invalidation": "not_inferred", "affected_turns": "unknown", "turn_author": {},
                  "event_id": str(uuid4()), "observed_at": _utc_now()}
         def worker() -> None:
-            tenant_id = self._resolve_tenant_id()
+            tenant_id = self._capture_tenant_id()
             if not tenant_id:
                 raise RuntimeError("Palace audit tenant resolution failed")
             payload = self._build_memory_write_payload(action="audit", target="memory",
@@ -3308,7 +3315,7 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
                 provenance.update(previous_content_sha256=_text_digest(previous),
                     previous_content_chars=len(previous), linkage="native_store_selected_content_digest")
             def worker() -> None:
-                tenant_id = self._resolve_tenant_id()
+                tenant_id = self._capture_tenant_id()
                 if not tenant_id:
                     raise RuntimeError("Palace mirror tenant resolution failed")
                 payload = self._build_memory_write_payload(action=action, target=target,
@@ -3319,6 +3326,38 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
                 payload["idempotency_key"] = _json_digest({"entry": payload["idempotency_key"], "provenance": provenance})
                 self._post_memory_entries("/api/v1/memory/entries", payload)
             self._queue_write(worker, self._quota_for_session(snapshot["session_id"]), context=caller_context)
+
+    def _capture_tenant_id(self):
+        if self._outbox_store is not None or self._config.get('outbox_prototype_enabled') is True:
+            self.last_outbox_receipt = None
+        if self._config.get('outbox_prototype_enabled') is not True:
+            if self._outbox_store is not None:
+                from .outbox import OutboxError
+                raise OutboxError('outbox mode cannot change after activation')
+            return self._resolve_tenant_id()
+        from .outbox import OutboxStore, OutboxError
+        self.last_outbox_receipt = None
+        if self._outbox_store is None:
+            binding = self._config.get('outbox_binding')
+            if not isinstance(binding, dict) or self._base_url != binding.get('origin'):
+                raise OutboxError('outbox configured origin differs')
+            if self._outbox_home is None:
+                raise OutboxError('outbox requires official initialized profile home')
+            directory = Path(self._config.get('outbox_directory', 'palace-outbox-prototype'))
+            if not directory.is_absolute():
+                directory = self._outbox_home / directory
+            if directory.parent != self._outbox_home:
+                raise OutboxError('outbox must be a direct child of initialized profile home')
+            self._outbox_store = OutboxStore(directory, binding)
+        if (self._outbox_store.directory.parent != self._outbox_home
+                or self._outbox_store.binding != self._config.get('outbox_binding')
+                or self._outbox_store.binding['origin'] != self._base_url):
+            raise OutboxError('outbox activated binding/home cannot change')
+        # Called in the unchanged native FIFO worker, never a synchronous host
+        # callback. Before this worker commits, the task is NOT recoverable.
+        # Binding is local intent, not authenticated authority; recovery verifies
+        # fresh whoami. No credentials or executable closure are persisted.
+        return self._outbox_store.binding['tenant_id']
 
     def _assert_open(self) -> None:
         if self._closed or self._admission_closed.is_set():
@@ -3566,6 +3605,17 @@ class PalaceOfTruthMemoryProvider(CheckpointMixin, MemoryProvider):
         *,
         is_bulk: bool = False,
     ) -> dict[str, Any]:
+        if (self._outbox_store is not None and self._config.get('outbox_prototype_enabled') is True
+                and getattr(self._write_quota_context, 'quota', None) is not None):
+            from .outbox import OutboxError
+            if is_bulk or path != '/api/v1/memory/entries':
+                raise OutboxError('outbox prototype supports single automatic entries only')
+            self.last_outbox_receipt = None
+            if not self._outbox_store.is_duplicate(payload):
+                self._reserve_write_quota(is_bulk=False)
+            receipt = self._outbox_store.admit(payload, max_session=self._max_writes_per_session)
+            self.last_outbox_receipt = receipt
+            return receipt
         cache_key = self._write_dedup_cache_key(path, payload)
         cached = self._dedup_cache_get(cache_key)
         if cached is not None:
