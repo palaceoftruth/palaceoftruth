@@ -82,12 +82,14 @@ class AuthDatabase(FakeSession):
 
 
 @contextmanager
-def actual_backend(tmp_path,monkeypatch,*,mode='mcp_oauth',fault=None,stage='identity'):
+def actual_backend(tmp_path,monkeypatch,*,mode='mcp_oauth',fault=None,stage='identity',tenant=TENANT):
     cert,key=tmp_path/'actual-cert.pem',tmp_path/'actual-key.pem'
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),
         '-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost'],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     db=AuthDatabase(mode=mode,fault=fault,stage=stage);committed=CommittedStore();calls=[]
+    if fault not in {'tenant'}:
+        db.api_row['tenant_id']=tenant;db.rows[0]['tenant_id']=tenant
     app=FastAPI();app.include_router(memory.router,prefix='/api/v1');app.include_router(mcp_oauth.router,prefix='/api/v1')
     async def domain_db():yield committed
     app.dependency_overrides[get_db]=domain_db
@@ -120,8 +122,9 @@ def actual_backend(tmp_path,monkeypatch,*,mode='mcp_oauth',fault=None,stage='ide
         finally:http.shutdown();http.server_close();thread.join(2)
 
 
-def prepared(tmp_path,origin,mode):
+def prepared(tmp_path,origin,mode,tenant=TENANT):
     m,p,b=setup(tmp_path);b['origin']=origin;p._base_url=origin
+    b['tenant_id']=tenant;p._tenant_id=tenant
     if mode=='mcp_oauth':
         b['credential']={'mode':'mcp_oauth','id':CLIENT_ID,'client_key':CLIENT_KEY}
         p._api_key='';p._oauth_client_secret=OAUTH_SECRET;p._oauth_client_key=CLIENT_KEY

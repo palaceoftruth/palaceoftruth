@@ -12,13 +12,14 @@ from tests.test_hermes_outbox_auth_routes import actual_backend, prepared, OAUTH
 
 @pytest.mark.parametrize('entrypoint', ['standalone', 'plugin'])
 @pytest.mark.parametrize('fault', [None, 'expired', 'grant'])
-def test_extracted_cli_actual_oauth_routes(tmp_path, monkeypatch, entrypoint, fault):
+@pytest.mark.parametrize('tenant', ['default', '11111111-1111-4111-8111-111111111111'])
+def test_extracted_cli_actual_oauth_routes(tmp_path, monkeypatch, entrypoint, fault, tenant):
     artifact = Path(os.environ['SAR1402_EXTRACTED_PACKAGE'])
     host = Path(os.environ['SAR1406_HOST_SOURCE'])
     assert (artifact / 'palaceoftruth/outbox.py').is_file()
     assert not (artifact / 'third_party_plugins').exists()
-    with actual_backend(tmp_path, monkeypatch, fault=fault) as (origin, cert, authdb, domain, calls):
-        m, provider, binding, store = prepared(tmp_path, origin, 'mcp_oauth')
+    with actual_backend(tmp_path, monkeypatch, fault=fault, tenant=tenant) as (origin, cert, authdb, domain, calls):
+        m, provider, binding, store = prepared(tmp_path, origin, 'mcp_oauth',tenant=tenant)
         shutil.copytree(artifact / 'palaceoftruth', tmp_path / 'plugins/palaceoftruth')
         (tmp_path / 'config.yaml').write_text('memory:\n  provider: palaceoftruth\n')
         binding_file = tmp_path / 'binding.json'
