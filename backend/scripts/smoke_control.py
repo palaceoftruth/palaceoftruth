@@ -49,7 +49,10 @@ def slot_key(doc):return sha256_json({'campaign_id':doc['campaign_id'],'phase':d
 def reject_credentials(value):
     if isinstance(value,dict):
         for key,child in value.items():
-            if any(word in str(key).lower() for word in ['secret','password','token','authorization','credential_value']):raise ControlError('credential data forbidden in control artifact')
+            # Normalize FIELD NAMES for classification only. Literal values and
+            # identifiers remain unchanged; this does not inspect secret prose.
+            field=re.sub(r'[^a-z0-9]','',str(key).lower())
+            if field in {'apikey','privatekey','credentialvalue'} or any(word in str(key).lower() for word in ['secret','password','token','authorization','credential_value']):raise ControlError('credential data forbidden in control artifact')
             reject_credentials(child)
     elif isinstance(value,list):
         for child in value:reject_credentials(child)

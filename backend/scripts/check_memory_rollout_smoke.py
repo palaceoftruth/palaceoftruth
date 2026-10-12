@@ -711,7 +711,7 @@ def check_mcp_reachable(url: str | None, report: dict[str, Any], *, timeout: flo
     request = urllib.request.Request(url, headers={"Accept": "application/json, text/event-stream"})
     budget = budget or smoke_transport.Budget(seconds=min(timeout, 10))
     try:
-        with smoke_transport.strict_open(request, timeout=timeout, budget=budget) as response:
+        with smoke_transport.strict_open(request, timeout=timeout, budget=budget, body_limit=65536) as response:
             status = response.status
             budget.read(response, 65536)
     except urllib.error.HTTPError as exc:
