@@ -1077,9 +1077,12 @@ async def get_checkpoint_receipt(
     job = await db.get(Job, job_id)
     if not job or job.tenant_id != request.state.tenant_id or job.job_type != MEMORY_JOB_TYPE:
         raise HTTPException(status_code=404, detail="Checkpoint not found")
-    payload = job.payload or {}
+    from collections.abc import Mapping
+    payload = job.payload
+    if not isinstance(payload, Mapping):
+        raise HTTPException(status_code=409, detail="Checkpoint scope missing")
     scope_type, scope_key = payload.get("scope_type"), payload.get("scope_key")
-    if scope_type not in {"agent", "workspace", "session", "tenant_shared"} or (scope_type != "tenant_shared" and not isinstance(scope_key, str)):
+    if not isinstance(scope_type, str) or scope_type not in {"agent", "workspace", "session", "tenant_shared"} or (scope_type != "tenant_shared" and not isinstance(scope_key, str)):
         raise HTTPException(status_code=409, detail="Checkpoint scope missing")
     _enforce_delegated_grant_retrieval(
         request, agent_scope_keys=[scope_key] if scope_type == "agent" and isinstance(scope_key, str) else [],
