@@ -17,6 +17,8 @@ class ReadOnlyTransport:
 
 def runtime_binding(smoke,client,report,args,kube,a):
     d=a.doc
+    selector='app.kubernetes.io/instance='+d['release_name']
+    if args.pod_label_selector!=selector:raise control.ControlError('selector is not approved release instance')
     if args.namespace!=d['namespace'] or client.base_url!=d['api_base_url'] or args.scope_key!=d['scope']['key']:raise control.ControlError('CLI binding differs from approved manifest')
     ident=report.get('identity')
     if not isinstance(ident,dict):raise control.ControlError('fresh server identity missing')
@@ -37,6 +39,8 @@ def runtime_binding(smoke,client,report,args,kube,a):
     if effective is not None and effective!=digest:raise control.ControlError('selected artifact differs from approved phase')
     replicas=values.get('highAvailability',{}).get('replicas',{})
     expected={name:replicas.get(name) for name in ['backend','mcp']}
+    owners=d.get('workloads')
+    if not owners or any(owners[k]['replicas']!=expected[k] for k in expected):raise control.ControlError('manifest-bound replica owners missing')
     if any(type(n) is not int or n<1 for n in expected.values()) or args.expected_sentinel_pods!=replicas.get('valkeySentinels'):raise control.ControlError('explicit expected runtime ensemble missing/mismatched')
     pods=kube.get('/api/v1/namespaces/'+args.namespace+'/pods',query={'labelSelector':args.pod_label_selector}).get('items')
     if not isinstance(pods,list):raise control.ControlError('artifact pod observations missing')
@@ -45,6 +49,9 @@ def runtime_binding(smoke,client,report,args,kube,a):
         if p.get('metadata',{}).get('deletionTimestamp'):continue
         for c in p.get('status',{}).get('containerStatuses',[]):
             if c.get('name') in found:
+                meta=p.get('metadata',{})
+                refs=meta.get('ownerReferences',[])
+                if meta.get('labels',{}).get('app.kubernetes.io/instance')!=d['release_name'] or len(refs)!=1 or refs[0].get('kind')!='ReplicaSet' or refs[0].get('controller') is not True or refs[0].get('uid') not in owners[c['name']]['replicaset_uids']:raise control.ControlError('pod release owner mismatch')
                 if c.get('ready') is not True or not isinstance(c.get('imageID'),str) or not c['imageID'].endswith('@'+digest):raise control.ControlError('actual image ID/readiness mismatch')
                 found[c['name']].append({'pod_uid':p.get('metadata',{}).get('uid'),'imageID':c['imageID']})
     if any(len(found[k])!=expected[k] or not all(p['pod_uid'] for p in found[k]) for k in expected):raise control.ControlError('artifact replica evidence incomplete')
@@ -53,12 +60,25 @@ def runtime_binding(smoke,client,report,args,kube,a):
         if not revision or release['spec'].get('suspend') is not True:raise control.ControlError('bounded operator write requires explicit canonical hold')
         ks=kube.get('/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/k3s-lab-apps')
         git=kube.get('/apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/flux-control')
-        if ks.get('status',{}).get('lastAppliedRevision')!=revision or git.get('status',{}).get('artifact',{}).get('revision')!=revision or not any(c.get('type')=='Ready' and c.get('status')=='True' for c in ks.get('status',{}).get('conditions',[])):raise control.ControlError('canonical/applied hold provenance missing')
+        if ks.get('status',{}).get('lastAppliedRevision')!=revision or git.get('status',{}).get('artifact',{}).get('revision')!=revision:raise control.ControlError('canonical/applied revision mismatch')
+        for resource in [ks,git]:
+            generation=resource.get('metadata',{}).get('generation')
+            conditions=resource.get('status',{}).get('conditions',[])
+            ready=[r for r in conditions if r.get('type')=='Ready']
+            if type(generation) is not int or len(ready)!=1 or ready[0].get('status')!='True' or ready[0].get('observedGeneration')!=generation or resource.get('status',{}).get('observedGeneration')!=generation:raise control.ControlError('source readiness is stale or failed')
+        hold=d.get('canonical_hold')
+        if not hold or hold['revision']!=revision or hold['parent_verified'] is not True:raise control.ControlError('parent-verified canonical artifact delivery required')
+        # No artifact reader authority is assumed. Parent verification is external,
+        # and the integrity pin cannot manufacture that authorization.
+        import yaml
+        canonical=yaml.safe_load(hold['blob'])
+        if not isinstance(canonical,dict) or canonical.get('kind')!='HelmRelease' or canonical.get('metadata',{}).get('name')!=d['release_name'] or canonical.get('metadata',{}).get('namespace')!=d['namespace'] or canonical.get('spec',{}).get('suspend') is not True or canonical.get('spec',{}).get('values',{}).get('image',{}).get('backendDigest')!=digest:raise control.ControlError('canonical same-release hold not proven')
     smoke._record_check(report,'artifact_binding','passed',observations=found,release_uid=d['release_uid'],phase_digest=digest)
 
 def temporal_observations(smoke,args,kube,a):
     now=smoke.utc_now();seconds=max(args.log_since_seconds,3600)
-    payload=kube.get('/api/v1/namespaces/'+args.namespace+'/pods',query={'labelSelector':args.pod_label_selector})
+    selector='app.kubernetes.io/instance='+a.doc['release_name']
+    payload=kube.get('/api/v1/namespaces/'+args.namespace+'/pods',query={'labelSelector':selector})
     workers=[];logs={}
     if not isinstance(payload.get('items'),list):raise control.ControlError('worker observations missing')
     for p in payload['items']:
@@ -70,9 +90,19 @@ def temporal_observations(smoke,args,kube,a):
         for c in statuses:
             row={'pod':name,'uid':p.get('metadata',{}).get('uid'),'container':c.get('name'),'container_id':c.get('containerID'),'restart_count':c.get('restartCount'),'ready':c.get('ready'),'phase':p.get('status',{}).get('phase'),'last_terminated':c.get('lastState',{}).get('terminated',{}),'waiting':c.get('state',{}).get('waiting'),'terminated':c.get('state',{}).get('terminated')}
             workers.append(row)
-            text=kube.get_text('/api/v1/namespaces/'+args.namespace+'/pods/'+name+'/log',query={'container':c.get('name'),'sinceSeconds':seconds,'tailLines':args.log_tail_lines})
+            text=kube.get_text('/api/v1/namespaces/'+args.namespace+'/pods/'+name+'/log',query={'container':c.get('name'),'sinceSeconds':seconds+60,'tailLines':args.log_tail_lines,'timestamps':'true'})
             if not isinstance(text,str) or len(text.encode())>1048576 or len(text.splitlines())>=args.log_tail_lines:raise control.ControlError('bounded log coverage truncated/unavailable')
-            logs[(row['uid'],row['container'])]={'readable':True,'covers_since':(now-timedelta(seconds=seconds)).isoformat(),'observed_at':smoke.utc_now().isoformat(),'text':text}
+            lines=text.splitlines()
+            if not lines:raise control.ControlError('empty logs do not prove coverage')
+            timestamps=[]
+            for line in lines:
+                stamp,sep,_=line.partition(' ')
+                if not sep:raise control.ControlError('log timestamp missing')
+                timestamps.append(control.instant(stamp))
+            started=control.instant(c.get('state',{}).get('running',{}).get('startedAt'))
+            window=now-timedelta(seconds=seconds)
+            if started>window or timestamps[0]>window or timestamps[-1]<now-timedelta(seconds=30) or timestamps[-1]>now or timestamps!=sorted(timestamps):raise control.ControlError('actual log/container interval does not cover observation window')
+            logs[(row['uid'],row['container'])]={'readable':True,'covers_since':timestamps[0].isoformat(),'observed_at':smoke.utc_now().isoformat(),'text':text}
     # Immutable baseline fingerprints must agree independently; successful POST is irrelevant.
     if any('MasterNotFoundError' in e['text'] or 'No master found' in e['text'] for e in logs.values()):
         initial=smoke._worker_startup_state(kube,args)
@@ -90,11 +120,13 @@ def preflight(smoke,client,args,kube,a):
            lambda:smoke.check_runtime_dependencies(client,report,args,kube=kube),
            lambda:smoke.resolve_tenant_identity(client,report,args),
            lambda:runtime_binding(smoke,client,report,args,kube,a),
-           lambda:smoke.asyncio.run(smoke.check_sentinel(report)),
-           lambda:smoke.check_mcp_reachable(args.mcp_url,report,timeout=min(args.request_timeout,10)),
+           lambda:smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report),timeout=args.reader_budget.timeout(10))),
+           lambda:smoke.check_mcp_reachable(args.mcp_url,report,timeout=min(args.request_timeout,10),budget=args.reader_budget),
            lambda:smoke._record_check(report,'baseline_temporal','passed',**temporal_observations(smoke,args,kube,a))]
     for call in calls:
-        try:call()
+        try:
+            args.reader_budget.timeout(10)
+            call()
         except Exception as exc:smoke._alert(report,'required_preflight_exception','read-only prerequisite failed',error_class=type(exc).__name__)
     # Temporal and runtime checks include the required Kubernetes/log/ensemble evidence.
     if smoke._check_passed(report,'baseline_temporal') and smoke._check_passed(report,'runtime_dependencies'):smoke._record_check(report,'kubernetes_alerts','passed')
@@ -103,8 +135,7 @@ def preflight(smoke,client,args,kube,a):
 def readonly_receipt(smoke,client,args,a):
     if not args.receipt_file:raise control.ControlError('approved campaign receipt delivery missing')
     p=Path(args.receipt_file)
-    if p.is_symlink() or not p.is_file() or p.stat().st_mode & 0o022 or p.stat().st_size>65536:raise control.ControlError('receipt file unsafe/unavailable')
-    try:envelope=json.loads(p.read_bytes())
+    try:envelope=json.loads(control.read_private(p,65536))
     except (OSError,ValueError) as exc:raise control.ControlError('receipt delivery corrupt') from exc
     if not isinstance(envelope,dict) or envelope.get('manifest_sha256')!=a.digest or envelope.get('payload_sha256')!=control.sha256_json(a.payload):raise control.ControlError('receipt envelope differs from approval')
     job=control.literal_uuid(envelope.get('receipt',{}).get('job_id'))

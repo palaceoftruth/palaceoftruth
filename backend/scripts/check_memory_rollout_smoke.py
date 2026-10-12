@@ -22,6 +22,7 @@ if __package__ in {None, ""}:
 from scripts.check_redis_sentinel_rollout_gate import check_rollout_gate
 from scripts import smoke_control
 from scripts import smoke_preflight
+from scripts import smoke_transport
 
 
 TERMINAL_SUCCESS = {"complete", "completed", "duplicate"}
@@ -61,14 +62,12 @@ class HttpClient:
         self.client_scopes = client_scopes
         self.timeout = timeout
         self.safe_transport = False
+        self.budget = smoke_transport.Budget()
 
     def _open(self, request):
         if not self.safe_transport:
             return urllib.request.urlopen(request, timeout=self.timeout)
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                raise urllib.error.URLError("redirect forbidden")
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=self.timeout)
+        return smoke_transport.strict_open(request, timeout=self.timeout, budget=self.budget)
 
     def _mcp_scope_headers(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, str]:
         normalized = method.upper(), path
@@ -116,16 +115,18 @@ class HttpClient:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._open(request) as response:
-                payload = response.read()
+                payload = self.budget.read(response) if self.safe_transport else response.read()
                 return HttpResult(response.status, _decode_payload(payload))
         except urllib.error.HTTPError as exc:
-            return HttpResult(exc.code, _decode_payload(exc.read()))
+            return HttpResult(exc.code, None if self.safe_transport else _decode_payload(exc.read()))
 
     def _active_bearer_token(self) -> str | None:
         if self.bearer_token:
             return self.bearer_token
         if not self.oauth_client_secret:
             return None
+        if self.safe_transport:
+            raise smoke_control.ControlError("required transport forbids OAuth mint/refresh")
         token_url = self.oauth_token_url or f"{self.base_url}/memory/mcp/oauth/token"
         oauth_resource = _oauth_backend_resource(self.oauth_resource, token_url)
         data = urllib.parse.urlencode(
@@ -168,6 +169,7 @@ class KubernetesClient:
         self.token = _read_text(KUBE_TOKEN_PATH).strip()
         self.timeout = timeout
         self.context = ssl.create_default_context(cafile=KUBE_CA_PATH)
+        self.budget = smoke_transport.Budget()
 
     def get(self, path: str, *, query: dict[str, Any] | None = None) -> dict[str, Any]:
         encoded_query = urllib.parse.urlencode(query or {})
@@ -178,11 +180,12 @@ class KubernetesClient:
             url,
             headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
-            payload = response.read()
+        budget = getattr(self, "budget", smoke_transport.Budget())
+        with smoke_transport.strict_open(request, timeout=self.timeout, context=self.context, budget=budget) as response:
+            payload = budget.read(response)
             decoded = _decode_payload(payload)
             if not isinstance(decoded, dict):
-                raise RuntimeError(f"Kubernetes API response was not an object: {decoded!r}")
+                raise RuntimeError("Kubernetes API response was not an object")
             return decoded
 
     def get_text(self, path: str, *, query: dict[str, Any] | None = None) -> str:
@@ -191,8 +194,9 @@ class KubernetesClient:
         if encoded_query:
             url = f"{url}?{encoded_query}"
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
-        with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
-            return response.read().decode("utf-8", errors="replace")
+        budget = getattr(self, "budget", smoke_transport.Budget())
+        with smoke_transport.strict_open(request, timeout=self.timeout, context=self.context, budget=budget) as response:
+            return budget.read(response).decode("utf-8", errors="strict")
 
 
 def _decode_payload(raw: bytes) -> Any:
@@ -695,21 +699,30 @@ def check_runtime_dependencies(
     _record_check(report, "runtime_dependencies", "failed", **last_state)
 
 
-def check_mcp_reachable(url: str | None, report: dict[str, Any], *, timeout: float) -> None:
+def check_mcp_reachable(url: str | None, report: dict[str, Any], *, timeout: float, budget=None) -> None:
     if not url:
         _record_check(report, "mcp_health", "skipped", reason="no MCP URL configured")
         return
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.path.rstrip("/") != "/mcp" or parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        _alert(report, "mcp_unhealthy", "configured MCP path contract missing")
+        _record_check(report, "mcp_health", "failed")
+        return
+    request = urllib.request.Request(url, headers={"Accept": "application/json, text/event-stream"})
+    budget = budget or smoke_transport.Budget(seconds=min(timeout, 10))
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with smoke_transport.strict_open(request, timeout=timeout, budget=budget) as response:
             status = response.status
+            budget.read(response, 65536)
     except urllib.error.HTTPError as exc:
         status = exc.code
     except Exception as exc:
         _alert(report, "mcp_unreachable", f"MCP endpoint was unreachable: {exc.__class__.__name__}")
         _record_check(report, "mcp_health", "failed", error_class=exc.__class__.__name__)
         return
-    if status >= 500:
+    # Streamable HTTP /mcp GET can require auth (401) or reject the method
+    # (405). This proves endpoint reachability only, never authenticated health.
+    if status not in {200, 401, 405}:
         _alert(report, "mcp_unhealthy", f"MCP endpoint returned HTTP {status}")
         _record_check(report, "mcp_health", "failed", http_status=status)
         return
@@ -969,6 +982,11 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
             timeout=min(args.request_timeout, 10))
         client.safe_transport = True
         kube = kube or KubernetesClient(namespace=args.namespace, timeout=min(args.request_timeout, 10))
+        budget = smoke_transport.Budget(seconds=120)
+        client.budget = budget
+        if isinstance(kube, KubernetesClient):kube.budget = budget
+        args.reader_budget = budget
+        args.dependency_timeout_seconds = min(args.dependency_timeout_seconds, 30)
         reader = smoke_preflight.ReadOnlyTransport(client)
         def preflight():
             return smoke_preflight.preflight(sys.modules[__name__], reader, args, kube, approval)
@@ -986,7 +1004,14 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
         _alert(report, "control_approval_failed", "required contract failed", error_class=type(exc).__name__)
     report["status"] = "passed" if not report["alerts"] else "failed"
     report["alert_count"] = len(report["alerts"])
-    return report
+    return safe_final_report(report)
+
+def safe_final_report(report):
+    """Public diagnostics never contain server bodies, arbitrary messages or identifiers."""
+    checks=[{"name":r["name"],"status":r["status"]} for r in report.get("checks",[]) if r.get("name") in set(smoke_control.REQUIRED_CHECKS)|{"canonical_campaign_receipt"} and r.get("status") in {"passed","failed","skipped"}]
+    known_codes={"control_approval_failed","api_health_failed","required_preflight_exception","mcp_unreachable","mcp_unhealthy","sentinel_or_valkey_failed","tenant_identity_failed","runtime_dependencies_not_ready"}
+    alerts=[{"code":r.get("code") if r.get("code") in known_codes else "required_preflight_exception"} for r in report.get("alerts",[])]
+    return {"report":"palace-memory-rollout-smoke","status":report["status"],"alert_count":len(alerts),"checks":checks,"alerts":alerts}
 
 
 def build_parser() -> argparse.ArgumentParser:
