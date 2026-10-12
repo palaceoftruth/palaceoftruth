@@ -1,0 +1,51 @@
+{
+  "predecessor": "9646dc0cbcafb48d3b6c0caef00e0b7f3d8b4691",
+  "status": "R1/R2 repaired; independent rereview pending",
+  "results": {
+    "reviewer-original": {
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "c7f162882cdbd3fca8453c5f50cea1b423b9c0e4a2676e1fc9020511b52ad00e"
+    },
+    "inverse-red": {
+      "tests": 4,
+      "failures": 4,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "81706413c32106155ac210d4bdeea16ddbd67d1d6cf2821c290eaeb36631c47c"
+    },
+    "routes-final": {
+      "tests": 187,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "023e45980d3b2782433795a12c1fbc34d5b2c5c2adaba0040e2bffd38c3d18b4"
+    },
+    "backend-final": {
+      "tests": 2553,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 6,
+      "sha256": "7deeeeef749e506235440e18414d567fbc8540752ae8f2590e0a9ef4478d147d"
+    },
+    "pin-final": {
+      "tests": 277,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 4,
+      "sha256": "62ca95fcd7203d1db8b1a8d8f4e43ae93fc91fcb41197ac2fe6ca16e3f6a92a5"
+    }
+  },
+  "host_global_gate": "MANDATORY BLOCKED",
+  "production_changed": false,
+  "R1": "server-owned credential/tenant/mode distinct from scope intent",
+  "R2": "ephemeral OAuth shared protocol and public profile secret reader",
+  "submission": "immutable nonsecret frozen policy",
+  "limits": [
+    "mock persistence not deployed Postgres",
+    "host and native precommit submission gaps",
+    "no merge/deployment/Done"
+  ]
+}

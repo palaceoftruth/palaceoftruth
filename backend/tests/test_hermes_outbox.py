@@ -32,7 +32,8 @@ def setup(tmp_path, *, provider_factory=None):
         p._scope_key = 'barbara'
     outbox = importlib.import_module(module.__name__ + '.outbox')
     binding = {'origin': 'https://fixture.invalid', 'tenant_id': TENANT,
-               'principal': 'barbara', 'scope': {'type': 'agent', 'key': 'barbara'}}
+               'credential': {'mode':'api_key','id':'44444444-4444-4444-8444-444444444444'},
+               'scope': {'type': 'agent', 'key': 'barbara'}}
     p._tenant_id = TENANT
     p._outbox_home = tmp_path
     p._config.update(outbox_prototype_enabled=True, outbox_directory=str(tmp_path / 'outbox'),
@@ -56,6 +57,23 @@ def admit(p, author='alice'):
     return p._outbox_store
 
 
+def fixture_identity(binding):
+    # Real backend context attachment/response model, not a fabricated API-key
+    # agent identity. Full auth dependencies/denial are covered by auth fixtures.
+    import asyncio
+    from fastapi import Request
+    from app import auth
+    from app.api.memory import whoami
+    credential=binding['credential'];oauth=credential['mode']=='mcp_oauth'
+    request=Request({'type':'http','headers':[(b'x-palace-agent-scope-key',b'caller-hint-only')]})
+    auth._attach_auth_context(request,auth._context_from_scopes(tenant_id=binding['tenant_id'],
+        auth_mode=credential['mode'],subject_id=credential['id'],token_hash_reference='fixture',
+        client_id=credential['id'] if oauth else None,client_key=credential.get('client_key'),
+        agent_scope_key=binding['scope'].get('key') if oauth else None,
+        scopes=['read','write','write:'+binding['scope']['type']]))
+    return asyncio.run(whoami(request)).model_dump(mode='json')
+
+
 class Backend:
     def __init__(self, binding):
         self.binding, self.posts = binding, []
@@ -65,7 +83,7 @@ class Backend:
         import hashlib
         assert deadline > time.perf_counter()
         if path.endswith('/whoami'):
-            return {'tenant_id': self.binding['tenant_id'], 'agent_scope_key': self.binding['principal']}
+            return fixture_identity(self.binding)
         if method == 'POST':
             self.posts.append(copy.deepcopy(payload))
             return {'job_id': JOB, 'source_item_id': ITEM}
@@ -123,7 +141,7 @@ def test_queue_acceptance_and_mismatched_readback_never_mark_delivered(tmp_path,
 
 def test_fresh_principal_or_binding_mismatch_stops_before_post(tmp_path):
     m, p, binding = setup(tmp_path); store = admit(p)
-    backend = Backend({**binding, 'principal': 'different'})
+    backend = Backend({**binding, 'credential':{**binding['credential'],'id':ITEM}})
     with pytest.raises(m.OutboxError):
         m.RecoveryWorker(store, backend).run(max_jobs=1, timeout=1)
     assert not backend.posts

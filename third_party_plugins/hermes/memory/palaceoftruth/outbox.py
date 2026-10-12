@@ -42,15 +42,23 @@ def digest(value):
 
 
 def validate_binding(binding):
-    if not isinstance(binding, dict) or set(binding) != {'origin', 'tenant_id', 'principal', 'scope'}:
+    if not isinstance(binding, dict) or set(binding) != {'origin', 'tenant_id', 'credential', 'scope'}:
         raise OutboxError('outbox binding fields invalid')
     value = copy.deepcopy(binding)
     url = urlsplit(value['origin'])
     if (url.scheme != 'https' or not url.hostname or url.username or url.password
             or url.path or url.query or url.fragment or value['origin'].endswith('/')):
         raise OutboxError('outbox requires exact HTTPS origin')
-    if not re.fullmatch(UUID, str(value['tenant_id'])) or not isinstance(value['principal'], str) or not value['principal']:
+    if not re.fullmatch(UUID, str(value['tenant_id'])):
         raise OutboxError('outbox tenant/principal invalid')
+    credential=value['credential']
+    if not isinstance(credential,dict) or credential.get('mode') not in {'api_key','mcp_oauth'}:
+        raise OutboxError('outbox explicit credential mode missing')
+    fields={'mode','id','client_key'} if credential['mode']=='mcp_oauth' else {'mode','id'}
+    if set(credential)!=fields or not re.fullmatch(UUID,str(credential.get('id',''))):
+        raise OutboxError('outbox server-owned credential ID required')
+    if credential['mode']=='mcp_oauth' and (not isinstance(credential['client_key'],str) or not credential['client_key']):
+        raise OutboxError('outbox registered OAuth client key required')
     scope = value['scope']
     if not isinstance(scope, dict) or scope.get('type') not in {'agent', 'workspace', 'session'}:
         raise OutboxError('outbox scope policy invalid')
@@ -266,10 +274,7 @@ class RecoveryWorker:
         with self.store.worker_lock():
             rows = [r for r in self.store.records() if r['state'] == 'pending'][:max_jobs]
             if not rows: return result
-            identity = self.transport.call('GET', '/api/v1/memory/whoami', deadline=deadline)
-            if (identity.get('tenant_id') != self.store.binding['tenant_id']
-                    or identity.get('agent_scope_key') != self.store.binding['principal']):
-                raise OutboxError('outbox fresh credential identity differs')
+            self._verify_identity(self.transport.call('GET', '/api/v1/memory/whoami', deadline=deadline))
             for row in rows:
                 try:
                     if perf_counter() >= deadline: raise OutboxError('outbox recovery deadline exceeded')
@@ -290,13 +295,41 @@ class RecoveryWorker:
         return result
 
 
+    def _verify_identity(self,identity):
+        self.validate_identity(self.store.binding,identity)
+
+    @staticmethod
+    def validate_identity(binding,identity):
+        credential=binding['credential']
+        observed_id=identity.get('credential_id')
+        if credential['mode']=='mcp_oauth' and observed_id is None:
+            observed_id=identity.get('mcp_client_id')  # Existing server-owned field, not a scope/header fallback.
+        if (identity.get('tenant_id')!=binding['tenant_id'] or identity.get('auth_mode')!=credential['mode']
+                or observed_id!=credential['id']):
+            raise OutboxError('outbox fresh credential identity differs')
+        if credential['mode']=='mcp_oauth':
+            if identity.get('mcp_client_id')!=credential['id'] or identity.get('mcp_client_key')!=credential['client_key']:
+                raise OutboxError('outbox registered OAuth principal differs')
+            if binding['scope']['type']=='agent' and identity.get('agent_scope_key')!=binding['scope']['key']:
+                raise OutboxError('outbox OAuth agent scope differs')
+        scopes=identity.get('allowed_scopes')
+        if not isinstance(scopes,list) or not {'read','write','write:'+binding['scope']['type']}.issubset(scopes):
+            raise OutboxError('outbox authenticated scope grant insufficient')
+
+
 class RestTransport:
     """Finite HTTPS subprocess requests reuse the approved plugin transport only."""
-    def __init__(self, binding, api_key, *, ca_file=None):
+    def __init__(self, binding, api_key=None, *, credentials=None, ca_file=None):
         self._binding_text = canonical(validate_binding(binding))
-        if not api_key or '\n' in api_key or '\r' in api_key:
-            raise OutboxError('outbox external API credential unavailable')
-        self._api_key, self.ca_file = api_key, ca_file
+        if __package__:
+            from .credentials import ApiKeyCredentials
+        else:
+            from credentials import ApiKeyCredentials
+        self._credentials=credentials if credentials is not None else ApiKeyCredentials(self.binding,api_key)
+        if self._credentials.binding!=self.binding:
+            raise OutboxError('outbox credential source mode/origin binding differs')
+        self._authorized_headers=None
+        self.ca_file=ca_file
 
     @property
     def binding(self):
@@ -312,12 +345,21 @@ class RestTransport:
                 or method == 'POST' and path == '/api/v1/memory/entries'):
             raise OutboxError('outbox REST action invalid')
         scope = self.binding['scope']
-        headers = (('X-API-Key', self._api_key),)
+        headers=tuple(self._credentials.headers(deadline).items())
+        headers+=(('X-MCP-Scopes',','.join(('read','write','write:'+scope['type']))),)
         if scope['type'] == 'agent': headers += (('X-Palace-Agent-Scope-Key', scope['key']),)
         snapshot = CheckpointSnapshot('', self.binding['tenant_id'], scope['type'], scope.get('key'),
                                       self.binding['origin'], headers, 5.0, self.ca_file)
         try:
-            return CheckpointMixin()._checkpoint_request_json(method, path, payload,
-                                                              snapshot=snapshot, deadline=deadline)
+            transport=CheckpointMixin()
+            if path!='/api/v1/memory/whoami' and self._authorized_headers!=headers:
+                identity=transport._checkpoint_request_json('GET','/api/v1/memory/whoami',snapshot=snapshot,deadline=deadline)
+                RecoveryWorker.validate_identity(self.binding,identity)
+                self._authorized_headers=headers
+            result=transport._checkpoint_request_json(method,path,payload,snapshot=snapshot,deadline=deadline)
+            if path=='/api/v1/memory/whoami':
+                RecoveryWorker.validate_identity(self.binding,result)
+                self._authorized_headers=headers
+            return result
         except Exception:
             raise OutboxError('outbox bounded authenticated request failed') from None

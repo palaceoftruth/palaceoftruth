@@ -47,9 +47,9 @@ Cron/subagent automatic suppression and cron explicit-tool policy are preserved.
 
 The storage leaf must be directly under the actual profile home supplied by official initialize(hermes_home=...). No hardcoded production home or cross-profile configured path is accepted. Once active, mode/binding/home cannot silently change. Directory must be owner UID mode0700; DB/journal/worker lock must be regular, owner UID mode0600 and single-link. Symlink paths and insecure existing modes are rejected, not repaired. Same UID and root remain trusted: permissions are not encryption or protection from the owner.
 
-Binding is immutable non-secret expected intent: exact HTTPS origin, tenant UUID, principal (whoami agent_scope_key), and explicit scope policy. It is NOT authenticated authorization at capture time. Every recovery batch first reads whoami using fresh externally supplied credentials and matches tenant/principal. Exact stored scope is revalidated before replay; backend POST/receipt authorization remains authoritative. Redirects (including HTTPS downgrade and cross-origin forwarding) are forbidden. TLS verification and bounded response size use the unchanged approved checkpoint child transport.
+Binding freezes exact HTTPS origin, tenant UUID, server-owned credential/client UUID and credential mode separately from explicit scope intent. API-key agent_scope_key is legitimately null; a caller scope header is never identity. Fresh whoami verifies authenticated credential identity and granted scopes before replay, and again after OAuth refresh. Backend POST/receipt authorization remains authoritative. See SAR-1402-outbox-auth-repair.md for the actual auth-route evidence and compatibility limits. Redirects/downgrade are forbidden.
 
-Provider auth headers/client secrets are not persisted. Worker reads PALACE_OUTBOX_API_KEY from its own supplied environment, never profile dotenv, command-line credential args or the outbox. Only canonical receipt fields are persisted; extra server data/credential-shaped fields are not retained. Captured user content may itself be sensitive: there is NO promise of universal secret redaction or encrypted-at-rest storage. File permissions and data-minimization remain required.
+Provider auth headers/client secrets are not persisted. Standalone recovery uses injected current credentials; the documented plugin CLI uses the public profile secret reader. OAuth client-credentials acquisition/expiry refresh is memory-only with no API-key fallback. Neither path reads dotenv or accepts credential arguments. Only canonical receipt fields are persisted. Captured user content may itself be sensitive; universal redaction/encryption is not claimed.
 
 ## Time and crash limits
 
@@ -62,7 +62,7 @@ No profile is changed by this candidate. Independent tests use isolated profiles
 Finite source command (not installed or scheduled):
     python scripts/recover_hermes_outbox.py --directory <isolated-outbox> --binding-file <non-secret-binding.json> --max-jobs 10 --timeout 10
 
-No service unit, cron, gateway factory replacement or live worker is installed. Existing plugin/package version is not bumped into a release. API-key recovery is the only implemented external credential mode; OAuth-vault recovery is not claimed.
+No service unit, cron, gateway factory replacement or live worker is installed. Existing plugin/package version is not bumped into a release. Both explicit API-key and OAuth-only recovery are implemented and tested with fixture credentials. Production credential validity, deployment and vault integration beyond the existing public profile secret reader are not claimed.
 
 ## Acceptance and exclusions
 
