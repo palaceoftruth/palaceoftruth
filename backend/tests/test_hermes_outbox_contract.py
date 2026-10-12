@@ -131,18 +131,18 @@ def test_profile_home_and_activated_mode_cannot_silently_change(tmp_path):
     m,p,binding=setup(tmp_path);store=admit(p)
     with pytest.raises(m.OutboxError):p.initialize('other',hermes_home=str(tmp_path/'other-profile'))
     p._config['outbox_prototype_enabled']=False
-    p.sync_turn('not legacy fallback','answer')
+    with pytest.raises(m.OutboxError):p.sync_turn('not legacy fallback','answer')
     assert p.flush_pending(timeout=1) and p.last_outbox_receipt is None
-    assert p.shutdown_drain_state['failed_writes']==1
+    assert p.shutdown_drain_state['failed_writes']==0  # Rejected before native admission.
     assert len(store.records())==1
 
 
 def test_outside_profile_storage_is_rejected_before_writing(tmp_path):
     m,p,binding=setup(tmp_path)
     p._config['outbox_directory']=str(tmp_path.parent/'outside-profile')
-    p.sync_turn('outside','outside')
+    with pytest.raises(m.OutboxError):p.sync_turn('outside','outside')
     assert p.flush_pending(timeout=1) and p._outbox_store is None
-    assert p.shutdown_drain_state['failed_writes']==1
+    assert p.shutdown_drain_state['failed_writes']==0
 
 
 def test_real_initialize_contract_keeps_cron_explicit_tools_only(tmp_path,monkeypatch):

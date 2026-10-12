@@ -19,12 +19,13 @@ def main():
     # Own plugin's pure-stdlib modules, not Hermes internals or a provider factory.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'third_party_plugins/hermes/memory/palaceoftruth'))
     from outbox import OutboxStore, RecoveryWorker, RestTransport
+    from credentials import from_environment
     try:
         binding = json.loads(args.binding_file.read_text())
         # Never source a host/profile dotenv; no auth on disk, command args or logs.
-        credential = os.environ.get('PALACE_OUTBOX_API_KEY', '')
         store = OutboxStore(args.directory, binding, create=False)
-        result = RecoveryWorker(store, RestTransport(binding, credential, ca_file=args.ca_file)).run(
+        credential = from_environment(store.binding, ca_file=args.ca_file)
+        result = RecoveryWorker(store, RestTransport(store.binding, credentials=credential, ca_file=args.ca_file)).run(
             max_jobs=args.max_jobs, timeout=args.timeout)
         print(json.dumps(result, sort_keys=True))
         return 2 if result['failed'] else 0

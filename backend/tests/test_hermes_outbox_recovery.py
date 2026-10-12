@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from tests.test_hermes_outbox import setup, admit, Backend, TENANT, JOB, ITEM, ROOT
+from tests.test_hermes_outbox import setup, admit, Backend, TENANT, JOB, ITEM, ROOT, fixture_identity
 
 
 def test_crash_before_sqlite_commit_does_not_ack_or_charge(tmp_path):
@@ -41,7 +41,7 @@ spec=importlib.util.spec_from_file_location('outbox_fixture',sys.argv[1]);m=impo
 b=json.loads(sys.argv[3]);s=m.OutboxStore(sys.argv[2],b)
 class Backend:
  def call(self,method,path,payload=None,*,deadline):
-  if path.endswith('/whoami'):return {'tenant_id':b['tenant_id'],'agent_scope_key':b['principal']}
+  if path.endswith('/whoami'):return {'tenant_id':b['tenant_id'],'auth_mode':'api_key','credential_id':b['credential']['id'],'agent_scope_key':None,'allowed_scopes':['read','write','write:agent']}
   if method=='POST':
    with open(sys.argv[4],'w') as f:json.dump({'keys':[payload['idempotency_key']],'calls':1},f);f.flush();os.fsync(f.fileno())
    os._exit(75)
@@ -103,7 +103,7 @@ def server(tmp_path, *, redirect=None, slow=False):
                 self.send_response(302);self.send_header('Location',redirect);self.end_headers();return
             if slow: time.sleep(.3)
             if self.path.endswith('/whoami'):
-                return self.respond({'tenant_id':TENANT,'agent_scope_key':'barbara'})
+                return self.respond(fixture_identity({'tenant_id':TENANT,'credential':{'mode':'api_key','id':'44444444-4444-4444-8444-444444444444'},'scope':{'type':'agent','key':'barbara'}}))
             p=payloads[-1]
             self.respond({'durable':True,'tenant_id':TENANT,'scope':p['scope'],'job_id':JOB,'source_item_id':ITEM,
                           'idempotency_key':p['idempotency_key'],'body_sha256':hashlib.sha256(p['body'].encode()).hexdigest()})
