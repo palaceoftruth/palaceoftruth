@@ -17,10 +17,31 @@ def main():
     parser.add_argument('--ca-file', default=None)
     args = parser.parse_args()
     # Own plugin's pure-stdlib modules, not Hermes internals or a provider factory.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'third_party_plugins/hermes/memory/palaceoftruth'))
-    from outbox import OutboxStore, RecoveryWorker, RestTransport
-    from credentials import from_environment
     try:
+        root = Path(__file__).resolve().parents[1]
+        packaged = root / 'palaceoftruth'
+        modules = packaged if packaged.exists() else root / 'third_party_plugins/hermes/memory/palaceoftruth'
+        # Explicit adjacent layout only. Never search cwd/PYTHONPATH for replacements.
+        import importlib.util
+        import types
+        required = ('outbox', 'credentials', 'checkpoint')
+        if any(not (modules / (name + '.py')).is_file() for name in required):
+            raise RuntimeError('recovery package incomplete')
+        namespace = '_palace_recovery_artifact'
+        package = types.ModuleType(namespace)
+        package.__path__ = [str(modules)]
+        sys.modules[namespace] = package
+        loaded = {}
+        for name in required:
+            spec = importlib.util.spec_from_file_location(namespace + '.' + name, modules / (name + '.py'))
+            if spec is None or spec.loader is None:
+                raise RuntimeError('recovery package unavailable')
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            loaded[name] = module
+        OutboxStore, RecoveryWorker, RestTransport = (getattr(loaded['outbox'], name) for name in ('OutboxStore', 'RecoveryWorker', 'RestTransport'))
+        from_environment = loaded['credentials'].from_environment
         binding = json.loads(args.binding_file.read_text())
         # Never source a host/profile dotenv; no auth on disk, command args or logs.
         store = OutboxStore(args.directory, binding, create=False)

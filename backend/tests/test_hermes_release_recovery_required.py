@@ -56,7 +56,18 @@ def test_packaged_normal_loader_recovery_required(tmp_path, revision):
     suites = list(ET.parse(receipt).getroot().iter('testsuite'))
     counts = {key: sum(int(s.get(key, 0)) for s in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
     assert counts == {'tests': 70, 'failures': 0, 'errors': 0, 'skipped': 0}, counts
+    env['SAR1402_EXTRACTED_PACKAGE'] = str(tmp_path / 'package')
+    artifact_receipt = tmp_path / 'artifact-cli.xml'
+    artifact_result = subprocess.run([sys.executable, '-m', 'pytest',
+        str(ROOT / 'backend/tests/artifact_cli_acceptance.py'), '-q', '-o', 'addopts=',
+        '--junitxml=' + str(artifact_receipt)], env=env, cwd=tmp_path,
+        capture_output=True, text=True, timeout=90)
+    assert artifact_result.returncode == 0, artifact_result.stdout + artifact_result.stderr
+    artifact_suites = list(ET.parse(artifact_receipt).getroot().iter('testsuite'))
+    artifact_counts = {key: sum(int(s.get(key, 0)) for s in artifact_suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+    assert artifact_counts == {'tests': 7, 'failures': 0, 'errors': 0, 'skipped': 0}, artifact_counts
     assert not subprocess.check_output(['git', '-C', str(host), 'status', '--porcelain'], text=True).strip()
     # Visible under the unchanged hosted pytest -q lane, no secret-bearing output.
     import warnings
     warnings.warn('REVISED_RECOVERY_RECEIPT ' + json.dumps({'host': revision, 'package': inventory['archive_sha256'], **counts}, sort_keys=True), UserWarning)
+    warnings.warn('ARTIFACT_ONLY_CLI_RECEIPT ' + json.dumps({'host': revision, 'package': inventory['archive_sha256'], **artifact_counts}, sort_keys=True), UserWarning)
