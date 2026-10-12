@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import stat
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
@@ -41,6 +42,15 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def validate_tenant(value):
+    # Backend tenant columns are Text and authenticated identity is str, not UUID.
+    # This finite client representation policy rejects unsafe values; never repairs them.
+    if (not isinstance(value, str) or not 1 <= len(value) <= 256
+            or any(c.isspace() or unicodedata.category(c).startswith('C') for c in value)):
+        raise OutboxError('outbox tenant identifier invalid')
+    return value
+
+
 def validate_binding(binding):
     if not isinstance(binding, dict) or set(binding) != {'origin', 'tenant_id', 'credential', 'scope'}:
         raise OutboxError('outbox binding fields invalid')
@@ -49,8 +59,7 @@ def validate_binding(binding):
     if (url.scheme != 'https' or not url.hostname or url.username or url.password
             or url.path or url.query or url.fragment or value['origin'].endswith('/')):
         raise OutboxError('outbox requires exact HTTPS origin')
-    if not re.fullmatch(UUID, str(value['tenant_id'])):
-        raise OutboxError('outbox tenant/principal invalid')
+    validate_tenant(value['tenant_id'])
     credential=value['credential']
     if not isinstance(credential,dict) or credential.get('mode') not in {'api_key','mcp_oauth'}:
         raise OutboxError('outbox explicit credential mode missing')
@@ -115,6 +124,8 @@ def secure(path, *, directory=False):
 def canonical_receipt(payload, receipt, accepted=None):
     if not isinstance(receipt, dict) or receipt.get('durable') is not True:
         raise OutboxError('outbox canonical durable receipt absent')
+    validate_tenant(payload.get('tenant_id'))
+    validate_tenant(receipt.get('tenant_id'))
     expected = {'tenant_id': payload['tenant_id'], 'scope': payload['scope'],
                 'idempotency_key': payload['idempotency_key'],
                 'body_sha256': hashlib.sha256(payload['body'].encode()).hexdigest()}
@@ -300,6 +311,8 @@ class RecoveryWorker:
 
     @staticmethod
     def validate_identity(binding,identity):
+        validate_binding(binding)
+        validate_tenant(identity.get('tenant_id'))
         credential=binding['credential']
         observed_id=identity.get('credential_id')
         if credential['mode']=='mcp_oauth' and observed_id is None:

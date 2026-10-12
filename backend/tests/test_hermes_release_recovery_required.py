@@ -65,9 +65,18 @@ def test_packaged_normal_loader_recovery_required(tmp_path, revision):
     assert artifact_result.returncode == 0, artifact_result.stdout + artifact_result.stderr
     artifact_suites = list(ET.parse(artifact_receipt).getroot().iter('testsuite'))
     artifact_counts = {key: sum(int(s.get(key, 0)) for s in artifact_suites) for key in ('tests', 'failures', 'errors', 'skipped')}
-    assert artifact_counts == {'tests': 7, 'failures': 0, 'errors': 0, 'skipped': 0}, artifact_counts
+    assert artifact_counts == {'tests': 13, 'failures': 0, 'errors': 0, 'skipped': 0}, artifact_counts
+    tenant_receipt = tmp_path / 'tenant.xml'
+    tenant_result = subprocess.run([sys.executable, '-m', 'pytest', str(ROOT / 'backend/tests/tenant_acceptance.py'),
+        '-q', '-o', 'addopts=', '--junitxml=' + str(tenant_receipt)], env=env, cwd=tmp_path,
+        capture_output=True, text=True, timeout=60)
+    assert tenant_result.returncode == 0, tenant_result.stdout + tenant_result.stderr
+    tenant_suites = list(ET.parse(tenant_receipt).getroot().iter('testsuite'))
+    tenant_counts = {key: sum(int(s.get(key, 0)) for s in tenant_suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+    assert tenant_counts == {'tests': 30, 'failures': 0, 'errors': 0, 'skipped': 0}, tenant_counts
     assert not subprocess.check_output(['git', '-C', str(host), 'status', '--porcelain'], text=True).strip()
     # Visible under the unchanged hosted pytest -q lane, no secret-bearing output.
     import warnings
     warnings.warn('REVISED_RECOVERY_RECEIPT ' + json.dumps({'host': revision, 'package': inventory['archive_sha256'], **counts}, sort_keys=True), UserWarning)
     warnings.warn('ARTIFACT_ONLY_CLI_RECEIPT ' + json.dumps({'host': revision, 'package': inventory['archive_sha256'], **artifact_counts}, sort_keys=True), UserWarning)
+    warnings.warn('OPAQUE_TENANT_RECEIPT ' + json.dumps({'host': revision, **tenant_counts}, sort_keys=True), UserWarning)
