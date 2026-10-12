@@ -71,6 +71,8 @@ class MemoryWhoAmIResponse(BaseModel):
     status: Literal["ok"] = "ok"
     tenant_id: str
     auth_mode: str | None = None
+    # Server-owned credential/client principal, not a requested scope header.
+    credential_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     mcp_client_id: uuid.UUID | None = None
     mcp_client_key: str | None = None
     agent_scope_key: str | None = None
