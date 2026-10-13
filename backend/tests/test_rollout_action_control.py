@@ -44,19 +44,42 @@ def _chart_tar(version="0.1.610"):
     return buf.getvalue()
 
 
-class FakeChartRunner:
-    """Fake skopeo/helm: writes the synthetic chart tar and renders one image."""
+def _oci_manifest(layer_digest, layer_media_type="application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                  config_digest="sha256:" + "c" * 64, extra_layer=None):
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": 2},
+        "layers": [{"mediaType": layer_media_type, "digest": layer_digest, "size": 1}],
+    }
+    if extra_layer:
+        manifest["layers"].append(extra_layer)
+    return json.dumps(manifest, sort_keys=True).encode()
 
-    def __init__(self, tar_bytes, version="0.1.610", image=IMAGE_DIGEST):
+
+class FakeChartRunner:
+    """Fake skopeo/helm: writes a real OCI dir (manifest+config+layer)."""
+
+    def __init__(self, tar_bytes, version="0.1.610", image=IMAGE_DIGEST,
+                 layer_media_type="application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                 extra_layer=None):
         self.tar_bytes = tar_bytes
         self.version = version
         self.image = image
+        self.layer_media_type = layer_media_type
+        self.extra_layer = extra_layer
+
+    def manifest_bytes(self):
+        return _oci_manifest("sha256:" + hashlib.sha256(self.tar_bytes).hexdigest(),
+                             self.layer_media_type, extra_layer=self.extra_layer)
 
     def __call__(self, argv, *, timeout=120):
         if argv[0] == "skopeo":
             outdir = Path(argv[-1].split(":", 1)[1])
             outdir.mkdir(parents=True, exist_ok=True)
-            (outdir / "chart.tar").write_bytes(self.tar_bytes)
+            (outdir / "manifest.json").write_bytes(self.manifest_bytes())
+            (outdir / ("c" * 64)).write_bytes(b"cfg")
+            (outdir / ("f" * 64)).write_bytes(self.tar_bytes)
             return ""
         if argv[0] == "helm" and argv[1] == "template":
             return (
@@ -105,11 +128,21 @@ class MockReader:
 
 
 def _make_env(tmp_path, **over):
+    import yaml
     values_path = tmp_path / VALUES_REL
     values_path.parent.mkdir(parents=True, exist_ok=True)
-    values_text = "spec:\n  values:\n    image:\n      backendDigest: " + IMAGE_DIGEST + "\n"
+    values_text = (
+        "apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
+        "metadata:\n  name: palace-sarvent\nspec:\n  values:\n    image:\n      backendDigest: "
+        + IMAGE_DIGEST + "\n"
+    )
     values_path.write_text(values_text)
+    spec_values = yaml.safe_load(values_text)["spec"]["values"]
+    canonical_values = yaml.safe_dump(spec_values, sort_keys=True, default_flow_style=False)
+    values_digest = "sha256:" + hashlib.sha256(canonical_values.encode()).hexdigest()
     tar = _chart_tar()
+    runner = FakeChartRunner(tar)
+    manifest_digest = "sha256:" + hashlib.sha256(runner.manifest_bytes()).hexdigest()
     doc = {
         "schema_version": 1,
         "action_id": "sar1402-forward-01",
@@ -121,20 +154,20 @@ def _make_env(tmp_path, **over):
         "release_name": "palace-sarvent",
         "expected_current_revision": 474,
         "chart": {"oci": g.ALLOWED_CHART_OCI, "version": "0.1.610",
-                  "manifest_digest": "sha256:" + "9" * 64,
+                  "manifest_digest": manifest_digest,
                   "layer_digest": "sha256:" + hashlib.sha256(tar).hexdigest()},
         "image_digest": IMAGE_DIGEST,
         "values": {"path": VALUES_REL,
-                   "blob_sha256": hashlib.sha256(values_text.encode()).hexdigest(),
-                   "digest": "sha256:" + hashlib.sha256(values_text.encode()).hexdigest()},
-        "config_digest": "sha256:" + "3" * 64,
+                   "source_sha256": hashlib.sha256(values_text.encode()).hexdigest(),
+                   "digest": values_digest},
+        "config_digest": values_digest,
         "flux_suspend": True,
         "starts_at": (NOW - timedelta(minutes=1)).isoformat(),
         "expires_at": (NOW + timedelta(minutes=30)).isoformat(),
         "deadline_seconds": 30,
     }
     doc.update(over)
-    return doc, g.sha256_json(doc), FakeChartRunner(tar)
+    return doc, g.sha256_json(doc), runner
 
 
 def _manifest(tmp_path, **over):
@@ -463,3 +496,193 @@ def test_child_output_never_returned(tmp_path):
     result = g.default_invoker([str(script)], deadline_seconds=5, output_path=str(out))
     assert result == {"returncode": 0}
     assert out.stat().st_mode & 0o777 == 0o600
+
+
+# --- RESIDUAL inverse safety (review test_repair_residuals R1-R5) ------------
+
+import yaml  # noqa: E402
+
+
+def test_inverse_R1_live_reader_accepts_valid_40hex_sha1(monkeypatch):
+    lr = g.LiveReader()
+    sha1 = "a" * 40
+    monkeypatch.setattr(lr, "_run", lambda argv, timeout=60: f"{sha1}\trefs/heads/main\n")
+    assert lr.canonical_repo_revision(g.CANONICAL_REPO_URL, "main") == "main@sha1:" + sha1
+    monkeypatch.setattr(lr, "_run", lambda argv, timeout=60: sha1 + "\n")
+    assert lr.working_tree_revision("/repo") == "main@sha1:" + sha1
+
+
+def test_inverse_R2_values_are_extracted_spec_values(tmp_path):
+    text = ("apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
+            "metadata:\n  name: palace-sarvent\nspec:\n  values:\n    x: 1\n")
+    rel = tmp_path / "release.yaml"
+    rel.write_text(text)
+    canonical = yaml.safe_dump({"x": 1}, sort_keys=True, default_flow_style=False)
+    binding = {"path": VALUES_REL,
+               "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
+               "digest": "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()}
+    got = g.read_gitops_values(str(rel), binding)
+    assert "kind: HelmRelease" not in got and "apiVersion:" not in got
+    assert yaml.safe_load(got) == {"x": 1}
+
+
+def test_inverse_R3_layer_selected_by_media_type(tmp_path):
+    tar = _chart_tar()
+    runner = FakeChartRunner(tar)          # config blob 'c'*64 sorts before layer 'f'*64
+    doc, digest, _ = _make_env(tmp_path)
+    manifest = g.ActionManifest.load(
+        _write_manifest(tmp_path, doc, digest), digest, now=NOW)
+    chart_dir = g.verify_oci_chart(manifest.doc["chart"], str(tmp_path / "wd"), runner=runner)
+    assert Path(chart_dir, "Chart.yaml").exists()
+
+
+def test_inverse_R3_duplicate_chart_layer_fails_closed(tmp_path):
+    tar = _chart_tar()
+    extra = {"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+             "digest": "sha256:" + "d" * 64, "size": 1}
+    runner = FakeChartRunner(tar, extra_layer=extra)
+    doc, digest, _ = _make_env(tmp_path)
+    manifest = g.ActionManifest.load(_write_manifest(tmp_path, doc, digest), digest, now=NOW)
+    with pytest.raises(g.ControlError):
+        g.verify_oci_chart(manifest.doc["chart"], str(tmp_path / "wd"), runner=runner)
+
+
+def test_inverse_R4_version_exact_match_only(tmp_path):
+    tar = _chart_tar(version="0.1.610")
+    runner = FakeChartRunner(tar)
+    doc, digest, _ = _make_env(tmp_path)
+    manifest = g.ActionManifest.load(_write_manifest(tmp_path, doc, digest), digest, now=NOW)
+    # substring "0.1.61" must be rejected against a real "0.1.610" chart
+    with pytest.raises(g.ControlError):
+        g.verify_oci_chart(dict(manifest.doc["chart"], version="0.1.61"),
+                           str(tmp_path / "wd"), runner=runner)
+
+
+def test_inverse_R5_tar_prefix_uses_separator():
+    src = SCRIPT.read_text()
+    assert "root + os.sep" in src
+
+
+def test_inverse_R5_sibling_prefix_dir_rejected(tmp_path):
+    dest = tmp_path / "extract"
+    tf = tmp_path / "evil.tar"
+    with tarfile.open(tf, mode="w") as archive:
+        data = b"pwned"
+        info = tarfile.TarInfo("../extract-evil/pwned")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    with pytest.raises(g.ControlError):
+        g._safe_extract_tar(tf, dest)
+
+
+# --- host CLI integration with fake executables (real LiveReader) -----------
+
+def _write_manifest(tmp_path, doc, digest):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def _fake_bin(tmp_path, tar_bytes, commit_sha="a" * 40):
+    """Write fake git/kubectl/helm/skopeo executables that a real LiveReader calls."""
+    import base64
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    manifest_b64 = base64.b64encode(_oci_manifest("sha256:" + hashlib.sha256(tar_bytes).hexdigest())).decode()
+    tar_b64 = base64.b64encode(tar_bytes).decode()
+    tool = bindir / "tool.py"
+    tool.write_text(textwrap.dedent(f'''
+        import base64, json, sys
+        argv = sys.argv[1:]
+        name = argv[0]
+        tar = base64.b64decode({tar_b64!r})
+        manifest = base64.b64decode({manifest_b64!r})
+        if name == "git" and argv[1] == "ls-remote":
+            print("{commit_sha}\\trefs/heads/main"); sys.exit(0)
+        if name == "git" and "rev-parse" in argv:
+            print("{commit_sha}"); sys.exit(0)
+        if name == "kubectl" and "config" in argv:
+            print("https://10.13.37.50"); sys.exit(0)
+        if name == "kubectl" and "namespaces" in " ".join(argv) and "kube-system" in argv:
+            print("cluster-uid-1"); sys.exit(0)
+        if name == "kubectl" and "kube-system" in argv:
+            print("cluster-uid-1"); sys.exit(0)
+        if name == "kubectl" and "helmrelease" in argv:
+            print("true"); sys.exit(0)
+        if name == "kubectl" and "jobs" in argv:
+            print(""); sys.exit(0)
+        if name == "helm" and "history" in argv:
+            print(json.dumps([{{"revision": 474, "status": "failed"}}])); sys.exit(0)
+        if name == "helm" and "template" in argv:
+            print("apiVersion: apps/v1\\nkind: Deployment\\nmetadata:\\n  name: palaceoftruth-backend\\n"
+                  "spec:\\n  template:\\n    spec:\\n      containers:\\n"
+                  "      - name: backend\\n        image: ghcr.io/palaceoftruth/palaceoftruth/backend@{IMAGE_DIGEST}\\n")
+            sys.exit(0)
+        if name == "helm" and "upgrade" in argv:
+            sys.exit(0)
+        if name == "skopeo":
+            out = argv[-1].split(":", 1)[1]
+            import pathlib
+            d = pathlib.Path(out); d.mkdir(parents=True, exist_ok=True)
+            (d / "manifest.json").write_bytes(manifest)
+            (d / ("f" * 64)).write_bytes(tar)
+            sys.exit(0)
+        sys.exit(0)
+    '''))
+    wrapper = bindir / "dispatch.sh"
+    wrapper.write_text('#!/bin/sh\nexec python3 "$(dirname "$0")/tool.py" "$(basename "$0")" "$@"\n')
+    wrapper.chmod(0o755)
+    for name in ("git", "kubectl", "helm", "skopeo"):
+        link = bindir / name
+        link.write_text('#!/bin/sh\nexec python3 "$(dirname "$0")/tool.py" ' + name + ' "$@"\n')
+        link.chmod(0o755)
+    return bindir, tool
+
+
+def test_host_cli_end_to_end_with_real_reader(tmp_path, monkeypatch):
+    """Runs scripts/rollout_fence.py 'run' with a real LiveReader over fake
+    executables. No real cluster/Helm. Proves the CLI + reader + fence end to end."""
+    values_path = tmp_path / VALUES_REL
+    values_path.parent.mkdir(parents=True, exist_ok=True)
+    values_text = ("apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
+                   "metadata:\n  name: palace-sarvent\nspec:\n  values:\n    image:\n      backendDigest: "
+                   + IMAGE_DIGEST + "\n")
+    values_path.write_text(values_text)
+    spec_values = yaml.safe_load(values_text)["spec"]["values"]
+    canonical = yaml.safe_dump(spec_values, sort_keys=True, default_flow_style=False)
+    values_digest = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    tar = _chart_tar()
+    bindir, _ = _fake_bin(tmp_path, tar)
+    runner = FakeChartRunner(tar)
+    manifest_digest = "sha256:" + hashlib.sha256(runner.manifest_bytes()).hexdigest()
+    doc = {
+        "schema_version": 1, "action_id": "sar1402-e2e-01", "phase": "forward",
+        "owner": {"host_id": HOST, "uid": os.getuid(), "owner_id": "barbara"},
+        "repo": {"url": g.CANONICAL_REPO_URL, "canonical_revision": "main@sha1:" + "a" * 40},
+        "kube": {"context": "k3s-lab", "cluster_uid": "cluster-uid-1", "api_origin": "https://10.13.37.50"},
+        "namespace": "palace-sarvent", "release_name": "palace-sarvent",
+        "expected_current_revision": 474,
+        "chart": {"oci": g.ALLOWED_CHART_OCI, "version": "0.1.610",
+                  "manifest_digest": manifest_digest,
+                  "layer_digest": "sha256:" + hashlib.sha256(tar).hexdigest()},
+        "image_digest": IMAGE_DIGEST,
+        "values": {"path": VALUES_REL,
+                   "source_sha256": hashlib.sha256(values_text.encode()).hexdigest(),
+                   "digest": values_digest},
+        "config_digest": values_digest, "flux_suspend": True,
+        "starts_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "deadline_seconds": 30,
+    }
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(doc))
+    digest = g.sha256_json(doc)
+    entry = ROOT / "scripts/rollout_fence.py"
+    env = dict(os.environ)
+    env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+    r = subprocess.run([sys.executable, str(entry), "run", "--manifest", str(mpath),
+                        "--manifest-sha256", digest, "--store", str(tmp_path / "store"),
+                        "--workdir", str(tmp_path / "wd"), "--repo-dir", str(tmp_path)],
+                       capture_output=True, text=True, cwd=str(tmp_path), env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["slot"]

@@ -50,6 +50,11 @@ MIN_TIMEOUT_SECONDS = 30
 HEX64 = re.compile(r"[0-9a-f]{64}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 GIT_REV = re.compile(r"main@sha1:[0-9a-f]{40}")
+GIT_SHA1 = re.compile(r"[0-9a-f]{40}")
+CHART_LAYER_MEDIA_TYPES = (
+    "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+)
 
 
 class ControlError(RuntimeError):
@@ -124,13 +129,13 @@ class LiveReader:
 
     def canonical_repo_revision(self, url: str, reference: str) -> str:
         out = self._run(["git", "ls-remote", url, reference]).strip().splitlines()
-        if len(out) != 1 or not HEX64.fullmatch(out[0].split()[0]):
+        if len(out) != 1 or not GIT_SHA1.fullmatch(out[0].split()[0]):
             raise ControlError("canonical remote revision unreadable")
         return "main@sha1:" + out[0].split()[0]
 
     def working_tree_revision(self, repo_dir: str) -> str:
         head = self._run(["git", "-C", repo_dir, "rev-parse", "HEAD"]).strip()
-        if not HEX64.fullmatch(head):
+        if not GIT_SHA1.fullmatch(head):
             raise ControlError("working tree revision unreadable")
         return "main@sha1:" + head
 
@@ -260,12 +265,14 @@ class ActionManifest:
             raise ControlError("chart OCI and layer digests required")
 
         values = d["values"]
-        if not isinstance(values, dict) or set(values) != {"path", "blob_sha256", "digest"}:
+        if not isinstance(values, dict) or set(values) != {"path", "source_sha256", "digest"}:
             raise ControlError("values binding schema mismatch")
         if values["path"] not in CANONICAL_VALUES_PATHS:
             raise ControlError("values path must be an approved canonical path")
-        if not HEX64.fullmatch(str(values["blob_sha256"])) or not DIGEST.fullmatch(str(values["digest"])):
+        if not HEX64.fullmatch(str(values["source_sha256"])) or not DIGEST.fullmatch(str(values["digest"])):
             raise ControlError("values digest required")
+        if values["digest"] != d["config_digest"]:
+            raise ControlError("config digest must equal the extracted values digest")
 
         for key in ("namespace", "release_name", "action_id"):
             value = d[key]
@@ -377,11 +384,46 @@ def _safe_extract_tar(path: Path, dest: Path) -> None:
     with tarfile.open(path) as tf:
         for member in tf.getmembers():
             target = str((dest / member.name).resolve())
-            if not target.startswith(root):
+            # Require a real path separator so a sibling dir sharing the prefix
+            # (…/extract-evil) can never pass the check.
+            if target != root and not target.startswith(root + os.sep):
                 raise ControlError("unsafe tar member path")
             if member.issym() or member.islnk() or member.isdev():
                 raise ControlError("unsafe tar member type")
         tf.extractall(dest, filter="data")
+
+
+def _select_chart_layer(outdir: Path, chart: dict) -> bytes:
+    """Select the chart layer from the OCI manifest by mediaType descriptor.
+
+    Never by sorted blob filename. Missing or duplicate chart layers fail closed.
+    """
+    manifest_path = outdir / "manifest.json"
+    if not manifest_path.exists():
+        raise ControlError("OCI manifest.json missing")
+    manifest_bytes = manifest_path.read_bytes()
+    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != chart["manifest_digest"]:
+        raise ControlError("OCI manifest digest mismatch")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except ValueError as exc:
+        raise ControlError("OCI manifest unreadable") from exc
+    layers = manifest.get("layers") or []
+    selected = [layer for layer in layers if layer.get("mediaType") in CHART_LAYER_MEDIA_TYPES]
+    if len(selected) != 1:
+        raise ControlError("chart layer descriptor missing or duplicated")
+    descriptor_digest = selected[0].get("digest")
+    blobs = {}
+    for candidate in outdir.iterdir():
+        if candidate.is_file():
+            blobs["sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()] = candidate
+    if descriptor_digest not in blobs:
+        raise ControlError("chart layer blob absent for descriptor digest")
+    if descriptor_digest != chart["layer_digest"]:
+        raise ControlError("chart layer digest mismatch")
+    if descriptor_digest == chart["manifest_digest"]:
+        raise ControlError("manifest digest must differ from layer tar digest")
+    return blobs[descriptor_digest].read_bytes()
 
 
 def verify_oci_chart(chart: dict, workdir: str, *, runner=_default_runner) -> str:
@@ -395,34 +437,57 @@ def verify_oci_chart(chart: dict, workdir: str, *, runner=_default_runner) -> st
     outdir = Path(workdir) / "chart-oci"
     outdir.mkdir(parents=True, exist_ok=True)
     runner(["skopeo", "copy", f"docker://{ref}", f"dir:{outdir}"])
-    blobs = sorted(p for p in outdir.glob("*") if p.is_file())
-    if not blobs:
-        raise ControlError("no OCI blob pulled")
-    layer = blobs[0]
-    digest = "sha256:" + hashlib.sha256(layer.read_bytes()).hexdigest()
-    if digest != chart["layer_digest"]:
-        raise ControlError("chart layer digest mismatch")
-    if digest == chart["manifest_digest"]:
-        raise ControlError("manifest digest must differ from layer tar digest")
+    layer_bytes = _select_chart_layer(outdir, chart)
+    layer = outdir / "chart-layer.tar"
+    layer.write_bytes(layer_bytes)
     extract = Path(workdir) / "chart-extracted"
     _safe_extract_tar(layer, extract)
-    candidates = list(extract.rglob("Chart.yaml"))
-    if not candidates:
+    # Root Chart.yaml only: the chart root, or one directory down. Never a
+    # nested dependency Chart.yaml under charts/.
+    candidates = [extract / "Chart.yaml"] + [p / "Chart.yaml" for p in extract.iterdir() if p.is_dir()]
+    chart_yaml = next((c for c in candidates if c.exists()), None)
+    if chart_yaml is None:
         raise ControlError("chart metadata missing after extract")
-    chart_yaml = candidates[0]
-    meta = chart_yaml.read_text("utf-8")
-    if f"version: {chart['version']}" not in meta:
+    try:
+        meta = __import__("yaml").safe_load(chart_yaml.read_text("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - any parse failure is fail-closed
+        raise ControlError("chart metadata unreadable") from exc
+    if not isinstance(meta, dict) or str(meta.get("version")) != chart["version"]:
         raise ControlError("extracted chart version does not match manifest")
     return str(chart_yaml.parent)
 
 
-def read_gitops_values(path: str, values: dict) -> str:
+def extract_gitops_values(path: str) -> tuple[str, str]:
+    """Return (original_git_file_sha256, canonical_values_yaml).
+
+    Parses the HelmRelease and extracts ``spec.values``. The raw HelmRelease is
+    NEVER used as Helm values; the extracted mapping is re-emitted as
+    deterministic canonical YAML.
+    """
     text = Path(path).read_text("utf-8")
-    if hashlib.sha256(text.encode("utf-8")).hexdigest() != values["blob_sha256"]:
-        raise ControlError("approved values blob mismatch")
-    if "sha256:" + hashlib.sha256(text.encode()).hexdigest() != values["digest"]:
-        raise ControlError("approved values digest mismatch")
-    return text
+    original_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        doc = __import__("yaml").safe_load(text)
+    except Exception as exc:  # noqa: BLE001
+        raise ControlError("HelmRelease unreadable") from exc
+    if not isinstance(doc, dict) or doc.get("kind") != "HelmRelease":
+        raise ControlError("approved values source must be a HelmRelease")
+    spec = doc.get("spec")
+    if not isinstance(spec, dict) or not isinstance(spec.get("values"), dict):
+        raise ControlError("HelmRelease spec.values missing")
+    canonical_values = __import__("yaml").safe_dump(spec["values"], sort_keys=True, default_flow_style=False)
+    return original_sha256, canonical_values
+
+
+def read_gitops_values(path: str, binding: dict) -> str:
+    """Verify the source hash and return the extracted canonical values YAML."""
+    original_sha256, canonical_values = extract_gitops_values(path)
+    if original_sha256 != binding["source_sha256"]:
+        raise ControlError("approved GitOps source hash mismatch")
+    digest = "sha256:" + hashlib.sha256(canonical_values.encode()).hexdigest()
+    if digest != binding["digest"]:
+        raise ControlError("extracted values digest mismatch")
+    return canonical_values
 
 
 def render_expected_image_digests(chart_dir: str, values_file: str, doc: dict,
@@ -589,8 +654,9 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = ["ControlError", "ActionManifest", "SlotStore", "LiveReader", "run_action",
            "default_invoker", "slot_key", "control_host_id", "sha256_json", "instant",
-           "verify_oci_chart", "read_gitops_values", "render_expected_image_digests",
-           "canonical", "main", "CANONICAL_REPO_URL", "ALLOWED_CHART_OCI"]
+           "verify_oci_chart", "extract_gitops_values", "read_gitops_values",
+           "render_expected_image_digests", "canonical", "main",
+           "CANONICAL_REPO_URL", "ALLOWED_CHART_OCI", "GIT_SHA1"]
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
