@@ -57,6 +57,32 @@ def _oci_manifest(layer_digest, layer_media_type="application/vnd.cncf.helm.char
     return json.dumps(manifest, sort_keys=True).encode()
 
 
+def _canonical_release_text(backend_digest=IMAGE_DIGEST):
+    """The canonical HelmRelease shape: spec.values + the protective postRenderers."""
+    return (
+        "apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
+        "metadata:\n  name: palace-sarvent\nspec:\n"
+        "  values:\n    image:\n      backendDigest: " + backend_digest + "\n"
+        "  postRenderers:\n"
+        "    - kustomize:\n"
+        "        patches:\n"
+        "          - target:\n"
+        "              group: postgresql.cnpg.io\n"
+        "              version: v1\n"
+        "              kind: Cluster\n"
+        "              name: palace-sarvent-postgres\n"
+        "            patch: |\n"
+        "              apiVersion: postgresql.cnpg.io/v1\n"
+        "              kind: Cluster\n"
+        "              metadata:\n"
+        "                name: palace-sarvent-postgres\n"
+        "                annotations:\n"
+        "                  cnpg.io/fencedInstances: '[\"*\"]'\n"
+        "                  cnpg.io/reconciliationLoop: disabled\n"
+        "                  helm.sh/resource-policy: keep\n"
+    )
+
+
 class FakeChartRunner:
     """Fake skopeo/helm: writes a real OCI dir (manifest+config+layer)."""
 
@@ -133,8 +159,27 @@ def _make_env(tmp_path, **over):
     values_path.parent.mkdir(parents=True, exist_ok=True)
     values_text = (
         "apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
-        "metadata:\n  name: palace-sarvent\nspec:\n  values:\n    image:\n      backendDigest: "
-        + IMAGE_DIGEST + "\n"
+        "metadata:\n  name: palace-sarvent\nspec:\n"
+        "  values:\n    image:\n      backendDigest: " + IMAGE_DIGEST + "\n"
+        # The canonical HelmRelease carries the protective postRenderers; the
+        # runner derives its --post-renderer from exactly these.
+        "  postRenderers:\n"
+        "    - kustomize:\n"
+        "        patches:\n"
+        "          - target:\n"
+        "              group: postgresql.cnpg.io\n"
+        "              version: v1\n"
+        "              kind: Cluster\n"
+        "              name: palace-sarvent-postgres\n"
+        "            patch: |\n"
+        "              apiVersion: postgresql.cnpg.io/v1\n"
+        "              kind: Cluster\n"
+        "              metadata:\n"
+        "                name: palace-sarvent-postgres\n"
+        "                annotations:\n"
+        "                  cnpg.io/fencedInstances: '[\"*\"]'\n"
+        "                  cnpg.io/reconciliationLoop: disabled\n"
+        "                  helm.sh/resource-policy: keep\n"
     )
     values_path.write_text(values_text)
     spec_values = yaml.safe_load(values_text)["spec"]["values"]
@@ -644,9 +689,7 @@ def test_host_cli_end_to_end_with_real_reader(tmp_path, monkeypatch):
     executables. No real cluster/Helm. Proves the CLI + reader + fence end to end."""
     values_path = tmp_path / VALUES_REL
     values_path.parent.mkdir(parents=True, exist_ok=True)
-    values_text = ("apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
-                   "metadata:\n  name: palace-sarvent\nspec:\n  values:\n    image:\n      backendDigest: "
-                   + IMAGE_DIGEST + "\n")
+    values_text = _canonical_release_text()
     values_path.write_text(values_text)
     spec_values = yaml.safe_load(values_text)["spec"]["values"]
     canonical = yaml.safe_dump(spec_values, sort_keys=True, default_flow_style=False)

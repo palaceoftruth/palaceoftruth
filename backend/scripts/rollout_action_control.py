@@ -306,6 +306,9 @@ class ActionManifest:
         if not start < end <= start + timedelta(seconds=3600):
             raise ControlError("bounded active window required")
         self.slot = slot_key(d)
+        # Set by run_action once the canonical post-renderer is built.
+        self.post_renderer_path: str | None = None
+        self.post_renderer_sha256: str | None = None
         self.active(now)
 
     @property
@@ -332,7 +335,7 @@ class ActionManifest:
         # Local digest-verified chart, explicit context, explicit values with
         # --reset-values so applied values are chart defaults + the approved
         # file only, never a silent reuse of previous release values.
-        return [
+        argv = [
             binary, "--kube-context", d["kube"]["context"],
             "upgrade", d["release_name"], chart_dir,
             "--namespace", d["namespace"],
@@ -340,6 +343,124 @@ class ActionManifest:
             "--install=false", "--atomic=false", "--wait",
             "--timeout", f"{self.timeout_seconds()}s",
         ]
+        # The canonical HelmRelease postRenderers are NOT applied by a bare
+        # `helm upgrade`; without them the fenced objects are overwritten. Pass
+        # the generated, digest-pinned post-renderer so the rendered output
+        # matches Flux's render.
+        post_renderer = getattr(self, "post_renderer_path", None)
+        if post_renderer:
+            argv += ["--post-renderer", post_renderer]
+        return argv
+
+
+# --- canonical post-renderer ------------------------------------------------
+
+_ALLOWED_PATCH_KEYS = {"target", "patch"}
+_ALLOWED_TARGET_KEYS = {"group", "version", "kind", "name", "namespace"}
+_ALLOWED_PATCH_PATHS = (("metadata", "annotations"), ("spec",))
+
+
+def _postrenderer_script(patches: list, source_sha256: str) -> str:
+    return (
+        "#!/usr/bin/env python3\n"
+        '"""Generated from the canonical HelmRelease spec.postRenderers.\n'
+        f"source_sha256={source_sha256}\n"
+        'Applies ONLY the approved kustomize patches; refuses anything else."""\n'
+        "import sys, yaml\n"
+        f"PATCHES = {patches!r}\n"
+        "def match(doc, t):\n"
+        "    md = doc.get('metadata', {}) or {}\n"
+        "    api = str(doc.get('apiVersion', ''))\n"
+        "    group, _, version = api.partition('/')\n"
+        "    if not version: group, version = '', group\n"
+        "    return (t.get('group', group) == group and t.get('version', version) == version\n"
+        "            and t.get('kind') == doc.get('kind') and t.get('name') == md.get('name')\n"
+        "            and (t.get('namespace') is None or t.get('namespace') == md.get('namespace')))\n"
+        "def apply(doc, body):\n"
+        "    if not isinstance(body, dict) or set(body) - {'apiVersion', 'kind', 'metadata', 'spec'}:\n"
+        "        raise SystemExit('unsupported patch body')\n"
+        "    md = body.get('metadata')\n"
+        "    if md is not None:\n"
+        "        if not isinstance(md, dict) or set(md) - {'name', 'annotations'}:\n"
+        "            raise SystemExit('unsupported metadata patch')\n"
+        "        if 'name' in md and md['name'] != doc.get('metadata', {}).get('name'):\n"
+        "            raise SystemExit('patch renames an object')\n"
+        "        if 'annotations' in md:\n"
+        "            doc.setdefault('metadata', {}).setdefault('annotations', {}).update(md['annotations'])\n"
+        "    spec = body.get('spec')\n"
+        "    if spec is not None:\n"
+        "        if not isinstance(spec, dict) or set(spec) != {'suspend'} or not isinstance(spec['suspend'], bool):\n"
+        "            raise SystemExit('unsupported spec patch')\n"
+        "        doc.setdefault('spec', {})['suspend'] = spec['suspend']\n"
+        "def main():\n"
+        "    docs = [d for d in yaml.safe_load_all(sys.stdin.read()) if isinstance(d, dict)]\n"
+        "    for spec in PATCHES:\n"
+        "        if set(spec) != {'patches'} or not isinstance(spec['patches'], list):\n"
+        "            raise SystemExit('unsupported postRenderer type')\n"
+        "        for item in spec['patches']:\n"
+        "            if set(item) != {'target', 'patch'}:\n"
+        "                raise SystemExit('unsupported kustomize patch keys')\n"
+        "            body = yaml.safe_load(item['patch'])\n"
+        "            hits = [d for d in docs if match(d, item['target'])]\n"
+        "            if not hits:\n"
+        "                raise SystemExit('patch target not found; nothing is ignored')\n"
+        "            for doc in hits:\n"
+        "                apply(doc, body)\n"
+        "    sys.stdout.write(yaml.safe_dump_all(docs, default_flow_style=False, sort_keys=True))\n"
+        "main()\n"
+    )
+
+
+def build_post_renderer(release_text: str, out_dir: str) -> tuple[str, str]:
+    """Build an executable post-renderer byte-derived from spec.postRenderers.
+
+    Returns (script_path, sha256). Fails closed on any postRenderer that is not
+    a kustomize patch set, or any patch that touches something other than
+    metadata.annotations / spec.suspend.
+    """
+    import yaml
+    try:
+        doc = yaml.safe_load(release_text)
+    except Exception as exc:  # noqa: BLE001
+        raise ControlError("canonical HelmRelease unreadable") from exc
+    if not isinstance(doc, dict) or doc.get("kind") != "HelmRelease":
+        raise ControlError("post-renderer source must be a HelmRelease")
+    post = (doc.get("spec") or {}).get("postRenderers")
+    if not isinstance(post, list) or not post:
+        raise ControlError("canonical postRenderers missing")
+    normalized = []
+    for entry in post:
+        if not isinstance(entry, dict) or set(entry) != {"kustomize"}:
+            raise ControlError("unsupported postRenderer type")
+        patches = entry["kustomize"].get("patches") if isinstance(entry["kustomize"], dict) else None
+        if not isinstance(patches, list) or not patches:
+            raise ControlError("kustomize postRenderer without patches")
+        clean = []
+        for item in patches:
+            if not isinstance(item, dict) or set(item) != _ALLOWED_PATCH_KEYS:
+                raise ControlError("unsupported kustomize patch keys")
+            target = item["target"]
+            if not isinstance(target, dict) or set(target) - _ALLOWED_TARGET_KEYS:
+                raise ControlError("unsupported kustomize patch target")
+            body = yaml.safe_load(item["patch"])
+            if not isinstance(body, dict) or set(body) - {"apiVersion", "kind", "metadata", "spec"}:
+                raise ControlError("unsupported kustomize patch path")
+            md = body.get("metadata")
+            if md is not None and (not isinstance(md, dict) or set(md) - {"name", "annotations"}):
+                raise ControlError("unsupported metadata patch")
+            if "annotations" in (md or {}) and not isinstance(md["annotations"], dict):
+                raise ControlError("unsupported annotations patch")
+            spec = body.get("spec")
+            if spec is not None and (not isinstance(spec, dict) or set(spec) != {"suspend"} or not isinstance(spec["suspend"], bool)):
+                raise ControlError("unsupported spec patch")
+            clean.append({"target": target, "patch": item["patch"]})
+        normalized.append({"patches": clean})
+    source_sha256 = hashlib.sha256(release_text.encode("utf-8")).hexdigest()
+    script = _postrenderer_script(normalized, source_sha256)
+    path = Path(out_dir) / "post-renderer.py"
+    path.write_text(script, encoding="utf-8")
+    os.chmod(path, 0o700)
+    return str(path), hashlib.sha256(script.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------
@@ -597,6 +718,15 @@ def run_action(manifest: ActionManifest, reader: LiveReader, *, store: SlotStore
     image_digests = render_expected_image_digests(chart_dir, str(values_file), d, runner=chart_runner)
     if d["image_digest"] not in set(image_digests.values()):
         raise ControlError("rendered image digest does not match manifest")
+
+    # --- Canonical post-renderer, derived from the same HelmRelease. ---
+    release_path = Path(d["values"]["path"])
+    release_text = release_path.read_text("utf-8")
+    if hashlib.sha256(release_text.encode("utf-8")).hexdigest() != d["values"]["source_sha256"]:
+        raise ControlError("canonical HelmRelease bytes changed")
+    post_renderer_path, post_renderer_sha256 = build_post_renderer(release_text, workdir)
+    manifest.post_renderer_path = post_renderer_path
+    manifest.post_renderer_sha256 = post_renderer_sha256
 
     # --- Consume the slot exactly once, atomically, before running anything. ---
     store.consume(manifest.slot, {"manifest": manifest.digest, "action_id": d["action_id"],
