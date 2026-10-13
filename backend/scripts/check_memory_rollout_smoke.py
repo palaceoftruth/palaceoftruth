@@ -975,7 +975,6 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
     try:
         if args.skip_kubernetes or args.skip_log_scan or args.restart_alert_threshold != 3 or args.log_since_seconds < 3600 or args.run_id is not None:
             raise smoke_control.ControlError("required mode forbids weaker gates")
-        approval = smoke_control.Approval.load(args.manifest, args.manifest_sha256, now=utc_now())
         client = HttpClient(base_url=args.api_base_url.rstrip("/"), api_key=_api_key(),
             bearer_token=_bearer_token(), oauth_client_secret=None, oauth_token_url=None,
             oauth_resource=None, client_key=_client_key(), client_scopes=_client_scopes(),
@@ -988,20 +987,25 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
         args.reader_budget = budget
         args.dependency_timeout_seconds = min(args.dependency_timeout_seconds, 30)
         reader = smoke_preflight.ReadOnlyTransport(client)
-        def preflight():
-            return smoke_preflight.preflight(sys.modules[__name__], reader, args, kube, approval)
         if args.mode == "read-only":
-            pre = preflight()
+            # Autonomous READ-ONLY health lane. It validates LIVE bindings only:
+            # no writer approval manifest is loaded and no campaign receipt is
+            # required. Genuine live conditions still fail closed.
+            pre = smoke_preflight.health_preflight(sys.modules[__name__], reader, args, kube)
             report.update(pre)
-            smoke_control.require_checks(pre)
-            receipt = smoke_preflight.readonly_receipt(sys.modules[__name__], reader, args, approval)
-            smoke_control.require_checks(preflight())
+            smoke_control.require_health_checks(pre)
         else:
+            approval = smoke_control.Approval.load(args.manifest, args.manifest_sha256, now=utc_now())
+            def preflight():
+                return smoke_preflight.preflight(sys.modules[__name__], reader, args, kube, approval)
             journal = smoke_control.Journal(Path(args.control_store_root), approval, host_id=smoke_control.control_host_id())
             receipt = smoke_control.run_reserved(approval, journal, client, preflight, preflight, clock=utc_now)
-        _record_check(report, "canonical_campaign_receipt", "passed", **receipt)
+            _record_check(report, "canonical_campaign_receipt", "passed", **receipt)
     except Exception as exc:
-        _alert(report, "control_approval_failed", "required contract failed", error_class=type(exc).__name__)
+        # The read-only lane has no writer approval, so a health-lane failure is
+        # reported as a required-preflight failure, not an approval failure.
+        _code = "control_approval_failed" if args.mode != "read-only" else "required_preflight_exception"
+        _alert(report, _code, "required contract failed", error_class=type(exc).__name__)
     report["status"] = "passed" if not report["alerts"] else "failed"
     report["alert_count"] = len(report["alerts"])
     return safe_final_report(report)

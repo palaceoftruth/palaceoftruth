@@ -345,6 +345,26 @@ class Journal:
                 c.commit()
         except sqlite3.Error as exc:raise ControlError('receipt journal update failed; permit remains consumed') from exc
 
+# The automatic, READ-ONLY health lane validates live bindings only. It must NOT
+# require a writer approval manifest or a campaign receipt: those belong to the
+# bounded writer. budget_manifest and the canonical receipt are writer concepts,
+# so health mode requires every other live check and fails closed without them.
+HEALTH_REQUIRED_CHECKS = tuple(n for n in REQUIRED_CHECKS if n != 'budget_manifest')
+
+
+def require_health_checks(report):
+    """Read-only lane gate: live health evidence only, no writer approval."""
+    if not isinstance(report, dict) or report.get('alerts'):
+        raise ControlError('health prerequisite alerts or unavailable report')
+    checks = report.get('checks')
+    if not isinstance(checks, list):
+        raise ControlError('health prerequisite checks missing')
+    for name in HEALTH_REQUIRED_CHECKS:
+        rows = [r for r in checks if isinstance(r, dict) and r.get('name') == name]
+        if not rows or any(r.get('status') != 'passed' for r in rows):
+            raise ControlError('required health gate failed: ' + name)
+
+
 def require_checks(report):
     if not isinstance(report,dict) or report.get('alerts'):raise ControlError('prerequisite alerts or unavailable report')
     checks=report.get('checks')

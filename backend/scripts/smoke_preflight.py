@@ -142,3 +142,133 @@ def readonly_receipt(smoke,client,args,a):
     fresh=control.recover_receipt(a,client,known_job_id=job)
     if envelope!=fresh:raise control.ControlError('fresh canonical receipt differs from delivered receipt')
     return fresh
+
+
+# ---------------------------------------------------------------------------
+# Autonomous READ-ONLY health lane.
+#
+# The automatic smoke Job supplies no approval manifest and no receipt file.
+# This lane therefore validates LIVE bindings only (identity, dependencies,
+# queue, sentinel/valkey, MCP, Kubernetes, and a live temporal baseline) and
+# fails closed when any required evidence is missing. It never loads a writer
+# Approval and never demands a campaign receipt.
+# ---------------------------------------------------------------------------
+
+def _health_workers(smoke, args, kube):
+    selector = 'app.kubernetes.io/instance=' + args.target_name
+    payload = kube.get('/api/v1/namespaces/' + args.namespace + '/pods', query={'labelSelector': selector})
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        raise control.ControlError('health worker observations missing')
+    rows = []
+    for pod in items:
+        name = pod.get('metadata', {}).get('name', '')
+        label = pod.get('metadata', {}).get('labels', {}).get('app', '')
+        if args.worker_name_fragment not in name and args.worker_name_fragment not in label:
+            continue
+        if pod.get('metadata', {}).get('deletionTimestamp'):
+            raise control.ControlError('approved worker terminating')
+        statuses = pod.get('status', {}).get('containerStatuses')
+        if not isinstance(statuses, list) or not statuses:
+            raise control.ControlError('worker container evidence missing')
+        if pod.get('status', {}).get('phase') != 'Running':
+            raise control.ControlError('worker not running')
+        for c in statuses:
+            if c.get('ready') is not True or c.get('state', {}).get('waiting') or c.get('state', {}).get('terminated'):
+                raise control.ControlError('worker not healthy')
+            count = c.get('restartCount')
+            if type(count) is not int or count < 0 or count >= args.restart_alert_threshold:
+                raise control.ControlError('restart counter at/over threshold')
+            rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
+                         'container': c.get('name'), 'container_id': c.get('containerID'),
+                         'restart_count': count,
+                         'last_terminated': c.get('lastState', {}).get('terminated', {})})
+    if not rows:
+        raise control.ControlError('no approved workers observed')
+    return rows
+
+
+def _health_log_coverage(smoke, args, kube, rows, now):
+    seconds = max(args.log_since_seconds, 3600)
+    seen = 0
+    for row in rows:
+        text = kube.get_text('/api/v1/namespaces/' + args.namespace + '/pods/' + row['pod'] + '/log',
+                             query={'container': row['container'], 'sinceSeconds': seconds + 60,
+                                    'tailLines': args.log_tail_lines, 'timestamps': 'true'})
+        if not isinstance(text, str) or not text.splitlines():
+            raise control.ControlError('empty logs do not prove coverage')
+        if len(text.encode()) > 1048576 or len(text.splitlines()) >= args.log_tail_lines:
+            raise control.ControlError('bounded log coverage truncated/unavailable')
+        stamps = []
+        for line in text.splitlines():
+            stamp, sep, _ = line.partition(' ')
+            if not sep:
+                raise control.ControlError('log timestamp missing')
+            stamps.append(control.instant(stamp))
+        window = now - timedelta(seconds=seconds)
+        if stamps[0] > window or stamps[-1] < now - timedelta(seconds=30) or stamps[-1] > now or stamps != sorted(stamps):
+            raise control.ControlError('actual log interval does not cover observation window')
+        seen += 1
+    return seen
+
+
+def health_runtime_binding(smoke, client, report, args, kube):
+    """Live-only artifact binding for the read-only lane (no approval manifest)."""
+    release_name = args.target_name
+    kube.get('/api/v1/namespaces/kube-system')
+    kube.get('/api/v1/namespaces/' + args.namespace)
+    release = kube.get('/apis/helm.toolkit.fluxcd.io/v2/namespaces/' + args.namespace + '/helmreleases/' + release_name)
+    if release.get('spec', {}).get('suspend') is not True:
+        raise control.ControlError('canonical hold is not suspended')
+    history = release.get('status', {}).get('history', [])
+    digest = release.get('spec', {}).get('values', {}).get('image', {}).get('backendDigest')
+    if not history or not history[0].get('ociDigest') or not digest:
+        raise control.ControlError('live immutable chart/artifact evidence missing')
+    pods = kube.get('/api/v1/namespaces/' + args.namespace + '/pods',
+                    query={'labelSelector': 'app.kubernetes.io/instance=' + release_name}).get('items')
+    if not isinstance(pods, list) or not pods:
+        raise control.ControlError('live artifact pod observations missing')
+    observed = []
+    for pod in pods:
+        for c in pod.get('status', {}).get('containerStatuses', []) or []:
+            image = c.get('imageID')
+            if isinstance(image, str) and image.endswith('@' + digest):
+                observed.append({'pod_uid': pod.get('metadata', {}).get('uid'),
+                                 'container': c.get('name'), 'imageID': image, 'ready': c.get('ready')})
+    if not observed or any(o['ready'] is not True for o in observed):
+        raise control.ControlError('running pods do not match the live backend digest')
+    smoke._record_check(report, 'artifact_binding', 'passed', observations=observed, phase_digest=digest)
+
+
+def health_temporal(smoke, args, kube):
+    """Live two-pass temporal baseline: the same run re-reads and must agree."""
+    if args.restart_alert_threshold != 3 or args.log_since_seconds < 3600:
+        raise control.ControlError('required mode forbids weaker gates')
+    first = _health_workers(smoke, args, kube)
+    _health_log_coverage(smoke, args, kube, first, smoke.utc_now())
+    second = _health_workers(smoke, args, kube)
+    keys = lambda rows: sorted((r['uid'], r['container'], r['container_id'], r['restart_count']) for r in rows)
+    if keys(first) != keys(second):
+        raise control.ControlError('worker identity/counter changed during the observation window')
+    return {'workers': second, 'passes': 2}
+
+
+def health_preflight(smoke, client, args, kube):
+    """Read-only health preflight. No Approval manifest, no writer receipt."""
+    report = {'target': args.target_name, 'checks': [], 'alerts': [], 'generated_at': smoke.utc_now().isoformat()}
+    calls = [lambda: smoke.check_api_health(client, report),
+             lambda: smoke.check_runtime_dependencies(client, report, args, kube=kube),
+             lambda: smoke.resolve_tenant_identity(client, report, args),
+             lambda: health_runtime_binding(smoke, client, report, args, kube),
+             lambda: smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report), timeout=args.reader_budget.timeout(10))),
+             lambda: smoke.check_mcp_reachable(args.mcp_url, report, timeout=min(args.request_timeout, 10), budget=args.reader_budget),
+             lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube))]
+    for call in calls:
+        try:
+            args.reader_budget.timeout(10)
+            call()
+        except Exception as exc:
+            smoke._alert(report, 'required_preflight_exception', 'read-only health prerequisite failed', error_class=type(exc).__name__)
+    if smoke._check_passed(report, 'baseline_temporal') and smoke._check_passed(report, 'runtime_dependencies'):
+        smoke._record_check(report, 'kubernetes_alerts', 'passed')
+    return report

@@ -1661,4 +1661,6 @@ def test_build_report_combines_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert report["status"] == "failed"
     assert report["alert_count"] == 1
-    assert report["alerts"][0]["code"] == "control_approval_failed"
+    # The read-only lane has no writer approval, so a rejected gate is reported
+    # as a required-preflight failure, not an approval failure.
+    assert report["alerts"][0]["code"] == "required_preflight_exception"
