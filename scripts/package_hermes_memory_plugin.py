@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import gzip
 import hashlib
+import io
 import json
 import os
 import tarfile
@@ -14,16 +16,29 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth"
+# The plugin package MUST ship every module the package imports at runtime
+# (`__init__` does `from .checkpoint import CheckpointMixin` and lazily imports
+# `.outbox` / `.credentials`). A prior release shipped only four members and the
+# published asset failed to import. Keep this list membership-equal to the
+# reviewed deterministic allowlist used by scripts/package_hermes_recovery.py.
 PLUGIN_FILES = {
     "__init__.py": "plugin/__init__.py",
+    "checkpoint.py": "plugin/checkpoint.py",
+    "outbox.py": "plugin/outbox.py",
+    "credentials.py": "plugin/credentials.py",
+    "cli.py": "plugin/cli.py",
     "plugin.yaml": "plugin/plugin.yaml",
     "README.md": "README.md",
     "Dockerfile": "Dockerfile",
 }
+# Required module files that must be present for the package to import.
+REQUIRED_PLUGIN_MODULES = ("__init__.py", "checkpoint.py", "outbox.py", "credentials.py", "cli.py")
 MANIFEST_SCHEMA_VERSION = "palace.plugin.update-manifest.v1"
 PLUGIN_ID = "hermes.memory.palaceoftruth"
 PACKAGE_SURFACE = "hermes-memory-plugin"
 ARTIFACT_REPOSITORY = "ghcr.io/palaceoftruth/palaceoftruth/hermes-memory-plugin"
+# A fixed DOS timestamp keeps the zip byte-deterministic across runs.
+ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
 
 def _read_plugin_metadata() -> dict[str, str]:
@@ -55,6 +70,52 @@ def _safe_archive_name(archive_root: str, archive_name: str) -> str:
     if candidate.is_absolute() or ".." in candidate.parts:
         raise SystemExit(f"unsafe archive path: {candidate}")
     return candidate.as_posix()
+
+
+def _archive_entries(archive_root: str) -> list[tuple[Path, str]]:
+    return [
+        (PLUGIN_DIR / source_name, _safe_archive_name(archive_root, archive_name))
+        for source_name, archive_name in PLUGIN_FILES.items()
+    ]
+
+
+def _source_epoch() -> int:
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "0") or "0"
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit("SOURCE_DATE_EPOCH must be an integer Unix timestamp") from exc
+
+
+def _deterministic_tar_gz(archive_root: str, *, epoch: int) -> bytes:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar_handle:
+        for source_path, archive_name in _archive_entries(archive_root):
+            data = source_path.read_bytes()
+            info = tarfile.TarInfo(archive_name)
+            info.size = len(data)
+            info.mtime = epoch
+            info.mode = 0o644
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            tar_handle.addfile(info, io.BytesIO(data))
+    gz = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz, mode="wb", mtime=epoch, compresslevel=9) as gz_handle:
+        gz_handle.write(raw.getvalue())
+    return gz.getvalue()
+
+
+def _deterministic_zip(archive_root: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zip_handle:
+        for source_path, archive_name in _archive_entries(archive_root):
+            info = zipfile.ZipInfo(archive_name, date_time=ZIP_DATE_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zip_handle.writestr(info, source_path.read_bytes())
+    return buf.getvalue()
 
 
 def _file_manifest() -> list[dict[str, Any]]:
@@ -176,22 +237,13 @@ def _package_plugin(output_dir: Path, metadata: dict[str, str]) -> dict[str, Pat
     version = metadata["version"]
     asset_base = f"palaceoftruth-hermes-memory-plugin-v{version}"
     archive_root = f"{asset_base}"
+    epoch = _source_epoch()
 
     tar_path = output_dir / f"{asset_base}.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tar_handle:
-        for source_name, archive_name in PLUGIN_FILES.items():
-            tar_handle.add(
-                PLUGIN_DIR / source_name,
-                arcname=_safe_archive_name(archive_root, archive_name),
-            )
+    tar_path.write_bytes(_deterministic_tar_gz(archive_root, epoch=epoch))
 
     zip_path = output_dir / f"{asset_base}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_handle:
-        for source_name, archive_name in PLUGIN_FILES.items():
-            zip_handle.write(
-                PLUGIN_DIR / source_name,
-                arcname=_safe_archive_name(archive_root, archive_name),
-            )
+    zip_path.write_bytes(_deterministic_zip(archive_root))
 
     metadata_path = output_dir / f"{asset_base}.json"
     update_manifest = _build_update_manifest(
