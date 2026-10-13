@@ -390,7 +390,18 @@ def test_runtime_workers_and_smoke_use_ordered_dependency_gates() -> None:
     job = _manifest_by_kind_name_prefix(manifests, "Job", "palaceoftruth-memory-smoke-")
     annotations = job["metadata"]["annotations"]
     assert annotations["helm.sh/hook"] == "post-install,post-upgrade"
-    assert annotations["helm.sh/hook-weight"] == "10"
+    # Distinct weight above the tenant RLS enforcement hook (weight 10). Equal
+    # weights would order alphabetically, letting a failed smoke hook block RLS.
+    assert annotations["helm.sh/hook-weight"] == "20"
+    rls_job = next(
+        manifest
+        for manifest in manifests
+        if manifest.get("kind") == "Job"
+        and manifest["metadata"]["name"].endswith("-tenant-rls-enforcement")
+    )
+    assert int(rls_job["metadata"]["annotations"]["helm.sh/hook-weight"]) < int(
+        annotations["helm.sh/hook-weight"]
+    )
     assert annotations["helm.sh/hook-delete-policy"] == "before-hook-creation,hook-succeeded"
     assert job["spec"]["activeDeadlineSeconds"] == 600
     args = job["spec"]["template"]["spec"]["containers"][0]["args"]
