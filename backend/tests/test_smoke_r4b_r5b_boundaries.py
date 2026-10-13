@@ -39,6 +39,15 @@ def test_noncredential_literal_values_are_not_normalized_or_prose_scanned(tmp_pa
     assert a.payload['body']==body and a.payload['metadata']==d['payload']['metadata']
 
 
+def _counting_server(handler,counters):
+    class Server(ThreadingHTTPServer):
+        def get_request(self):
+            connection,address=super().get_request()
+            counters['connections']+=1
+            return connection,address
+    return Server(('127.0.0.1',0),handler)
+
+
 @pytest.mark.parametrize('phase',['headers','body'])
 @pytest.mark.parametrize('reader',['api','kube_json','kube_text','mcp'])
 def test_exchange_drip_cancelled_and_child_reaped(phase,reader,monkeypatch,record_property):
@@ -49,8 +58,10 @@ def test_exchange_drip_cancelled_and_child_reaped(phase,reader,monkeypatch,recor
         if pid:pids.append(pid)
         return pid
     monkeypatch.setattr(t.os,'fork',tracked_fork)
+    counters={'connections':0,'requests':0}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            counters['requests']+=1
             try:
                 if phase=='headers':data=b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n'
                 else:
@@ -58,7 +69,7 @@ def test_exchange_drip_cancelled_and_child_reaped(phase,reader,monkeypatch,recor
                 for byte in data:self.connection.sendall(bytes([byte]));time.sleep(.015)
             except (BrokenPipeError,ConnectionResetError):pass
         def log_message(self,format,*args):pass
-    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    server=_counting_server(Handler,counters);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     base='http://127.0.0.1:'+str(server.server_port);budget=t.Budget(seconds=.12)
     try:
         start=time.monotonic()
@@ -75,33 +86,47 @@ def test_exchange_drip_cancelled_and_child_reaped(phase,reader,monkeypatch,recor
             with pytest.raises(ControlError):method('/resource')
         elapsed=time.monotonic()-start
         record_property('configured_deadline_seconds',.12);record_property('elapsed_seconds',elapsed)
+        record_property('forked_children',len(pids))
         assert elapsed<=.12+.20
-        assert len(pids)==1
-        with pytest.raises(ChildProcessError):os.waitpid(pids[0],os.WNOHANG)
+        if pids:
+            # A supervised child was established and MUST be reaped.
+            assert len(pids)==1
+            with pytest.raises(ChildProcessError):os.waitpid(pids[0],os.WNOHANG)
+        else:
+            # Zero children is the fail-closed pre-flight refusal: the total deadline
+            # had already elapsed at attempt time and no network I/O ran (no connect,
+            # no request). This is the bounded refusal, not a forked child.
+            assert budget.deadline<=time.monotonic()
+            assert counters['connections']==0 and counters['requests']==0
     finally:server.shutdown();server.server_close();thread.join()
 
 
 @pytest.mark.parametrize('reader',['api','kube_json'])
-def test_exchange_expired_total_deadline_still_forks_and_reaps(reader,monkeypatch,record_property):
-    # Deterministic counterpart to the scheduling jitter in the drip test: the
-    # shared total deadline has already elapsed when the exchange is attempted
-    # (CI can spend more than a tiny budget between arming it and the fork).
-    # The cancellable exchange must still establish and reap exactly one child.
+def test_exchange_expired_deadline_refuses_without_network_io(reader,monkeypatch,tmp_path,record_property):
+    # Deterministic counterpart to the scheduling jitter in the drip test: the shared
+    # total deadline has already elapsed when the exchange is attempted. The runtime
+    # guard must fail closed BEFORE any fork or socket: zero children, zero
+    # connections, zero requests, and the child-side opener is never reached.
     from scripts.smoke_transport import ControlError
+    sentinel=tmp_path/'opener-open-reached'
     pids=[];original=t.os.fork
     def tracked_fork():
         pid=original()
         if pid:pids.append(pid)
         return pid
     monkeypatch.setattr(t.os,'fork',tracked_fork)
+    real_open=urllib.request.OpenerDirector.open
+    def spied_open(self,*args,**kwargs):
+        sentinel.write_text('reached')
+        return real_open(self,*args,**kwargs)
+    monkeypatch.setattr(urllib.request.OpenerDirector,'open',spied_open)
+    counters={'connections':0,'requests':0}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            try:
-                self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n')
-                for byte in b'x'*100:self.connection.sendall(bytes([byte]));time.sleep(.015)
-            except (BrokenPipeError,ConnectionResetError):pass
+            counters['requests']+=1
+            self.send_response(200);self.send_header('Content-Length','0');self.end_headers()
         def log_message(self,format,*args):pass
-    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    server=_counting_server(Handler,counters);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     base='http://127.0.0.1:'+str(server.server_port)
     try:
         budget=t.Budget(seconds=.12);budget.deadline=time.monotonic()-1
@@ -113,7 +138,46 @@ def test_exchange_expired_total_deadline_still_forks_and_reaps(reader,monkeypatc
             k=s.KubernetesClient.__new__(s.KubernetesClient);k.base_url=base;k.token='FIXTURE_ONLY';k.timeout=1;k.context=None;k.budget=budget
             with pytest.raises(ControlError):k.get('/resource')
         record_property('forked_children',len(pids))
+        record_property('server_connections',counters['connections'])
+        record_property('server_requests',counters['requests'])
+        assert len(pids)==0
+        assert counters['connections']==0 and counters['requests']==0
+        assert not sentinel.exists()
+    finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_exchange_live_deadline_forks_and_delivers_fixture_post(monkeypatch,record_property):
+    # Positive control: with a live total deadline the cancellable exchange really
+    # forks exactly one supervised child, delivers the request over IPC, and the
+    # loopback peer receives the fixture-only body. Proves the expiry detector is not
+    # vacuous and that no real credential ever crosses the wire.
+    pids=[];original=t.os.fork
+    def tracked_fork():
+        pid=original()
+        if pid:pids.append(pid)
+        return pid
+    monkeypatch.setattr(t.os,'fork',tracked_fork)
+    posts=[]
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            posts.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+            self.send_response(200);self.send_header('Content-Length','2');self.end_headers();self.wfile.write(b'{}')
+        def log_message(self,format,*args):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    base='http://127.0.0.1:'+str(server.server_port)
+    try:
+        budget=t.Budget(seconds=5)
+        client=s.HttpClient(base_url=base,api_key='FIXTURE_ONLY',bearer_token=None,oauth_client_secret=None,oauth_token_url=None,oauth_resource=None,client_key='fixture',client_scopes=[],timeout=5)
+        client.safe_transport=True;client.budget=budget
+        body={'fixture_marker':'FIXTURE_ONLY','scopes':['read']}
+        result=client.request('POST','/entries',body=body)
+        record_property('forked_children',len(pids))
+        assert result.status==200
         assert len(pids)==1
+        assert posts==[body]
+        rendered=json.dumps(posts[0])
+        assert 'FIXTURE_ONLY' in rendered
+        for secret in ('api_key','private_key','credentialValue','password'):assert secret not in rendered
         with pytest.raises(ChildProcessError):os.waitpid(pids[0],os.WNOHANG)
     finally:server.shutdown();server.server_close();thread.join()
 
