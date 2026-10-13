@@ -82,6 +82,9 @@ spec:
             - -m
             - scripts.check_memory_rollout_smoke
           args:
+            # Automatic controller actions never receive bounded POST mode.
+            - --mode
+            - read-only
             - --target-name
             - {{ default .Release.Namespace .Values.memoryRolloutSmoke.targetName | quote }}
             - --api-base-url

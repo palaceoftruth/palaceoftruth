@@ -343,17 +343,9 @@ def test_memory_write_smoke_reports_completed_job() -> None:
 
     rollout_smoke.check_memory_write(client, report, args)
 
-    assert report["tenant_id"] == "tenant-a"
-    assert report["alerts"] == []
-    assert {check["name"]: check["status"] for check in report["checks"]} == {
-        "tenant_identity": "passed",
-        "memory_write": "passed",
-        "memory_job_completion": "passed",
-        "memory_jobs_listing": "passed",
-    }
-    write_request = next(request for request in client.requests if request[0:2] == ("POST", "/memory/entries"))
-    assert write_request[2]["metadata"]["target"] == "example-staging"
-    assert write_request[2]["idempotency_key"] == "palace-rollout-smoke:example-staging:20260527T180000Z"
+    # Completed/queued legacy responses do not authorize unreserved invocation.
+    assert report["alerts"][0]["code"] == "unreserved_memory_write_forbidden"
+    assert client.requests == []
 
 
 def test_resolve_tenant_identity_checks_expected_oauth_identity() -> None:
@@ -406,8 +398,8 @@ def test_memory_write_smoke_alerts_when_accepted_job_never_completes() -> None:
 
     rollout_smoke.check_memory_write(client, report, args)
 
-    assert report["alerts"][0]["code"] == "accepted_but_not_completed"
-    assert report["alerts"][0]["tenant_id"] == "tenant-a"
+    assert report["alerts"][0]["code"] == "unreserved_memory_write_forbidden"
+    assert client.requests == []
     assert report["alerts"][0]["target"] == "palaceoftruth"
 
 
@@ -1667,6 +1659,6 @@ def test_build_report_combines_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     report = rollout_smoke.build_report(args)
 
-    assert report["status"] == "passed"
-    assert report["alert_count"] == 0
-    assert report["tenant_id"] == "tenant-a"
+    assert report["status"] == "failed"
+    assert report["alert_count"] == 1
+    assert report["alerts"][0]["code"] == "control_approval_failed"
