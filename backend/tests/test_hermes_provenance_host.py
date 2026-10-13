@@ -21,6 +21,7 @@ from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
 spec = importlib.util.spec_from_file_location('provenance_candidate', sys.argv[2])
 m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 p = m.PalaceOfTruthMemoryProvider()
 assert isinstance(p, MemoryProvider)
