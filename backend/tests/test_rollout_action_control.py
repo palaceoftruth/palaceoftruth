@@ -686,3 +686,85 @@ def test_host_cli_end_to_end_with_real_reader(tmp_path, monkeypatch):
                        capture_output=True, text=True, cwd=str(tmp_path), env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads(r.stdout)["slot"]
+
+
+# --- helm history ordering (real LiveReader over a fake helm) ---------------
+#
+# Defect repaired: `helm history -o json` is ordered ASCENDING, so rows[0] is
+# the OLDEST revision. The old adapter returned 470 for a release whose newest
+# revision is 474, which made the fence refuse a valid action. These tests run
+# the REAL LiveReader against a fake `helm` executable on PATH (subprocess, no
+# cluster, no upgrade, no secrets).
+
+def _fake_helm(tmp_path, payload, *, record_args=None):
+    bindir = tmp_path / "fakehelm"
+    bindir.mkdir(parents=True, exist_ok=True)
+    script = bindir / "helm"
+    body = "#!/usr/bin/env python3\nimport sys\n"
+    if record_args is not None:
+        body += f"open({str(record_args)!r}, 'w').write(' '.join(sys.argv[1:]))\n"
+    body += f"sys.stdout.write({payload!r})\n"
+    script.write_text(body)
+    script.chmod(0o755)
+    return bindir
+
+
+def _rows(*pairs):
+    return json.dumps([{"revision": r, "status": s} for r, s in pairs])
+
+
+def _reader_with(tmp_path, payload, monkeypatch, *, record_args=None):
+    bindir = _fake_helm(tmp_path, payload, record_args=record_args)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    return g.LiveReader()
+
+
+def test_helm_history_ascending_fixture_returns_latest(tmp_path, monkeypatch):
+    # Real observed shape: ascending 470..474; newest is `failed` at 474.
+    payload = _rows((470, "superseded"), (471, "deployed"), (472, "failed"),
+                     (473, "failed"), (474, "failed"))
+    reader = _reader_with(tmp_path, payload, monkeypatch)
+    revision, pointer = reader.helm_history("k3s-lab", "palace-sarvent", "palace-sarvent")
+    assert revision == 474
+    assert pointer == "helm/palace-sarvent/revision/474"
+
+
+def test_helm_history_descending_and_unordered_also_return_latest(tmp_path, monkeypatch):
+    descending = _rows((474, "failed"), (473, "failed"), (471, "deployed"), (470, "superseded"))
+    assert _reader_with(tmp_path / "a", descending, monkeypatch).helm_history("ctx", "ns", "rel")[0] == 474
+
+    unordered = _rows((472, "failed"), (474, "failed"), (470, "superseded"), (471, "deployed"))
+    assert _reader_with(tmp_path / "b", unordered, monkeypatch).helm_history("ctx", "ns", "rel")[0] == 474
+
+
+def test_helm_history_argv_is_explicit_and_bounded(tmp_path, monkeypatch):
+    args_file = tmp_path / "argv.txt"
+    reader = _reader_with(tmp_path, _rows((471, "deployed")), monkeypatch, record_args=args_file)
+    reader.helm_history("k3s-lab", "palace-sarvent", "palace-sarvent")
+    argv = args_file.read_text()
+    assert argv == "--kube-context k3s-lab -n palace-sarvent history palace-sarvent -o json"
+    assert "--set" not in argv and "--values" not in argv
+
+
+@pytest.mark.parametrize("payload", [
+    "",
+    "[]",
+    "not json",
+    '[{"status":"failed"}]',
+    '[{"revision":true,"status":"failed"}]',
+    '[{"revision":"474","status":"failed"}]',
+    '[{"revision":4.5,"status":"failed"}]',
+    '[{"revision":0,"status":"failed"}]',
+    '[{"revision":-3,"status":"failed"}]',
+    '[{"revision":474,"status":"failed"},{"revision":474,"status":"deployed"}]',
+])
+def test_helm_history_malformed_inputs_refused(tmp_path, monkeypatch, payload):
+    reader = _reader_with(tmp_path, payload, monkeypatch)
+    with pytest.raises(g.ControlError):
+        reader.helm_history("ctx", "ns", "rel")
+
+
+def test_helm_history_duplicate_same_status_is_accepted(tmp_path, monkeypatch):
+    payload = _rows((474, "failed"), (474, "failed"), (471, "deployed"))
+    reader = _reader_with(tmp_path, payload, monkeypatch)
+    assert reader.helm_history("ctx", "ns", "rel")[0] == 474

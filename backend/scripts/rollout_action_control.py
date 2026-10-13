@@ -155,8 +155,24 @@ class LiveReader:
             raise ControlError("helm history unreadable") from exc
         if not isinstance(rows, list) or not rows:
             raise ControlError("helm history empty")
-        latest = rows[0]
-        return int(latest["revision"]), f"helm/{release}/revision/{latest['revision']}"
+        # `helm history -o json` is ordered ASCENDING, so rows[0] is the OLDEST
+        # revision. Select the maximum revision instead of an index. Validate
+        # strictly: reject malformed rows, bool/str/float/None revisions, and a
+        # duplicated revision whose statuses disagree (ambiguous). Do not
+        # coerce or normalize source values.
+        statuses: dict[int, object] = {}
+        for row in rows:
+            if not isinstance(row, dict) or "revision" not in row:
+                raise ControlError("helm history row malformed")
+            revision = row["revision"]
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ControlError("helm history revision malformed")
+            status = row.get("status")
+            if revision in statuses and statuses[revision] != status:
+                raise ControlError("helm history duplicate revision is ambiguous")
+            statuses[revision] = status
+        latest = max(statuses)
+        return latest, f"helm/{release}/revision/{latest}"
 
     def active_job(self, context: str, namespace: str, release: str) -> bool:
         out = self._run(["kubectl", "--context", context, "-n", namespace, "get", "jobs",
