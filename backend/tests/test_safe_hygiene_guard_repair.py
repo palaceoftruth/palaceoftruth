@@ -1,7 +1,7 @@
 """Path/line/rule only. Synthetic fixtures, no real credentials, no values logged.
 
-The new guard contract is: only path, line, field name, rule id and
-path category are emitted. The guard does not inspect, hash, sample,
+The new guard contract is: only path, line and rule id
+are emitted. The guard does not inspect, hash, sample,
 length, normalise or print any assigned value. Tests below prove both
 the true-positive rule emission AND the explicit no-value-derivative
 output contract.
@@ -14,7 +14,7 @@ g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
 VALUE='SYNTHETIC_NON_SECRET_REVIEW_MARKER'
 
 FORBIDDEN_KEYS={'value','length','sample','shape_fingerprint','hash','fingerprint','prefix','suffix','first2','last2','redact','start','end','truncate','head','tail'}
-ALLOWED_KEYS={'path','line','field','rule','category'}
+ALLOWED_KEYS={'path','line','rule'}
 
 
 def _emits_only_paths_rules(finding):
@@ -30,9 +30,7 @@ def _run_guard_main():
 def test_plain_credential_assignment_true_positive():
     rows=g.scan_blob(Path('backend/config.py'),'api_key = "'+VALUE+'"\n')
     assert len(rows)==1
-    assert rows[0]['field']=='api_key'
     assert rows[0]['rule']=='rule:credential-shaped-api-key-assignment'
-    assert rows[0]['category']=='category:publishable-source'
     _emits_only_paths_rules(rows[0])
 
 
@@ -72,18 +70,14 @@ def test_path_classification(path,expected_category):
 def test_credential_assignment_in_actual_publication_surface():
     rows=g.scan_blob(Path('receipts/test.xml'),'api_key = "'+VALUE+'"\n')
     assert len(rows)==1
-    assert rows[0]['field']=='api_key'
     assert rows[0]['rule']=='rule:credential-shaped-api-key-assignment'
-    assert rows[0]['category']=='category:publication-surface'
     _emits_only_paths_rules(rows[0])
 
 
 def test_credential_assignment_in_actual_secret_handling_surface():
     rows=g.scan_blob(Path('backend/app/auth.py'),'api_key = "'+VALUE+'"\n')
     assert len(rows)==1
-    assert rows[0]['field']=='api_key'
     assert rows[0]['rule']=='rule:credential-shaped-api-key-assignment'
-    assert rows[0]['category']=='category:secret-handling'
     _emits_only_paths_rules(rows[0])
 
 
@@ -136,7 +130,7 @@ def test_main_output_only_contains_path_line_field_rule_category():
     proc=_run_guard_main()
     assert proc.returncode==0
     payload=json.loads(proc.stdout)
-    assert set(payload) >= {'ref','scanned','policy','rule_ids','findings','finding_count'}
+    assert set(payload) >= {'scanned','policy','rule_ids','findings','finding_count'}
     assert payload['policy']=='review-aid-only; no value, length, sample, hash, or fingerprint is ever emitted'
     for f in payload['findings']:
         _emits_only_paths_rules(f)

@@ -6,9 +6,9 @@ not parse, normalise, hash, fingerprint, sample, length, or print
 existing secret values, and it does not assert whether a finding is a
 real credential. The guard never reads the live environment,
 production logs, or existing assigned values. Its only output is the
-file path, the source line, the matched field name, and a static rule
+file path, the source line number, and a static rule
 identifier. It is a limited review aid, not a blocking security
-guard. Exit code is always 0; reviewers read the JSON rule-id list.
+guard. Successful scans exit 0; operational failures exit 2 with static errors.
 
 The OWNER of any credential is solely responsible for rotation,
 revocation, scope change, validity, and containment. This tool does
@@ -142,10 +142,10 @@ def classify_path(path: Path) -> str:
         return "category:excluded"
     if name.endswith("receipts/INDEX.md"):
         return "category:publishable-source"
-    if any(token in name for token in SECRET_HANDLING_PATH_TOKENS):
-        return "category:secret-handling"
     if any(token in name for token in PUBLICATION_PATH_TOKENS):
         return "category:publication-surface"
+    if any(token in name for token in SECRET_HANDLING_PATH_TOKENS):
+        return "category:secret-handling"
     if any(token in name for token in EXCLUDED_PATH_TOKENS):
         return "category:excluded"
     return "category:publishable-source"
@@ -153,11 +153,10 @@ def classify_path(path: Path) -> str:
 
 def is_allowed_text_file(path: Path) -> bool:
     """Return True if the file is text we should scan for the rule list."""
-    name = str(path)
-    if any(token in name for token in EXCLUDED_PATH_TOKENS):
+    if classify_path(path) == "category:excluded":
         return False
-    if "/private-retained-receipts/" in name:
-        return False
+    if path.name in {".env", ".env.example"}:
+        return True
     if path.suffix.lower() in {
         ".py", ".sh", ".yaml", ".yml", ".json", ".md", ".env", ".env.example",
         ".toml", ".cfg", ".ini", ".txt", ".tf", ".csv", ".hcl",
@@ -170,33 +169,26 @@ def is_allowed_text_file(path: Path) -> bool:
 def scan_blob(path: Path, blob: str) -> list[dict]:
     """Return a list of static rule ids for credential-shaped assignments.
 
-    The guard emits only path, line, field name and the matching static
+    The guard emits only path, line and the matching static
     rule id. No value, no length, no sample, no hash, no fingerprint
     and no other value-derived data is included.
     """
     findings = []
-    category = classify_path(path)
+
     for lineno, line in enumerate(blob.splitlines(), 1):
         stripped = line.lstrip()
         if stripped.startswith("#") or stripped.startswith("//"):
             continue
         if "=" not in line and ":" not in line:
             continue
-        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_\-.]*)\s*[:=]\s*(.+?)\s*$", line)
-        if not m:
-            continue
-        field, _raw_value = m.group(1), m.group(2)
-        if field in EXCLUDED_FIELDNAMES:
-            continue
-        if not KNOWN_CREDENTIAL_FIELD.search(field):
-            continue
-        findings.append({
-            "path": str(path),
-            "line": lineno,
-            "field": field,
-            "rule": _rule_for_field(field),
-            "category": category,
-        })
+        # Capture identifiers only, never the assigned text. Also covers
+        # quoted JSON keys and Config(...) assignments embedded in JUnit.
+        for m in re.finditer(r"(?<![\w.-])[\"']?([A-Za-z_][A-Za-z0-9_\-.]*)[\"']?\s*[:=](?!=)", line):
+            field = m.group(1)
+            if field in EXCLUDED_FIELDNAMES or not KNOWN_CREDENTIAL_FIELD.search(field):
+                continue
+            findings.append({"path": str(path), "line": lineno,
+                             "rule": _rule_for_field(field)})
     return findings
 
 
@@ -206,9 +198,13 @@ def main(argv: list[str]) -> int:
         return 2
     ref = argv[1]
     cmd = ["git", "ls-tree", "-r", "--name-only", ref]
-    tree = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()
+    try:
+        tree = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()
+    except (subprocess.SubprocessError, OSError, UnicodeError):
+        print(json.dumps({"error": "tree-read-failed"}))
+        return 2
     out = {
-        "ref": ref,
+
         "scanned": 0,
         "policy": "review-aid-only; no value, length, sample, hash, or fingerprint is ever emitted",
         "rule_ids": [],
@@ -221,8 +217,9 @@ def main(argv: list[str]) -> int:
             continue
         try:
             blob = subprocess.run(["git", "show", f"{ref}:{name}"], capture_output=True, text=True, check=True).stdout
-        except subprocess.CalledProcessError:
-            continue
+        except (subprocess.SubprocessError, OSError, UnicodeError):
+            print(json.dumps({"error": "blob-read-failed"}))
+            return 2
         out["scanned"] += 1
         rows = scan_blob(p, blob)
         out["findings"].extend(rows)

@@ -61,13 +61,9 @@ uncontrolled environment produced.
 
 ## Owner-reported disposition
 
-The disclosed value was a `TYPESAFE_API_KEY`-shaped 107-byte string
-in the JUnit dump of
-`tests/test_config.py::test_typesafe_settings_are_inert_by_default`.
-It is NOT the live key; the live value lives only in the
-`TYPESAFE_API_KEY` env var, read by
-`backend/app/services/typesafe.py` with `JevConfig.api_key`
-`repr=False`. The Jev path is currently disabled in default config.
+Andrew confirmed that the exposed credential was Barbara's key.
+Owner-reported rotation COMPLETE; default Hermes environment update
+COMPLETE. No further owner action is requested by this packet.
 
 - Owner (Andrew) reported: the exposed value was Barbara's key, has
   been rotated, and `~/.hermes/.env` was updated. This is a direct
@@ -76,39 +72,38 @@ It is NOT the live key; the live value lives only in the
   value, did not test the new value, did not call any
   revocation/replay/mint endpoint, and does not make an independent
   claim about the live value, validity or revocation.
-- Independent test, validity or revocation status: NOT tested. Treat
-  the historical exposure as real until the owner validates the
-  rotation through a separately owner-led packet.
+- Independent validity or revocation testing was not performed.
+  Historical exposure remains in retained Git history.
 
-## Current exact-head CI for the cleanup parent (a6aaa88)
+## Verified predecessor CI
 
-Historical pointers (NOT current branch; presented for context only).
+Exact predecessor: e9fe58cc02b087bbb35a5ca14475052ae108fc5c.
 
-- build/validation workflow `38228931363` at `c76350d9...` (parent
-  of cleanup): success. Backend fast 2568/2/1, Helm/workflow
+- build/validation workflow `38337498997`: success.
+  Backend fast 2616 passed, 2 skipped, 1 xfailed; Helm/workflow
   policy 127 passed.
-- Dependency vulnerability scan `38228931277` at `c76350d9...`:
+- Dependency vulnerability scan `38337499872`:
   success.
 - Backend database, browser, frontend, image build and publication
   lanes were SKIPPED. No DB or publication proof is inferred.
 
-## Current exact-head CI for this branch (read this one)
-
-- build/validation workflow run to be confirmed by the next
-  push of this branch. The exact-head hosted CI is verified
-  separately and retained in
-  `/home/asarver/.hermes/cache/scratch/sar1402-completion/cleanup-repair/hosted-run.json`
-  and the matching `hosted.json` / `hosted.log`. Database, image
-  build and publication lanes are SKIPPED (unchanged from prior
-  runs); no DB or publication proof is inferred.
+These are predecessor results, not results for the commit containing
+this index. Final candidate CI and PR metadata are retained outside
+Git under cleanup-residual/ and reported in its SUMMARY.md. This
+index does not require a self-referential commit pin.
 
 ## Hygiene guard
 
 `backend/scripts/safe_hygiene_guard.py` is an offline path/line/rule
-review aid. It emits only path, line, field name, static rule id
-and path category. It does NOT inspect, sample, length, hash or
+review aid. Findings contain exactly path, line, rule.
+It does NOT emit, sample, measure, hash or
 fingerprint any assigned value. It is not a comprehensive secret
-detector and is not a blocking security gate. Exit code is always
-0; reviewers read the JSON rule-id list. The guard's coverage is
+detector and is not a blocking security gate. Successful scans exit
+0; operational failures exit 2 with static errors. Coverage includes
+quoted JSON keys and XML/JUnit Config/assertion assignments.
+Classification controls eligibility; publication precedence and
+explicit .env/.env.example handling apply to the actual CLI scan.
+Tests, docs and .github remain excluded unless publication takes
+precedence. Name-only findings can be false positives. Coverage is
 intentionally limited to known credential-shaped field names; it
 will miss custom names and prose-embedded secrets.
