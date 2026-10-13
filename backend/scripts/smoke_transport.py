@@ -41,7 +41,6 @@ class Budget:
 
 def strict_open(request, *, timeout, context=None, budget=None, body_limit=1048576):
     budget=budget or Budget(seconds=timeout)
-    budget.timeout(timeout)
     handlers=[urllib.request.ProxyHandler({}),NoRedirect()]
     if context is not None:handlers.append(urllib.request.HTTPSHandler(context=context))
     opener=urllib.request.build_opener(*handlers)
@@ -92,7 +91,6 @@ def _cancellable_exchange(opener,request,timeout,budget,body_limit):
     read_fd,write_fd=os.pipe()
     pid=None
     try:
-        budget.timeout(timeout)
         pid=os.fork()
         if pid==0:
             os.close(read_fd)

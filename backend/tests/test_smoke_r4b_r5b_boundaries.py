@@ -81,6 +81,43 @@ def test_exchange_drip_cancelled_and_child_reaped(phase,reader,monkeypatch,recor
     finally:server.shutdown();server.server_close();thread.join()
 
 
+@pytest.mark.parametrize('reader',['api','kube_json'])
+def test_exchange_expired_total_deadline_still_forks_and_reaps(reader,monkeypatch,record_property):
+    # Deterministic counterpart to the scheduling jitter in the drip test: the
+    # shared total deadline has already elapsed when the exchange is attempted
+    # (CI can spend more than a tiny budget between arming it and the fork).
+    # The cancellable exchange must still establish and reap exactly one child.
+    from scripts.smoke_transport import ControlError
+    pids=[];original=t.os.fork
+    def tracked_fork():
+        pid=original()
+        if pid:pids.append(pid)
+        return pid
+    monkeypatch.setattr(t.os,'fork',tracked_fork)
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n')
+                for byte in b'x'*100:self.connection.sendall(bytes([byte]));time.sleep(.015)
+            except (BrokenPipeError,ConnectionResetError):pass
+        def log_message(self,format,*args):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    base='http://127.0.0.1:'+str(server.server_port)
+    try:
+        budget=t.Budget(seconds=.12);budget.deadline=time.monotonic()-1
+        if reader=='api':
+            client=s.HttpClient(base_url=base,api_key='FIXTURE_ONLY',bearer_token=None,oauth_client_secret=None,oauth_token_url=None,oauth_resource=None,client_key='fixture',client_scopes=[],timeout=1)
+            client.safe_transport=True;client.budget=budget
+            with pytest.raises(ControlError):client.request('GET','/health')
+        else:
+            k=s.KubernetesClient.__new__(s.KubernetesClient);k.base_url=base;k.token='FIXTURE_ONLY';k.timeout=1;k.context=None;k.budget=budget
+            with pytest.raises(ControlError):k.get('/resource')
+        record_property('forked_children',len(pids))
+        assert len(pids)==1
+        with pytest.raises(ChildProcessError):os.waitpid(pids[0],os.WNOHANG)
+    finally:server.shutdown();server.server_close();thread.join()
+
+
 def test_interrupted_post_remains_consumed_and_recovery_is_readonly(tmp_path):
     d=doc_for(tmp_path/'store');a=approval(d);journal=c.Journal(tmp_path/'store',a,host_id='fixture-host');posts=[];reads=[]
     class Handler(BaseHTTPRequestHandler):
