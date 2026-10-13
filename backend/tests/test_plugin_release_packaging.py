@@ -37,6 +37,11 @@ EXPECTED_ARCHIVE_PATHS = {
     f"{ARCHIVE_ROOT}/Dockerfile",
 }
 REQUIRED_MODULE_SOURCES = ("__init__.py", "checkpoint.py", "outbox.py", "credentials.py", "cli.py")
+# Every file the package ships (modules + manifest + metadata).
+EXPECTED_PLUGIN_FILES = REQUIRED_MODULE_SOURCES + ("plugin.yaml", "README.md", "Dockerfile")
+# The container image only carries the runtime package: modules + manifest.
+# README.md and Dockerfile are archive-only metadata, not image files.
+IMAGE_PLUGIN_FILES = REQUIRED_MODULE_SOURCES + ("plugin.yaml",)
 
 
 def _build(output_dir: Path, epoch: str = "1700000000") -> dict[str, Path]:
@@ -151,3 +156,116 @@ def test_missing_module_file_is_detected():
     for module in REQUIRED_MODULE_SOURCES:
         assert module in packager.PLUGIN_FILES, module
         assert (PLUGIN_DIR / module).exists(), module
+
+
+# --- container surface (the published OCI image) ----------------------------
+#
+# The plugin image is a SEPARATE published artifact. A prior image copied only
+# __init__.py + plugin.yaml and failed to import. The static COPY check is not
+# enough on its own, so the runtime image proof below actually builds the image,
+# extracts its filesystem, checks source equality, and imports the package.
+
+DOCKERFILE = PLUGIN_DIR / "Dockerfile"
+
+
+def _docker_available() -> bool:
+    import shutil as _shutil
+    if _shutil.which("docker") is None:
+        return False
+    probe = subprocess.run(["docker", "info"], capture_output=True, text=True)
+    return probe.returncode == 0
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker daemon unavailable")
+def test_dockerfile_copy_set_covers_required_modules():
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    copied: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.upper().startswith("COPY "):
+            continue
+        parts = stripped.split()[1:]
+        if len(parts) < 2:
+            continue
+        sources, destination = parts[:-1], parts[-1]
+        if destination.rstrip("/") == "/plugin":
+            copied.update(sources)
+        elif destination.startswith("/plugin/"):
+            copied.add(Path(destination).name)
+    for module in REQUIRED_MODULE_SOURCES:
+        assert module in copied, f"{module} is not COPYd into /plugin (copied={sorted(copied)})"
+    assert "plugin.yaml" in copied
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker daemon unavailable")
+def test_built_image_contains_all_modules_and_imports(tmp_path):
+    """Build the real image (no push), export its filesystem, prove membership,
+    source equality, import, and the actual plugin CLI entrypoint."""
+    tag = f"palace-plugin-pkgtest-{os.getpid()}"
+    build = subprocess.run(
+        ["docker", "build", "-t", tag, str(PLUGIN_DIR)],
+        capture_output=True, text=True,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    container_id = None
+    try:
+        # The image is FROM scratch with no CMD, so pass an inert command; the
+        # container is only exported, never started.
+        container_id = subprocess.check_output(
+            ["docker", "create", tag, "unused"], text=True
+        ).strip()
+        rootfs = tmp_path / "rootfs.tar"
+        with rootfs.open("wb") as handle:
+            export = subprocess.run(["docker", "export", container_id], stdout=handle)
+        assert export.returncode == 0
+
+        extract = tmp_path / "rootfs"
+        extract.mkdir()
+        # Extract ONLY the /plugin files as plain bytes. A full extract hits the
+        # image's absolute symlinks (e.g. etc/mtab) and is unnecessary here.
+        expected = {f"plugin/{name}" for name in IMAGE_PLUGIN_FILES}
+        with tarfile.open(rootfs) as tf:
+            names = []
+            for member in tf.getmembers():
+                if not member.name.startswith("plugin/"):
+                    continue
+                if member.isfile():
+                    names.append(member.name)
+                    dest = extract / member.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    handle = tf.extractfile(member)
+                    dest.write_bytes(handle.read() if handle else b"")
+        assert set(names) == expected, sorted(expected ^ set(names))
+
+        # source equality: the image bytes equal the repository source bytes
+        for name in IMAGE_PLUGIN_FILES:
+            image_bytes = (extract / "plugin" / name).read_bytes()
+            assert image_bytes == (PLUGIN_DIR / name).read_bytes(), name
+
+        # actual import + actual plugin CLI entrypoint, from the IMAGE path only
+        host = tmp_path / "host"
+        (host / "agent").mkdir(parents=True)
+        (host / "agent" / "__init__.py").write_text("")
+        (host / "agent" / "memory_provider.py").write_text("class MemoryProvider:\n    pass\n")
+        code = (
+            "import importlib, sys\n"
+            f"sys.path.insert(0, {str(host)!r})\n"
+            f"sys.path.insert(0, {str(extract)!r})\n"
+            "import plugin\n"
+            "importlib.import_module('plugin.checkpoint')\n"
+            "importlib.import_module('plugin.outbox')\n"
+            "importlib.import_module('plugin.credentials')\n"
+            "cli = importlib.import_module('plugin.cli')\n"
+            "assert hasattr(plugin, 'PalaceOfTruthMemoryProvider')\n"
+            "assert hasattr(cli, 'palaceoftruth_command')\n"
+            "assert hasattr(cli, 'register_cli')\n"
+            "assert 'third_party_plugins' not in repr(plugin.__file__)\n"
+            "print('IMAGE_IMPORT_OK')\n"
+        )
+        run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert "IMAGE_IMPORT_OK" in run.stdout
+    finally:
+        if container_id:
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
