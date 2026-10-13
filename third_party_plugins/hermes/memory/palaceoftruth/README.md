@@ -172,9 +172,17 @@ write-back is explicitly delegated.
   available. Explicit cron writes and retained automatic turns include
   `metadata.runtime`, while `metadata.capture_origin` distinguishes
   `automatic_turn_sync` from `explicit_memory_tool`.
+  Hermes core passes `agent_context="cron"` for scheduled jobs (see #80646).
+  The plugin treats that context as lifecycle-suppressed only: automatic
+  completed-turn sync and the built-in-memory mirror are skipped for cron, but
+  the deliberate operator tools (`palace_remember`, `palace_remember_bulk`,
+  `palace_promote_to_shared`) stay available - matching this retention policy
+  and the pre-#80646 behavior. Genuinely delegated contexts such as `subagent`
+  keep explicit tools disabled. Per-job cron capture suppression is still the
+  `cron_automatic_capture_disabled_job_ids` denylist above.
   This is retention control, not an access-control boundary: direct Palace API
   writes and explicit memory tools remain possible by design. Deployment
-  consumers must install or pin plugin `1.0.37`; an older vendored copy cannot
+  consumers must install or pin plugin `1.0.40`; an older vendored copy cannot
   enforce this policy.
 - `palace_remember` reports write contract status honestly. A successful tool
   call can still mean accepted or queued rather than durable; inspect the

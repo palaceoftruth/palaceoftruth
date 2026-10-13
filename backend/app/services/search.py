@@ -23,6 +23,7 @@ from app.schemas.search import (
 from app.services.artifact_citations import build_artifact_citation
 from app.services.embedder import EmbeddingRequestError, EmbeddingService
 from app.services.memory_entries import source_project_from_memory_metadata
+from app.services.item_dates import source_date_evidence
 from app.services.retrieval_provenance import build_retrieval_provenance, classify_retrieval_trust
 from app.services.retrieval_hints import report_retrieval_hint_candidates, score_retrieval_hints_for_items
 from app.services.retrieval_lenses import resolve_retrieval_lens
@@ -2538,6 +2539,7 @@ class SearchService:
                     source_item_id=source_item_id,
                     source_span=source_span,
                     created_at=candidate.created_at,
+                    **source_date_evidence(candidate.item_metadata),
                     chunk_text=candidate.chunk_text,
                     chunk_index=candidate.chunk_index,
                     score=float(adjusted_score),
