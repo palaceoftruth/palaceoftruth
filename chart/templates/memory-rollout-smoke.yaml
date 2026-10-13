@@ -50,8 +50,11 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
     # Run after Helm has waited for normal workload resources. Failed smoke
     # Jobs stay available for diagnosis until the next hook creation.
+    # Distinct weight above the tenant RLS enforcement hook (weight 10) so RLS
+    # runs first. Equal weights would order alphabetically and let a failed
+    # memory-rollout-smoke hook block RLS enforcement.
     helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "10"
+    helm.sh/hook-weight: "20"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 0
