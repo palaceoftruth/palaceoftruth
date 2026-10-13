@@ -98,6 +98,7 @@ def test_read_only_lane_never_loads_an_approval(monkeypatch):
     monkeypatch.setattr(smoke, "check_mcp_reachable", lambda url, report, timeout=10, budget=None: smoke._record_check(report, "mcp_health", "passed"))
     monkeypatch.setattr(smoke.smoke_preflight, "health_runtime_binding", lambda s, c, r, a, k: smoke._record_check(r, "artifact_binding", "passed"))
     monkeypatch.setattr(smoke.smoke_preflight, "health_temporal", lambda s, a, k: {"workers": [], "passes": 2})
+    monkeypatch.setattr(smoke.smoke_preflight, "health_kubernetes_alerts", lambda s, a, k, now: None)
 
     report = smoke.build_report(_args())
     codes = [a.get("code") for a in report.get("alerts", [])]
@@ -118,6 +119,7 @@ def test_read_only_lane_fails_closed_on_bad_dependencies(monkeypatch):
     monkeypatch.setattr(smoke, "check_mcp_reachable", lambda url, report, timeout=10, budget=None: smoke._record_check(report, "mcp_health", "passed"))
     monkeypatch.setattr(smoke.smoke_preflight, "health_runtime_binding", lambda s, c, r, a, k: smoke._record_check(r, "artifact_binding", "passed"))
     monkeypatch.setattr(smoke.smoke_preflight, "health_temporal", lambda s, a, k: {"workers": [], "passes": 2})
+    monkeypatch.setattr(smoke.smoke_preflight, "health_kubernetes_alerts", lambda s, a, k, now: None)
 
     report = smoke.build_report(_args())
     assert report["status"] == "failed"

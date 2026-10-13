@@ -149,12 +149,155 @@ def readonly_receipt(smoke,client,args,a):
 #
 # The automatic smoke Job supplies no approval manifest and no receipt file.
 # This lane therefore validates LIVE bindings only (identity, dependencies,
-# queue, sentinel/valkey, MCP, Kubernetes, and a live temporal baseline) and
-# fails closed when any required evidence is missing. It never loads a writer
-# Approval and never demands a campaign receipt.
+# queue, sentinel/valkey, MCP, Kubernetes alerts, and a live temporal baseline)
+# and fails closed when any required evidence is missing. It never loads a
+# writer Approval and never demands a campaign receipt.
+#
+# Strictness (incident476 review C1-C5):
+# - the workload binding derives the EXPECTED replica counts from the live
+#   HelmRelease, evaluates ALL workload-replica pods (a wrong image cannot hide),
+#   and pins ownership to the ReplicaSet controller;
+# - the temporal evidence is an explicit {coverage_start, coverage_end,
+#   collection_complete} record with a bounded freshness -- an old line alone is
+#   not up-to-now proof;
+# - kubernetes_alerts QUERIES real evidence (recent OOM terminations and
+#   namespace warning events) instead of being derived.
 # ---------------------------------------------------------------------------
 
-def _health_workers(smoke, args, kube):
+WORKLOAD_CONTAINERS = ("backend", "mcp")
+# Real resource-OOM reasons only. kubelet EVENTS use `OOMKilling`; container
+# STATUS lastState uses `OOMKilled`. A prior failed hook Job's
+# `BackoffLimitExceeded` is a gate artifact, not runtime OOM, and must not poison
+# the health gate on a retry.
+OOM_EVENT_REASONS = {"OOMKilling", "OOMKilled"}
+# Policy bound, NOT an up-to-now guarantee: a worker that legitimately logs
+# less often than this needs the operator to justify a different bound.
+FRESHNESS_SECONDS = 300
+COVERAGE_TOLERANCE_SECONDS = 120
+
+
+def _live_release(kube, namespace, release_name):
+    return kube.get('/apis/helm.toolkit.fluxcd.io/v2/namespaces/' + namespace + '/helmreleases/' + release_name)
+
+
+def _expected_workload_replicas(release):
+    """Exact expected replica counts from the live HelmRelease, else fail."""
+    values = (release.get('spec') or {}).get('values') or {}
+    replicas = (values.get('highAvailability') or {}).get('replicas') or {}
+    expected = {}
+    for name in WORKLOAD_CONTAINERS:
+        count = replicas.get(name)
+        if type(count) is not int or count < 1:
+            raise control.ControlError('desired replica count missing for ' + name)
+        expected[name] = count
+    return expected
+
+
+def _workload_pods(kube, namespace, release_name):
+    payload = kube.get('/api/v1/namespaces/' + namespace + '/pods',
+                       query={'labelSelector': 'app.kubernetes.io/instance=' + release_name})
+    items = payload.get('items')
+    if not isinstance(items, list):
+        raise control.ControlError('workload pod observations missing')
+    return items
+
+
+def _replicaset_owner(pod):
+    """Return the owning ReplicaSet uid, or raise (no/foreign owner)."""
+    refs = (pod.get('metadata') or {}).get('ownerReferences') or []
+    if len(refs) != 1:
+        raise control.ControlError('pod has no single owner')
+    ref = refs[0]
+    if ref.get('kind') != 'ReplicaSet' or ref.get('controller') is not True or not ref.get('uid'):
+        raise control.ControlError('pod owner is not a controlled ReplicaSet')
+    return ref['uid']
+
+
+def _deployment_ancestry(kube, namespace, name):
+    """Prove Deployment -> current ReplicaSet chain; return (deploy_uid, rs_uids)."""
+    dep = kube.get('/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name)
+    dep_uid = (dep.get('metadata') or {}).get('uid')
+    if not dep_uid:
+        raise control.ControlError('deployment UID missing for ' + name)
+    # ReplicaSets are labelled with the RELEASE instance, not the deployment name.
+    release_name = name.rsplit('-', 1)[0]
+    rs_list = kube.get('/apis/apps/v1/namespaces/' + namespace + '/replicasets',
+                       query={'labelSelector': 'app.kubernetes.io/instance=' + release_name}).get('items')
+    if not isinstance(rs_list, list):
+        raise control.ControlError('replicaset observations missing')
+    owned = set()
+    for rs in rs_list:
+        refs = (rs.get('metadata') or {}).get('ownerReferences') or []
+        if len(refs) == 1 and refs[0].get('kind') == 'Deployment' and refs[0].get('controller') is True \
+                and refs[0].get('uid') == dep_uid:
+            owned.add((rs.get('metadata') or {}).get('uid'))
+    if not owned:
+        raise control.ControlError('no current ReplicaSet owned by deployment ' + name)
+    return dep_uid, owned
+
+
+def health_runtime_binding(smoke, client, report, args, kube):
+    """Live-only artifact binding: expected counts, ALL pods, ReplicaSet owner."""
+    release_name = args.target_name
+    kube.get('/api/v1/namespaces/kube-system')
+    kube.get('/api/v1/namespaces/' + args.namespace)
+    release = _live_release(kube, args.namespace, release_name)
+    if release.get('spec', {}).get('suspend') is not True:
+        raise control.ControlError('canonical hold is not suspended')
+    history = release.get('status', {}).get('history', [])
+    digest = (release.get('spec', {}).get('values', {}).get('image') or {}).get('backendDigest')
+    if not history or not history[0].get('ociDigest') or not digest:
+        raise control.ControlError('live immutable chart/artifact evidence missing')
+    expected = _expected_workload_replicas(release)
+    # Deployment name convention: <release>-<container>
+    ancestry = {name: _deployment_ancestry(kube, args.namespace, release_name + '-' + name) for name in expected}
+    found = {name: [] for name in expected}
+    for pod in _workload_pods(kube, args.namespace, release_name):
+        if pod.get('metadata', {}).get('deletionTimestamp'):
+            continue
+        refs = (pod.get('metadata') or {}).get('ownerReferences') or []
+        if any(r.get('kind') in ('Job', 'CronJob') for r in refs):
+            continue                      # hook/Job pods are not workload replicas
+        statuses = pod.get('status', {}).get('containerStatuses') or []
+        names = {c.get('name') for c in statuses}
+        if not (names & set(expected)):
+            continue                      # not a workload replica of interest
+        if (pod.get('status') or {}).get('phase') != 'Running':
+            raise control.ControlError('workload pod not running')
+        rs_uid = _replicaset_owner(pod)   # foreign/absent owner fails
+        for c in statuses:
+            name = c.get('name')
+            if name not in expected:
+                continue
+            if rs_uid not in ancestry[name][1]:
+                raise control.ControlError('pod owner is not the current ReplicaSet of ' + name)
+            image = c.get('imageID')
+            # EVERY selected workload container must match the canonical image:
+            # a wrong digest FAILS instead of being filtered out.
+            if not isinstance(image, str) or not image.endswith('@' + digest):
+                raise control.ControlError('workload container image digest mismatch: ' + str(name))
+            if c.get('ready') is not True:
+                raise control.ControlError('workload container not ready: ' + str(name))
+            found[name].append({'pod_uid': pod.get('metadata', {}).get('uid'), 'container': name,
+                                'imageID': image, 'ready': True})
+    for name, count in expected.items():
+        if len(found[name]) != count:
+            raise control.ControlError('expected replicas not all observed for ' + name)
+    smoke._record_check(report, 'artifact_binding', 'passed', observations=found, phase_digest=digest)
+
+
+def _termination_is_recent(term, floor):
+    if not isinstance(term, dict) or not term:
+        return False
+    try:
+        finished = control.instant(term.get('finishedAt'))
+    except control.ControlError:
+        return True                        # unparsable recent evidence is not proof
+    return finished >= floor
+
+
+def _health_workers(smoke, args, kube, floor):
+    """Two-pass worker observations; recent OOM or a restart since the floor fails."""
     selector = 'app.kubernetes.io/instance=' + args.target_name
     payload = kube.get('/api/v1/namespaces/' + args.namespace + '/pods', query={'labelSelector': selector})
     items = payload.get('items')
@@ -176,81 +319,122 @@ def _health_workers(smoke, args, kube):
         for c in statuses:
             if c.get('ready') is not True or c.get('state', {}).get('waiting') or c.get('state', {}).get('terminated'):
                 raise control.ControlError('worker not healthy')
+            term = (c.get('lastState') or {}).get('terminated') or {}
             count = c.get('restartCount')
-            if type(count) is not int or count < 0 or count >= args.restart_alert_threshold:
+            if type(count) is not int or count < 0:
+                raise control.ControlError('restart counter malformed')
+            if count >= args.restart_alert_threshold:
                 raise control.ControlError('restart counter at/over threshold')
+            if term and (_termination_is_recent(term, floor)):
+                raise control.ControlError('recent worker termination is not proof of health')
             rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
                          'container': c.get('name'), 'container_id': c.get('containerID'),
                          'restart_count': count,
-                         'last_terminated': c.get('lastState', {}).get('terminated', {})})
+                         'started_at': (c.get('state', {}).get('running') or {}).get('startedAt')})
     if not rows:
         raise control.ControlError('no approved workers observed')
     return rows
 
 
-def _health_log_coverage(smoke, args, kube, rows, now):
+def _health_log_coverage(smoke, args, kube, rows, now, floor):
+    """Explicit coverage record; bounded freshness; truncation is rejected."""
     seconds = max(args.log_since_seconds, 3600)
-    seen = 0
+    records = []
     for row in rows:
         text = kube.get_text('/api/v1/namespaces/' + args.namespace + '/pods/' + row['pod'] + '/log',
                              query={'container': row['container'], 'sinceSeconds': seconds + 60,
                                     'tailLines': args.log_tail_lines, 'timestamps': 'true'})
-        if not isinstance(text, str) or not text.splitlines():
-            raise control.ControlError('empty logs do not prove coverage')
-        if len(text.encode()) > 1048576 or len(text.splitlines()) >= args.log_tail_lines:
-            raise control.ControlError('bounded log coverage truncated/unavailable')
+        if not isinstance(text, str):
+            raise control.ControlError('log read failed')
+        lines = text.splitlines()
+        if not lines:
+            # A newly started container with no lines cannot prove coverage.
+            raise control.ControlError('empty logs cannot prove coverage')
+        if len(text.encode()) > 1048576 or len(lines) >= args.log_tail_lines:
+            raise control.ControlError('log capture truncated (cap/overflow)')
         stamps = []
-        for line in text.splitlines():
+        for line in lines:
             stamp, sep, _ = line.partition(' ')
             if not sep:
                 raise control.ControlError('log timestamp missing')
             stamps.append(control.instant(stamp))
-        window = now - timedelta(seconds=seconds)
-        if stamps[0] > window or stamps[-1] < now - timedelta(seconds=30) or stamps[-1] > now or stamps != sorted(stamps):
-            raise control.ControlError('actual log interval does not cover observation window')
-        seen += 1
-    return seen
-
-
-def health_runtime_binding(smoke, client, report, args, kube):
-    """Live-only artifact binding for the read-only lane (no approval manifest)."""
-    release_name = args.target_name
-    kube.get('/api/v1/namespaces/kube-system')
-    kube.get('/api/v1/namespaces/' + args.namespace)
-    release = kube.get('/apis/helm.toolkit.fluxcd.io/v2/namespaces/' + args.namespace + '/helmreleases/' + release_name)
-    if release.get('spec', {}).get('suspend') is not True:
-        raise control.ControlError('canonical hold is not suspended')
-    history = release.get('status', {}).get('history', [])
-    digest = release.get('spec', {}).get('values', {}).get('image', {}).get('backendDigest')
-    if not history or not history[0].get('ociDigest') or not digest:
-        raise control.ControlError('live immutable chart/artifact evidence missing')
-    pods = kube.get('/api/v1/namespaces/' + args.namespace + '/pods',
-                    query={'labelSelector': 'app.kubernetes.io/instance=' + release_name}).get('items')
-    if not isinstance(pods, list) or not pods:
-        raise control.ControlError('live artifact pod observations missing')
-    observed = []
-    for pod in pods:
-        for c in pod.get('status', {}).get('containerStatuses', []) or []:
-            image = c.get('imageID')
-            if isinstance(image, str) and image.endswith('@' + digest):
-                observed.append({'pod_uid': pod.get('metadata', {}).get('uid'),
-                                 'container': c.get('name'), 'imageID': image, 'ready': c.get('ready')})
-    if not observed or any(o['ready'] is not True for o in observed):
-        raise control.ControlError('running pods do not match the live backend digest')
-    smoke._record_check(report, 'artifact_binding', 'passed', observations=observed, phase_digest=digest)
+        if stamps != sorted(stamps):
+            raise control.ControlError('log timestamps out of order')
+        try:
+            started = control.instant(row.get('started_at'))
+        except control.ControlError:
+            started = None
+        # The floor is the later of the log window and this container's own
+        # start: a freshly rolled pod legitimately has no older history.
+        start_floor = floor if started is None else max(floor, started)
+        coverage_start = max(stamps[0], start_floor)
+        if stamps[0] > start_floor + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
+            raise control.ControlError('coverage does not start at the floor')
+        if stamps[-1] > now:
+            raise control.ControlError('log coverage is in the future')
+        records.append({'pod': row['pod'], 'container': row['container'],
+                        'coverage_start': coverage_start.isoformat(),
+                        'coverage_end': stamps[-1].isoformat(),
+                        'captured_at': now.isoformat(),
+                        'collection_complete': True})
+    # Coverage contract (documented): a container proves it has logged since its
+    # floor; the WORKLOAD's up-to-now liveness is proven by (a) at least one
+    # selected worker logging within FRESHNESS_SECONDS and (b) the second-pass
+    # identity/counter equality in health_temporal. FRESHNESS_SECONDS is a policy
+    # bound, not an up-to-now guarantee -- an idle media worker may legitimately
+    # be silent for longer.
+    freshest = max(control.instant(r['coverage_end']) for r in records)
+    if freshest < now - timedelta(seconds=FRESHNESS_SECONDS):
+        raise control.ControlError('no selected worker logged within the freshness bound')
+    return records
 
 
 def health_temporal(smoke, args, kube):
-    """Live two-pass temporal baseline: the same run re-reads and must agree."""
+    """Live two-pass temporal baseline with explicit coverage and freshness."""
     if args.restart_alert_threshold != 3 or args.log_since_seconds < 3600:
         raise control.ControlError('required mode forbids weaker gates')
-    first = _health_workers(smoke, args, kube)
-    _health_log_coverage(smoke, args, kube, first, smoke.utc_now())
-    second = _health_workers(smoke, args, kube)
+    now = smoke.utc_now()
+    floor = now - timedelta(seconds=max(args.log_since_seconds, 3600))
+    first = _health_workers(smoke, args, kube, floor)
+    coverage = _health_log_coverage(smoke, args, kube, first, now, floor)
+    second = _health_workers(smoke, args, kube, floor)
     keys = lambda rows: sorted((r['uid'], r['container'], r['container_id'], r['restart_count']) for r in rows)
     if keys(first) != keys(second):
         raise control.ControlError('worker identity/counter changed during the observation window')
-    return {'workers': second, 'passes': 2}
+    return {'workers': second, 'passes': 2, 'coverage': coverage}
+
+
+def health_kubernetes_alerts(smoke, args, kube, now):
+    """QUERY real evidence: recent OOM terminations and namespace warning events."""
+    floor = now - timedelta(seconds=max(args.log_since_seconds, 3600))
+    for pod in _workload_pods(kube, args.namespace, args.target_name):
+        for c in (pod.get('status') or {}).get('containerStatuses') or []:
+            term = (c.get('lastState') or {}).get('terminated') or {}
+            if not term:
+                continue
+            if term.get('reason') in ('OOMKilled',) or term.get('exitCode') == 137:
+                if _termination_is_recent(term, floor):
+                    raise control.ControlError('recent OOM termination observed')
+    try:
+        events = kube.get('/api/v1/namespaces/' + args.namespace + '/events').get('items')
+    except Exception as exc:  # noqa: BLE001
+        raise control.ControlError('event query failed') from exc
+    if not isinstance(events, list):
+        raise control.ControlError('event evidence missing')
+    for e in events:
+        if e.get('reason') not in OOM_EVENT_REASONS:
+            continue
+        if e.get('involvedObject', {}).get('namespace') != args.namespace:
+            continue
+        stamp = e.get('lastTimestamp') or e.get('eventTime') or e.get('firstTimestamp')
+        if not isinstance(stamp, str):
+            raise control.ControlError('event without timestamp is not proof')
+        try:
+            when = control.instant(stamp)
+        except control.ControlError as exc:
+            raise control.ControlError('event timestamp unparsable') from exc
+        if when >= floor:
+            raise control.ControlError('recent Kubernetes alert event: ' + str(e.get('reason')))
 
 
 def health_preflight(smoke, client, args, kube):
@@ -262,13 +446,18 @@ def health_preflight(smoke, client, args, kube):
              lambda: health_runtime_binding(smoke, client, report, args, kube),
              lambda: smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report), timeout=args.reader_budget.timeout(10))),
              lambda: smoke.check_mcp_reachable(args.mcp_url, report, timeout=min(args.request_timeout, 10), budget=args.reader_budget),
-             lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube))]
-    for call in calls:
+             lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube)),
+             lambda: health_kubernetes_alerts(smoke, args, kube, smoke.utc_now()),
+             lambda: smoke._record_check(report, 'kubernetes_alerts', 'passed')]
+    for call in calls[:-1]:
         try:
             args.reader_budget.timeout(10)
             call()
         except Exception as exc:
             smoke._alert(report, 'required_preflight_exception', 'read-only health prerequisite failed', error_class=type(exc).__name__)
     if smoke._check_passed(report, 'baseline_temporal') and smoke._check_passed(report, 'runtime_dependencies'):
-        smoke._record_check(report, 'kubernetes_alerts', 'passed')
+        try:
+            calls[-1]()
+        except Exception as exc:
+            smoke._alert(report, 'required_preflight_exception', 'kubernetes alert stamp failed', error_class=type(exc).__name__)
     return report
