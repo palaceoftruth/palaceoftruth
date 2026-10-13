@@ -1,20 +1,14 @@
-"""incident476 RED/GREEN — health lane gates must pass on a SETTLED rollout.
+"""incident476 health lane — strict read-only contract (PR573 + C1-C5 repairs).
 
-RED on current main: (1) artifact_binding counts Job-owned hook pods (incl. the
-smoke pod itself, never Ready) among the digest-matching pods and then demands
-all of them Ready -> self-defeating. (2) baseline_temporal requires log coverage
-back to now - log_since_seconds, impossible for a pod that rolled recently.
+Offline only: a fake kube adapter, no cluster, no secrets, no POST.
 
-GREEN after the fix: hook/Job pods are excluded from the workload artifact
-binding (the exact backend digest on workload-owned pods is still required), and
-the temporal coverage floor is the container's own start time (bounded), not the
-full log window.
-
-Offline only: fake kube adapter; no cluster, no secrets, no POST.
+The lane passes ONLY on a settled rollout and fails on every weakness the
+independent review reproduced: C1 missing expected replica, C2 wrong image,
+C3 owner forgery, C4 stale/empty/truncated coverage, C5 real alert evidence.
 """
 from __future__ import annotations
 
-import importlib.util
+import argparse
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -25,80 +19,191 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-# Import the real modules (shared, no sys.modules clobbering) so this file does
-# not collide with other test modules that also load them.
 import check_memory_rollout_smoke as smoke  # noqa: E402
+import scripts.smoke_control as control  # noqa: E402
 
 preflight = smoke.smoke_preflight
-
 BACKEND = "sha256:" + "b" * 64
+WRONG = "sha256:" + "e" * 64
 NOW = smoke.utc_now()
+REPLICAS = {"backend": 2, "mcp": 1}
 
 
-def _container(name, digest, ready):
-    return {"name": name, "ready": ready, "containerID": "cid-" + name,
-            "restartCount": 0, "state": {"running": {"startedAt": NOW.isoformat()}},
-            "lastState": {}, "imageID": "ghcr.io/x/" + name + "@" + digest}
-
-
-def _pod(name, *, owner_kind, owner_name, digest, ready, started_ago_s=240):
+def _pod(name, container, *, owner=("ReplicaSet", True), digest=BACKEND, ready=True,
+         started_ago_s=240, last_terminated=None, restart_count=0):
     started = (NOW - timedelta(seconds=started_ago_s)).isoformat()
-    return {"metadata": {"name": name, "uid": "uid-" + name, "namespace": "palace-sarvent",
-                         "labels": {"app.kubernetes.io/instance": "palace-sarvent", "app": name},
-                         "ownerReferences": [{"kind": owner_kind, "name": owner_name}]},
-            "status": {"phase": "Running",
-                       "containerStatuses": [dict(_container(name, digest, ready),
-                                                  state={"running": {"startedAt": started}})]}}
+    if owner is None:
+        refs = []
+    else:
+        kind, controller = owner
+        refs = [{"kind": kind, "controller": controller, "name": name + "-rs", "uid": "rsuid-" + name}]
+    return {
+        "metadata": {"name": name, "uid": "uid-" + name, "namespace": "palace-sarvent",
+                     "labels": {"app.kubernetes.io/instance": "palace-sarvent", "app": name},
+                     "ownerReferences": refs},
+        "status": {"phase": "Running",
+                   "containerStatuses": [{"name": container, "ready": ready, "containerID": "cid-" + name,
+                                          "restartCount": restart_count,
+                                          "state": {"running": {"startedAt": started}},
+                                          "lastState": ({"terminated": last_terminated} if last_terminated else {}),
+                                          "imageID": "ghcr.io/x/" + name + "@" + digest}]},
+    }
+
+
+def _healthy_pods():
+    return [_pod("backend-a", "backend"), _pod("backend-b", "backend"), _pod("mcp-a", "mcp")]
 
 
 class FakeKube:
-    def __init__(self, pods):
+    def __init__(self, pods, *, events=None, lines=None, history=None, digest=BACKEND, replicas=REPLICAS):
         self.pods = pods
+        self.events = events or []
+        self.lines = lines or {}
+        self.history = history or [{"ociDigest": "sha256:" + "c" * 64}]
+        self.digest = digest
+        self.replicas = replicas
 
     def get(self, path, query=None):
         if path.endswith("/pods"):
             return {"items": self.pods}
+        if path.endswith("/events"):
+            return {"items": self.events}
         if "helmreleases" in path:
             return {"metadata": {"uid": "rel"},
-                    "spec": {"suspend": True, "values": {"image": {"backendDigest": BACKEND}}},
-                    "status": {"history": [{"ociDigest": "sha256:" + "c" * 64}]}}
+                    "spec": {"suspend": True,
+                             "values": {"image": {"backendDigest": self.digest},
+                                        "highAvailability": {"replicas": self.replicas}}},
+                    "status": {"history": self.history}}
         return {"metadata": {"uid": "u"}}
 
     def get_text(self, path, query=None):
         pod = path.split("/pods/")[1].split("/log")[0]
-        started = next(p for p in self.pods if p["metadata"]["name"] == pod)["status"]["containerStatuses"][0]
-        start = started["state"]["running"]["startedAt"]
-        return f"{start} started\n{NOW.isoformat()} healthy\n"
+        if pod in self.lines:
+            return self.lines[pod]
+        # A settled pod's log reaches back to its own start and has a fresh line.
+        started = next(p for p in self.pods if p["metadata"]["name"] == pod)["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+        fresh = (NOW - timedelta(seconds=30)).isoformat()
+        return f"{started} started\n{fresh} heartbeat\n"
 
 
-def _args():
-    import argparse
-    return argparse.Namespace(namespace="palace-sarvent", target_name="palace-sarvent",
-                              worker_name_fragment="worker", log_tail_lines=3000,
-                              log_since_seconds=7200, restart_alert_threshold=3,
-                              pod_label_selector="app.kubernetes.io/instance=palace-sarvent")
+def _args(**kw):
+    base = dict(namespace="palace-sarvent", target_name="palace-sarvent",
+                worker_name_fragment="worker", log_tail_lines=3000,
+                log_since_seconds=7200, restart_alert_threshold=3,
+                pod_label_selector="app.kubernetes.io/instance=palace-sarvent")
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _binding(kube):
+    report = {"checks": [], "alerts": []}
+    preflight.health_runtime_binding(smoke, None, report, _args(), kube)
+    return report
+
+
+# --- the contract passes only on a settled rollout --------------------------
+
+def test_settled_rollout_passes():
+    report = _binding(FakeKube(_healthy_pods()))
+    row = next(c for c in report["checks"] if c["name"] == "artifact_binding")
+    assert row["status"] == "passed"
+    assert sum(len(v) for v in row["observations"].values()) == sum(REPLICAS.values())
 
 
 def test_artifact_binding_ignores_job_hook_pods():
-    """The smoke/RLS hook pods run the backend image but are never 'Ready';
-    they must not defeat the workload artifact binding."""
-    pods = [
-        _pod("backend-1", owner_kind="ReplicaSet", owner_name="backend-rs", digest=BACKEND, ready=True),
-        _pod("mcp-1", owner_kind="ReplicaSet", owner_name="mcp-rs", digest=BACKEND, ready=True),
-        _pod("memory-smoke-1", owner_kind="Job", owner_name="memory-smoke", digest=BACKEND, ready=False),
-        _pod("tenant-rls-1", owner_kind="Job", owner_name="tenant-rls", digest=BACKEND, ready=False),
-    ]
-    report = {"checks": [], "alerts": []}
-    preflight.health_runtime_binding(smoke, None, report, _args(), FakeKube(pods))
-    row = next(c for c in report["checks"] if c["name"] == "artifact_binding")
-    assert row["status"] == "passed"
+    """Hook/Job pods run the backend image but are never Ready; they must not
+    defeat the workload artifact binding."""
+    pods = _healthy_pods() + [_pod("memory-smoke-1", "memory-rollout-smoke", owner=("Job", None), ready=False)]
+    assert _binding(FakeKube(pods))["checks"][0]["status"] == "passed"
 
 
-def test_temporal_uses_container_start_as_coverage_floor():
-    """A pod that rolled minutes ago cannot have log_since_seconds of history;
-    coverage is measured from its own start, not now - log_since_seconds."""
-    pods = [_pod("worker-1", owner_kind="ReplicaSet", owner_name="worker-rs",
-                 digest="sha256:" + "w" * 64, ready=True, started_ago_s=240)]
-    out = preflight.health_temporal(smoke, _args(), FakeKube(pods))
+def test_temporal_settled_worker_passes():
+    out = preflight.health_temporal(smoke, _args(), FakeKube([_pod("worker-1", "worker")]))
     assert out["passes"] == 2
+    assert out["coverage"][0]["collection_complete"] is True
     assert len(out["workers"]) == 1
+
+
+# --- C1: expected replica counts are required ------------------------------
+
+def test_C1_missing_replica_fails():
+    pods = [_pod("backend-a", "backend"), _pod("mcp-a", "mcp")]   # only 1 of 2 backends
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube(pods))
+
+
+def test_C1_missing_desired_count_fails():
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube(_healthy_pods(), replicas={}))
+
+
+# --- C2: a wrong image cannot hide -----------------------------------------
+
+def test_C2_wrong_digest_workload_pod_fails():
+    pods = _healthy_pods() + [_pod("backend-c", "backend", digest=WRONG)]
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube(pods))
+
+
+# --- C3: owner forgery ------------------------------------------------------
+
+def test_C3_pod_without_owner_fails():
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube([_pod("backend-a", "backend", owner=None)]))
+
+
+def test_C3_foreign_controller_owner_fails():
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube([_pod("backend-a", "backend", owner=("DaemonSet", True))]))
+
+
+# --- C4: coverage must be fresh up to now ----------------------------------
+
+def test_C4_stale_last_line_fails():
+    stale = (NOW - timedelta(seconds=7100)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=10000)],
+                    lines={"worker-1": f"{stale} only-line\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+def test_C4_empty_logs_fail():
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), FakeKube([_pod("worker-1", "worker")], lines={"worker-1": ""}))
+
+
+def test_C4_truncated_capture_fails():
+    fresh = (NOW - timedelta(seconds=30)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker")],
+                    lines={"worker-1": "".join(f"{fresh} line{i}\n" for i in range(3000))})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+# --- C5: kubernetes_alerts queries real evidence ---------------------------
+
+def test_C5_recent_oom_event_fails():
+    event = {"reason": "OOMKilled", "involvedObject": {"namespace": "palace-sarvent"},
+             "lastTimestamp": (NOW - timedelta(seconds=60)).isoformat()}
+    with pytest.raises(control.ControlError):
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+
+
+def test_C5_recent_oom_termination_fails():
+    term = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": (NOW - timedelta(seconds=60)).isoformat()}
+    pods = _healthy_pods() + [_pod("worker-1", "worker", last_terminated=term)]
+    with pytest.raises(control.ControlError):
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(pods), NOW)
+
+
+def test_C5_no_recent_alert_passes():
+    old = {"reason": "OOMKilled", "involvedObject": {"namespace": "palace-sarvent"},
+           "lastTimestamp": (NOW - timedelta(seconds=20000)).isoformat()}
+    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[old]), NOW)
+
+
+def test_C5_recent_subthreshold_restart_termination_fails():
+    term = {"reason": "Error", "exitCode": 1, "finishedAt": (NOW - timedelta(seconds=60)).isoformat()}
+    pods = [_pod("worker-1", "worker", last_terminated=term, restart_count=1)]
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), FakeKube(pods))
