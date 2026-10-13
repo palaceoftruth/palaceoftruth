@@ -165,7 +165,13 @@ def readonly_receipt(smoke,client,args,a):
 # ---------------------------------------------------------------------------
 
 WORKLOAD_CONTAINERS = ("backend", "mcp")
-OOM_REASONS = {"OOMKilled", "BackoffLimitExceeded"}
+# Real resource-OOM reasons only. kubelet EVENTS use `OOMKilling`; container
+# STATUS lastState uses `OOMKilled`. A prior failed hook Job's
+# `BackoffLimitExceeded` is a gate artifact, not runtime OOM, and must not poison
+# the health gate on a retry.
+OOM_EVENT_REASONS = {"OOMKilling", "OOMKilled"}
+# Policy bound, NOT an up-to-now guarantee: a worker that legitimately logs
+# less often than this needs the operator to justify a different bound.
 FRESHNESS_SECONDS = 300
 COVERAGE_TOLERANCE_SECONDS = 120
 
@@ -204,6 +210,30 @@ def _replicaset_owner(pod):
     ref = refs[0]
     if ref.get('kind') != 'ReplicaSet' or ref.get('controller') is not True or not ref.get('uid'):
         raise control.ControlError('pod owner is not a controlled ReplicaSet')
+    return ref['uid']
+
+
+def _deployment_ancestry(kube, namespace, name):
+    """Prove Deployment -> current ReplicaSet chain; return (deploy_uid, rs_uids)."""
+    dep = kube.get('/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name)
+    dep_uid = (dep.get('metadata') or {}).get('uid')
+    if not dep_uid:
+        raise control.ControlError('deployment UID missing for ' + name)
+    # ReplicaSets are labelled with the RELEASE instance, not the deployment name.
+    release_name = name.rsplit('-', 1)[0]
+    rs_list = kube.get('/apis/apps/v1/namespaces/' + namespace + '/replicasets',
+                       query={'labelSelector': 'app.kubernetes.io/instance=' + release_name}).get('items')
+    if not isinstance(rs_list, list):
+        raise control.ControlError('replicaset observations missing')
+    owned = set()
+    for rs in rs_list:
+        refs = (rs.get('metadata') or {}).get('ownerReferences') or []
+        if len(refs) == 1 and refs[0].get('kind') == 'Deployment' and refs[0].get('controller') is True \
+                and refs[0].get('uid') == dep_uid:
+            owned.add((rs.get('metadata') or {}).get('uid'))
+    if not owned:
+        raise control.ControlError('no current ReplicaSet owned by deployment ' + name)
+    return dep_uid, owned
 
 
 def health_runtime_binding(smoke, client, report, args, kube):
@@ -219,6 +249,8 @@ def health_runtime_binding(smoke, client, report, args, kube):
     if not history or not history[0].get('ociDigest') or not digest:
         raise control.ControlError('live immutable chart/artifact evidence missing')
     expected = _expected_workload_replicas(release)
+    # Deployment name convention: <release>-<container>
+    ancestry = {name: _deployment_ancestry(kube, args.namespace, release_name + '-' + name) for name in expected}
     found = {name: [] for name in expected}
     for pod in _workload_pods(kube, args.namespace, release_name):
         if pod.get('metadata', {}).get('deletionTimestamp'):
@@ -232,11 +264,13 @@ def health_runtime_binding(smoke, client, report, args, kube):
             continue                      # not a workload replica of interest
         if (pod.get('status') or {}).get('phase') != 'Running':
             raise control.ControlError('workload pod not running')
-        _replicaset_owner(pod)            # foreign/absent owner fails
+        rs_uid = _replicaset_owner(pod)   # foreign/absent owner fails
         for c in statuses:
             name = c.get('name')
             if name not in expected:
                 continue
+            if rs_uid not in ancestry[name][1]:
+                raise control.ControlError('pod owner is not the current ReplicaSet of ' + name)
             image = c.get('imageID')
             # EVERY selected workload container must match the canonical image:
             # a wrong digest FAILS instead of being filtered out.
@@ -336,15 +370,22 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
         coverage_start = max(stamps[0], start_floor)
         if stamps[0] > start_floor + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
             raise control.ControlError('coverage does not start at the floor')
-        # Bounded freshness: an old last line alone is NOT up-to-now proof.
-        if stamps[-1] < now - timedelta(seconds=FRESHNESS_SECONDS):
-            raise control.ControlError('log coverage is not fresh up to now')
         if stamps[-1] > now:
             raise control.ControlError('log coverage is in the future')
         records.append({'pod': row['pod'], 'container': row['container'],
                         'coverage_start': coverage_start.isoformat(),
                         'coverage_end': stamps[-1].isoformat(),
+                        'captured_at': now.isoformat(),
                         'collection_complete': True})
+    # Coverage contract (documented): a container proves it has logged since its
+    # floor; the WORKLOAD's up-to-now liveness is proven by (a) at least one
+    # selected worker logging within FRESHNESS_SECONDS and (b) the second-pass
+    # identity/counter equality in health_temporal. FRESHNESS_SECONDS is a policy
+    # bound, not an up-to-now guarantee -- an idle media worker may legitimately
+    # be silent for longer.
+    freshest = max(control.instant(r['coverage_end']) for r in records)
+    if freshest < now - timedelta(seconds=FRESHNESS_SECONDS):
+        raise control.ControlError('no selected worker logged within the freshness bound')
     return records
 
 
@@ -381,7 +422,7 @@ def health_kubernetes_alerts(smoke, args, kube, now):
     if not isinstance(events, list):
         raise control.ControlError('event evidence missing')
     for e in events:
-        if e.get('reason') not in OOM_REASONS:
+        if e.get('reason') not in OOM_EVENT_REASONS:
             continue
         if e.get('involvedObject', {}).get('namespace') != args.namespace:
             continue

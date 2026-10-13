@@ -55,8 +55,11 @@ def _healthy_pods():
 
 
 class FakeKube:
-    def __init__(self, pods, *, events=None, lines=None, history=None, digest=BACKEND, replicas=REPLICAS):
+    def __init__(self, pods, *, events=None, lines=None, history=None, digest=BACKEND, replicas=REPLICAS,
+                 owner_deploy=None, owner_ok=None):
         self.pods = pods
+        self.owner_deploy = owner_deploy or {}
+        self.owner_ok = owner_ok or {}
         self.events = events or []
         self.lines = lines or {}
         self.history = history or [{"ociDigest": "sha256:" + "c" * 64}]
@@ -68,6 +71,27 @@ class FakeKube:
             return {"items": self.pods}
         if path.endswith("/events"):
             return {"items": self.events}
+        if "/deployments/" in path:
+            name = path.rsplit("/", 1)[1]
+            return {"metadata": {"uid": "dep-" + name, "name": name}}
+        if path.endswith("/replicasets"):
+            # The lane labels by the RELEASE instance; the owning Deployment is
+            # <release>-<container>. Derive from the pod's container name.
+            items = []
+            for pod in self.pods:
+                cs = (pod.get("status") or {}).get("containerStatuses") or []
+                if not cs:
+                    continue
+                deploy = "palace-sarvent-" + cs[0]["name"]
+                refs = (pod.get("metadata") or {}).get("ownerReferences") or []
+                if len(refs) != 1 or refs[0].get("kind") != "ReplicaSet":
+                    continue
+                items.append({"metadata": {"name": refs[0].get("name"), "uid": refs[0].get("uid"),
+                                           "ownerReferences": ([{"kind": "Deployment", "controller": True,
+                                                                 "uid": "dep-" + self.owner_deploy.get(pod["metadata"]["name"], deploy)}]
+                                                               if self.owner_ok.get(pod["metadata"]["name"], True) else
+                                                               [{"kind": "Deployment", "controller": True, "uid": "dep-foreign"}])}})
+            return {"items": items}
         if "helmreleases" in path:
             return {"metadata": {"uid": "rel"},
                     "spec": {"suspend": True,
@@ -155,6 +179,40 @@ def test_C3_pod_without_owner_fails():
 def test_C3_foreign_controller_owner_fails():
     with pytest.raises(control.ControlError):
         _binding(FakeKube([_pod("backend-a", "backend", owner=("DaemonSet", True))]))
+
+
+def test_E1_replicaset_not_owned_by_the_current_deployment_fails():
+    """A controlled ReplicaSet that is not the Deployment's current one fails."""
+    pods = _healthy_pods()
+    kube = FakeKube(pods, owner_ok={"backend-a": False})
+    with pytest.raises(control.ControlError):
+        _binding(kube)
+
+
+def test_E4_prior_failed_hook_job_backoff_is_not_a_health_blocker():
+    """A prior failed hook Job's BackoffLimitExceeded must not poison the gate."""
+    event = {"reason": "BackoffLimitExceeded",
+             "involvedObject": {"namespace": "palace-sarvent", "kind": "Job",
+                                "name": "palace-sarvent-memory-smoke-4a631ed7", "uid": "job-uid-old"},
+             "lastTimestamp": (NOW - timedelta(seconds=1687)).isoformat()}
+    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+
+
+def test_E3_real_oom_killing_event_fails():
+    event = {"reason": "OOMKilling", "involvedObject": {"namespace": "palace-sarvent", "kind": "Pod"},
+             "lastTimestamp": (NOW - timedelta(seconds=60)).isoformat()}
+    with pytest.raises(control.ControlError):
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+
+
+def test_E3_oom_killing_on_prior_job_pod_today_fails():
+    """A real OOM on an earlier hook Job pod (same namespace, today) IS a failure."""
+    event = {"reason": "OOMKilling",
+             "involvedObject": {"namespace": "palace-sarvent", "kind": "Pod",
+                                "name": "palace-sarvent-memory-smoke-43c72fbe-x", "uid": "pod-uid-old"},
+             "lastTimestamp": (NOW - timedelta(seconds=600)).isoformat()}
+    with pytest.raises(control.ControlError):
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
 
 
 # --- C4: coverage must be fresh up to now ----------------------------------
