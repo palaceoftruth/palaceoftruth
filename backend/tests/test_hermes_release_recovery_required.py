@@ -34,7 +34,14 @@ def test_packaged_normal_loader_recovery_required(tmp_path, revision):
     first, second = tmp_path / 'first.tar', tmp_path / 'second.tar'
     inventory = packager.build(first)
     assert packager.build(second) == inventory and first.read_bytes() == second.read_bytes()
-    assert inventory['version'] == '1.0.41'
+    # The packaged version tracks plugin.yaml; read it instead of hard-coding.
+    plugin_yaml = ROOT / 'third_party_plugins' / 'hermes' / 'memory' / 'palaceoftruth' / 'plugin.yaml'
+    expected_version = next(
+        line.split(':', 1)[1].strip()
+        for line in plugin_yaml.read_text(encoding='utf-8').splitlines()
+        if line.startswith('version:')
+    )
+    assert inventory['version'] == expected_version
     home = tmp_path / 'home'
     plugins = home / 'plugins'
     plugins.mkdir(parents=True)

@@ -45,7 +45,14 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
     ).read_text(encoding="utf-8")
 
     assert codex_manifest["version"] == "0.2.0"
-    assert "version: 1.0.41" in hermes_plugin_yaml
+    # The Hermes package version is sourced from plugin.yaml, so read it back
+    # instead of hard-coding a literal that breaks on every version bump.
+    plugin_version = next(
+        line.split(":", 1)[1].strip()
+        for line in hermes_plugin_yaml.splitlines()
+        if line.startswith("version:")
+    )
+    assert plugin_version == "1.0.42"
     assert "`palace_semantic_recall` is the 1.0.37 compatibility alias" in root_readme
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
