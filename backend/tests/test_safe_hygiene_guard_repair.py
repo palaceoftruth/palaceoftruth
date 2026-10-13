@@ -126,10 +126,15 @@ def test_output_never_contains_value_substring_of_reviewer_fixture():
     assert str(len(VALUE)) not in flat
 
 
-def test_main_output_only_contains_path_line_field_rule_category():
-    proc=_run_guard_main()
-    assert proc.returncode==0
-    payload=json.loads(proc.stdout)
+def test_main_output_only_contains_path_line_field_rule_category(monkeypatch, capsys):
+    def run(cmd, **kwargs):
+        text = 'backend/config.py\n' if cmd[1] == 'ls-tree' else 'api_key = "'+VALUE+'"\n'
+        return subprocess.CompletedProcess(cmd, 0, text, '')
+    monkeypatch.setattr(g.subprocess, 'run', run)
+    assert g.main(['guard', 'HEAD']) == 0
+    output = capsys.readouterr()
+    assert output.err == ''
+    payload=json.loads(output.out)
     assert set(payload) >= {'scanned','policy','rule_ids','findings','finding_count'}
     assert payload['policy']=='review-aid-only; no value, length, sample, hash, or fingerprint is ever emitted'
     for f in payload['findings']:
