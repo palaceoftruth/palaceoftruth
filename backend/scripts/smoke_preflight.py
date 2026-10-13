@@ -182,6 +182,7 @@ def _health_workers(smoke, args, kube):
             rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
                          'container': c.get('name'), 'container_id': c.get('containerID'),
                          'restart_count': count,
+                         'started_at': ((c.get('state', {}) or {}).get('running', {}) or {}).get('startedAt'),
                          'last_terminated': c.get('lastState', {}).get('terminated', {})})
     if not rows:
         raise control.ControlError('no approved workers observed')
@@ -205,8 +206,19 @@ def _health_log_coverage(smoke, args, kube, rows, now):
             if not sep:
                 raise control.ControlError('log timestamp missing')
             stamps.append(control.instant(stamp))
-        window = now - timedelta(seconds=seconds)
-        if stamps[0] > window or stamps[-1] < now - timedelta(seconds=30) or stamps[-1] > now or stamps != sorted(stamps):
+        # Coverage floor is the container's OWN start (bounded by the configured
+        # window): a pod that rolled recently legitimately has no older logs, so
+        # we require coverage from max(now - window, container start) to now,
+        # not the full window back to a time before the pod existed.
+        floor = now - timedelta(seconds=seconds)
+        started = row.get('started_at')
+        if isinstance(started, str) and started:
+            try:
+                floor = max(floor, control.instant(started))
+            except control.ControlError as exc:
+                raise control.ControlError('container start timestamp invalid') from exc
+        tolerance = timedelta(seconds=120)
+        if stamps[0] > floor + tolerance or stamps[-1] < floor or stamps[-1] > now or stamps != sorted(stamps):
             raise control.ControlError('actual log interval does not cover observation window')
         seen += 1
     return seen
@@ -230,6 +242,12 @@ def health_runtime_binding(smoke, client, report, args, kube):
         raise control.ControlError('live artifact pod observations missing')
     observed = []
     for pod in pods:
+        # Hook/Job pods (the smoke Job itself, the RLS enforcement hook) run the
+        # same backend image but are never 'Ready'. They are not the workload
+        # artifact under test and must not defeat the binding.
+        if any(str(ref.get('kind')) in ('Job', 'CronJob')
+               for ref in (pod.get('metadata', {}).get('ownerReferences') or [])):
+            continue
         for c in pod.get('status', {}).get('containerStatuses', []) or []:
             image = c.get('imageID')
             if isinstance(image, str) and image.endswith('@' + digest):
