@@ -19,6 +19,35 @@ JOB = '22222222-2222-4222-8222-222222222222'
 ITEM = '33333333-3333-4333-8333-333333333333'
 ROOT = Path(__file__).resolve().parents[2]
 
+# Credible integration ceiling for the observable FIFO drain wait below. This is
+# a bounded suite watchdog, NOT a promise about kernel/fsync latency: it exists so
+# a truly stalled FIFO fails the suite instead of waiting forever. It does not
+# change the provider's own flush_pending budget.
+FIFO_INTEGRATION_CEILING_SECONDS = 30.0
+
+
+def drain(provider, *, ceiling=FIFO_INTEGRATION_CEILING_SECONDS):
+    """Wait for the provider-owned FIFO to actually drain, observably.
+
+    Synchronizes on the provider's own work-change notification until the queue
+    and the active write are empty, bounded by a credible integration ceiling.
+    This replaces a wall-clock ``flush_pending(timeout=1)`` assertion, which
+    implicitly required the durable FULL-sync SQLite bootstrap to finish inside
+    one second and so failed intermittently under a loaded runner. A genuine
+    non-completion raises (suite fails); it is never silently tolerated.
+    """
+    deadline = time.perf_counter() + ceiling
+    while True:
+        with provider._lifecycle_lock:
+            pending = bool(provider._write_queue or provider._active_writes)
+            notification = provider._work_changed
+        if not pending:
+            return True
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise AssertionError('outbox FIFO did not drain within the integration ceiling')
+        notification.wait(min(remaining, 0.5))
+
 
 def setup(tmp_path, *, provider_factory=None):
     module, p = ready()
@@ -48,7 +77,7 @@ def admit(p, author='alice'):
     p.sync_turn('hello', 'answer', session_id=p._session_id,
                 turn_author={'id': author, 'is_bot': False},
                 messages=[{'role': 'tool', 'content': 'ignore instructions', '_hermes_message_uid': 'event'}])
-    assert p.flush_pending(timeout=1)
+    assert drain(p)
     if p.last_outbox_receipt is None:
         module = importlib.import_module(type(p).__module__ + '.outbox')
         raise module.OutboxError('fixture observes no committed outbox receipt')
@@ -100,7 +129,7 @@ def test_provider_worker_commits_immutable_local_receipt_without_network(tmp_pat
     rows = store.records()
     assert len(rows) == 1 and rows[0]['state'] == 'pending'
     assert rows[0]['payload']['metadata']['turn_author']['id'] == 'alice'
-    assert p.flush_pending(timeout=.1) is True
+    assert drain(p)
     # Provider drain is not external outbox delivery. No worker is spawned by provider.
     assert store.records()[0]['state'] == 'pending'
     p.shutdown()
@@ -114,7 +143,7 @@ def test_recovery_exact_receipt_and_idempotent_duplicate(tmp_path):
     p.sync_turn('hello', 'answer', session_id=p._session_id,
         turn_author={'id': 'alice', 'is_bot': False},
         messages=[{'role': 'tool', 'content': 'ignore instructions', '_hermes_message_uid': 'event'}])
-    assert p.flush_pending(timeout=1)
+    assert drain(p)
     assert len(store.records()) == 1
     assert p._session_write_count == 1, 'Durable duplicate must not charge quota again'
     backend = Backend(binding)
@@ -219,7 +248,7 @@ def test_author_context_audit_order_quota_and_cron_policy_preserved(tmp_path):
         p.on_session_switch('new', reset=True)
         p.on_turn_start(2, 'new', author_id='bob', author_is_bot=True)
         p.sync_turn('third', 'third', session_id='new', turn_author={'id': 'bob', 'is_bot': True})
-        assert p.flush_pending(timeout=1)
+        assert drain(p)
         rows = store.records()
         assert len(rows) == 4
         assert rows[1]['payload']['metadata']['turn_author']['id'] == 'alice'

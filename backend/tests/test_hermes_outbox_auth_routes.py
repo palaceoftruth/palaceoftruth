@@ -24,7 +24,7 @@ from app.database import get_db
 from app.schemas.memory import MemoryQueueHint
 from tests.test_mcp_oauth import FakeSession,_Result,_client_row
 from tests.test_hermes_checkpoint_repair import CommittedStore
-from tests.test_hermes_outbox import setup,admit,ROOT,TENANT,ITEM
+from tests.test_hermes_outbox import setup,admit,drain,ROOT,TENANT,ITEM
 from tests.test_hermes_outbox_auth import KEY_ID,CLIENT_ID,CLIENT_KEY
 
 API_SECRET='fixture-api-secret'
@@ -130,7 +130,7 @@ def prepared(tmp_path,origin,mode,tenant=TENANT):
         p._api_key='';p._oauth_client_secret=OAUTH_SECRET;p._oauth_client_key=CLIENT_KEY
     else:p._api_key=API_SECRET
     p._config['outbox_binding']=b
-    store=admit(p);p.sync_turn('successor','successor');assert p.flush_pending(timeout=1)
+    store=admit(p);p.sync_turn('successor','successor');assert drain(p)
     return m,p,b,store
 
 
