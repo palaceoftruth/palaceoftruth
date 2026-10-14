@@ -56,13 +56,23 @@ def test_packaged_normal_loader_recovery_required(tmp_path, revision):
            'SAR1406_NORMAL_LOADER': '1', 'SAR1406_HOST_SOURCE': str(host),
            'HERMES_CONTRACT_ROOT': str(host), 'HERMES_PROVENANCE_HOST_ROOT': str(host)}
     receipt = tmp_path / 'recovery.xml'
-    files = sorted((ROOT / 'backend/tests').glob('test_hermes_outbox*.py'))
+    # Explicit required module set, all matching the outbox selection pattern.
+    outbox_dir = ROOT / 'backend' / 'tests'
+    files = sorted(outbox_dir.glob('test_hermes_outbox*.py'))
+    assert [f.name for f in files] == [
+        'test_hermes_outbox.py',
+        'test_hermes_outbox_auth.py',
+        'test_hermes_outbox_auth_routes.py',
+        'test_hermes_outbox_contract.py',
+        'test_hermes_outbox_fifo_barrier.py',
+        'test_hermes_outbox_recovery.py',
+    ], [f.name for f in files]
     result = subprocess.run([sys.executable, '-m', 'pytest', *map(str, files), '-q', '-o', 'addopts=',
                              '--junitxml=' + str(receipt)], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
     suites = list(ET.parse(receipt).getroot().iter('testsuite'))
     counts = {key: sum(int(s.get(key, 0)) for s in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
-    assert counts == {'tests': 70, 'failures': 0, 'errors': 0, 'skipped': 0}, counts
+    assert counts == {'tests': 81, 'failures': 0, 'errors': 0, 'skipped': 0}, counts
     env['SAR1402_EXTRACTED_PACKAGE'] = str(tmp_path / 'package')
     artifact_receipt = tmp_path / 'artifact-cli.xml'
     artifact_result = subprocess.run([sys.executable, '-m', 'pytest',

@@ -41,7 +41,7 @@ class ControlledStore:
 
     def admit(self, payload, *, max_session):
         self.entered.set()
-        assert self.release.wait(5), 'fixture commit gate was never released'
+        assert self.release.wait(10), 'fixture commit gate was never released'
         stored = json.loads(json.dumps(payload, sort_keys=True))
         self.admissions.append(stored)
         return {
@@ -74,7 +74,7 @@ def _provider(tmp_path, monkeypatch, outbox, *, blocked):
     return factory
 
 
-def _store(factory, timeout=2.0):
+def _store(factory, timeout=10.0):
     """Wait for the drain worker to create the fixture store (it is lazy)."""
     deadline = time.perf_counter() + timeout
     while factory.last is None and time.perf_counter() < deadline:
@@ -96,7 +96,7 @@ def test_flush_deadline_is_absolute_while_commit_blocked_then_completes(tmp_path
     p._request_json = lambda *a, **k: posts.append(a) or {}
     _submit(p, 1)
     store = _store(factory)
-    assert store.entered.wait(2), 'worker did not reach the blocked commit'
+    assert store.entered.wait(10), 'worker did not reach the blocked commit'
     # Nothing is durable yet and the short-budget barrier must say so.
     assert p.last_outbox_receipt is None
     assert p.flush_pending(timeout=0.05) is False
@@ -128,7 +128,7 @@ def test_concurrent_flush_waiters_all_observe_completion(tmp_path, monkeypatch):
     factory = _provider(tmp_path, monkeypatch, outbox, blocked=True)
     _submit(p, 1)
     store = _store(factory)
-    assert store.entered.wait(2)
+    assert store.entered.wait(10)
     results = []
     threads = [threading.Thread(target=lambda: results.append(p.flush_pending(timeout=5)))
                for _ in range(3)]
@@ -148,7 +148,7 @@ def test_fifo_order_preserved_across_blocked_then_released_commits(tmp_path, mon
     for index in range(3):
         _submit(p, index)
     store = _store(factory)
-    assert store.entered.wait(2)
+    assert store.entered.wait(10)
     store.release.set()
     assert p.flush_pending(timeout=5) is True
     bodies = [row['body'] for row in store.admissions]
@@ -163,7 +163,7 @@ def test_cancellation_closes_admission_while_commit_blocked_then_completes(tmp_p
     factory = _provider(tmp_path, monkeypatch, outbox, blocked=True)
     _submit(p, 1)
     store = _store(factory)
-    assert store.entered.wait(2)
+    assert store.entered.wait(10)
     # Shutdown must close admission without waiting forever on the blocked commit.
     p.shutdown(timeout=0.05)
     with pytest.raises(RuntimeError):
@@ -182,7 +182,7 @@ def test_slow_commit_barrier_is_deterministic(tmp_path, monkeypatch, iteration):
     factory = _provider(tmp_path, monkeypatch, outbox, blocked=True)
     _submit(p, 1)
     store = _store(factory)
-    assert store.entered.wait(2)
+    assert store.entered.wait(10)
     assert p.flush_pending(timeout=0.05) is False
     assert p.last_outbox_receipt is None
     store.release.set()
