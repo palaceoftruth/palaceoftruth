@@ -9,7 +9,7 @@ import pytest
 from fastapi import Request
 from app import auth
 from app.api import memory
-from tests.test_hermes_outbox import setup, admit, Backend, TENANT
+from tests.test_hermes_outbox import setup, admit, drain, Backend, TENANT
 
 KEY_ID='44444444-4444-4444-8444-444444444444'
 CLIENT_ID='55555555-5555-4555-8555-555555555555'
@@ -68,7 +68,7 @@ def test_submission_nonsecret_binding_freezes_before_worker(tmp_path,mutation):
         p._api_key='';p._oauth_client_secret='fixture-late-mode';p._oauth_client_key=CLIENT_KEY
     p._config['outbox_binding']=changed;p._base_url=changed['origin']
     try:
-        release.set();assert p.flush_pending(timeout=1)
+        release.set();assert drain(p)
         assert p._outbox_store.binding==binding
         assert p._outbox_store.records()[0]['payload']['tenant_id']==TENANT
     finally:release.set();p.shutdown()

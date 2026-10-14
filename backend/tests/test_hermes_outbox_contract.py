@@ -7,13 +7,13 @@ import sys
 import time
 
 import pytest
-from tests.test_hermes_outbox import setup, admit, Backend, ROOT
+from tests.test_hermes_outbox import setup, admit, drain, Backend, ROOT
 
 
 def test_recovery_stops_at_first_unproven_predecessor(tmp_path):
     m,p,binding=setup(tmp_path);store=admit(p)
     p.sync_turn('second','second')
-    assert p.flush_pending(timeout=1)
+    assert drain(p)
     backend=Backend(binding);backend.queue_only=True
     result=m.RecoveryWorker(store,backend).run(max_jobs=2,timeout=1)
     assert result['failed']==1 and result['remote_durable']==0
@@ -25,7 +25,7 @@ def test_row_cap_is_finite_and_done_rows_are_not_forgotten(tmp_path,monkeypatch)
     monkeypatch.setattr(m,'MAX_ROWS',1)
     assert m.RecoveryWorker(store,Backend(binding)).run(max_jobs=1,timeout=1)['remote_durable']==1
     p.sync_turn('not silently evicted','second')
-    assert p.flush_pending(timeout=1) and p.last_outbox_receipt is None
+    assert drain(p) and p.last_outbox_receipt is None
     assert p.shutdown_drain_state['failed_writes']==1
     assert len(store.records())==1 and store.records()[0]['state']=='delivered'
 
@@ -102,7 +102,7 @@ def test_precommit_native_queue_gap_and_checkpoint_deadline_remain_honest(tmp_pa
         assert time.perf_counter()-start<.15 and not calls
         assert p.flush_pending(timeout=.01) is False
     finally:release.set()
-    assert p.flush_pending(timeout=1)
+    assert drain(p)
     assert len(store.records())==2 and not calls
     state=p.shutdown_drain_state
     assert state['accepted_writes']==3 and state['completed_writes']==2 and state['failed_writes']==1
@@ -132,7 +132,7 @@ def test_profile_home_and_activated_mode_cannot_silently_change(tmp_path):
     with pytest.raises(m.OutboxError):p.initialize('other',hermes_home=str(tmp_path/'other-profile'))
     p._config['outbox_prototype_enabled']=False
     with pytest.raises(m.OutboxError):p.sync_turn('not legacy fallback','answer')
-    assert p.flush_pending(timeout=1) and p.last_outbox_receipt is None
+    assert drain(p) and p.last_outbox_receipt is None
     assert p.shutdown_drain_state['failed_writes']==0  # Rejected before native admission.
     assert len(store.records())==1
 
@@ -141,7 +141,7 @@ def test_outside_profile_storage_is_rejected_before_writing(tmp_path):
     m,p,binding=setup(tmp_path)
     p._config['outbox_directory']=str(tmp_path.parent/'outside-profile')
     with pytest.raises(m.OutboxError):p.sync_turn('outside','outside')
-    assert p.flush_pending(timeout=1) and p._outbox_store is None
+    assert drain(p) and p._outbox_store is None
     assert p.shutdown_drain_state['failed_writes']==0
 
 
@@ -156,7 +156,7 @@ def test_real_initialize_contract_keeps_cron_explicit_tools_only(tmp_path,monkey
     p._request_json=lambda *a,**kw:posts.append(a) or {'job_id':'22222222-2222-4222-8222-222222222222'}
     assert json.loads(p.handle_tool_call('palace_remember',{'content':'explicit fixture','target':'memory'}))['ok'] is True
     p.sync_turn('automatic','automatic');p.on_memory_write('add','memory','automatic');p.on_session_switch('later',reset=True)
-    assert p.flush_pending(timeout=1) and len(posts)==1 and p._outbox_store is None
+    assert drain(p) and len(posts)==1 and p._outbox_store is None
 
 
 def test_primary_public_initialize_reads_isolated_plugin_config(tmp_path):

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from tests.test_hermes_outbox import setup, admit, Backend, TENANT, JOB, ITEM, ROOT, fixture_identity
+from tests.test_hermes_outbox import setup, admit, drain, Backend, TENANT, JOB, ITEM, ROOT, fixture_identity
 
 
 def test_crash_before_sqlite_commit_does_not_ack_or_charge(tmp_path):
@@ -183,7 +183,7 @@ def test_real_official_host_submission_gap_is_observed_not_repaired(tmp_path):
         assert p.flush_pending(timeout=.02) is True  # No visibility into host executor queue.
         assert manager.flush_pending(timeout=.02) is False
         release.set();assert manager.flush_pending(timeout=2)
-        assert p.flush_pending(timeout=1)
+        assert drain(p)
         assert p.last_outbox_receipt['local_durable'] is True
         assert p._outbox_store.records()[0]['state']=='pending'
     finally:release.set();manager.shutdown_all()
