@@ -25,13 +25,24 @@ import scripts.smoke_control as control  # noqa: E402
 preflight = smoke.smoke_preflight
 BACKEND = "sha256:" + "b" * 64
 WRONG = "sha256:" + "e" * 64
-NOW = smoke.utc_now()
+def _now():
+    """Resolve the fixture clock at CALL time.
+
+    The synthetic pod/log/event timestamps must be relative to execution time,
+    not to module import time: the live freshness bound in health_temporal is
+    compared against wall-clock now, so a fixture base stamped at collection
+    goes stale on a suite that takes longer than the bound and fails
+    test_temporal_settled_worker_passes for a harness reason, not a source one.
+    """
+    return smoke.utc_now()
+
+
 REPLICAS = {"backend": 2, "mcp": 1}
 
 
 def _pod(name, container, *, owner=("ReplicaSet", True), digest=BACKEND, ready=True,
          started_ago_s=240, last_terminated=None, restart_count=0):
-    started = (NOW - timedelta(seconds=started_ago_s)).isoformat()
+    started = (_now() - timedelta(seconds=started_ago_s)).isoformat()
     if owner is None:
         refs = []
     else:
@@ -106,7 +117,7 @@ class FakeKube:
             return self.lines[pod]
         # A settled pod's log reaches back to its own start and has a fresh line.
         started = next(p for p in self.pods if p["metadata"]["name"] == pod)["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
-        fresh = (NOW - timedelta(seconds=30)).isoformat()
+        fresh = (_now() - timedelta(seconds=30)).isoformat()
         return f"{started} started\n{fresh} heartbeat\n"
 
 
@@ -194,15 +205,15 @@ def test_E4_prior_failed_hook_job_backoff_is_not_a_health_blocker():
     event = {"reason": "BackoffLimitExceeded",
              "involvedObject": {"namespace": "palace-sarvent", "kind": "Job",
                                 "name": "palace-sarvent-memory-smoke-4a631ed7", "uid": "job-uid-old"},
-             "lastTimestamp": (NOW - timedelta(seconds=1687)).isoformat()}
-    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+             "lastTimestamp": (_now() - timedelta(seconds=1687)).isoformat()}
+    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), _now())
 
 
 def test_E3_real_oom_killing_event_fails():
     event = {"reason": "OOMKilling", "involvedObject": {"namespace": "palace-sarvent", "kind": "Pod"},
-             "lastTimestamp": (NOW - timedelta(seconds=60)).isoformat()}
+             "lastTimestamp": (_now() - timedelta(seconds=60)).isoformat()}
     with pytest.raises(control.ControlError):
-        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), _now())
 
 
 def test_E3_oom_killing_on_prior_job_pod_today_fails():
@@ -210,15 +221,15 @@ def test_E3_oom_killing_on_prior_job_pod_today_fails():
     event = {"reason": "OOMKilling",
              "involvedObject": {"namespace": "palace-sarvent", "kind": "Pod",
                                 "name": "palace-sarvent-memory-smoke-43c72fbe-x", "uid": "pod-uid-old"},
-             "lastTimestamp": (NOW - timedelta(seconds=600)).isoformat()}
+             "lastTimestamp": (_now() - timedelta(seconds=600)).isoformat()}
     with pytest.raises(control.ControlError):
-        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), _now())
 
 
 # --- C4: coverage must be fresh up to now ----------------------------------
 
 def test_C4_stale_last_line_fails():
-    stale = (NOW - timedelta(seconds=7100)).isoformat()
+    stale = (_now() - timedelta(seconds=7100)).isoformat()
     kube = FakeKube([_pod("worker-1", "worker", started_ago_s=10000)],
                     lines={"worker-1": f"{stale} only-line\n"})
     with pytest.raises(control.ControlError):
@@ -231,7 +242,7 @@ def test_C4_empty_logs_fail():
 
 
 def test_C4_truncated_capture_fails():
-    fresh = (NOW - timedelta(seconds=30)).isoformat()
+    fresh = (_now() - timedelta(seconds=30)).isoformat()
     kube = FakeKube([_pod("worker-1", "worker")],
                     lines={"worker-1": "".join(f"{fresh} line{i}\n" for i in range(3000))})
     with pytest.raises(control.ControlError):
@@ -242,26 +253,26 @@ def test_C4_truncated_capture_fails():
 
 def test_C5_recent_oom_event_fails():
     event = {"reason": "OOMKilled", "involvedObject": {"namespace": "palace-sarvent"},
-             "lastTimestamp": (NOW - timedelta(seconds=60)).isoformat()}
+             "lastTimestamp": (_now() - timedelta(seconds=60)).isoformat()}
     with pytest.raises(control.ControlError):
-        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), NOW)
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[event]), _now())
 
 
 def test_C5_recent_oom_termination_fails():
-    term = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": (NOW - timedelta(seconds=60)).isoformat()}
+    term = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": (_now() - timedelta(seconds=60)).isoformat()}
     pods = _healthy_pods() + [_pod("worker-1", "worker", last_terminated=term)]
     with pytest.raises(control.ControlError):
-        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(pods), NOW)
+        preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(pods), _now())
 
 
 def test_C5_no_recent_alert_passes():
     old = {"reason": "OOMKilled", "involvedObject": {"namespace": "palace-sarvent"},
-           "lastTimestamp": (NOW - timedelta(seconds=20000)).isoformat()}
-    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[old]), NOW)
+           "lastTimestamp": (_now() - timedelta(seconds=20000)).isoformat()}
+    preflight.health_kubernetes_alerts(smoke, _args(), FakeKube(_healthy_pods(), events=[old]), _now())
 
 
 def test_C5_recent_subthreshold_restart_termination_fails():
-    term = {"reason": "Error", "exitCode": 1, "finishedAt": (NOW - timedelta(seconds=60)).isoformat()}
+    term = {"reason": "Error", "exitCode": 1, "finishedAt": (_now() - timedelta(seconds=60)).isoformat()}
     pods = [_pod("worker-1", "worker", last_terminated=term, restart_count=1)]
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), FakeKube(pods))
