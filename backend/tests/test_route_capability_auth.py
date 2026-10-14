@@ -140,51 +140,78 @@ def _client(monkeypatch, auth_session: AuthSession, db_session=object()) -> Test
     return TestClient(app)
 
 
+# Data-only rows: the token row is built INSIDE the test (see below) so its
+# issue/expiry timestamps are relative to execution time, not to module
+# collection time. Building the row here (as a parametrize argument) frozen it
+# at collection; a suite that then ran longer than the 5-minute window made
+# every late case see an already-expired token and masked the scope/revocation/
+# resource refusals under test.
 @pytest.mark.parametrize(
-    ("method", "path", "row", "expected_detail"),
+    ("method", "path", "scopes", "resource", "revoked", "expired", "expected_detail"),
     [
-        ("GET", "/api/v1/conversations", _oauth_token_row(scopes=["write"]), "MCP bearer token missing read scope"),
-        ("POST", "/api/v1/chat", _oauth_token_row(scopes=["read"]), "MCP bearer token missing write scope"),
+        ("GET", "/api/v1/conversations", ["write"], "https://testserver/api/v1", False, False, "MCP bearer token missing read scope"),
+        ("POST", "/api/v1/chat", ["read"], "https://testserver/api/v1", False, False, "MCP bearer token missing write scope"),
         (
             "DELETE",
             f"/api/v1/jobs/{uuid.uuid4()}",
-            _oauth_token_row(scopes=["read"]),
+            ["read"],
+            "https://testserver/api/v1",
+            False,
+            False,
             "MCP bearer token missing write scope",
         ),
         (
             "POST",
             "/api/v1/palace/mcp-clients/register",
-            _oauth_token_row(scopes=["write"]),
+            ["write"],
+            "https://testserver/api/v1",
+            False,
+            False,
             "MCP bearer token missing admin scope",
         ),
         (
             "GET",
             "/api/v1/stats",
-            _oauth_token_row(scopes=["read"], expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)),
+            ["read"],
+            "https://testserver/api/v1",
+            False,
+            True,
             "MCP bearer token expired",
         ),
         (
             "GET",
             "/api/v1/curation-artifacts",
-            _oauth_token_row(scopes=["read"], revoked=True),
+            ["read"],
+            "https://testserver/api/v1",
+            True,
+            False,
             "MCP bearer token revoked",
         ),
         (
             "GET",
             "/api/v1/palace",
-            _oauth_token_row(scopes=["read"], resource="https://wrong.example/mcp"),
+            ["read"],
+            "https://wrong.example/mcp",
+            False,
+            False,
             "MCP bearer token resource is invalid",
         ),
         (
             "GET",
             "/api/v1/palace",
-            _oauth_token_row(scopes=["read"], resource=None),
+            ["read"],
+            None,
+            False,
+            False,
             "MCP bearer token resource is invalid",
         ),
         (
             "PATCH",
             f"/api/v1/web-saves/{uuid.uuid4()}",
-            _oauth_token_row(scopes=["read"]),
+            ["read"],
+            "https://testserver/api/v1",
+            False,
+            False,
             "MCP bearer token missing write scope",
         ),
     ],
@@ -193,9 +220,17 @@ def test_route_capability_auth_rejects_invalid_oauth_token_before_handlers(
     monkeypatch,
     method: str,
     path: str,
-    row: dict,
+    scopes: list[str],
+    resource: str | None,
+    revoked: bool,
+    expired: bool,
     expected_detail: str,
 ) -> None:
+    # Build the fixture token at TEST time. A live token gets a fresh
+    # now + 5-minute window (the original semantics); the expired control gets a
+    # genuine past expiry so the real expiry refusal path is still exercised.
+    expires_at = datetime.now(timezone.utc) - timedelta(minutes=1) if expired else None
+    row = _oauth_token_row(scopes=scopes, resource=resource, revoked=revoked, expires_at=expires_at)
     auth_session = AuthSession(row)
     client = _client(monkeypatch, auth_session)
 
