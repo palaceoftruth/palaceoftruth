@@ -1,5 +1,38 @@
 # Palace of Truth
 
+## Generation routing (SAR-1484)
+
+All text generation uses OpenRouter MiniMax M3 (`minimax/minimax-m3`) by
+default, with MiniMax M2.7 (`minimax/minimax-m2.7`) as the only generic
+fallback. Client overrides must also be operator-allowlisted MiniMax IDs.
+Exhaustion, including streaming fallback exhaustion, fails closed: there is
+no direct OpenAI, GPT, or Nemotron generation fallback. Relationship
+classification defaults to M3 with `allow_model_fallbacks=False`; bounded
+same-model retries and one legacy JSON parsing retry remain, but it never
+borrows the generic M2.7 fallback. Schema, semantic abstention, confidence
+thresholds and the SAR-1068 contract remain unchanged. Offline tests verify
+routing and parsing, not actual M3 classification quality.
+
+Cloud vision defaults to M3 ONLY; `OPENROUTER_VISION_FALLBACK_MODELS` must be
+empty. M2.7 is text-only. For a trusted operator-owned OpenAI-compatible
+vision endpoint set `VISION_PROVIDER=custom`, `VISION_BASE_URL` (including
+the serving prefix, e.g. `/v1`), and `VISION_MODEL` to its actual model ID.
+No actual Lux URL/model/key is supplied or assumed. `VISION_API_KEY` is an
+optional dedicated bearer secret; blank means no Authorization header, not
+inheritance from OpenRouter or OpenAI. `VISION_TIMEOUT_SECONDS` defaults to
+60 and must be finite, >0 and <=300. Private HTTP hosts are permitted;
+userinfo, query strings and fragments are rejected. Redirects and ambient
+proxy/netrc configuration are disabled. These are operator settings, not
+user-request overrides. Custom failures never use cloud or global text LLMs.
+Only explicit schema-unsupported HTTP 400/422 permits one same-endpoint
+retry without response_format; local structured validation remains mandatory.
+Existing image data-URI, artifact and bounded evidence policies remain.
+
+Embeddings/index profiles and transcription are separate and unchanged:
+retain the existing OpenAI embedding implementation and the live local
+WhisperX primary settings. This change performs no model-profile migration.
+See INTEGRATIONS.md for required override updates and secret wiring.
+
 Palace of Truth is a cloud-native knowledge base, retrieval service, and agent-memory control plane for humans and AI agents.
 
 It provides:

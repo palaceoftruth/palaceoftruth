@@ -73,7 +73,7 @@ class VisionUsage(BaseModel):
 class VisionProviderMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    provider: Literal["openrouter"] = "openrouter"
+    provider: Literal["openrouter", "custom"] = "openrouter"
     requested_model: str = Field(min_length=1, max_length=200)
     returned_model: str = Field(min_length=1, max_length=200)
     usage: VisionUsage | None = None
@@ -84,6 +84,12 @@ class VisionAnalysisResult(BaseModel):
 
     analysis: VisionAnalysis
     provider: VisionProviderMetadata
+
+
+def _configured_vision_provider() -> str:
+    from app.config import settings
+
+    return settings.vision_provider
 
 
 class ImageAnalysisError(RuntimeError):
@@ -157,7 +163,7 @@ def build_image_analysis_metadata(
                 "storage_path": artifact_storage_path,
             },
             "vision": {
-                "provider": provider.provider if provider is not None else "openrouter",
+                "provider": provider.provider if provider is not None else _configured_vision_provider(),
                 "model": provider.returned_model if provider is not None else None,
                 "requested_model": provider.requested_model if provider is not None else None,
                 "returned_model": provider.returned_model if provider is not None else None,

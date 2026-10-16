@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 
-from pydantic import model_validator
+from typing import Literal
+
+from pydantic import Field, model_validator
 from urllib.parse import parse_qs, urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.embedding_profile import (
@@ -33,6 +35,20 @@ _PLACEHOLDER_CREDENTIAL_VALUES = frozenset(
 
 def _is_placeholder_credential(value: str) -> bool:
     return value.strip() in _PLACEHOLDER_CREDENTIAL_VALUES
+
+
+# Palace routes every generation request (chat, summarize, tag, entity
+# extraction, relationship classification, and cloud image analysis) through
+# MiniMax. These are the only accepted model identifiers; any other configured
+# or request-time value fails visibly instead of silently generating text on a
+# non-MiniMax provider. Embeddings and transcription are separate OpenAI paths
+# and are deliberately not covered by this policy.
+SUPPORTED_TEXT_MODELS = frozenset(
+    {
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -127,16 +143,26 @@ class Settings(BaseSettings):
     # failures exhausted), retry the chunk on OpenAI instead of failing the job.
     # Disable to guarantee audio never leaves the configured provider.
     transcription_fallback_to_openai: bool = True
-    # OpenRouter (LLM)
+    # OpenRouter (MiniMax-only generation). M3 is the calibrated primary for
+    # every text task; M2.7 is the bounded generic fallback. Any other value is
+    # rejected at boot by validate_minimax_generation_policy.
     openrouter_api_key: str
-    openrouter_default_model: str = "minimax/minimax-m2.7"
-    openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
+    openrouter_default_model: str = "minimax/minimax-m3"
+    openrouter_fallback_models: str = "minimax/minimax-m2.7"
     openrouter_vision_model: str = "minimax/minimax-m3"
-    openrouter_vision_fallback_models: str = "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+    openrouter_vision_fallback_models: str = ""
+    # Trusted operator settings only; never populated from an API request.
+    vision_provider: Literal["openrouter", "custom"] = "openrouter"
+    vision_base_url: str = ""
+    vision_model: str = ""
+    vision_api_key: str = Field(default="", repr=False)
+    vision_timeout_seconds: float = Field(default=60.0, gt=0, le=300, allow_inf_nan=False)
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
-    relationship_classification_model: str = "openai/gpt-4.1"
+    # Relationship classification is a single fail-closed M3 call: the
+    # calibrated contract never borrows a generic model fallback.
+    relationship_classification_model: str = "minimax/minimax-m3"
     relationship_classification_temperature: float = 0.0
     relationship_classification_seed: int = 1083
     relationship_extraction_min_confidence: float = 0.7
@@ -457,6 +483,63 @@ class Settings(BaseSettings):
         # Chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
         # dev and the test suite never do, so this gate only applies to real
         # clusters and never breaks `docker compose up` or `pytest`.
+        return self
+
+    @model_validator(mode="after")
+    def validate_minimax_generation_policy(self) -> "Settings":
+        """Refuse to boot with any non-MiniMax generation model configured.
+
+        A single generation policy keeps chat, summarization, tagging,
+        relationship classification, and cloud image analysis on the approved
+        MiniMax models. The alternative — silently routing one of these paths to
+        a different provider — is exactly the hidden behavior this gate
+        prevents.
+        """
+        configured_models = (
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
+            ("OPENROUTER_FALLBACK_MODELS", self.openrouter_fallback_models),
+            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+
+            ("CLIENT_LLM_ALLOWED_MODELS", self.client_llm_allowed_models),
+        )
+        for field_name, raw_value in configured_models:
+            for model in (entry.strip() for entry in raw_value.split(",")):
+                if not model:
+                    continue
+                if model not in SUPPORTED_TEXT_MODELS:
+                    raise ValueError(
+                        f"{field_name} must be a supported MiniMax generation model "
+                        f"{sorted(SUPPORTED_TEXT_MODELS)}; got {model!r}"
+                    )
+        for field_name, value in (
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
+            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+        ):
+            if value not in SUPPORTED_TEXT_MODELS:
+                raise ValueError(f"{field_name} must be one supported MiniMax model")
+        if self.openrouter_vision_model != "minimax/minimax-m3":
+            raise ValueError("OPENROUTER_VISION_MODEL must be minimax/minimax-m3")
+        if self.openrouter_vision_fallback_models.strip():
+            raise ValueError("OPENROUTER_VISION_FALLBACK_MODELS must be empty; M2.7 is text only")
+        if self.vision_base_url:
+            try:
+                parsed = urlparse(self.vision_base_url)
+                port = parsed.port
+                valid = (
+                    parsed.scheme in {"http", "https"} and parsed.hostname
+                    and parsed.username is None and parsed.password is None
+                    and "?" not in self.vision_base_url and "#" not in self.vision_base_url
+                    and not any(char.isspace() for char in self.vision_base_url)
+                    and "\\" not in self.vision_base_url
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError("VISION_BASE_URL must be an HTTP(S) base URL without userinfo/query/fragment")
+        if self.vision_provider == "custom" and (
+            not self.vision_base_url or not self.vision_model.strip() or len(self.vision_model) > 200
+        ):
+            raise ValueError("custom vision requires VISION_BASE_URL and VISION_MODEL (1-200 characters)")
         return self
 
 

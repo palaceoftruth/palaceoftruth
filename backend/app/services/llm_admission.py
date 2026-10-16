@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from app.config import settings
+from app.config import SUPPORTED_TEXT_MODELS, settings
 
 
 @dataclass
@@ -43,7 +43,7 @@ def validate_client_llm_model(model: str | None) -> str | None:
         for value in settings.client_llm_allowed_models.split(",")
         if value.strip()
     )
-    if cleaned not in allowed:
+    if cleaned not in SUPPORTED_TEXT_MODELS or cleaned not in allowed:
         raise ValueError("model is not allowed for client-selected LLM work")
     return cleaned
 

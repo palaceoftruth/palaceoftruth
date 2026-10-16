@@ -133,10 +133,10 @@ def llm_service(monkeypatch):
     monkeypatch.setattr("app.services.llm.asyncio.sleep", _fake_sleep)
     monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
     monkeypatch.setattr("app.services.llm.settings.openai_api_key", "test-openai-key")
-    monkeypatch.setattr("app.services.llm.settings.openrouter_default_model", "openrouter/primary")
+    monkeypatch.setattr("app.services.llm.settings.openrouter_default_model", "minimax/minimax-m3")
     monkeypatch.setattr(
         "app.services.llm.settings.openrouter_fallback_models",
-        "openrouter/fallback-a, openrouter/fallback-b",
+        "minimax/minimax-m2.7",
     )
 
     service = LLMService()
@@ -144,7 +144,7 @@ def llm_service(monkeypatch):
     return (
         service,
         clients[0].chat.completions,
-        clients[1].chat.completions,
+        _FakeCompletionsAPI(),  # Unconnected sentinel: service constructs no direct client.
     )
 
 
@@ -165,14 +165,14 @@ async def test_complete_retries_next_openrouter_model_on_model_access_failure(
 
     assert result == "openrouter fallback answer"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/fallback-a",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
     ]
     assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
-async def test_complete_uses_direct_openai_only_after_openrouter_chain_exhausted(llm_service) -> None:
+async def test_complete_fails_closed_after_minimax_chain_exhausted(llm_service) -> None:
     service, openrouter_completions, openai_completions = llm_service
     messages = [{"role": "user", "content": "Hello"}]
     openrouter_completions.outcomes = [
@@ -182,15 +182,13 @@ async def test_complete_uses_direct_openai_only_after_openrouter_chain_exhausted
     ]
     openai_completions.outcomes = [_completion_response("direct openai answer")]
 
-    result = await service.complete(messages)
-
-    assert result == "direct openai answer"
+    with pytest.raises(RuntimeError, match="exhausted"):
+        await service.complete(messages)
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/fallback-a",
-        "openrouter/fallback-b",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
     ]
-    assert [call["model"] for call in openai_completions.calls] == ["gpt-4o-mini"]
+    assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
@@ -206,8 +204,8 @@ async def test_complete_retries_same_openrouter_model_on_malformed_completion(ll
 
     assert result == "openrouter primary retry answer"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/primary",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
     ]
     assert openai_completions.calls == []
 
@@ -225,8 +223,8 @@ async def test_complete_retries_same_openrouter_model_on_provider_error_payload(
 
     assert result == "openrouter primary retry answer"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/primary",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
     ]
     assert openai_completions.calls == []
 
@@ -244,8 +242,8 @@ async def test_complete_retries_same_openrouter_model_on_missing_message_content
 
     assert result == "openrouter primary retry answer"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/primary",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
     ]
     assert openai_completions.calls == []
 
@@ -263,34 +261,30 @@ async def test_complete_retries_same_openrouter_model_on_rate_limit(llm_service)
 
     assert result == "openrouter primary retry answer"
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/primary",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
     ]
     assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
-async def test_complete_uses_direct_openai_after_malformed_openrouter_chain(llm_service) -> None:
+async def test_complete_fails_closed_after_malformed_minimax_chain(llm_service) -> None:
     service, openrouter_completions, openai_completions = llm_service
     messages = [{"role": "user", "content": "Hello"}]
     openrouter_completions.outcomes = [_malformed_completion_response() for _ in range(9)]
     openai_completions.outcomes = [_completion_response("direct openai answer")]
 
-    result = await service.complete(messages)
-
-    assert result == "direct openai answer"
+    with pytest.raises(RuntimeError, match="exhausted"):
+        await service.complete(messages)
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/primary",
-        "openrouter/primary",
-        "openrouter/fallback-a",
-        "openrouter/fallback-a",
-        "openrouter/fallback-a",
-        "openrouter/fallback-b",
-        "openrouter/fallback-b",
-        "openrouter/fallback-b",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.7",
     ]
-    assert [call["model"] for call in openai_completions.calls] == ["gpt-4o-mini"]
+    assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
@@ -315,14 +309,14 @@ async def test_complete_with_usage_retries_next_openrouter_model_on_model_access
     assert content == "openrouter fallback answer"
     assert usage == {"input_tokens": 11, "output_tokens": 5}
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/fallback-a",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
     ]
     assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
-async def test_complete_with_usage_uses_direct_openai_only_after_openrouter_chain_exhausted(llm_service) -> None:
+async def test_complete_with_usage_fails_closed_after_minimax_chain_exhausted(llm_service) -> None:
     service, openrouter_completions, openai_completions = llm_service
     messages = [{"role": "user", "content": "Hello"}]
     openrouter_completions.outcomes = [
@@ -338,16 +332,13 @@ async def test_complete_with_usage_uses_direct_openai_only_after_openrouter_chai
         )
     ]
 
-    content, usage = await service.complete_with_usage(messages)
-
-    assert content == "direct openai answer"
-    assert usage == {"input_tokens": 17, "output_tokens": 9}
+    with pytest.raises(RuntimeError, match="exhausted"):
+        await service.complete_with_usage(messages)
     assert [call["model"] for call in openrouter_completions.calls] == [
-        "openrouter/primary",
-        "openrouter/fallback-a",
-        "openrouter/fallback-b",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
     ]
-    assert [call["model"] for call in openai_completions.calls] == ["gpt-4o-mini"]
+    assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
@@ -428,8 +419,8 @@ async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm
         _completion_response(
             '<think>compare sources</think>\n'
             '{"relationship_exists": true, "relationship": "related_to", "confidence": 0.85}',
-            model="openai/gpt-4.1",
-            provider="OpenAI",
+            model="minimax/minimax-m3",
+            provider="Minimax",
         )
     ]
 
@@ -444,9 +435,9 @@ async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm
     assert result.confidence == 0.85
     assert result.validation_outcome == "valid"
     assert result.provider == "openrouter"
-    assert result.upstream_provider == "OpenAI"
-    assert result.requested_model == "openai/gpt-4.1"
-    assert result.model == "openai/gpt-4.1"
+    assert result.upstream_provider == "Minimax"
+    assert result.requested_model == "minimax/minimax-m3"
+    assert result.model == "minimax/minimax-m3"
     assert result.prompt_version == "relationship-classification-v4"
     assert result.temperature == 0.0
     assert result.seed == 1083
@@ -512,7 +503,7 @@ async def test_classify_relationship_detailed_fails_closed_without_uncalibrated_
     assert result.confidence == 0.0
     assert result.validation_outcome == "provider_error"
     assert result.provider == "openrouter"
-    assert result.requested_model == "openai/gpt-4.1"
+    assert result.requested_model == "minimax/minimax-m3"
     assert result.model == "unknown"
     assert result.upstream_provider == "unknown"
     assert result.retry_provider == "openrouter"
@@ -569,7 +560,7 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     )
     monkeypatch.setattr(
         "app.services.llm.settings.openrouter_vision_fallback_models",
-        "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        "",
     )
     openrouter_completions.outcomes = [
         _completion_response(
@@ -631,7 +622,7 @@ async def test_analyze_image_401_is_terminal_without_vision_fallback(llm_service
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [400, 403, 404])
-async def test_analyze_image_model_access_errors_use_openrouter_fallback(
+async def test_analyze_image_model_access_errors_fail_closed(
     llm_service, status_code: int
 ) -> None:
     service, openrouter_completions, openai_completions = llm_service
@@ -640,24 +631,21 @@ async def test_analyze_image_model_access_errors_use_openrouter_fallback(
         _completion_response('{"summary":"Fallback summary","image_type":"diagram"}'),
     ]
 
-    result = await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
-
-    assert result.provider.requested_model == "openai/gpt-4o-mini"
+    with pytest.raises(VisionAnalysisTransportError) as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
+    assert failure.value.retryable is False
+    assert failure.value.status_code == status_code
     assert [call["model"] for call in openrouter_completions.calls] == [
         "minimax/minimax-m3",
-        "openai/gpt-4o-mini",
     ]
     assert openrouter_completions.calls[0]["extra_body"] == {
-        "provider": {"require_parameters": True}
-    }
-    assert openrouter_completions.calls[1]["extra_body"] == {
         "provider": {"require_parameters": True}
     }
     assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
-async def test_analyze_image_retries_transient_then_uses_openrouter_fallback(llm_service) -> None:
+async def test_analyze_image_retries_transient_then_fails_closed(llm_service) -> None:
     service, openrouter_completions, openai_completions = llm_service
     openrouter_completions.outcomes = [
         _api_status_error(503),
@@ -666,22 +654,21 @@ async def test_analyze_image_retries_transient_then_uses_openrouter_fallback(llm
         _completion_response('{"summary":"Fallback summary","image_type":"photo"}'),
     ]
 
-    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
-
-    assert result.analysis.summary == "Fallback summary"
-    assert result.provider.requested_model == "openai/gpt-4o-mini"
+    with pytest.raises(VisionAnalysisTransportError) as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+    assert failure.value.retryable is True
+    assert failure.value.status_code == 503
     assert [call["model"] for call in openrouter_completions.calls] == [
         "minimax/minimax-m3",
         "minimax/minimax-m3",
         "minimax/minimax-m3",
-        "openai/gpt-4o-mini",
     ]
     assert openai_completions.calls == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [_api_status_error(429), _api_connection_error()])
-async def test_analyze_image_rate_limit_and_network_errors_are_bounded_before_fallback(
+async def test_analyze_image_rate_limit_and_network_errors_are_bounded_and_closed(
     llm_service, failure: Exception
 ) -> None:
     service, openrouter_completions, openai_completions = llm_service
@@ -692,10 +679,11 @@ async def test_analyze_image_rate_limit_and_network_errors_are_bounded_before_fa
         _completion_response('{"summary":"Fallback summary","image_type":"photo"}'),
     ]
 
-    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
-
-    assert result.provider.requested_model == "openai/gpt-4o-mini"
-    assert len(openrouter_completions.calls) == 4
+    with pytest.raises(VisionAnalysisTransportError) as error:
+        await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+    assert error.value.retryable is True
+    assert len(openrouter_completions.calls) == 3
+    assert {call["model"] for call in openrouter_completions.calls} == {"minimax/minimax-m3"}
     assert openai_completions.calls == []
 
 
@@ -713,7 +701,7 @@ async def test_analyze_image_invalid_output_fails_closed_without_invented_conten
 
 
 @pytest.mark.asyncio
-async def test_analyze_image_uses_final_gpt_4_1_mini_fallback(llm_service) -> None:
+async def test_analyze_image_never_uses_gpt_fallback(llm_service) -> None:
     service, openrouter_completions, openai_completions = llm_service
     openrouter_completions.outcomes = [
         _api_status_error(404),
@@ -724,13 +712,92 @@ async def test_analyze_image_uses_final_gpt_4_1_mini_fallback(llm_service) -> No
         ),
     ]
 
-    result = await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
-
-    assert result.analysis.summary == "Final fallback summary"
-    assert result.provider.requested_model == "openai/gpt-4.1-mini"
+    with pytest.raises(VisionAnalysisTransportError) as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+    assert failure.value.status_code == 404
     assert [call["model"] for call in openrouter_completions.calls] == [
         "minimax/minimax-m3",
-        "openai/gpt-4o-mini",
-        "openai/gpt-4.1-mini",
     ]
     assert openai_completions.calls == []
+
+
+# MiniMax-only generation routing (this slice). These exercise the real
+# LLMService and Settings rather than a mocked policy helper.
+@pytest.mark.asyncio
+async def test_relationship_classification_requests_minimax_m3(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "related_to", "confidence": 0.85}',
+            model="minimax/minimax-m3",
+            provider="Minimax",
+        )
+    ]
+
+    result = await service.classify_relationship_detailed("A", "sa", "B", "sb")
+
+    assert result.requested_model == "minimax/minimax-m3"
+    assert openrouter_completions.calls[0]["model"] == "minimax/minimax-m3"
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_generic_completion_exhaustion_fails_closed_without_openai(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [_api_status_error(401), _api_status_error(401)]
+
+    with pytest.raises(RuntimeError):
+        await service.complete([{"role": "user", "content": "Hello"}])
+
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
+    ]
+    assert openai_completions.calls == []
+
+
+def test_llm_service_does_not_construct_an_openai_generation_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients: list[_FakeOpenAIClient] = []
+
+    def _fake_async_openai(*_args, **_kwargs):
+        client = _FakeOpenAIClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("app.services.llm.AsyncOpenAI", _fake_async_openai)
+    monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr("app.services.llm.settings.openrouter_default_model", "minimax/minimax-m3")
+    monkeypatch.setattr("app.services.llm.settings.openrouter_fallback_models", "minimax/minimax-m2.7")
+
+    service = LLMService()
+
+    assert len(clients) == 1
+    assert not hasattr(service, "_openai_client")
+
+
+@pytest.mark.asyncio
+async def test_complete_rejects_unsupported_model_override(llm_service) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+
+    with pytest.raises(ValueError, match="MiniMax"):
+        await service.complete(
+            [{"role": "user", "content": "Hello"}],
+            model="openai/gpt-4.1",
+        )
+
+    assert openrouter_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_rejects_unsupported_model_override(llm_service) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+
+    with pytest.raises(ValueError, match="MiniMax"):
+        await service.stream_complete(
+            [{"role": "user", "content": "Hello"}],
+            model="openai/gpt-4.1",
+        )
+
+    assert openrouter_completions.calls == []

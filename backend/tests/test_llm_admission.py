@@ -13,18 +13,18 @@ from app.services.llm_admission import (
 
 
 def test_client_model_override_requires_operator_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.services.llm_admission.settings.openrouter_default_model", "default/model")
-    monkeypatch.setattr("app.services.llm_admission.settings.client_llm_allowed_models", "plan/model")
+    monkeypatch.setattr("app.services.llm_admission.settings.openrouter_default_model", "minimax/minimax-m3")
+    monkeypatch.setattr("app.services.llm_admission.settings.client_llm_allowed_models", "minimax/minimax-m2.7,expensive/model")
 
     accepted = ChatRequest.model_validate(
-        {"messages": [{"role": "user", "content": "hello"}], "model": "plan/model"}
+        {"messages": [{"role": "user", "content": "hello"}], "model": "minimax/minimax-m2.7"}
     )
     with pytest.raises(ValueError, match="not allowed"):
         ChatRequest.model_validate(
             {"messages": [{"role": "user", "content": "hello"}], "model": "expensive/model"}
         )
 
-    assert accepted.model == "plan/model"
+    assert accepted.model == "minimax/minimax-m2.7"
 
 
 def test_tenant_llm_gate_prevents_same_tenant_starvation(monkeypatch: pytest.MonkeyPatch) -> None:
