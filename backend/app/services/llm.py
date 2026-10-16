@@ -419,6 +419,11 @@ class LLMService:
                 **kwargs.get("extra_body", {}),
                 **extra_body,
             }
+        # Keep bounded MiniMax output budgets available for visible content.
+        kwargs["extra_body"] = {
+            **kwargs.get("extra_body", {}),
+            "reasoning": {"enabled": False},
+        }
         async with _LLM_SEMAPHORE:
             return await self.client.chat.completions.create(**kwargs)
 
@@ -666,6 +671,7 @@ class LLMService:
                         max_tokens=1024,
                         stream=True,
                         stream_options={"include_usage": True},
+                        extra_body={"reasoning": {"enabled": False}},
                     )
                 async for chunk in stream:
                     choices = chunk.choices or []
@@ -692,6 +698,7 @@ class LLMService:
                                 messages=messages,
                                 max_tokens=1024,
                                 stream=True,
+                                extra_body={"reasoning": {"enabled": False}},
                             )
                         async for chunk in stream:
                             choices = chunk.choices or []

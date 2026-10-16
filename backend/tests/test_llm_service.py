@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APIConnectionError, APIStatusError
+from openai import APIConnectionError, APIStatusError, BadRequestError
 
 from app.services.llm import (
     BrowserActions,
@@ -103,6 +103,46 @@ def _api_status_error(status_code: int) -> APIStatusError:
 
 def _api_connection_error() -> APIConnectionError:
     return APIConnectionError(request=httpx.Request("POST", "https://example.test/chat/completions"))
+
+
+def _bad_request_error(message: str) -> BadRequestError:
+    request = httpx.Request("POST", "https://example.test/chat/completions")
+    response = httpx.Response(400, request=request)
+    return BadRequestError(message, response=response, body=None)
+
+
+class _FakeStream:
+    """Minimal async-iterable stand-in for a streaming completion response."""
+
+    def __init__(self, chunks) -> None:
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        async def _generate():
+            for chunk in self._chunks:
+                yield chunk
+
+        return _generate()
+
+
+def _stream_content_chunk(text: str):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text))],
+        usage=None,
+    )
+
+
+def _stream_usage_chunk(*, prompt_tokens: int, completion_tokens: int):
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ),
+    )
+
+
+_REASONING_DISABLED = {"reasoning": {"enabled": False}}
 
 
 def test_strict_json_schema_requires_all_object_properties_and_rejects_extras() -> None:
@@ -374,7 +414,9 @@ async def test_generate_tags_parses_think_wrapped_structured_json(llm_service) -
     assert tags == ["ai", "robotics"]
     assert categories == ["technology"]
     assert openrouter_completions.calls[0]["response_format"]["type"] == "json_schema"
-    assert openrouter_completions.calls[0]["extra_body"] == {"provider": {"require_parameters": True}}
+    assert openrouter_completions.calls[0]["extra_body"] == {
+        "provider": {"require_parameters": True}, **_REASONING_DISABLED
+    }
     assert openai_completions.calls == []
 
 
@@ -448,7 +490,7 @@ async def test_classify_relationship_detailed_accepts_reasoning_wrapped_json(llm
     assert call["temperature"] == 0.0
     assert call["seed"] == 1083
     assert call["response_format"]["json_schema"]["name"] == "relationship_classification_v3"
-    assert call["extra_body"] == {"provider": {"require_parameters": True}}
+    assert call["extra_body"] == {"provider": {"require_parameters": True}, **_REASONING_DISABLED}
 
 
 @pytest.mark.asyncio
@@ -591,7 +633,7 @@ async def test_analyze_image_uses_structured_openrouter_vision_request(llm_servi
     assert call["max_tokens"] == 4096
     assert call["response_format"]["type"] == "json_schema"
     assert call["extra_body"]["provider"] == {"require_parameters": True}
-    assert call["extra_body"] == {"provider": {"require_parameters": True}}
+    assert call["extra_body"] == {"provider": {"require_parameters": True}, **_REASONING_DISABLED}
     schema = call["response_format"]["json_schema"]["schema"]
     serialized_schema = json.dumps(schema)
     assert "maxLength" not in serialized_schema
@@ -639,7 +681,7 @@ async def test_analyze_image_model_access_errors_fail_closed(
         "minimax/minimax-m3",
     ]
     assert openrouter_completions.calls[0]["extra_body"] == {
-        "provider": {"require_parameters": True}
+        "provider": {"require_parameters": True}, **_REASONING_DISABLED
     }
     assert openai_completions.calls == []
 
@@ -801,3 +843,193 @@ async def test_stream_complete_rejects_unsupported_model_override(llm_service) -
         )
 
     assert openrouter_completions.calls == []
+
+
+# MiniMax M3 reasoning control (this slice). At a bounded 256-token budget M3
+# can spend the whole allowance on hidden reasoning and return empty content
+# with finish_reason=length. Every cloud generation request must therefore send
+# reasoning.enabled=false, including model-fallback and legacy-parser retries.
+@pytest.mark.asyncio
+async def test_structured_first_request_and_legacy_retry_both_disable_reasoning(
+    llm_service,
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    messages = [{"role": "user", "content": "Classify"}]
+    # Structured schema request is rejected (matches the live 404), the classifier
+    # retries the same model with the legacy JSON parser.
+    openrouter_completions.outcomes = [
+        _api_status_error(404),
+        _completion_response(
+            '{"tags": ["backups", "restore-testing"], "categories": ["operations"]}',
+            model="minimax/minimax-m3",
+            provider="Minimax",
+        ),
+    ]
+
+    result = await service.complete_structured(
+        messages,
+        TagExtraction,
+        schema_name="tag_extraction",
+        model="minimax/minimax-m3",
+        allow_model_fallbacks=False,
+    )
+
+    assert isinstance(result, TagExtraction)
+    assert result.tags == ["backups", "restore-testing"]
+    assert result.categories == ["operations"]
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
+    ]
+    structured_call, legacy_call = openrouter_completions.calls
+    assert "response_format" in structured_call
+    assert structured_call["extra_body"]["provider"] == {"require_parameters": True}
+    assert structured_call["extra_body"]["reasoning"] == {"enabled": False}
+    assert "response_format" not in legacy_call
+    assert legacy_call["extra_body"] == _REASONING_DISABLED
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_relationship_classifier_schema_and_legacy_retry_disable_reasoning(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _api_status_error(404),
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "prerequisite_of", "confidence": 0.85}'
+        ),
+    ]
+
+    result = await service.classify_relationship_detailed("Backup", "Procedure", "Restore", "Testing")
+
+    assert result.relationship == "prerequisite_of"
+    assert result.confidence == 0.85
+    assert result.validation_outcome == "valid"
+    assert result.retry_count == 1
+    assert result.fallback_used is False
+    assert len(openrouter_completions.calls) == 2
+    schema_call, legacy_call = openrouter_completions.calls
+    assert schema_call["response_format"]["json_schema"]["name"] == "relationship_classification_v3"
+    assert schema_call["extra_body"] == {
+        "provider": {"require_parameters": True}, **_REASONING_DISABLED
+    }
+    assert "response_format" not in legacy_call
+    assert legacy_call["extra_body"] == _REASONING_DISABLED
+    for call in openrouter_completions.calls:
+        assert call["model"] == "minimax/minimax-m3"
+        assert call["max_tokens"] == 256
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cloud_vision_request_disables_reasoning(llm_service, monkeypatch) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    monkeypatch.setattr(
+        "app.services.llm.settings.openrouter_vision_model",
+        "minimax/minimax-m3",
+    )
+    monkeypatch.setattr(
+        "app.services.llm.settings.openrouter_vision_fallback_models",
+        "",
+    )
+    openrouter_completions.outcomes = [
+        _completion_response(
+            '{"summary":"A photo.","image_type":"photo"}',
+            model="minimax/minimax-m3",
+        )
+    ]
+
+    await service.analyze_image("aW1hZ2U=", "image/png", "photo.png")
+
+    call = openrouter_completions.calls[0]
+    assert call["extra_body"]["provider"] == {"require_parameters": True}
+    assert call["extra_body"]["reasoning"] == {"enabled": False}
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_success_disables_reasoning(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _FakeStream(
+            [
+                _stream_content_chunk("Hello "),
+                _stream_content_chunk("world"),
+                _stream_usage_chunk(prompt_tokens=7, completion_tokens=2),
+            ]
+        )
+    ]
+
+    stream, get_usage = await service.stream_complete([{"role": "user", "content": "Hi"}])
+    chunks = [chunk async for chunk in stream]
+
+    assert "".join(chunks) == "Hello world"
+    assert get_usage() == {"input_tokens": 7, "output_tokens": 2}
+    assert len(openrouter_completions.calls) == 1
+    call = openrouter_completions.calls[0]
+    assert call["stream"] is True
+    assert call["stream_options"] == {"include_usage": True}
+    assert call["extra_body"] == _REASONING_DISABLED
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_options_unsupported_retry_also_disables_reasoning(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _bad_request_error("Provider does not support stream_options"),
+        _FakeStream([_stream_content_chunk("fallback chunk")]),
+    ]
+
+    stream, get_usage = await service.stream_complete([{"role": "user", "content": "Hi"}])
+    chunks = [chunk async for chunk in stream]
+
+    assert "".join(chunks) == "fallback chunk"
+    assert get_usage() is None
+    assert len(openrouter_completions.calls) == 2
+    initial_call, retry_call = openrouter_completions.calls
+    assert initial_call["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in retry_call
+    assert initial_call["extra_body"] == _REASONING_DISABLED
+    assert retry_call["extra_body"] == _REASONING_DISABLED
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_falls_back_to_completion_with_reasoning_disabled(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        RuntimeError("stream transport exploded"),
+        _completion_response("non-streamed fallback"),
+    ]
+
+    stream, get_usage = await service.stream_complete([{"role": "user", "content": "Hi"}])
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == ["non-streamed fallback"]
+    assert get_usage() is None
+    assert len(openrouter_completions.calls) == 2
+    for call in openrouter_completions.calls:
+        assert call["extra_body"] == _REASONING_DISABLED
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_exhaustion_fails_closed_without_openai(llm_service) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        RuntimeError("stream transport exploded"),
+        _api_status_error(401),
+        _api_status_error(401),
+    ]
+
+    stream, _get_usage = await service.stream_complete([{"role": "user", "content": "Hi"}])
+    with pytest.raises(RuntimeError, match="exhausted"):
+        _ = [chunk async for chunk in stream]
+
+    assert [call["model"] for call in openrouter_completions.calls] == [
+        "minimax/minimax-m3",
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
+    ]
+    assert openai_completions.calls == []

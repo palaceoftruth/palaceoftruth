@@ -12,6 +12,9 @@ same-model retries and one legacy JSON parsing retry remain, but it never
 borrows the generic M2.7 fallback. Schema, semantic abstention, confidence
 thresholds and the SAR-1068 contract remain unchanged. Offline tests verify
 routing and parsing, not actual M3 classification quality.
+Cloud MiniMax requests disable reasoning (`reasoning.enabled=false`), including
+streaming and legacy JSON retries, to preserve bounded visible-output budgets.
+Custom vision transport receives no OpenRouter-specific reasoning controls.
 
 Cloud vision defaults to M3 ONLY; `OPENROUTER_VISION_FALLBACK_MODELS` must be
 empty. M2.7 is text-only. For a trusted operator-owned OpenAI-compatible

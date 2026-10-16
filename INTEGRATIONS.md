@@ -24,6 +24,9 @@ embedding/index profile and live local WhisperX transcription primary intact.
 Do not change transcription provider/gateway/token or embedding dimensions
 as part of this generation rollout. No migration or chart/release version
 bump is included.
+Cloud MiniMax generation sends `reasoning.enabled=false` on schema requests,
+legacy JSON retries, and streaming requests; custom vision transport does not
+receive this OpenRouter-specific control. Existing JSON compatibility is retained.
 
 Optional custom vision uses `config.visionProvider=custom`,
 `config.visionBaseUrl`, `config.visionModel`, and
