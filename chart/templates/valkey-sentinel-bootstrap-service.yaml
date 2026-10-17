@@ -1,0 +1,22 @@
+{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palaceoftruth.valkeySentinelBootstrapName" . }}
+  labels:
+    {{- include "palaceoftruth.labels" . | nindent 4 }}
+spec:
+  # Headless bootstrap authority source. A data node resolves this to the
+  # individual Sentinel pod IPs and takes a MAJORITY over DISTINCT instances, so a
+  # single ClusterIP round-robin endpoint cannot be triple-counted. Reachable even
+  # before the Sentinel readiness gate (a live master) is satisfied.
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: {{ include "palaceoftruth.valkeySentinelName" . }}
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+      protocol: TCP
+{{- end }}
