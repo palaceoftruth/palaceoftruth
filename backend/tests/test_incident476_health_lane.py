@@ -276,3 +276,53 @@ def test_C5_recent_subthreshold_restart_termination_fails():
     pods = [_pod("worker-1", "worker", last_terminated=term, restart_count=1)]
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), FakeKube(pods))
+
+
+# --- C4b: the coverage floor must not demand a line at an arbitrary boundary --
+
+def test_C4_sparse_long_running_worker_resuming_after_the_window_floor_passes():
+    """A worker older than the window is sampled from an arbitrary boundary; a
+    sparse emitter that resumes well after it is healthy, not a false alarm."""
+    first = (_now() - timedelta(seconds=6500)).isoformat()   # floor is now-7200
+    last = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=3 * 24 * 3600)],
+                    lines={"worker-1": f"{first} resumed\n{last} heartbeat\n"})
+    out = preflight.health_temporal(smoke, _args(), kube)
+    assert out["coverage"][0]["collection_complete"] is True
+
+
+def test_C4_container_started_inside_window_must_log_near_its_start():
+    """A container that began inside the window must log near its own start."""
+    first = (_now() - timedelta(seconds=100)).isoformat()    # 500s after a 600s start
+    last = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=600)],
+                    lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+# --- C4c: PR #589 fail-closed edges (F1 missing start, F2 boundary equality) ---
+
+def test_C4_missing_container_start_metadata_fails_closed():
+    """Startup metadata is required; absent startedAt must fail closed, not skip
+    the coverage-start guard (PR #589 F1)."""
+    pod = _pod("worker-1", "worker")
+    del pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+    fresh = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([pod], lines={"worker-1": f"{fresh} line\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+def test_C4_container_started_exactly_at_window_floor_must_log_near_its_start(monkeypatch):
+    """A container whose start equals the window floor began AT the window and
+    must log near its start; the strict-'|>' skip was a fail-open edge (F2)."""
+    fixed = smoke.utc_now()
+    monkeypatch.setattr(smoke, "utc_now", lambda: fixed)
+    started_ago = 7200  # == log_since_seconds -> started == floor exactly
+    first = (fixed - timedelta(seconds=started_ago - 180)).isoformat()
+    last = (fixed - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=started_ago)],
+                    lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
