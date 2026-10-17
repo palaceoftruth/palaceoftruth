@@ -493,7 +493,9 @@ def test_sentinel_container_rerenders_config_from_template_on_every_start() -> N
     container = pod_spec["containers"][0]
     assert container["name"] == "sentinel"
     script = "\n".join(container.get("args", []))
-    assert "cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf" in script
+    # Rendered from the ConfigMap template, renamed into place atomically, exec'd.
+    assert "cp /etc/sentinel-template/sentinel.conf" in script
+    assert 'mv "$tmp" /data/sentinel.conf' in script
     assert "exec valkey-sentinel /data/sentinel.conf" in script
 
     mounts = {mount["name"]: mount["mountPath"] for mount in container["volumeMounts"]}
