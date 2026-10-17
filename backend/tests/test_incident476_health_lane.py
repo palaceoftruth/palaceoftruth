@@ -326,3 +326,120 @@ def test_C4_container_started_exactly_at_window_floor_must_log_near_its_start(mo
                     lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), kube)
+
+
+# --- C6: an idle healthy ARQ worker is covered by state + a live heartbeat ----
+#
+# A long-running worker whose log window is EMPTY is not automatically a failure:
+# an idle media worker legitimately emits no line for hours. It is covered only
+# when it is a KNOWN ARQ worker (broker queue resolvable), the container has run
+# continuously across the whole window (start metadata present and <= floor), the
+# container state is healthy (no termination/OOM/restart in _health_workers), and
+# the pod-specific broker heartbeat is present and fresh. The coverage record then
+# carries the explicit kind `state_and_events_for_idle_worker`, never `log`.
+
+def _idle_pulse(present=True, ttl=9, qlen=0):
+    def broker(queue_name, pod_name):
+        return {"present": present, "ttl_seconds": ttl, "queue_length": qlen,
+                "as_of": _now().isoformat()}
+    return broker
+
+
+def _idle_worker_pod(**kw):
+    kw.setdefault("started_ago_s", 3 * 24 * 3600)
+    return _pod("media-worker-1", "media-worker", **kw)
+
+
+def test_C6_idle_worker_with_live_broker_heartbeat_passes():
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    out = preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+    rec = out["coverage"][0]
+    assert rec["coverage_kind"] == "state_and_events_for_idle_worker"
+    assert rec["coverage_kind"] != "log"
+    assert rec["collection_complete"] is True
+    assert rec["pod"] == "media-worker-1"
+    assert out["passes"] == 2
+
+
+def test_C6_logged_worker_coverage_kind_stays_log():
+    out = preflight.health_temporal(smoke, _args(), FakeKube([_pod("worker-1", "worker")]))
+    assert out["coverage"][0]["coverage_kind"] == "log"
+
+
+def test_C6_empty_worker_with_unavailable_broker_probe_fails_closed():
+    """An absent probe is not proof: the empty capture still fails closed."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=lambda *a: None)
+
+
+def test_C6_empty_worker_with_stale_heartbeat_is_a_real_failure():
+    """A stale task queue (heartbeat gone, jobs waiting) is NOT idle health."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse(present=False, qlen=5))
+
+
+def test_C6_empty_non_worker_container_is_not_covered():
+    """A non-worker API service with empty logs must fail, not borrow the kind."""
+    kube = FakeKube([_pod("api-1", "backend", started_ago_s=3 * 24 * 3600)], lines={"api-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_degenerate_tail_cap_fails_closed():
+    """A zero/negative cap is not a complete capture, even if the read is empty."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(log_tail_lines=0), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_started_inside_window_fails():
+    """A worker that began inside the window is not a long-idle worker."""
+    kube = FakeKube([_idle_worker_pod(started_ago_s=600)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_missing_start_metadata_fails():
+    pod = _idle_worker_pod()
+    del pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+    kube = FakeKube([pod], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_terminated_worker_fails():
+    pod = _idle_worker_pod()
+    pod["status"]["containerStatuses"][0]["state"] = {"terminated": {"exitCode": 1}}
+    kube = FakeKube([pod], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_recent_oom_worker_fails():
+    term = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": (_now() - timedelta(seconds=60)).isoformat()}
+    kube = FakeKube([_idle_worker_pod(last_terminated=term)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_at_restart_threshold_fails():
+    kube = FakeKube([_idle_worker_pod(restart_count=3)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_malformed_heartbeat_ttl_fails():
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse(ttl=None))
+
+
+def test_C6_empty_worker_future_heartbeat_stamp_fails():
+    """A grossly-future heartbeat stamp is not proof (only a bounded skew is)."""
+    future = {"present": True, "ttl_seconds": 9, "queue_length": 0,
+              "as_of": (_now() + timedelta(seconds=3600)).isoformat()}
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=lambda q, p: future)

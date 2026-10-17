@@ -174,6 +174,26 @@ OOM_EVENT_REASONS = {"OOMKilling", "OOMKilled"}
 # less often than this needs the operator to justify a different bound.
 FRESHNESS_SECONDS = 300
 COVERAGE_TOLERANCE_SECONDS = 120
+# ARQ workers refresh a pod-specific broker health key on this cadence
+# (app/workers/queues.py). A live, pod-specific key is up-to-now liveness
+# evidence for a worker that legitimately emits NO log line inside the window:
+# the refresh runs in the worker's event loop, so a stale/absent key means the
+# loop is not servicing the broker.
+BROKER_HEARTBEAT_INTERVAL_SECONDS = 15
+BROKER_HEARTBEAT_TOLERANCE_SECONDS = 30
+# Coverage kinds are explicit and honest. An idle worker proved by container
+# state + a live broker heartbeat is NEVER reported as having satisfied a
+# log-coverage check it did not satisfy.
+LOG_COVERAGE_KIND = "log"
+IDLE_WORKER_COVERAGE_KIND = "state_and_events_for_idle_worker"
+# Known ARQ worker containers -> broker queue name. Only these workloads have a
+# broker heartbeat that can prove an idle worker is alive; an unknown container
+# (including a non-worker API service) with empty logs still fails closed.
+WORKER_QUEUE_BY_CONTAINER = {
+    "worker": "arq:queue",
+    "media-worker": "arq:queue:media",
+    "palace-worker": "arq:queue:palace",
+}
 
 
 def _live_release(kube, namespace, release_name):
@@ -336,8 +356,84 @@ def _health_workers(smoke, args, kube, floor):
     return rows
 
 
-def _health_log_coverage(smoke, args, kube, rows, now, floor):
-    """Explicit coverage record; bounded freshness; truncation is rejected."""
+def _idle_worker_queue(container_name):
+    """Map a KNOWN ARQ worker container to its broker queue, else None."""
+    return WORKER_QUEUE_BY_CONTAINER.get(container_name)
+
+
+def _broker_heartbeat_proof(broker, queue_name, pod_name, now):
+    """Read-only ARQ heartbeat proof for an idle worker, else None.
+
+    The probe is INJECTED (host harness) or resolves to the in-cluster lane's
+    live Redis EXISTS/TTL read (check_memory_rollout_smoke.broker_pulse). An
+    absent probe, an absent key, or a stale/implausible value returns None so the
+    caller fails closed. The probe never enqueues, pushes, or mutates SQL.
+    """
+    if not callable(broker):
+        return None
+    try:
+        pulse = broker(queue_name, pod_name)
+    except Exception:  # noqa: BLE001 - an unavailable probe is not proof
+        return None
+    if not isinstance(pulse, dict) or pulse.get('present') is not True:
+        return None
+    ttl = pulse.get('ttl_seconds')
+    if type(ttl) is not int or ttl < 0 or ttl > BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS:
+        return None
+    try:
+        heartbeat_at = control.instant(pulse.get('as_of'))
+    except control.ControlError:
+        return None
+    # The probe observes the key a beat AFTER the caller froze `now`; a bounded
+    # tolerance admits that skew without accepting a fabricated future stamp.
+    if heartbeat_at > now + timedelta(seconds=BROKER_HEARTBEAT_TOLERANCE_SECONDS):
+        return None
+    return {'heartbeat_at': heartbeat_at.isoformat(), 'ttl_seconds': ttl,
+            'queue_length': pulse.get('queue_length')}
+
+
+def _idle_worker_coverage(args, row, now, floor, broker):
+    """Explicit `state_and_events_for_idle_worker` proof, else None.
+
+    Only a KNOWN ARQ worker whose container has run continuously across the whole
+    window (start metadata present and started <= floor) AND whose live,
+    pod-specific broker heartbeat is fresh qualifies. Every other empty capture
+    still fails closed. This never asserts log coverage.
+    """
+    tail = getattr(args, 'log_tail_lines', None)
+    if type(tail) is not int or tail < 1:
+        return None                       # a degenerate cap is not a complete capture
+    queue_name = _idle_worker_queue(row.get('container'))
+    if queue_name is None:
+        return None                       # not a known ARQ worker: no broker heartbeat
+    try:
+        started = control.instant(row.get('started_at'))
+    except control.ControlError:
+        return None                       # start metadata missing -> coverage unproven
+    if started > floor:
+        return None                       # began inside the window: not a long-idle worker
+    proof = _broker_heartbeat_proof(broker, queue_name, row.get('pod'), now)
+    if proof is None:
+        return None
+    return {'pod': row['pod'], 'container': row['container'],
+            'coverage_kind': IDLE_WORKER_COVERAGE_KIND,
+            'coverage_start': started.isoformat(),
+            'coverage_end': proof['heartbeat_at'],
+            'heartbeat_at': proof['heartbeat_at'],
+            'heartbeat_ttl_seconds': proof['ttl_seconds'],
+            'queue_length': proof['queue_length'],
+            'captured_at': now.isoformat(),
+            'collection_complete': True}
+
+
+def _health_log_coverage(smoke, args, kube, rows, now, floor, broker=None):
+    """Explicit coverage record; bounded freshness; truncation is rejected.
+
+    A worker with an EMPTY capture is covered only when it is a known ARQ worker
+    proven live by its pod-specific broker heartbeat and by continuous container
+    state; that record carries an explicit `state_and_events_for_idle_worker`
+    kind and never claims log coverage.
+    """
     seconds = max(args.log_since_seconds, 3600)
     records = []
     for row in rows:
@@ -348,8 +444,12 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
             raise control.ControlError('log read failed')
         lines = text.splitlines()
         if not lines:
-            # A newly started container with no lines cannot prove coverage.
-            raise control.ControlError('empty logs cannot prove coverage')
+            record = _idle_worker_coverage(args, row, now, floor, broker)
+            if record is None:
+                # No complete log capture and no idle-worker proof: fail closed.
+                raise control.ControlError('empty logs cannot prove coverage')
+            records.append(record)
+            continue
         if len(text.encode()) > 1048576 or len(lines) >= args.log_tail_lines:
             raise control.ControlError('log capture truncated (cap/overflow)')
         stamps = []
@@ -387,30 +487,40 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
         if stamps[-1] > now:
             raise control.ControlError('log coverage is in the future')
         records.append({'pod': row['pod'], 'container': row['container'],
+                        'coverage_kind': LOG_COVERAGE_KIND,
                         'coverage_start': coverage_start.isoformat(),
                         'coverage_end': stamps[-1].isoformat(),
                         'captured_at': now.isoformat(),
                         'collection_complete': True})
     # Coverage contract (documented): a container proves it has logged since its
-    # floor; the WORKLOAD's up-to-now liveness is proven by (a) at least one
-    # selected worker logging within FRESHNESS_SECONDS and (b) the second-pass
-    # identity/counter equality in health_temporal. FRESHNESS_SECONDS is a policy
-    # bound, not an up-to-now guarantee -- an idle media worker may legitimately
-    # be silent for longer.
-    freshest = max(control.instant(r['coverage_end']) for r in records)
+    # floor, OR -- for a known ARQ worker with an empty window -- it proves
+    # up-to-now liveness by continuous container state plus a fresh, pod-specific
+    # broker heartbeat recorded under `state_and_events_for_idle_worker`. Either
+    # way the WORKLOAD must expose a fresh evidence stream within FRESHNESS_SECONDS;
+    # the second-pass identity/counter equality in health_temporal is unchanged.
+    # FRESHNESS_SECONDS is a policy bound, not an up-to-now guarantee.
+    log_ends = [control.instant(r['coverage_end']) for r in records
+                if r.get('coverage_kind') == LOG_COVERAGE_KIND]
+    beat_ends = [control.instant(r['heartbeat_at']) for r in records
+                 if r.get('coverage_kind') == IDLE_WORKER_COVERAGE_KIND]
+    if not log_ends and not beat_ends:
+        raise control.ControlError('no selected worker logged within the freshness bound')
+    freshest = max(log_ends + beat_ends)
     if freshest < now - timedelta(seconds=FRESHNESS_SECONDS):
         raise control.ControlError('no selected worker logged within the freshness bound')
     return records
 
 
-def health_temporal(smoke, args, kube):
+def health_temporal(smoke, args, kube, broker=None):
     """Live two-pass temporal baseline with explicit coverage and freshness."""
     if args.restart_alert_threshold != 3 or args.log_since_seconds < 3600:
         raise control.ControlError('required mode forbids weaker gates')
+    if broker is None:
+        broker = getattr(smoke, 'broker_pulse', None)
     now = smoke.utc_now()
     floor = now - timedelta(seconds=max(args.log_since_seconds, 3600))
     first = _health_workers(smoke, args, kube, floor)
-    coverage = _health_log_coverage(smoke, args, kube, first, now, floor)
+    coverage = _health_log_coverage(smoke, args, kube, first, now, floor, broker)
     second = _health_workers(smoke, args, kube, floor)
     keys = lambda rows: sorted((r['uid'], r['container'], r['container_id'], r['restart_count']) for r in rows)
     if keys(first) != keys(second):

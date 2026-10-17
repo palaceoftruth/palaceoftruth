@@ -19,7 +19,11 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from redis.asyncio import Redis
+from redis.asyncio.sentinel import Sentinel
+
 from scripts.check_redis_sentinel_rollout_gate import check_rollout_gate
+from scripts.wait_for_redis_sentinel import load_config_from_env, redis_auth_kwargs
 from scripts import smoke_control
 from scripts import smoke_preflight
 from scripts import smoke_transport
@@ -743,6 +747,43 @@ async def check_sentinel(report: dict[str, Any]) -> None:
         master=f"{result.master_host}:{result.master_port}",
         connected_replicas=result.connected_replicas,
     )
+
+
+async def _broker_pulse_async(queue_name: str, pod_name: str, *, timeout: float) -> dict[str, Any]:
+    """Read-only ARQ heartbeat probe. EXISTS/TTL/LLEN only: no enqueue, no SQL.
+
+    The ARQ worker refreshes `{queue}:health-check:{pod}` every
+    WORKER_HEALTH_CHECK_INTERVAL_SECONDS from its event loop, so a present key is
+    up-to-now liveness proof for an idle worker. Nothing is written.
+    """
+    config = load_config_from_env()
+    if config is None:
+        raise RuntimeError("REDIS_SENTINEL_HOSTS must be set for the broker heartbeat probe")
+    sentinel = Sentinel(config.hosts, socket_timeout=timeout, socket_connect_timeout=timeout)
+    redis = None
+    key = f"{queue_name}:health-check:{pod_name}"
+    try:
+        master_host, master_port = await sentinel.discover_master(config.master_name)
+        redis = Redis(host=master_host, port=master_port, socket_timeout=timeout,
+                      socket_connect_timeout=timeout, **redis_auth_kwargs())
+        present = bool(await redis.exists(key))
+        ttl = await redis.ttl(key) if present else None
+        queue_length = int(await redis.llen(queue_name))
+    finally:
+        if redis is not None:
+            await redis.aclose()
+        sentinel_close = getattr(sentinel, "aclose", None)
+        if sentinel_close is not None:
+            await sentinel_close()
+    return {"present": present,
+            "ttl_seconds": (None if ttl is None else max(int(ttl), 0)),
+            "queue_length": queue_length,
+            "as_of": utc_now().isoformat().replace("+00:00", "Z")}
+
+
+def broker_pulse(queue_name: str, pod_name: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    """Injected read-only worker-heartbeat probe for the idle-worker coverage kind."""
+    return asyncio.run(_broker_pulse_async(queue_name, pod_name, timeout=timeout))
 
 
 def resolve_tenant_identity(client: HttpClient, report: dict[str, Any], args: argparse.Namespace | None = None) -> str | None:
