@@ -766,8 +766,10 @@ async def _broker_pulse_async(queue_name: str, pod_name: str, *, timeout: float)
         master_host, master_port = await sentinel.discover_master(config.master_name)
         redis = Redis(host=master_host, port=master_port, socket_timeout=timeout,
                       socket_connect_timeout=timeout, **redis_auth_kwargs())
-        present = bool(await redis.exists(key))
-        ttl = await redis.ttl(key) if present else None
+        # RAW Redis TTL, never normalized: -2 = key missing, -1 = exists with NO
+        # expiry (not being refreshed), >= 0 = seconds remaining. Clamping a
+        # negative value into the acceptable range would be a fail-open.
+        raw_ttl = int(await redis.ttl(key))
         queue_length = int(await redis.llen(queue_name))
     finally:
         if redis is not None:
@@ -775,8 +777,10 @@ async def _broker_pulse_async(queue_name: str, pod_name: str, *, timeout: float)
         sentinel_close = getattr(sentinel, "aclose", None)
         if sentinel_close is not None:
             await sentinel_close()
-    return {"present": present,
-            "ttl_seconds": (None if ttl is None else max(int(ttl), 0)),
+    return {"present": raw_ttl != -2,
+            "ttl_seconds": raw_ttl,
+            "queue": queue_name,
+            "pod": pod_name,
             "queue_length": queue_length,
             "as_of": utc_now().isoformat().replace("+00:00", "Z")}
 

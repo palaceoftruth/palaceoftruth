@@ -377,16 +377,25 @@ def _broker_heartbeat_proof(broker, queue_name, pod_name, now):
         return None
     if not isinstance(pulse, dict) or pulse.get('present') is not True:
         return None
+    # The heartbeat must be for THIS queue and pod (the same key), not a sibling.
+    if pulse.get('queue') != queue_name or pulse.get('pod') != pod_name:
+        return None
     ttl = pulse.get('ttl_seconds')
-    if type(ttl) is not int or ttl < 0 or ttl > BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS:
+    # `type(...) is int` excludes bool. A RAW Redis TTL of -2 (key missing), -1
+    # (exists with no expiry: NOT being refreshed), 0 (imminent expiry), or
+    # > interval+tolerance (stale) is NOT a fresh heartbeat. Never clamp a
+    # negative TTL into this range; only a live, refreshing key qualifies.
+    if type(ttl) is not int or ttl < 1 or ttl > BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS:
         return None
     try:
         heartbeat_at = control.instant(pulse.get('as_of'))
     except control.ControlError:
         return None
-    # The probe observes the key a beat AFTER the caller froze `now`; a bounded
-    # tolerance admits that skew without accepting a fabricated future stamp.
-    if heartbeat_at > now + timedelta(seconds=BROKER_HEARTBEAT_TOLERANCE_SECONDS):
+    skew = timedelta(seconds=BROKER_HEARTBEAT_TOLERANCE_SECONDS)
+    fresh_window = timedelta(seconds=BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS)
+    # The caller's probe stamp must be FRESH: recent enough that the observation
+    # is about the live key, yet not fabricated far into the future.
+    if heartbeat_at < now - fresh_window or heartbeat_at > now + skew:
         return None
     return {'heartbeat_at': heartbeat_at.isoformat(), 'ttl_seconds': ttl,
             'queue_length': pulse.get('queue_length')}
