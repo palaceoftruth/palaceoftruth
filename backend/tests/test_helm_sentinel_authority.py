@@ -52,10 +52,19 @@ def test_sentinel_start_path_preserves_conf_and_repairs_only_a_stale_pin() -> No
     assert "sentinel auth-pass" in script
 
 
-def test_sentinel_service_is_reachable_for_bootstrap() -> None:
+def test_client_sentinel_service_does_not_publish_not_ready_but_bootstrap_does() -> None:
     m = _render("highAvailability.enabled=true")
-    svc = _by(m, "Service", "palaceoftruth-valkey-sentinel")
-    assert svc["spec"].get("publishNotReadyAddresses") is True
+    client = _by(m, "Service", "palaceoftruth-valkey-sentinel")
+    bootstrap = _by(m, "Service", "palaceoftruth-valkey-sentinel-bootstrap")
+    # The CLIENT-facing Service must never route to a failed / not-ready
+    # Sentinel pod.
+    assert client["spec"].get("publishNotReadyAddresses") in (None, False)
+    assert client["spec"]["type"] == "ClusterIP"
+    assert client["spec"]["selector"] == {"app": "palaceoftruth-valkey-sentinel"}
+    # The internal headless BOOTSTRAP Service stays reachable before the
+    # readiness gate so a data node can take a majority during a cold start.
+    assert bootstrap["spec"]["clusterIP"] == "None"
+    assert bootstrap["spec"]["publishNotReadyAddresses"] is True
 
 
 def test_data_node_init_runs_fail_closed_authority_then_acl_sanitizer() -> None:
@@ -124,3 +133,29 @@ def test_statefulset_mode_preserves_auth_invariants() -> None:
     env = {e["name"] for e in c.get("env", [])}
     assert "VALKEY_PASSWORD" in env
     assert "REDISCLI_AUTH" not in env
+
+def test_sentinel_deployment_replaces_one_pod_at_a_time_and_requires_quorum() -> None:
+    # A coordinated upgrade must keep a quorum: replace pods ONE AT A TIME and
+    # never surge a fourth identity. Recreate would drop all Sentinels at once.
+    m = _render("highAvailability.enabled=true")
+    d = _by(m, "Deployment", "palaceoftruth-valkey-sentinel")
+    assert d["spec"]["strategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
+    }
+
+
+def test_sentinel_mode_requires_at_least_three_sentinels() -> None:
+    # A single Sentinel cannot keep a quorum across a rolling replacement; the
+    # chart must fail loudly instead of silently claiming HA.
+    import subprocess
+    import shutil
+    cmd = ["helm", "template", "palaceoftruth", str(CHART),
+           "--set", "highAvailability.enabled=true",
+           "--set", "highAvailability.replicas.valkeySentinels=1"]
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering tests")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "at least 3 sentinels" in (r.stderr + r.stdout)
+

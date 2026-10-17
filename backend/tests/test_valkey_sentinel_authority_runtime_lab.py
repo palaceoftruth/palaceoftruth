@@ -120,17 +120,36 @@ def _build_lab(tag, net_name):
     def start_replica(ip):
         data_node("repl", RPL, ip, "repl", repl_init)
 
+    def run_sentinel(i):
+        _docker("rm", "-f", f"{tag}-s{i}")
+        _docker("run", "-d", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
+                "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
+                "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start)
+
     def start_sentinels():
         for i in (1, 2, 3):
+            run_sentinel(i)
+
+    def restart_sentinel(i):
+        # Controlled, one-at-a-time replacement (the chart's RollingUpdate).
+        run_sentinel(i)
+
+    def wipe_sentinels():
+        # FULL Sentinel state loss: remove the pods AND their learned conf.
+        for i in (1, 2, 3):
             _docker("rm", "-f", f"{tag}-s{i}")
-            _docker("run", "-d", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
-                    "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
-                    "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start)
+            sd = d / f"s{i}"
+            for x in list(sd.iterdir()):
+                if x.is_dir():
+                    shutil.rmtree(x, ignore_errors=True)
+                else:
+                    x.unlink(missing_ok=True)
 
     start_primary(str(net[10]), fresh=True)
     start_replica(str(net[11]))
     start_sentinels()
     return {"tag": tag, "net": net, "start_sentinels": start_sentinels,
+            "restart_sentinel": restart_sentinel, "wipe_sentinels": wipe_sentinels,
             "start_primary": start_primary, "start_replica": start_replica, "_dir": d, "_net_name": net_name}
 
 
@@ -155,6 +174,30 @@ def lab_churn():
         for c in ("prim", "repl", "s1", "s2", "s3"):
             _docker("rm", "-f", f"pslchurn-{c}")
         _docker("network", "rm", "psl-churn")
+        shutil.rmtree(state["_dir"], ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def lab_reconverge():
+    state = _build_lab("pslrcv", "psl-rcv")
+    try:
+        yield state
+    finally:
+        for c in ("prim", "repl", "s1", "s2", "s3"):
+            _docker("rm", "-f", f"pslrcv-{c}")
+        _docker("network", "rm", "psl-rcv")
+        shutil.rmtree(state["_dir"], ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def lab_roll():
+    state = _build_lab("pslroll", "psl-roll")
+    try:
+        yield state
+    finally:
+        for c in ("prim", "repl", "s1", "s2", "s3"):
+            _docker("rm", "-f", f"pslroll-{c}")
+        _docker("network", "rm", "psl-roll")
         shutil.rmtree(state["_dir"], ignore_errors=True)
 
 
@@ -237,3 +280,68 @@ def test_lab_two_ip_churn_keeps_one_continuous_authority(lab_churn):
     masters = [c for c in (f"{tag}-prim", f"{tag}-repl") if _role(c) == "master"]
     assert len(masters) == 1, f"expected exactly one writable master after churn, saw {masters}"
     assert _cli(masters[0], "GET", "churn:marker") == "v1", "the churn marker must survive the IP changes"
+
+def test_lab_full_sentinel_state_wipe_reconverges_to_the_newer_master(lab_reconverge):
+    """FULL Sentinel state loss + old primary return.
+
+    The Sentinels lose every learned conf. The ensemble must re-converge on the
+    ACTUAL master (the promoted replica, holding the NEWER marker) instead of
+    stranding on the returning old primary, and a client write through the
+    Sentinel-discovered master must succeed with no second writable master."""
+    tag = lab_reconverge["tag"]
+    net = lab_reconverge["net"]
+    assert _wait(lambda: _quorum_ok_tag(tag), 150), "no quorum after fresh bootstrap"
+    assert _role(f"{tag}-prim") == "master"
+    _cli(f"{tag}-prim", "SET", "rc:marker", "v1")
+    assert _wait(lambda: _cli(f"{tag}-repl", "GET", "rc:marker") == "v1", 90), "replica did not sync"
+
+    # natural failover to the replica
+    _docker("rm", "-f", f"{tag}-prim")
+    repl_ip = _ipof(f"{tag}-repl")
+    assert _wait(lambda: (_sent(f"{tag}-s1", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split() or [""])[0] == repl_ip, 180), "natural failover did not promote the replica"
+    _cli(f"{tag}-repl", "SET", "rc:marker", "v2-NEWER")
+
+    # the old primary returns with reused data: read-only, never a second master
+    lab_reconverge["start_primary"](str(net[215]))
+    time.sleep(20)
+    assert _role(f"{tag}-prim") != "master", "returning old primary must not be writable"
+
+    # FULL Sentinel state wipe, then a fresh ensemble
+    lab_reconverge["wipe_sentinels"]()
+    lab_reconverge["start_sentinels"]()
+
+    # the ensemble must re-converge on the promoted (newer) master
+    assert _wait(lambda: all(
+        (_sent(f"{tag}-s{i}", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split() or [""])[0] == repl_ip
+        for i in (1, 2, 3)), 120), "ensemble did not re-converge on the newer master after a full state wipe"
+
+    # a client write through the Sentinel-discovered master succeeds
+    addr = _sent(f"{tag}-s1", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split()
+    assert addr and addr[0] == repl_ip
+    out = _docker("exec", f"{tag}-s1", "valkey-cli", "-a", PW, "--no-auth-warning",
+                  "-h", addr[0], "-p", addr[1], "SET", "rc:probe", "ok")
+    assert "OK" in out.stdout, f"write through the Sentinel-discovered master failed: {out.stdout} {out.stderr}"
+    # the NEWER marker is intact (no epoch/state reset)
+    assert _cli(f"{tag}-repl", "GET", "rc:marker") == "v2-NEWER"
+    # exactly one writable master
+    assert _role(f"{tag}-prim") != "master"
+
+
+def test_lab_sequential_sentinel_replacement_keeps_quorum(lab_roll):
+    """A controlled one-at-a-time Sentinel replacement must keep a quorum and
+    must not move the authoritative master (RollingUpdate, maxSurge=0)."""
+    tag = lab_roll["tag"]
+    assert _wait(lambda: _quorum_ok_tag(tag), 150), "no quorum after fresh bootstrap"
+    _cli(f"{tag}-prim", "SET", "roll:marker", "v1")
+    before = _sent(f"{tag}-s1", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split()
+    assert before
+    for i in (1, 2, 3):
+        lab_roll["restart_sentinel"](i)
+        time.sleep(10)
+        remaining = [x for x in (1, 2, 3) if x != i]
+        assert _wait(lambda: all("OK" in _sent(f"{tag}-s{x}", "SENTINEL", "CKQUORUM", "mymaster") for x in remaining), 60), f"quorum lost after replacing s{i}"
+        addrs = {tuple(_sent(f"{tag}-s{x}", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split()) for x in remaining}
+        assert addrs == {tuple(before)}, f"master moved during replacement of s{i}: {addrs}"
+    assert _wait(lambda: _quorum_ok_tag(tag), 90)
+    assert _cli(f"{tag}-prim", "GET", "roll:marker") == "v1"
+

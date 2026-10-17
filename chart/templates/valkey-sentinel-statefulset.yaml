@@ -64,6 +64,7 @@ spec:
               template=/etc/sentinel-template/sentinel.conf
               conf=/data/sentinel.conf
               monitor_target={{ include "palaceoftruth.valkeyPrimaryName" . | quote }}
+              replica_target={{ include "palaceoftruth.valkeyReplicaName" . | quote }}
               wait_seconds={{ .Values.valkey.sentinel.bootstrapWaitSeconds | default 20 }}
               role_of() {
                 {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
@@ -78,6 +79,47 @@ spec:
                   *.*.*.*) return 0 ;;
                   *) return 1 ;;
                 esac
+              }
+              unique_live_master() {
+                # Echoes the address iff exactly ONE known data-node endpoint
+                # (primary or replica headless Service) answers ROLE master.
+                found=""
+                n=0
+                for ip in $({ getent ahosts "$monitor_target" 2>/dev/null; getent ahosts "$replica_target" 2>/dev/null; } | awk '{print $1}' | sort -u); do
+                  if [ "$(role_of "$ip")" = "master" ]; then found="$ip"; n=$((n + 1)); fi
+                done
+                if [ "$n" -eq 1 ]; then echo "$found"; return 0; fi
+                return 1
+              }
+              info_replication_of() {
+                # $1 = address; print its INFO replication (auth when required).
+                {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+                timeout 3 env REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw info replication 2>/dev/null || true
+                {{- else }}
+                timeout 3 valkey-cli -h "$1" -p 6379 --raw info replication 2>/dev/null || true
+                {{- end }}
+              }
+              # If a monitored address is a REPLICA, follow its LIVE replication
+              # upstream to the actual master. Bounded hops; NEVER destructive
+              # (reads ROLE and INFO only). Returns an address only when it
+              # resolves to a live ROLE master; an unreachable address is left
+              # untouched so natural failover is never blocked.
+              follow_replication_upstream() {
+                addr="${1:-}"
+                hops=0
+                while [ "$hops" -lt 5 ]; do
+                  r="$(role_of "$addr")"
+                  if [ "$r" = "master" ]; then echo "$addr"; return 0; fi
+                  [ -z "$r" ] && return 1
+                  up="$(info_replication_of "$addr" | awk -F: '/^master_host:/{print $2}' | tr -d '\r')"
+                  [ -n "$up" ] || return 1
+                  case "$up" in 127.0.0.1|localhost|"") return 1 ;; esac
+                  uip="$(getent hosts "$up" 2>/dev/null | awk '{print $1}' | head -n1)"
+                  [ -n "$uip" ] || return 1
+                  addr="$uip"
+                  hops=$((hops + 1))
+                done
+                return 1
               }
               # A recorded literal address that is still a live master is kept
               # byte for byte; only this STRICT lookup (role must be master) is
@@ -152,14 +194,34 @@ spec:
                 mv "$tmp" "$conf"
                 trap - EXIT
               fi
-              # The template monitors the primary by SERVICE NAME. Sentinel
-              # requires a literal address, so guarantee one before exec: pin the
-              # resolved live address, else keep the recorded line verbatim
-              # (never blank).
-              if ! is_ipv4 "$(awk '/^sentinel monitor/{print $4; exit}' "$conf")"; then
-                target=$(resolve_monitor_address || true)
-                if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
-              fi
+              # The template monitors the primary by SERVICE NAME; Sentinel
+              # requires a literal address. Guarantee one before exec, and
+              # RE-CONVERGE on the ACTUAL master when the recorded address is a
+              # REPLICA (for example after a full Sentinel state wipe, when the
+              # conf is regenerated and would otherwise pin the old primary).
+              # BOUNDED retry so a still-booting peer cannot strand the ensemble;
+              # reads only; never blanks the monitor line; epochs and every other
+              # bit of topology are preserved.
+              i=0
+              while [ "$i" -lt "$wait_seconds" ]; do
+                i=$((i + 1))
+                recorded=$(awk '/^sentinel monitor/{print $4; exit}' "$conf")
+                if ! is_ipv4 "${recorded:-}"; then
+                  resolved=$(resolve_monitor_address || true)
+                  if [ -n "${resolved:-}" ]; then pin_monitor "$resolved"; fi
+                  sleep 1
+                  continue
+                fi
+                if [ "$(role_of "$recorded")" = "master" ]; then break; fi
+                target=$(follow_replication_upstream "$recorded" || true)
+                if [ -z "${target:-}" ]; then target=$(unique_live_master || true); fi
+                if [ -n "${target:-}" ] && [ "$target" != "$recorded" ]; then
+                  pin_monitor "$target"
+                  sleep 1
+                  continue
+                fi
+                break
+              done
               exec valkey-sentinel "$conf"
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # Deliberately not REDISCLI_AUTH: Sentinel's own port has no

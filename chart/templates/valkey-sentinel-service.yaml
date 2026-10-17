@@ -10,9 +10,10 @@ metadata:
     {{- end }}
 spec:
   type: ClusterIP
-  # Bootstrap authority: a data node must be able to query a Sentinel ensemble
-  # even before the Sentinel readiness gate (a live master) is satisfied.
-  publishNotReadyAddresses: true
+  # This is the CLIENT-facing Sentinel Service (REDIS_SENTINEL_HOSTS). It must
+  # NOT publish not-ready addresses: a failed/not-ready Sentinel pod must not be
+  # routable to clients. In-cluster bootstrap uses the headless
+  # <name>-bootstrap Service, which deliberately publishes not-ready addresses.
   selector:
     app: {{ include "palaceoftruth.valkeySentinelName" . }}
   ports:
