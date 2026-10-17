@@ -42,6 +42,15 @@ config:
   # through OpenRouter; OPENAI_API_KEY is never used for image analysis.
   openrouterVisionModel: "minimax/minimax-m3"
   openrouterVisionFallbackModels: "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+  # Vision route. "openrouter" (default) keeps the OpenRouter vision chain above.
+  # "gateway" routes image analysis to the self-hosted OpenAI-compatible gateway
+  # (llmGatewayUrl / externalSecrets.llmGatewayTokenProperty) with a dedicated
+  # model. The gateway route never uses the OpenAI or OpenRouter credential and
+  # has no automatic paid fallback.
+  visionProvider: "openrouter"
+  visionGatewayModel: "qwen-vl"
+  visionGatewayTimeoutSeconds: "60"
+  visionMaxImageBytes: "20971520"
   # Frozen relationship-classifier profile. Change only with a calibrated eval.
   relationshipClassificationModel: "openai/gpt-4.1"
   relationshipClassificationTemperature: "0.0"

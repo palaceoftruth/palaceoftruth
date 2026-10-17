@@ -30,6 +30,11 @@ _PLACEHOLDER_CREDENTIAL_VALUES = frozenset(
     }
 )
 
+# Retired vision gateway model aliases. The gateway does not serve these any
+# more, and a stale value must fail loudly instead of being rewritten silently
+# to a different model.
+_DEPRECATED_VISION_GATEWAY_MODELS = frozenset({"qwen3-vl"})
+
 
 def _is_placeholder_credential(value: str) -> bool:
     return value.strip() in _PLACEHOLDER_CREDENTIAL_VALUES
@@ -133,6 +138,16 @@ class Settings(BaseSettings):
     openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
     openrouter_vision_model: str = "minimax/minimax-m3"
     openrouter_vision_fallback_models: str = "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+    # Vision route. "openrouter" (default) keeps the existing OpenRouter vision
+    # chain. "gateway" sends image analysis to the self-hosted OpenAI-compatible
+    # LLM gateway (LLM_GATEWAY_URL / LLM_GATEWAY_TOKEN) with a dedicated model.
+    # The gateway route is independent of the OpenRouter and OpenAI credentials,
+    # carries no cross-provider fallback, and never lets a missing gateway
+    # credential fall through to a paid provider.
+    vision_provider: str = "openrouter"
+    vision_gateway_model: str = "qwen-vl"
+    vision_gateway_timeout_seconds: float = 60.0
+    vision_max_image_bytes: int = 20 * 1024 * 1024
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
@@ -325,6 +340,24 @@ class Settings(BaseSettings):
         if transcription_provider not in {"openai", "assemblyai", "local_whisperx"}:
             raise ValueError("TRANSCRIPTION_PROVIDER must be one of: openai, assemblyai, local_whisperx")
         self.transcription_provider = transcription_provider
+        vision_provider = self.vision_provider.strip().lower()
+        if vision_provider not in {"openrouter", "gateway"}:
+            raise ValueError("VISION_PROVIDER must be one of: openrouter, gateway")
+        self.vision_provider = vision_provider
+        if vision_provider == "gateway":
+            gateway_model = self.vision_gateway_model.strip()
+            if not gateway_model:
+                raise ValueError("VISION_GATEWAY_MODEL must not be empty")
+            if gateway_model.lower() in _DEPRECATED_VISION_GATEWAY_MODELS:
+                raise ValueError(
+                    f"VISION_GATEWAY_MODEL {gateway_model!r} is deprecated and no longer served; "
+                    "use 'qwen-vl'"
+                )
+            self.vision_gateway_model = gateway_model
+        if self.vision_gateway_timeout_seconds <= 0:
+            raise ValueError("VISION_GATEWAY_TIMEOUT_SECONDS must be greater than 0")
+        if self.vision_max_image_bytes <= 0:
+            raise ValueError("VISION_MAX_IMAGE_BYTES must be greater than 0")
         if self.llm_gateway_url:
             parsed = urlparse(self.llm_gateway_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
