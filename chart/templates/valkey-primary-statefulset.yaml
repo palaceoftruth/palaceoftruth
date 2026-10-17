@@ -60,19 +60,10 @@ spec:
         - name: init-config
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkey") | nindent 10 }}
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/sh", "-ec"]
           args:
             - |
-              # The named primary must not keep a stale replicaof rewrite after
-              # a pod/IP recycle, or Sentinel cannot discover a healthy master.
-              if [ ! -f /data/valkey.conf ]; then
-                echo "appendonly yes" > /data/valkey.conf
-                echo "appendfilename appendonly.aof" >> /data/valkey.conf
-              fi
-              sed -i '/^replicaof /d;/^slaveof /d' /data/valkey.conf
-              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-              {{- include "palaceoftruth.valkeyAuthConfigScript" "/data/valkey.conf" | nindent 14 }}
-              {{- end }}
+              {{- include "palaceoftruth.valkeyAuthorityStartScript" . | nindent 14 }}
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           env:
             {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}

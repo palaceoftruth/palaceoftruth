@@ -122,6 +122,99 @@ CNPG auto-generated app secret name: <cluster-name>-app
 {{- end }}
 
 {{/*
+Bounded, fail-closed AUTHORITY decision for a Sentinel-managed data node start.
+
+Distinguishes a legitimate NEW bootstrap from RECOVERY and never creates a blind
+writable master:
+  * explicit initialBootstrap (chart install opt-in) -> writable master (new install);
+  * consult the Sentinel ensemble and require a MAJORITY-consistent live answer
+    (not a single CKQUORUM): follow a live named master; become master only if the
+    ensemble names THIS node, or the named address is dead AND this pod is the
+    monitored service endpoint (no live promoted master exists, else the follow
+    branch wins) -> this can never prioritise the original service over a live
+    higher-epoch promoted master;
+  * anything ambiguous (no consistent answer, unresolvable address) -> READ-ONLY
+    (replica of an unreachable placeholder; writes refused) = FAIL CLOSED.
+The existing conf is PRESERVED and reconciled, and the auth/ACL sanitizer
+(requirepass/masterauth + the `user default` rewrite) runs last, so a rotated
+password is applied and a stale ACL line can never defeat requirepass.
+Identity uses the pod's own address and the primary SERVICE resolution -- no
+hardcoded/guessed numeric IPs.
+*/}}
+{{- define "palaceoftruth.valkeyAuthorityStartScript" -}}
+set -eu
+conf=/data/valkey.conf
+sentinel_host={{ include "palaceoftruth.valkeySentinelName" . | quote }}
+master_name={{ .Values.valkey.sentinel.masterName | quote }}
+primary_service={{ include "palaceoftruth.valkeyPrimaryName" . | quote }}
+quorum={{ .Values.valkey.sentinel.quorum }}
+wait_seconds={{ .Values.valkey.sentinel.bootstrapWaitSeconds | default 20 }}
+[ -f "$conf" ] || : > "$conf"
+grep -q '^appendonly ' "$conf" || echo "appendonly yes" >> "$conf"
+grep -q '^appendfilename ' "$conf" || echo "appendfilename appendonly.aof" >> "$conf"
+grep -q '^dir ' "$conf" || echo "dir /data" >> "$conf"
+sed -i '/^replicaof /d;/^slaveof /d;/^replica-read-only /d' "$conf"
+master_role() {
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+  REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+{{- else }}
+  valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+{{- end }}
+}
+myip=$(hostname -i 2>/dev/null | awk '{print $1}')
+data_present=0
+for f in appendonlydir appendonly.aof dump.rdb; do [ -e "/data/$f" ] && data_present=1; done
+ROLE=readonly
+FOLLOW=""
+{{- if .Values.valkey.sentinel.initialBootstrap }}
+ROLE=master
+{{- else }}
+consensus=""
+if getent hosts "$sentinel_host" >/dev/null 2>&1; then
+  list=/tmp/.valkey-masters.$$
+  : > "$list"
+  i=0
+  while [ "$i" -lt "$wait_seconds" ]; do
+    ans=$(valkey-cli -h "$sentinel_host" -p 26379 --raw sentinel get-master-addr-by-name "$master_name" 2>/dev/null | tr '\n' ' ' || true)
+    addr=$(echo "$ans" | awk '{print $1}')
+    [ -n "$addr" ] && echo "$addr" >> "$list"
+    if [ -s "$list" ]; then
+      top=$(sort "$list" | uniq -c | sort -rn | head -n1)
+      cnt=$(echo "$top" | awk '{print $1}')
+      cand=$(echo "$top" | awk '{print $2}')
+      if [ "${cnt:-0}" -ge "$quorum" ]; then consensus="$cand"; break; fi
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  rm -f "$list"
+fi
+if [ -n "$consensus" ]; then
+  if [ "$consensus" = "$myip" ]; then
+    ROLE=master
+  elif [ "$(master_role "$consensus")" = "master" ]; then
+    ROLE=replica
+    FOLLOW="$consensus"
+  else
+    svc_ip=$(getent hosts "$primary_service" 2>/dev/null | awk '{print $1}')
+    if [ -n "$svc_ip" ] && [ "$svc_ip" = "$myip" ]; then
+      ROLE=master
+    fi
+  fi
+fi
+{{- end }}
+case "$ROLE" in
+  master) : ;;
+  replica) echo "replicaof $FOLLOW 6379" >> "$conf" ;;
+  readonly) echo "replicaof 127.0.0.1 1" >> "$conf"; echo "replica-read-only yes" >> "$conf" ;;
+esac
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+{{ include "palaceoftruth.valkeyAuthConfigScript" "$conf" }}
+{{- end }}
+{{- end }}
+
+
+{{/*
 Valkey service name: <fullname>-valkey  (single-instance mode)
 */}}
 {{- define "palaceoftruth.valkeyServiceName" -}}

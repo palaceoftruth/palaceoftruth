@@ -38,41 +38,73 @@ spec:
                 labelSelector:
                   matchLabels:
                     app: {{ include "palaceoftruth.valkeySentinelName" . }}
-      initContainers:
-        # Sentinel rewrites its config file at runtime (to record the current
-        # primary after failover). Copy the ConfigMap template to a writable
-        # emptyDir so those writes don't hit a read-only mount.
-        - name: init-sentinel-config
-          image: {{ .Values.valkey.image }}
-          {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          command: ["/bin/sh", "-ec"]
-          args:
-            - |
-              cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf
-              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-              # Kept out of the ConfigMap: the monitored primary's password
-              # must not be readable to anyone who can read ConfigMaps.
-              printf 'sentinel auth-pass %s %s\n' {{ .Values.valkey.sentinel.masterName | quote }} "$VALKEY_PASSWORD" >> /data/sentinel.conf
-              chmod 600 /data/sentinel.conf
-              {{- end }}
-          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-          env:
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
-                  key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
-          {{- end }}
-          volumeMounts:
-            - name: sentinel-config-template
-              mountPath: /etc/sentinel-template
-            - name: sentinel-data
-              mountPath: /data
       containers:
         - name: sentinel
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          command: ["valkey-sentinel", "/data/sentinel.conf"]
+          # Sentinel records the monitored master by ADDRESS and, on CONFIG
+          # REWRITE, persists the RESOLVED address. A process that boots from a
+          # stale literal-IP conf can never follow the primary again after the
+          # primary pod is recycled onto a new IP (the 477 stall). But after a
+          # LEGITIMATE failover the recorded address is the PROMOTED replica and
+          # MUST be preserved. So this start path:
+          #   1. PRESERVES an existing learned conf (epoch, known replicas,
+          #      known sentinels, auth) across restarts; and
+          #   2. repairs ONLY a monitor address that is PROVABLY stale (the
+          #      recorded address is not a live master AND the primary SERVICE
+          #      hostname resolves to a live master), rewriting just the monitor
+          #      target back to the stable service hostname.
+          # It never runs SENTINEL RESET/MONITOR/REMOVE/FAILOVER and never
+          # overwrites a live (possibly promoted) master.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set -eu
+              template=/etc/sentinel-template/sentinel.conf
+              conf=/data/sentinel.conf
+              monitor_target={{ include "palaceoftruth.valkeyPrimaryName" . | quote }}
+              role_of() {
+                {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+                REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+                {{- else }}
+                valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+                {{- end }}
+              }
+              if [ -f "$conf" ] && grep -qi '^sentinel monitor' "$conf"; then
+                recorded=$(awk '/^sentinel monitor/{print $4}' "$conf")
+                case "$recorded" in
+                  *[!0-9.]*|"")
+                    : ;;   # hostname or empty: keep the learned conf as-is
+                  *)
+                    if [ "$(role_of "$recorded")" != "master" ]; then
+                      resolved=$(getent hosts "$monitor_target" | awk '{print $1}' || true)
+                      if [ -n "$resolved" ] && [ "$(role_of "$resolved")" = "master" ]; then
+                        tmp=/data/.sentinel.conf.$$
+                        awk -v svc="$monitor_target" '/^sentinel monitor/{print $1" "$2" "$3" "svc" "$5" "$6; next}{print}' "$conf" > "$tmp"
+                        mv "$tmp" "$conf"
+                      fi
+                    fi ;;
+                esac
+              else
+                tmp=/data/.sentinel.conf.$$
+                trap 'rm -f "$tmp"' EXIT
+                cp "$template" "$tmp"
+                {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+                # Kept out of the ConfigMap: the monitored primary's password
+                # must not be readable to anyone who can read ConfigMaps. Reject
+                # control characters so a crafted secret value cannot inject an
+                # extra sentinel.conf directive through the printf below.
+                if printf '%s' "$VALKEY_PASSWORD" | grep -q '[[:cntrl:]]'; then
+                  echo 'VALKEY_PASSWORD must not contain control characters' >&2
+                  exit 1
+                fi
+                printf 'sentinel auth-pass %s %s\n' {{ .Values.valkey.sentinel.masterName | quote }} "$VALKEY_PASSWORD" >> "$tmp"
+                {{- end }}
+                chmod 600 "$tmp"
+                mv "$tmp" "$conf"
+                trap - EXIT
+              fi
+              exec valkey-sentinel "$conf"
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # Deliberately not REDISCLI_AUTH: Sentinel's own port has no
           # requirepass, and valkey-cli treats an unwanted AUTH as a failed
@@ -91,6 +123,8 @@ spec:
           resources:
             {{- toYaml .Values.valkey.sentinel.resources | nindent 12 }}
           volumeMounts:
+            - name: sentinel-config-template
+              mountPath: /etc/sentinel-template
             - name: sentinel-data
               mountPath: /data
           readinessProbe:
