@@ -9,6 +9,7 @@ C3 owner forgery, C4 stale/empty/truncated coverage, C5 real alert evidence.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -326,3 +327,222 @@ def test_C4_container_started_exactly_at_window_floor_must_log_near_its_start(mo
                     lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), kube)
+
+
+# --- C6: an idle healthy ARQ worker is covered by state + a live heartbeat ----
+#
+# A long-running worker whose log window is EMPTY is not automatically a failure:
+# an idle media worker legitimately emits no line for hours. It is covered only
+# when it is a KNOWN ARQ worker (broker queue resolvable), the container has run
+# continuously across the whole window (start metadata present and <= floor), the
+# container state is healthy (no termination/OOM/restart in _health_workers), and
+# the pod-specific broker heartbeat is present and fresh. The coverage record then
+# carries the explicit kind `state_and_events_for_idle_worker`, never `log`.
+
+def _idle_pulse(present=True, ttl=9, qlen=0, queue="arq:queue:media", pod="media-worker-1"):
+    def broker(queue_name, pod_name):
+        return {"present": present, "ttl_seconds": ttl, "queue": queue, "pod": pod,
+                "queue_length": qlen, "as_of": _now().isoformat()}
+    return broker
+
+
+def _idle_worker_pod(**kw):
+    kw.setdefault("started_ago_s", 3 * 24 * 3600)
+    return _pod("media-worker-1", "media-worker", **kw)
+
+
+def test_C6_idle_worker_with_live_broker_heartbeat_passes():
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    out = preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+    rec = out["coverage"][0]
+    assert rec["coverage_kind"] == "state_and_events_for_idle_worker"
+    assert rec["coverage_kind"] != "log"
+    assert rec["collection_complete"] is True
+    assert rec["pod"] == "media-worker-1"
+    assert out["passes"] == 2
+
+
+def test_C6_logged_worker_coverage_kind_stays_log():
+    out = preflight.health_temporal(smoke, _args(), FakeKube([_pod("worker-1", "worker")]))
+    assert out["coverage"][0]["coverage_kind"] == "log"
+
+
+def test_C6_empty_worker_with_unavailable_broker_probe_fails_closed():
+    """An absent probe is not proof: the empty capture still fails closed."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=lambda *a: None)
+
+
+def test_C6_empty_worker_with_stale_heartbeat_is_a_real_failure():
+    """A stale task queue (heartbeat gone, jobs waiting) is NOT idle health."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse(present=False, qlen=5))
+
+
+def test_C6_empty_non_worker_container_is_not_covered():
+    """A non-worker API service with empty logs must fail, not borrow the kind."""
+    kube = FakeKube([_pod("api-1", "backend", started_ago_s=3 * 24 * 3600)], lines={"api-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_degenerate_tail_cap_fails_closed():
+    """A zero/negative cap is not a complete capture, even if the read is empty."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(log_tail_lines=0), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_started_inside_window_fails():
+    """A worker that began inside the window is not a long-idle worker."""
+    kube = FakeKube([_idle_worker_pod(started_ago_s=600)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_missing_start_metadata_fails():
+    pod = _idle_worker_pod()
+    del pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+    kube = FakeKube([pod], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_terminated_worker_fails():
+    pod = _idle_worker_pod()
+    pod["status"]["containerStatuses"][0]["state"] = {"terminated": {"exitCode": 1}}
+    kube = FakeKube([pod], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_recent_oom_worker_fails():
+    term = {"reason": "OOMKilled", "exitCode": 137, "finishedAt": (_now() - timedelta(seconds=60)).isoformat()}
+    kube = FakeKube([_idle_worker_pod(last_terminated=term)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_at_restart_threshold_fails():
+    kube = FakeKube([_idle_worker_pod(restart_count=3)], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+
+
+def test_C6_empty_worker_malformed_heartbeat_ttl_fails():
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse(ttl=None))
+
+
+def test_C6_empty_worker_future_heartbeat_stamp_fails():
+    """A grossly-future heartbeat stamp is not proof (only a bounded skew is)."""
+    future = {"present": True, "ttl_seconds": 9, "queue_length": 0,
+              "as_of": (_now() + timedelta(seconds=3600)).isoformat()}
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube, broker=lambda q, p: future)
+
+
+# --- C7: the TTL must be a RAW, refreshing value (1..45), never normalized -----
+#
+# Redis TTL semantics: -2 = key missing, -1 = exists with NO expiry (NOT being
+# refreshed), 0 = expires immediately, >= 1 = seconds remaining. A persistent or
+# expired key must NEVER be clamped into the acceptable range. Covered at BOTH
+# layers: the probe's raw value path AND the canonical checker, plus end to end.
+
+def _pulse(queue="arq:queue:media", pod="media-worker-1", ttl=9, present=True, as_of=None):
+    return {"present": present, "ttl_seconds": ttl, "queue": queue, "pod": pod,
+            "queue_length": 0, "as_of": as_of or _now().isoformat()}
+
+
+@pytest.mark.parametrize("raw_ttl,ok", [(-2, False), (-1, False), (0, False), (1, True), (45, True), (46, False)])
+def test_C7_checker_accepts_only_raw_ttl_in_range(raw_ttl, ok):
+    now = _now()
+    proof = preflight._broker_heartbeat_proof(lambda q, p: _pulse(ttl=raw_ttl),
+                                              "arq:queue:media", "media-worker-1", now)
+    assert (proof is not None) is ok
+    if ok:
+        assert proof["ttl_seconds"] == raw_ttl          # seen raw, not clamped
+
+
+def test_C7_checker_rejects_bool_and_non_int_ttl():
+    now = _now()
+    for bad in (True, False, "9", 9.0, None):
+        assert preflight._broker_heartbeat_proof(lambda q, p: _pulse(ttl=bad),
+                                                 "arq:queue:media", "media-worker-1", now) is None
+
+
+def test_C7_checker_rejects_mismatched_queue_or_pod():
+    now = _now()
+    assert preflight._broker_heartbeat_proof(lambda q, p: _pulse(queue="arq:queue"),
+                                             "arq:queue:media", "media-worker-1", now) is None
+    assert preflight._broker_heartbeat_proof(lambda q, p: _pulse(pod="other-pod"),
+                                             "arq:queue:media", "media-worker-1", now) is None
+
+
+def test_C7_checker_rejects_stale_or_future_caller_stamp():
+    now = _now()
+    stale = (now - timedelta(seconds=600)).isoformat()
+    future = (now + timedelta(seconds=600)).isoformat()
+    assert preflight._broker_heartbeat_proof(lambda q, p: _pulse(as_of=stale),
+                                             "arq:queue:media", "media-worker-1", now) is None
+    assert preflight._broker_heartbeat_proof(lambda q, p: _pulse(as_of=future),
+                                             "arq:queue:media", "media-worker-1", now) is None
+
+
+class _FakeRedis:
+    def __init__(self, ttl, qlen=0):
+        self._ttl, self._qlen = ttl, qlen
+
+    async def ttl(self, key):
+        return self._ttl
+
+    async def llen(self, key):
+        return self._qlen
+
+    async def aclose(self):
+        return None
+
+
+class _FakeSentinel:
+    def __init__(self, *a, **k):
+        pass
+
+    async def discover_master(self, name):
+        return ("127.0.0.1", 6379)
+
+    async def aclose(self):
+        return None
+
+
+class _FakeConfig:
+    hosts = [("127.0.0.1", 26379)]
+    master_name = "mymaster"
+
+
+@pytest.mark.parametrize("raw_ttl", [-2, -1, 0, 1, 45, 46])
+def test_C7_probe_returns_raw_ttl_without_normalization(monkeypatch, raw_ttl):
+    monkeypatch.setattr(smoke, "load_config_from_env", lambda: _FakeConfig())
+    monkeypatch.setattr(smoke, "Sentinel", lambda *a, **k: _FakeSentinel())
+    monkeypatch.setattr(smoke, "Redis", lambda *a, **k: _FakeRedis(raw_ttl))
+    monkeypatch.setattr(smoke, "redis_auth_kwargs", lambda: {})
+    pulse = asyncio.run(smoke._broker_pulse_async("arq:queue:media", "media-worker-1", timeout=1.0))
+    assert pulse["ttl_seconds"] == raw_ttl                  # NEVER clamped
+    assert pulse["present"] is (raw_ttl != -2)
+    assert pulse["queue"] == "arq:queue:media" and pulse["pod"] == "media-worker-1"
+
+
+@pytest.mark.parametrize("raw_ttl,ok", [(-1, False), (-2, False), (0, False), (1, True), (45, True), (46, False)])
+def test_C7_temporal_end_to_end_ttl_matrix(raw_ttl, ok):
+    """A persistent (-1), expired (-2), imminent (0), or stale (>45) key fails."""
+    kube = FakeKube([_idle_worker_pod()], lines={"media-worker-1": ""})
+    broker = _idle_pulse(ttl=raw_ttl, present=(raw_ttl != -2))
+    if ok:
+        out = preflight.health_temporal(smoke, _args(), kube, broker=broker)
+        assert out["coverage"][0]["coverage_kind"] == "state_and_events_for_idle_worker"
+    else:
+        with pytest.raises(control.ControlError):
+            preflight.health_temporal(smoke, _args(), kube, broker=broker)
