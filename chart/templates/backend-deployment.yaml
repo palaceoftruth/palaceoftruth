@@ -88,6 +88,18 @@ spec:
             # is disabled. Always defer RLS until the post-rollout gate.
             - name: DEFER_TENANT_RLS_ENFORCEMENT
               value: "true"
+            {{- if .Values.metrics.serviceMonitor.enabled }}
+            # ServiceMonitor discovers each pod IP, not the Service DNS name.
+            # Kubelet loads envFrom before expanding env values: retain its
+            # effective TRUSTED_HOSTS (including secret overrides), then append
+            # only this pod's own address. Never trust the whole pod CIDR.
+            - name: PALACE_METRICS_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: TRUSTED_HOSTS
+              value: "$(TRUSTED_HOSTS),$(PALACE_METRICS_POD_IP)"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config
