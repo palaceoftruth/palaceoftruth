@@ -299,3 +299,30 @@ def test_C4_container_started_inside_window_must_log_near_its_start():
                     lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), kube)
+
+
+# --- C4c: PR #589 fail-closed edges (F1 missing start, F2 boundary equality) ---
+
+def test_C4_missing_container_start_metadata_fails_closed():
+    """Startup metadata is required; absent startedAt must fail closed, not skip
+    the coverage-start guard (PR #589 F1)."""
+    pod = _pod("worker-1", "worker")
+    del pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+    fresh = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([pod], lines={"worker-1": f"{fresh} line\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+def test_C4_container_started_exactly_at_window_floor_must_log_near_its_start(monkeypatch):
+    """A container whose start equals the window floor began AT the window and
+    must log near its start; the strict-'|>' skip was a fail-open edge (F2)."""
+    fixed = smoke.utc_now()
+    monkeypatch.setattr(smoke, "utc_now", lambda: fixed)
+    started_ago = 7200  # == log_since_seconds -> started == floor exactly
+    first = (fixed - timedelta(seconds=started_ago - 180)).isoformat()
+    last = (fixed - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=started_ago)],
+                    lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)

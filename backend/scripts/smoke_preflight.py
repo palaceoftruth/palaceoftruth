@@ -364,21 +364,24 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
             started = control.instant(row.get('started_at'))
         except control.ControlError:
             started = None
-        # The floor is the later of the log window and this container's own
-        # start: a freshly rolled pod legitimately has no older history.
-        start_floor = floor if started is None else max(floor, started)
+        # Startup metadata is required. Without it the coverage-start guard cannot
+        # run, so refuse here instead of skipping the check (fail closed).
+        if started is None:
+            raise control.ControlError('container start metadata missing; coverage start unproven')
+        # The floor is the later of the log window and this container's own start:
+        # a freshly rolled pod legitimately has no older history.
+        start_floor = max(floor, started)
         coverage_start = max(stamps[0], start_floor)
-        # A container that began INSIDE the observation window must have logged at
-        # its own start: its first line is real startup evidence. A container older
-        # than the window is instead sampled from an ARBITRARY boundary (now -
-        # log_since_seconds). A sparse worker with no heartbeat contract can
-        # legitimately emit its next line well after that boundary, so a line
-        # exactly at the floor is NOT required -- the previous unconditional
-        # tolerance check failed and passed purely on where the wall-clock
-        # boundary landed. Non-empty, complete, ordered capture plus the workload
-        # freshness bound below carry the coverage proof; this does not relax the
-        # truncation, stale-freshness, or OOM gates.
-        if started is not None and started > floor:
+        # A container that began AT or INSIDE the observation window must have
+        # logged near its own start: its first line is real startup evidence. A
+        # container OLDER than the window is instead sampled from an ARBITRARY
+        # boundary (now - log_since_seconds). A sparse worker with no heartbeat
+        # contract can legitimately emit its next line well after that boundary,
+        # so a line exactly at the floor is NOT required. Non-empty, complete,
+        # ordered capture plus the workload freshness bound below carry the
+        # coverage proof; this does not relax the truncation, stale-freshness, or
+        # OOM gates.
+        if started >= floor:
             if stamps[0] > started + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
                 raise control.ControlError('coverage does not start at the container start')
         if stamps[-1] > now:
