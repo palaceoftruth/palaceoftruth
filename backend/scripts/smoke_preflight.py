@@ -316,8 +316,40 @@ def _termination_is_recent(term, floor):
     return finished >= floor
 
 
+def _running_started_at(state):
+    """Parse ``state.running.startedAt``; None when absent or invalid."""
+    if not isinstance(state, dict):
+        return None
+    running = state.get('running')
+    if not isinstance(running, dict):
+        return None
+    try:
+        return control.instant(running.get('startedAt'))
+    except control.ControlError:
+        return None
+
+
 def _health_workers(smoke, args, kube, floor):
-    """Two-pass worker observations; recent OOM or a restart since the floor fails."""
+    """Two-pass worker observations judged in the CURRENT observation window.
+
+    The restart counter is an ACTIVE-window signal, not an absolute historical
+    total. A counter at/over ``restart_alert_threshold`` is admitted ONLY with
+    the full historical proof: the container's most recent termination is
+    provably OUTSIDE the window (``lastState.terminated.finishedAt < floor``),
+    the live container has run continuously across the whole window
+    (``state.running.startedAt <= floor``), that start is coherent with the
+    termination (``startedAt > finishedAt``), and every timestamp is valid and
+    not in the future.
+
+    Fail-closed edges: a non-zero counter with no ``lastState`` evidence, a
+    termination inside the window, an absent/unparsable/future timestamp, a
+    container that began inside the window, or an incoherent start/termination
+    interval all refuse the gate. The threshold (3) and the log window (>=3600s)
+    are unchanged: this is a windowed scope, not a threshold raise and not a
+    label-capture bypass. An OLD counter with old terminations passes; a
+    contemporary or unprovable counter still fails.
+    """
+    now = smoke.utc_now()
     selector = 'app.kubernetes.io/instance=' + args.target_name
     payload = kube.get('/api/v1/namespaces/' + args.namespace + '/pods', query={'labelSelector': selector})
     items = payload.get('items')
@@ -343,14 +375,37 @@ def _health_workers(smoke, args, kube, floor):
             count = c.get('restartCount')
             if type(count) is not int or count < 0:
                 raise control.ControlError('restart counter malformed')
+            finished = None
+            if term:
+                try:
+                    finished = control.instant(term.get('finishedAt'))
+                except control.ControlError as exc:
+                    # Unparsable evidence is not proof of health.
+                    raise control.ControlError('termination timestamp unparsable') from exc
+                if finished > now:
+                    raise control.ControlError('future termination evidence')
+                if finished >= floor:
+                    raise control.ControlError('recent worker termination is not proof of health')
+            elif count > 0:
+                # A live non-zero counter with no lastState cannot be scoped:
+                # whether the restarts are old or current is unprovable.
+                raise control.ControlError('restart history absent for a non-zero counter')
             if count >= args.restart_alert_threshold:
-                raise control.ControlError('restart counter at/over threshold')
-            if term and (_termination_is_recent(term, floor)):
-                raise control.ControlError('recent worker termination is not proof of health')
+                # Historical-only admission: the full window proof is required.
+                if finished is None:
+                    raise control.ControlError('historical restart count without termination evidence')
+                run_start = _running_started_at(c.get('state'))
+                if run_start is None:
+                    raise control.ControlError('container start metadata missing for a historical counter')
+                if run_start > floor:
+                    raise control.ControlError('container began inside the window; historical restart scope unproven')
+                if run_start <= finished:
+                    raise control.ControlError('incoherent container start and termination interval')
             rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
                          'container': c.get('name'), 'container_id': c.get('containerID'),
                          'restart_count': count,
-                         'started_at': (c.get('state', {}).get('running') or {}).get('startedAt')})
+                         'started_at': (c.get('state', {}).get('running') or {}).get('startedAt'),
+                         'last_terminated_at': finished.isoformat() if finished is not None else None})
     if not rows:
         raise control.ControlError('no approved workers observed')
     return rows
@@ -521,7 +576,16 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor, broker=None):
 
 
 def health_temporal(smoke, args, kube, broker=None):
-    """Live two-pass temporal baseline with explicit coverage and freshness."""
+    """Live two-pass temporal baseline with explicit coverage and freshness.
+
+    The restart policy is WINDOWED: an at/over-threshold counter is admitted
+    only with proof -- from BOTH passes -- that it is historical: the most
+    recent termination is outside the window, the container has run across the
+    whole window, and no counter move (even 1) occurred during the observation.
+    This mirrors the control path's baseline delta (smoke_control.temporal_gate)
+    while preserving threshold 3 and the >=3600s window. Any counter advance,
+    termination-metadata change, or identity/container change refuses the gate.
+    """
     if args.restart_alert_threshold != 3 or args.log_since_seconds < 3600:
         raise control.ControlError('required mode forbids weaker gates')
     if broker is None:
@@ -531,10 +595,25 @@ def health_temporal(smoke, args, kube, broker=None):
     first = _health_workers(smoke, args, kube, floor)
     coverage = _health_log_coverage(smoke, args, kube, first, now, floor, broker)
     second = _health_workers(smoke, args, kube, floor)
-    keys = lambda rows: sorted((r['uid'], r['container'], r['container_id'], r['restart_count']) for r in rows)
-    if keys(first) != keys(second):
-        raise control.ControlError('worker identity/counter changed during the observation window')
-    return {'workers': second, 'passes': 2, 'coverage': coverage}
+    first_by = {(r['uid'], r['container']): r for r in first}
+    if len(first_by) != len(first) or len(first_by) != len(second):
+        raise control.ControlError('worker identity set changed during the observation window')
+    history = []
+    for r in second:
+        b = first_by.get((r['uid'], r['container']))
+        if b is None or r['container_id'] != b['container_id']:
+            raise control.ControlError('worker identity/container changed during the observation window')
+        if r['restart_count'] != b['restart_count']:
+            # Any in-window counter movement (even 1) is an active restart signal.
+            raise control.ControlError('restart counter advanced during the observation window')
+        if r['started_at'] != b['started_at'] or r['last_terminated_at'] != b['last_terminated_at']:
+            raise control.ControlError('worker termination metadata changed during the observation window')
+        if r['restart_count'] >= args.restart_alert_threshold:
+            history.append({'pod': r['pod'], 'uid': r['uid'], 'container': r['container'],
+                            'restart_count': r['restart_count'],
+                            'last_terminated_at': r['last_terminated_at']})
+    return {'workers': second, 'passes': 2, 'coverage': coverage,
+            'lookback_start': floor.isoformat(), 'historical_restarts': history}
 
 
 def health_kubernetes_alerts(smoke, args, kube, now):
