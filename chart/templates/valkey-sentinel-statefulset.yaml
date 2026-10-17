@@ -37,19 +37,25 @@ spec:
         - name: sentinel
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          # Sentinel records the monitored master by ADDRESS. With the headless
-          # primary Service, resolve-hostnames rewrites the conf to the RESOLVED
-          # pod IP; a process that boots from a stale literal IP pins a dead
-          # address (the 477 stall), and a process that keeps the SERVICE
-          # hostname in the conf TILTS when the name is unresolvable after the
-          # pod is removed (no failover). This start path therefore:
+          # Sentinel records the monitored master by ADDRESS, and it runs with
+          # resolve-hostnames DISABLED (a hostname monitor line is a FATAL
+          # config error for it). The headless primary Service resolves to the
+          # primary POD IP while the pod exists and is NXDOMAIN when it is
+          # removed. This start path therefore:
           #   1. PRESERVES a learned conf (epoch, known peers, auth);
-          #   2. if the recorded monitor is a HOSTNAME or a NON-LIVE address,
-          #      pins it to the RESOLVED LIVE MASTER IP (bounded wait) so runtime
-          #      monitoring uses an address and a removed primary fails over;
-          #   3. keeps a recorded LIVE MASTER (incl. a promoted replica) byte for
-          #      byte -- never a DNS rewrite back to the service, never a stale
-          #      conf reset, never a wrong promotion when no live master exists.
+          #   2. keeps a recorded LIVE master (incl. a promoted replica) byte for
+          #      byte -- the recorded literal address IS what lets a removed
+          #      primary fail over;
+          #   3. re-pins ONLY a provably stale literal address, or a recorded
+          #      HOSTNAME/empty target, to a literal LIVE address before exec.
+          #      On a fresh boot it prefers an address that already reports
+          #      role=master and otherwise uses the monitored Service's resolved
+          #      address, so Sentinel starts immediately and does its own role
+          #      detection instead of dead-locking against a primary that is
+          #      still booting;
+          #   4. NEVER truncates the conf: pin_monitor writes a complete
+          #      replacement line atomically and refuses to swap in an empty
+          #      file, so the monitor line is never left blank.
           # No SENTINEL RESET/MONITOR/REMOVE/FAILOVER.
           command: ["/bin/sh", "-ec"]
           args:
@@ -61,44 +67,76 @@ spec:
               wait_seconds={{ .Values.valkey.sentinel.bootstrapWaitSeconds | default 20 }}
               role_of() {
                 {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-                REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+                timeout 3 env REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
                 {{- else }}
-                valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+                timeout 3 valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
                 {{- end }}
               }
-              resolve_live_master() {
-                for cand in $(getent ahosts "$monitor_target" 2>/dev/null | awk '{print $1}' | sort -u); do
-                  if [ "$(role_of "$cand")" = "master" ]; then echo "$cand"; return 0; fi
+              is_ipv4() {
+                case "${1:-}" in
+                  ""|*[!0-9.]*) return 1 ;;
+                  *.*.*.*) return 0 ;;
+                  *) return 1 ;;
+                esac
+              }
+              # A recorded literal address that is still a live master is kept
+              # byte for byte; only this STRICT lookup (role must be master) is
+              # used to re-pin a provably stale address.
+              live_master() {
+                i=0
+                while [ "$i" -lt "$wait_seconds" ]; do
+                  for cand in $(getent ahosts "$monitor_target" 2>/dev/null | awk '{print $1}' | sort -u); do
+                    if [ "$(role_of "$cand")" = "master" ]; then echo "$cand"; return 0; fi
+                  done
+                  i=$((i + 1))
+                  sleep 1
                 done
                 return 1
               }
-              wait_live_master() {
+              # Literal address for a recorded HOSTNAME/empty target. Prefer a
+              # current master; otherwise the monitored Service's resolved
+              # address (the pod exists but is still booting), so the ensemble
+              # starts without waiting for the primary's own authority loop.
+              resolve_monitor_address() {
+                first=""
                 i=0
                 while [ "$i" -lt "$wait_seconds" ]; do
-                  if out=$(resolve_live_master); then echo "$out"; return 0; fi
+                  for cand in $(getent ahosts "$monitor_target" 2>/dev/null | awk '{print $1}' | sort -u); do
+                    [ -n "$first" ] || first="$cand"
+                    if [ "$(role_of "$cand")" = "master" ]; then echo "$cand"; return 0; fi
+                  done
+                  if [ -n "$first" ]; then echo "$first"; return 0; fi
                   i=$((i + 1))
                   sleep 1
                 done
                 return 1
               }
               pin_monitor() {
-                # $1 = the live master IP to pin. Rewrites ONLY the monitor line.
+                # $1 = the literal address to pin. Rewrites ONLY the monitor
+                # line, atomically, and only from a complete replacement line
+                # that still contains a monitor directive. Never leaves blank.
+                ip="${1:-}"
+                is_ipv4 "$ip" || return 1
                 tmp=/data/.sentinel.conf.$$
-                awk -v ip="$1" '/^sentinel monitor/{print $1" "$2" "$3" "ip" "$5" "$6; next}{print}' "$conf" > "$tmp"
-                mv "$tmp" "$conf"
+                if awk -v ip="$ip" 'BEGIN{found=0}
+                    /^sentinel monitor/{print "sentinel monitor " $3 " " ip " " $5 " " $6; found=1; next}
+                    {print}
+                    END{exit !found}' "$conf" > "$tmp" && [ -s "$tmp" ]; then
+                  mv "$tmp" "$conf"
+                else
+                  rm -f "$tmp"
+                  return 1
+                fi
               }
               if [ -f "$conf" ] && grep -qi '^sentinel monitor' "$conf"; then
-                recorded=$(awk '/^sentinel monitor/{print $4}' "$conf")
-                target=""
-                case "$recorded" in
-                  *[!0-9.]*|"")
-                    target=$(wait_live_master || true) ;;   # hostname/empty: pin to the live IP
-                  *)
-                    if [ "$(role_of "$recorded")" != "master" ]; then
-                      target=$(wait_live_master || true)      # stale IP: pin to the live IP
-                    fi ;;
-                esac
-                if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
+                recorded=$(awk '/^sentinel monitor/{print $4; exit}' "$conf")
+                # A recorded literal address that is still a live master (incl.
+                # a promoted replica) is kept untouched. Only a provably stale
+                # address is re-pinned to the live master.
+                if is_ipv4 "$recorded" && [ "$(role_of "$recorded")" != "master" ]; then
+                  target=$(live_master || true)
+                  if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
+                fi
               else
                 tmp=/data/.sentinel.conf.$$
                 trap 'rm -f "$tmp"' EXIT
@@ -113,7 +151,13 @@ spec:
                 chmod 600 "$tmp"
                 mv "$tmp" "$conf"
                 trap - EXIT
-                target=$(wait_live_master || true)
+              fi
+              # The template monitors the primary by SERVICE NAME. Sentinel
+              # requires a literal address, so guarantee one before exec: pin the
+              # resolved live address, else keep the recorded line verbatim
+              # (never blank).
+              if ! is_ipv4 "$(awk '/^sentinel monitor/{print $4; exit}' "$conf")"; then
+                target=$(resolve_monitor_address || true)
                 if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
               fi
               exec valkey-sentinel "$conf"

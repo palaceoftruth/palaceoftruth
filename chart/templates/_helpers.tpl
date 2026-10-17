@@ -81,12 +81,11 @@ template checksum changes only when the Sentinel runtime configuration changes,
 not when chart metadata changes.
 */}}
 {{- define "palaceoftruth.valkeySentinelConfig" -}}
-# Valkey Sentinel requires this when the monitored primary is configured
-# with Kubernetes service DNS instead of a literal IP address.
-sentinel resolve-hostnames yes
-
-# Monitor the primary. Quorum = minimum sentinels that must agree the
-# primary is down before triggering a failover.
+# Monitor the primary. The boot path (see the Sentinel workload start script)
+# rewrites this line to the RESOLVED LIVE primary IP before exec: Sentinel runs
+# with resolve-hostnames DISABLED, and a hostname here is a fatal config error
+# for it. Quorum = minimum sentinels that must agree the primary is down before
+# triggering a failover.
 sentinel monitor {{ .Values.valkey.sentinel.masterName }} {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379 {{ .Values.valkey.sentinel.quorum }}
 
 # How long (ms) a primary can be unreachable before it's considered down.

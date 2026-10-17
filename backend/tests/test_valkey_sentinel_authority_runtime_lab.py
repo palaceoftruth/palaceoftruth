@@ -7,7 +7,9 @@ and a dedicated Docker-allocated network. No secrets: literal lab fixture.
 Covers: fresh bootstrap; a natural failover to the replica (newest marker kept);
 a Sentinel restart after the failover (promoted master preserved); the old primary
 returning with reused data (must NOT become a second writable master, newest
-marker preserved); no reachable ensemble with reused data (FAIL CLOSED read-only).
+marker preserved); no reachable ensemble with reused data (FAIL CLOSED read-only);
+and two consecutive primary IP changes with a CONTINUOUS Sentinel process (the
+ensemble must keep exactly one authority).
 
 NOT claimed: the Sentinel StatefulSet+PVC durability migration (not implemented).
 """
@@ -83,8 +85,8 @@ def _wait(pred, timeout=150, interval=2.0):
     return False
 
 
-@pytest.fixture(scope="module")
-def lab():
+def _build_lab(tag, net_name):
+    """Start a disposable Valkey primary + replica + 3 Sentinels. Returns a dict."""
     if shutil.which("docker") is None:
         pytest.skip("docker is required")
     m = _render("highAvailability.enabled=true", "valkey.auth.enabled=true", "valkey.sentinel.initialBootstrap=true")
@@ -93,18 +95,19 @@ def lab():
     sent_start = _by(m, "Deployment", "palaceoftruth-valkey-sentinel")["spec"]["template"]["spec"]["containers"][0]["args"][0]
     cm = _by(m, "ConfigMap", "palaceoftruth-valkey-sentinel-config")["data"]["sentinel.conf"]
 
-    d = Path(tempfile.mkdtemp(prefix="psllab-"))
+    d = Path(tempfile.mkdtemp(prefix=f"{tag}-"))
     (d / "tpl").mkdir(); (d / "tpl" / "sentinel.conf").write_text(cm)
     for n in ("prim", "repl", "s1", "s2", "s3"):
         (d / n).mkdir(); os.chmod(d / n, 0o777)
 
-    _docker("network", "create", NET)
-    sub = _docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Subnet}}", NET).stdout.strip()
+    _docker("network", "rm", net_name)
+    _docker("network", "create", net_name)
+    sub = _docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Subnet}}", net_name).stdout.strip()
     net = ipaddress.ip_network(sub)
 
     def data_node(name, alias, ip, vol, init):
-        _docker("rm", "-f", f"{TAG}-{name}")
-        _docker("run", "-d", "--name", f"{TAG}-{name}", "--network", NET, "--ip", ip,
+        _docker("rm", "-f", f"{tag}-{name}")
+        _docker("run", "-d", "--name", f"{tag}-{name}", "--network", net_name, "--ip", ip,
                 "--network-alias", alias, "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / vol}:/data",
                 IMAGE, "sh", "-ec", init + "\nexec valkey-server /data/valkey.conf")
 
@@ -119,26 +122,48 @@ def lab():
 
     def start_sentinels():
         for i in (1, 2, 3):
-            _docker("rm", "-f", f"{TAG}-s{i}")
-            _docker("run", "-d", "--name", f"{TAG}-s{i}", "--network", NET, "--network-alias", SENT, "--network-alias", SENT_BOOT,
+            _docker("rm", "-f", f"{tag}-s{i}")
+            _docker("run", "-d", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
                     "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
                     "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start)
 
     start_primary(str(net[10]), fresh=True)
     start_replica(str(net[11]))
     start_sentinels()
+    return {"tag": tag, "net": net, "start_sentinels": start_sentinels,
+            "start_primary": start_primary, "start_replica": start_replica, "_dir": d, "_net_name": net_name}
+
+
+@pytest.fixture(scope="module")
+def lab():
+    state = _build_lab(TAG, NET)
     try:
-        yield {"net": net, "start_sentinels": start_sentinels,
-               "start_primary": start_primary, "start_replica": start_replica}
+        yield state
     finally:
         for c in ("prim", "repl", "s1", "s2", "s3"):
             _docker("rm", "-f", f"{TAG}-{c}")
         _docker("network", "rm", NET)
-        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(state["_dir"], ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def lab_churn():
+    state = _build_lab("pslchurn", "psl-churn")
+    try:
+        yield state
+    finally:
+        for c in ("prim", "repl", "s1", "s2", "s3"):
+            _docker("rm", "-f", f"pslchurn-{c}")
+        _docker("network", "rm", "psl-churn")
+        shutil.rmtree(state["_dir"], ignore_errors=True)
 
 
 def _quorum_ok():
     return all("OK" in _sent(f"{TAG}-s{i}", "SENTINEL", "CKQUORUM", "mymaster") for i in (1, 2, 3))
+
+
+def _quorum_ok_tag(tag):
+    return all("OK" in _sent(f"{tag}-s{i}", "SENTINEL", "CKQUORUM", "mymaster") for i in (1, 2, 3))
 
 
 def test_lab_failover_sentinel_restart_and_old_primary_return(lab):
@@ -186,3 +211,29 @@ def test_lab_default_initial_bootstrap_false_fresh_primary_fails_closed():
     m = _render("highAvailability.enabled=true", "valkey.auth.enabled=true")  # default flag
     init = _by(m, "StatefulSet", "palaceoftruth-valkey-primary")["spec"]["template"]["spec"]["initContainers"][0]["args"][0]
     assert "initial_bootstrap=false" in init
+
+
+def test_lab_two_ip_churn_keeps_one_continuous_authority(lab_churn):
+    """Two consecutive primary IP changes with a CONTINUOUS Sentinel process.
+
+    The Sentinel containers are never restarted. After the churn the ensemble
+    must still agree on exactly ONE master address, and it must be the only
+    writable master (a legitimate replica promotion is accepted -- data
+    continuity is required, not the identity of the original master)."""
+    tag = lab_churn["tag"]
+    net = lab_churn["net"]
+    assert _wait(lambda: _quorum_ok_tag(tag), 150), "no quorum after fresh bootstrap"
+    assert _role(f"{tag}-prim") == "master"
+    _cli(f"{tag}-prim", "SET", "churn:marker", "v1")
+    assert _wait(lambda: _cli(f"{tag}-repl", "GET", "churn:marker") == "v1", 90), "replica did not sync"
+
+    # move the primary pod to two new IPs; the Sentinel ensemble runs throughout
+    for ip in (str(net[120]), str(net[130])):
+        lab_churn["start_primary"](ip)
+        time.sleep(25)
+
+    addrs = {_sent(f"{tag}-s{i}", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").replace("\n", ":") for i in (1, 2, 3)}
+    assert len(addrs) == 1, f"continuous Sentinels disagree after IP churn: {addrs}"
+    masters = [c for c in (f"{tag}-prim", f"{tag}-repl") if _role(c) == "master"]
+    assert len(masters) == 1, f"expected exactly one writable master after churn, saw {masters}"
+    assert _cli(masters[0], "GET", "churn:marker") == "v1", "the churn marker must survive the IP changes"
