@@ -828,8 +828,11 @@ async def test_gateway_vision_sends_text_and_image_blocks_without_fallback(
     assert call["temperature"] == 0.0
     assert call["max_tokens"] == 4096
     assert "extra_body" not in call
+    # The gateway accepts JSON-object mode, not a full JSON schema.
+    assert call["response_format"] == {"type": "json_object"}
     content = call["messages"][0]["content"]
     assert content[0]["type"] == "text"
+    assert "exactly these keys: summary" in content[0]["text"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == f"data:{media_type};base64,aW1hZ2U="
     # Neither paid credential is touched on the gateway route.
@@ -920,3 +923,26 @@ async def test_gateway_vision_client_closed_on_aclose(gateway_llm_service) -> No
 
     assert gateway_client.closed is True
     assert service._vision_gateway_client is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_parses_fenced_json_response(gateway_llm_service) -> None:
+    """The live llama.cpp gateway wraps its JSON in a code fence; the shared
+    tolerant parser must strip it and still validate the typed result."""
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [
+        _completion_response(
+            '```json\n{"summary":"Text \'PALACE 42\' in a bold font.","image_type":"OCR fixture",'
+            '"visible_text":["PALACE 42"],"objects":[],"entities":[],"relationships":[],'
+            '"visual_details":[],"uncertainties":[]}\n```',
+            model="qwen2.5-vl-7b",
+        )
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    assert result.analysis.visible_text == ["PALACE 42"]
+    assert result.provider.provider == "gateway"
+    assert result.provider.returned_model == "qwen2.5-vl-7b"

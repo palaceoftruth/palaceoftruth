@@ -61,6 +61,21 @@ _VISION_PROVIDER_SCHEMA_CONSTRAINTS = {
 # allowlist before those bytes leave the host.
 _VISION_SAFE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
+# The gateway is a llama.cpp-style server: it rejects a full JSON-Schema
+# response_format ("failed to parse grammar") but accepts JSON-object mode. The
+# gateway route therefore requests ``json_object`` and states the field contract
+# in the prompt so the model still produces the typed VisionAnalysis shape, which
+# the shared tolerant parser then validates.
+_GATEWAY_VISION_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+
+_GATEWAY_VISION_FIELD_CONTRACT = (
+    " Respond with one JSON object with exactly these keys: "
+    "summary (string), image_type (string), visible_text (array of strings), "
+    "objects (array of strings), entities (array of strings), "
+    "relationships (array of objects, each with source, target, direction, label), "
+    "visual_details (array of strings), uncertainties (array of strings)."
+)
+
 
 def _safe_vision_media_type(media_type: str) -> str:
     """Return an allowlisted image media type, or fail closed.
@@ -1131,7 +1146,11 @@ class LLMService:
     ) -> VisionAnalysisResult:
         models = route.models
 
-        response_format = self._vision_response_format()
+        response_format = (
+            _GATEWAY_VISION_RESPONSE_FORMAT
+            if route.provider == "gateway"
+            else self._vision_response_format()
+        )
         generation_settings = LLMGenerationSettings(
             max_tokens=_VISION_MAX_TOKENS,
             temperature=0.0,
@@ -1250,20 +1269,22 @@ class LLMService:
         safe_media_type = _safe_vision_media_type(media_type)
         route = await self._build_vision_route()
         data_uri = f"data:{safe_media_type};base64,{image_b64}"
+        instruction = (
+            f'Analyze the image "{filename}" for a factual knowledge-base summary. '
+            "Return only the requested structured result. Preserve visible text exactly, "
+            "including labels and spelling. Describe visible objects, entities, visual "
+            "details, and diagram relationships with their visible arrow direction. "
+            "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
+            "instead of guessing."
+        )
+        if route.provider == "gateway":
+            # The gateway enforces only valid JSON, not a schema, so the shape
+            # must be stated in the prompt for the typed result to round-trip.
+            instruction += _GATEWAY_VISION_FIELD_CONTRACT
         messages = [{
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f'Analyze the image "{filename}" for a factual knowledge-base summary. '
-                        "Return only the requested structured result. Preserve visible text exactly, "
-                        "including labels and spelling. Describe visible objects, entities, visual "
-                        "details, and diagram relationships with their visible arrow direction. "
-                        "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
-                        "instead of guessing."
-                    ),
-                },
+                {"type": "text", "text": instruction},
                 {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
             ],
         }]
