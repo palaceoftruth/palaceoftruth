@@ -56,6 +56,56 @@ _VISION_PROVIDER_SCHEMA_CONSTRAINTS = {
     "title",
 }
 
+# Fixed set of image types permitted in an inline vision data URI. The stored
+# media type is already derived from verified bytes upstream; this is the final
+# allowlist before those bytes leave the host.
+_VISION_SAFE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+# The gateway is a llama.cpp-style server: it rejects a full JSON-Schema
+# response_format ("failed to parse grammar") but accepts JSON-object mode. The
+# gateway route therefore requests ``json_object`` and states the field contract
+# in the prompt so the model still produces the typed VisionAnalysis shape, which
+# the shared tolerant parser then validates.
+_GATEWAY_VISION_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+
+_GATEWAY_VISION_FIELD_CONTRACT = (
+    " Respond with one JSON object with exactly these keys: "
+    "summary (string), image_type (string), visible_text (array of strings), "
+    "objects (array of strings), entities (array of strings), "
+    "relationships (array of objects, each with source, target, direction, label), "
+    "visual_details (array of strings), uncertainties (array of strings)."
+)
+
+
+def _safe_vision_media_type(media_type: str) -> str:
+    """Return an allowlisted image media type, or fail closed.
+
+    An unknown or parameterised value is rejected rather than forwarded, so the
+    data URI can never carry a caller-controlled type into the provider request.
+    """
+    candidate = (media_type or "").split(";", 1)[0].strip().lower()
+    if candidate not in _VISION_SAFE_MEDIA_TYPES:
+        raise VisionAnalysisTransportError(
+            "Unsupported vision image media type", retryable=False
+        )
+    return candidate
+
+
+def _vision_gateway_base_url(raw: str) -> str:
+    """Join the gateway root with the OpenAI-compatible ``/v1`` prefix once.
+
+    ``LLM_GATEWAY_URL`` may be given with or without a trailing ``/v1``.
+    Appending it blindly would produce a doubled ``/v1/v1`` path, so the suffix
+    is added only when it is not already present.
+    """
+    base = (raw or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("LLM_GATEWAY_URL is not configured")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return base
+
+
 # Bound concurrent outbound LLM calls to avoid 429s under parallel ingest gather
 _LLM_SEMAPHORE = asyncio.Semaphore(4)
 
@@ -290,6 +340,20 @@ def _vision_provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return provider_schema
 
 
+@dataclass(frozen=True)
+class _VisionRoute:
+    """Resolved vision transport: one client, its model chain, and its provider.
+
+    The OpenRouter route keeps its multi-model chain and provider-side filtering;
+    the gateway route is a single dedicated model with no cross-provider hop.
+    """
+
+    client: Any
+    models: list[str]
+    provider: Literal["openrouter", "gateway"]
+    openrouter_extras: bool
+
+
 class LLMService:
     """LLM operations via OpenRouter with OpenAI gpt-4o-mini as final fallback."""
 
@@ -304,6 +368,10 @@ class LLMService:
         )
         # Direct OpenAI client — used only when all OpenRouter free models are exhausted
         self._openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        # Self-hosted vision gateway client. Built lazily and only when the
+        # gateway vision route is selected, so an OpenRouter deployment never
+        # constructs an object that holds the gateway credential.
+        self._vision_gateway_client: AsyncOpenAI | None = None
         self.default_model = settings.openrouter_default_model
         self._fallback_models = [
             m.strip()
@@ -429,6 +497,92 @@ class LLMService:
             kwargs["response_format"] = response_format
         async with _LLM_SEMAPHORE:
             return await self._openai_client.chat.completions.create(**kwargs)
+
+    async def _get_vision_gateway_client(self) -> AsyncOpenAI:
+        """Build the gateway client on first use, carrying only the gateway key."""
+        if self._vision_gateway_client is None:
+            self._vision_gateway_client = AsyncOpenAI(
+                # The gateway credential, never the OpenAI or OpenRouter key.
+                api_key=settings.llm_gateway_token,
+                base_url=_vision_gateway_base_url(settings.llm_gateway_url),
+                timeout=settings.vision_gateway_timeout_seconds,
+                # The vision chain already applies its own bounded retries; keep
+                # the SDK from adding hidden ones onto a shared gateway.
+                max_retries=0,
+            )
+        return self._vision_gateway_client
+
+    async def _build_vision_route(self) -> _VisionRoute:
+        """Resolve the configured vision transport, or fail closed before any request."""
+        if settings.vision_provider == "gateway":
+            if not settings.llm_gateway_url.strip():
+                raise VisionAnalysisTransportError(
+                    "Vision gateway URL is not configured", retryable=False
+                )
+            if not settings.llm_gateway_token.strip():
+                raise VisionAnalysisTransportError(
+                    "Vision gateway credential is not configured", retryable=False
+                )
+            return _VisionRoute(
+                client=await self._get_vision_gateway_client(),
+                models=[settings.vision_gateway_model],
+                provider="gateway",
+                openrouter_extras=False,
+            )
+        models = self._build_vision_model_chain()
+        if not models:
+            raise VisionAnalysisTransportError(
+                "Vision analysis has no configured OpenRouter model",
+                retryable=False,
+            )
+        return _VisionRoute(
+            client=self.client,
+            models=models,
+            provider="openrouter",
+            openrouter_extras=True,
+        )
+
+    async def _create_vision_completion(
+        self,
+        route: _VisionRoute,
+        current_model: str,
+        messages: list[dict],
+        response_format: dict[str, Any] | None,
+        generation_settings: LLMGenerationSettings,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "model": current_model,
+            "messages": messages,
+            **generation_settings.request_kwargs(),
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if route.openrouter_extras:
+            # OpenRouter filters providers by every supplied parameter. Gemini
+            # accepts the reasoning control, while the gpt-4o-mini fallback has
+            # no compatible route when it is present.
+            kwargs["extra_body"] = {"provider": {"require_parameters": True}}
+            if current_model.startswith("google/gemini-"):
+                kwargs["extra_body"] = {
+                    "provider": {"require_parameters": True},
+                    "reasoning": {"enabled": False},
+                }
+        async with _LLM_SEMAPHORE:
+            return await route.client.chat.completions.create(**kwargs)
+
+    async def aclose(self) -> None:
+        """Close every outbound client this service owns."""
+        for client in (self.client, self._openai_client, self._vision_gateway_client):
+            if client is None:
+                continue
+            close = getattr(client, "close", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception:  # pragma: no cover - defensive shutdown path
+                logger.debug("failed to close an LLM client", exc_info=True)
+        self._vision_gateway_client = None
 
     async def _complete_with_fallback(
         self,
@@ -958,7 +1112,13 @@ class LLMService:
         return returned_model[:200] or "unknown"
 
     @classmethod
-    def _parse_vision_response(cls, response: Any, requested_model: str) -> VisionAnalysisResult:
+    def _parse_vision_response(
+        cls,
+        response: Any,
+        requested_model: str,
+        *,
+        provider: Literal["openrouter", "gateway"] = "openrouter",
+    ) -> VisionAnalysisResult:
         content = cls._completion_content(response).strip()
         if not content:
             raise ValueError("vision response was empty")
@@ -966,7 +1126,7 @@ class LLMService:
         return VisionAnalysisResult(
             analysis=analysis,
             provider=VisionProviderMetadata(
-                provider="openrouter",
+                provider=provider,
                 requested_model=requested_model,
                 returned_model=cls._sanitize_returned_model(response),
                 usage=cls._sanitize_vision_usage(response),
@@ -981,12 +1141,16 @@ class LLMService:
     async def _complete_vision_with_fallback(
         self,
         messages: list[dict],
+        *,
+        route: _VisionRoute,
     ) -> VisionAnalysisResult:
-        models = self._build_vision_model_chain()
-        if not models:
-            raise RuntimeError("Vision analysis has no configured OpenRouter model")
+        models = route.models
 
-        response_format = self._vision_response_format()
+        response_format = (
+            _GATEWAY_VISION_RESPONSE_FORMAT
+            if route.provider == "gateway"
+            else self._vision_response_format()
+        )
         generation_settings = LLMGenerationSettings(
             max_tokens=_VISION_MAX_TOKENS,
             temperature=0.0,
@@ -997,22 +1161,16 @@ class LLMService:
             transient_retry = 0
             while True:
                 try:
-                    response = await self._create_openrouter_completion(
+                    response = await self._create_vision_completion(
+                        route,
                         current_model,
                         messages,
-                        response_format=response_format,
-                        generation_settings=generation_settings,
-                        # OpenRouter filters providers by every supplied
-                        # parameter. Gemini accepts this control, while the
-                        # gpt-4o-mini fallback has no compatible route when it
-                        # is present.
-                        extra_body=(
-                            {"reasoning": {"enabled": False}}
-                            if current_model.startswith("google/gemini-")
-                            else None
-                        ),
+                        response_format,
+                        generation_settings,
                     )
-                    return self._parse_vision_response(response, current_model)
+                    return self._parse_vision_response(
+                        response, current_model, provider=route.provider
+                    )
                 except (ValidationError, json.JSONDecodeError, ValueError, _MalformedCompletionResponse):
                     # A provider response is never copied into logs or returned
                     # to callers. Try the next configured model immediately.
@@ -1100,31 +1258,37 @@ class LLMService:
         )
 
     async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> VisionAnalysisResult:
-        """Analyze an image through the dedicated OpenRouter vision chain.
+        """Analyze an image through the configured vision route.
 
-        The provider receives only a data URI and an instruction. It never
-        receives the private artifact path, and no direct OpenAI vision call is
-        made even when the OpenRouter primary model fails.
+        The provider receives only an inline data URI and an instruction. It
+        never receives the private artifact path, a private URL, or any
+        credential. The OpenRouter route keeps its bounded multi-model chain;
+        the gateway route is a single dedicated model and never falls through to
+        OpenRouter or OpenAI.
         """
-        data_uri = f"data:{media_type};base64,{image_b64}"
+        safe_media_type = _safe_vision_media_type(media_type)
+        route = await self._build_vision_route()
+        data_uri = f"data:{safe_media_type};base64,{image_b64}"
+        instruction = (
+            f'Analyze the image "{filename}" for a factual knowledge-base summary. '
+            "Return only the requested structured result. Preserve visible text exactly, "
+            "including labels and spelling. Describe visible objects, entities, visual "
+            "details, and diagram relationships with their visible arrow direction. "
+            "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
+            "instead of guessing."
+        )
+        if route.provider == "gateway":
+            # The gateway enforces only valid JSON, not a schema, so the shape
+            # must be stated in the prompt for the typed result to round-trip.
+            instruction += _GATEWAY_VISION_FIELD_CONTRACT
         messages = [{
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f'Analyze the image "{filename}" for a factual knowledge-base summary. '
-                        "Return only the requested structured result. Preserve visible text exactly, "
-                        "including labels and spelling. Describe visible objects, entities, visual "
-                        "details, and diagram relationships with their visible arrow direction. "
-                        "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
-                        "instead of guessing."
-                    ),
-                },
+                {"type": "text", "text": instruction},
                 {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
             ],
         }]
-        return await self._complete_vision_with_fallback(messages)
+        return await self._complete_vision_with_fallback(messages, route=route)
 
     async def generate_tags(
         self, text: str, existing_tags: list[str] | None = None, model: str | None = None
