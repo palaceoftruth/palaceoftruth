@@ -1,4 +1,4 @@
-{{- if eq (include "palaceoftruth.valkeySentinelEnabled" .) "true" }}
+{{- if and (eq (include "palaceoftruth.valkeySentinelEnabled" .) "true") (ne (default "deployment" .Values.valkey.sentinel.workload) "statefulset") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

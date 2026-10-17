@@ -63,7 +63,7 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              {{- include "palaceoftruth.valkeyAuthorityStartScript" . | nindent 14 }}
+              {{- include "palaceoftruth.valkeyAuthorityStartScript" (dict "root" . "role" "replica") | nindent 14 }}
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           env:
             {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}

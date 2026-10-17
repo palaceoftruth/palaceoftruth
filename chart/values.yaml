@@ -532,6 +532,22 @@ valkey:
   # which transparently redirects clients to the current primary. A failing
   # primary is automatically replaced by the replica (failover in ~5 s).
   sentinel:
+
+    # Explicit initial-bootstrap for a genuinely NEW install. Default false so a
+    # recovery never blind-boots a writable master. Set true ONLY for the very
+    # first rollout onto a fresh, empty data volume.
+    initialBootstrap: false
+    # Bounded wait (seconds) for a quorum-consistent Sentinel answer at start.
+    bootstrapWaitSeconds: 20
+    # Workload kind for the Sentinel ensemble: 'deployment' (default, backward
+    # compatible) or 'statefulset' (opt-in, persists each Sentinel's conf on a
+    # PVC). Exactly one renders at a time, so two ensembles never coexist.
+    workload: deployment
+    persistence:
+      storageClassName: ""
+      size: 100Mi
+      whenDeleted: Retain
+      whenScaled: Retain
     enabled: false
     # Number of replica pods (1 is sufficient for HA; replicas also serve reads).
     replicas: 1

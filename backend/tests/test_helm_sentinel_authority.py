@@ -64,8 +64,8 @@ def test_data_node_init_runs_fail_closed_authority_then_acl_sanitizer() -> None:
         init = _by(m, "StatefulSet", f"palaceoftruth-valkey-{role}")["spec"]["template"]["spec"]["initContainers"][0]
         assert init["name"] == "init-config"
         s = init["args"][0]
-        # bounded multi-Sentinel consensus, not a single query
-        assert "sentinel get-master-addr-by-name" in s
+        # bounded majority over DISTINCT Sentinel instances, not a single query
+        assert "sentinel master" in s and "sentinel myid" in s
         assert "sort" in s and "uniq -c" in s
         assert "ckquorum" not in s  # never trust a bare CKQUORUM success
         # fail-closed read-only path
@@ -85,3 +85,42 @@ def test_authority_is_opt_in_and_default_off_for_recovery() -> None:
     m = _render("highAvailability.enabled=true")
     init = _by(m, "StatefulSet", "palaceoftruth-valkey-primary")["spec"]["template"]["spec"]["initContainers"][0]
     assert "ROLE=master" in init["args"][0] or "initialBootstrap" in init["args"][0]
+
+
+def _kinds(m, kind, name):
+    return [x for x in m if x.get("kind") == kind and x["metadata"]["name"] == name]
+
+
+def test_sentinel_workload_default_is_deployment_and_modes_are_exclusive() -> None:
+    name = "palaceoftruth-valkey-sentinel"
+    default = _render("highAvailability.enabled=true")
+    assert _kinds(default, "Deployment", name), "default must render the Sentinel Deployment"
+    assert not _kinds(default, "StatefulSet", name), "default must not render a Sentinel StatefulSet"
+
+    sts = _render("highAvailability.enabled=true", "valkey.sentinel.workload=statefulset")
+    assert _kinds(sts, "StatefulSet", name), "statefulset mode must render the Sentinel StatefulSet"
+    assert not _kinds(sts, "Deployment", name), "statefulset mode must not also render the Deployment"
+
+
+def test_sentinel_statefulset_mode_persists_conf_on_a_retained_pvc() -> None:
+    m = _render("highAvailability.enabled=true", "valkey.sentinel.workload=statefulset")
+    sts = _by(m, "StatefulSet", "palaceoftruth-valkey-sentinel")
+    spec = sts["spec"]
+    # governing headless service + a data PVC per Sentinel
+    assert spec["serviceName"] == "palaceoftruth-valkey-sentinel-bootstrap"
+    names = [v["metadata"]["name"] for v in spec["volumeClaimTemplates"]]
+    assert "sentinel-data" in names
+    assert spec["persistentVolumeClaimRetentionPolicy"] == {"whenDeleted": "Retain", "whenScaled": "Retain"}
+    # the sentinel still mounts its learned conf at /data
+    mounts = {v["name"]: v["mountPath"] for v in sts["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]}
+    assert mounts["sentinel-data"] == "/data"
+
+
+def test_statefulset_mode_preserves_auth_invariants() -> None:
+    m = _render("highAvailability.enabled=true", "valkey.sentinel.workload=statefulset", "valkey.auth.enabled=true")
+    sts = _by(m, "StatefulSet", "palaceoftruth-valkey-sentinel")
+    c = sts["spec"]["template"]["spec"]["containers"][0]
+    assert "sentinel auth-pass" in "\n".join(c["args"])
+    env = {e["name"] for e in c.get("env", [])}
+    assert "VALKEY_PASSWORD" in env
+    assert "REDISCLI_AUTH" not in env
