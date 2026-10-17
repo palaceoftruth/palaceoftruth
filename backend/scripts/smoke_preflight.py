@@ -368,8 +368,19 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
         # start: a freshly rolled pod legitimately has no older history.
         start_floor = floor if started is None else max(floor, started)
         coverage_start = max(stamps[0], start_floor)
-        if stamps[0] > start_floor + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
-            raise control.ControlError('coverage does not start at the floor')
+        # A container that began INSIDE the observation window must have logged at
+        # its own start: its first line is real startup evidence. A container older
+        # than the window is instead sampled from an ARBITRARY boundary (now -
+        # log_since_seconds). A sparse worker with no heartbeat contract can
+        # legitimately emit its next line well after that boundary, so a line
+        # exactly at the floor is NOT required -- the previous unconditional
+        # tolerance check failed and passed purely on where the wall-clock
+        # boundary landed. Non-empty, complete, ordered capture plus the workload
+        # freshness bound below carry the coverage proof; this does not relax the
+        # truncation, stale-freshness, or OOM gates.
+        if started is not None and started > floor:
+            if stamps[0] > started + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
+                raise control.ControlError('coverage does not start at the container start')
         if stamps[-1] > now:
             raise control.ControlError('log coverage is in the future')
         records.append({'pod': row['pod'], 'container': row['container'],

@@ -276,3 +276,26 @@ def test_C5_recent_subthreshold_restart_termination_fails():
     pods = [_pod("worker-1", "worker", last_terminated=term, restart_count=1)]
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), FakeKube(pods))
+
+
+# --- C4b: the coverage floor must not demand a line at an arbitrary boundary --
+
+def test_C4_sparse_long_running_worker_resuming_after_the_window_floor_passes():
+    """A worker older than the window is sampled from an arbitrary boundary; a
+    sparse emitter that resumes well after it is healthy, not a false alarm."""
+    first = (_now() - timedelta(seconds=6500)).isoformat()   # floor is now-7200
+    last = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=3 * 24 * 3600)],
+                    lines={"worker-1": f"{first} resumed\n{last} heartbeat\n"})
+    out = preflight.health_temporal(smoke, _args(), kube)
+    assert out["coverage"][0]["collection_complete"] is True
+
+
+def test_C4_container_started_inside_window_must_log_near_its_start():
+    """A container that began inside the window must log near its own start."""
+    first = (_now() - timedelta(seconds=100)).isoformat()    # 500s after a 600s start
+    last = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([_pod("worker-1", "worker", started_ago_s=600)],
+                    lines={"worker-1": f"{first} late\n{last} heartbeat\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
