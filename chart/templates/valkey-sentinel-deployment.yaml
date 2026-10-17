@@ -38,41 +38,46 @@ spec:
                 labelSelector:
                   matchLabels:
                     app: {{ include "palaceoftruth.valkeySentinelName" . }}
-      initContainers:
-        # Sentinel rewrites its config file at runtime (to record the current
-        # primary after failover). Copy the ConfigMap template to a writable
-        # emptyDir so those writes don't hit a read-only mount.
-        - name: init-sentinel-config
-          image: {{ .Values.valkey.image }}
-          {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          command: ["/bin/sh", "-ec"]
-          args:
-            - |
-              cp /etc/sentinel-template/sentinel.conf /data/sentinel.conf
-              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-              # Kept out of the ConfigMap: the monitored primary's password
-              # must not be readable to anyone who can read ConfigMaps.
-              printf 'sentinel auth-pass %s %s\n' {{ .Values.valkey.sentinel.masterName | quote }} "$VALKEY_PASSWORD" >> /data/sentinel.conf
-              chmod 600 /data/sentinel.conf
-              {{- end }}
-          {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-          env:
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "palaceoftruth.valkeyAuthSecretName" . }}
-                  key: {{ include "palaceoftruth.valkeyAuthSecretKey" . }}
-          {{- end }}
-          volumeMounts:
-            - name: sentinel-config-template
-              mountPath: /etc/sentinel-template
-            - name: sentinel-data
-              mountPath: /data
       containers:
         - name: sentinel
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          command: ["valkey-sentinel", "/data/sentinel.conf"]
+          # Re-render the monitor target from the ConfigMap template on EVERY
+          # container start (not only at pod init). Sentinel rewrites its own
+          # /data/sentinel.conf with the RESOLVED primary address, so a process
+          # that boots from that rewritten file no longer holds the primary
+          # SERVICE hostname and can never follow the primary again when the
+          # primary pod is recycled onto a new IP: it pins the dead IP, reports
+          # no writable master, and the ensemble never becomes ready. Rendering
+          # on every start keeps the monitor target the stable service hostname,
+          # which Sentinel re-resolves after the primary's pod IP changes. The
+          # copy lands on a writable emptyDir so Sentinel's runtime rewrites do
+          # not hit the read-only ConfigMap mount.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set -eu
+              # Render to a temporary file on the SAME filesystem as /data and
+              # rename it into place, so a partial write can never leave a
+              # truncated sentinel.conf. The rename is atomic.
+              tmp="/data/.sentinel.conf.$$"
+              trap 'rm -f "$tmp"' EXIT
+              cp /etc/sentinel-template/sentinel.conf "$tmp"
+              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
+              # Kept out of the ConfigMap: the monitored primary's password
+              # must not be readable to anyone who can read ConfigMaps. Reject
+              # control characters so a crafted secret value cannot inject an
+              # extra sentinel.conf directive through the printf below.
+              if printf '%s' "$VALKEY_PASSWORD" | grep -q '[[:cntrl:]]'; then
+                echo 'VALKEY_PASSWORD must not contain control characters' >&2
+                exit 1
+              fi
+              printf 'sentinel auth-pass %s %s\n' {{ .Values.valkey.sentinel.masterName | quote }} "$VALKEY_PASSWORD" >> "$tmp"
+              {{- end }}
+              chmod 600 "$tmp"
+              mv "$tmp" /data/sentinel.conf
+              trap - EXIT
+              exec valkey-sentinel /data/sentinel.conf
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           # Deliberately not REDISCLI_AUTH: Sentinel's own port has no
           # requirepass, and valkey-cli treats an unwanted AUTH as a failed
@@ -91,6 +96,8 @@ spec:
           resources:
             {{- toYaml .Values.valkey.sentinel.resources | nindent 12 }}
           volumeMounts:
+            - name: sentinel-config-template
+              mountPath: /etc/sentinel-template
             - name: sentinel-data
               mountPath: /data
           readinessProbe:

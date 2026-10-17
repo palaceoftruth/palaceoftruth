@@ -476,6 +476,41 @@ def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods()
         assert forbidden not in workload_commands
 
 
+def test_sentinel_container_rerenders_config_from_template_on_every_start() -> None:
+    """A Sentinel that boots from its own rewritten literal-IP config can never
+    follow the primary again once the primary pod is recycled onto a new IP: it
+    pins the dead address and never reports a writable master. The render must
+    therefore live in the sentinel container so it runs on EVERY start, not only
+    in a pod-init container, and the monitor target must stay the service name.
+    """
+    manifests = _render_chart("valkey.sentinel.enabled=true")
+    sentinel = _deployment_by_name(manifests, "palaceoftruth-valkey-sentinel")
+    pod_spec = sentinel["spec"]["template"]["spec"]
+
+    # No init-only rendering: the init container must not be the sole renderer.
+    assert all(init["name"] != "init-sentinel-config" for init in pod_spec.get("initContainers", []))
+
+    container = pod_spec["containers"][0]
+    assert container["name"] == "sentinel"
+    script = "\n".join(container.get("args", []))
+    # Rendered from the ConfigMap template, renamed into place atomically, exec'd.
+    assert "cp /etc/sentinel-template/sentinel.conf" in script
+    assert 'mv "$tmp" /data/sentinel.conf' in script
+    assert "exec valkey-sentinel /data/sentinel.conf" in script
+
+    mounts = {mount["name"]: mount["mountPath"] for mount in container["volumeMounts"]}
+    assert mounts.get("sentinel-config-template") == "/etc/sentinel-template"
+    assert mounts.get("sentinel-data") == "/data"
+
+    configmap = _manifest_by_kind_name(manifests, "ConfigMap", "palaceoftruth-valkey-sentinel-config")
+    monitor_line = next(
+        line
+        for line in configmap["data"]["sentinel.conf"].splitlines()
+        if line.startswith("sentinel monitor")
+    )
+    assert monitor_line == "sentinel monitor mymaster palaceoftruth-valkey-primary 6379 2"
+
+
 def test_sentinel_checksum_ignores_release_metadata_but_tracks_runtime_config(tmp_path: Path) -> None:
     baseline = _render_chart("valkey.sentinel.enabled=true")
     updated_chart = tmp_path / "chart"

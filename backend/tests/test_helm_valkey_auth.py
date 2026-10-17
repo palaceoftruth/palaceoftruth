@@ -117,9 +117,20 @@ def test_sentinel_topology_authenticates_data_nodes_and_replication() -> None:
     # Sentinel needs the primary's password to run its own health checks, but
     # its own port stays unauthenticated because redis-py cannot pass
     # credentials to sentinel connections.
+    #
+    # The config render moved out of a pod-init container and into the sentinel
+    # container itself, so it runs on every container start (a pod-init render
+    # only runs once per pod, which is how a restarted container could boot from
+    # a stale literal-IP config). The auth invariant is unchanged: Sentinel still
+    # receives the primary's password from the same Secret, via an env var.
     sentinel = specs["palaceoftruth-valkey-sentinel"]
-    assert "sentinel auth-pass" in yaml.safe_dump(sentinel["initContainers"])
-    assert "REDISCLI_AUTH" not in _env_names(sentinel["containers"][0])
+    sentinel_container = sentinel["containers"][0]
+    assert sentinel_container["name"] == "sentinel"
+    assert "sentinel auth-pass" in yaml.safe_dump(sentinel_container.get("args"))
+    assert _secret_ref(sentinel_container, "VALKEY_PASSWORD")["name"] == SECRET_NAME
+    assert "REDISCLI_AUTH" not in _env_names(sentinel_container)
+    # The password must never be rendered into argv or the ConfigMap.
+    assert "$VALKEY_PASSWORD" in yaml.safe_dump(sentinel_container.get("args"))
 
 
 def test_every_client_workload_receives_the_password() -> None:
