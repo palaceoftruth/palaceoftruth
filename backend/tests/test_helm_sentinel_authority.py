@@ -43,8 +43,8 @@ def test_sentinel_start_path_preserves_conf_and_repairs_only_a_stale_pin() -> No
     assert 'if [ -f "$conf" ]' in script
     assert '"/^sentinel monitor/' in script or "/^sentinel monitor/" in script
     assert '"master"' in script  # only a live master is followed / preserved
-    assert "getent hosts" in script
-    assert "mv" in script
+    assert "getent ahosts" in script
+    assert "pin_monitor" in script
     # never runs a destructive Sentinel command
     for forbidden in ("sentinel reset", "sentinel remove", "sentinel failover"):
         assert forbidden not in script

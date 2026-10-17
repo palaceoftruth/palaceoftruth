@@ -24,8 +24,6 @@ spec:
     spec:
       automountServiceAccountToken: {{ .Values.podSecurity.automountServiceAccountToken }}
       {{- include "palaceoftruth.podSecurityContext" (list . "valkeySentinel") | nindent 6 }}
-      # Spread sentinel pods across nodes to prevent a single node failure
-      # from taking out quorum.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -39,20 +37,20 @@ spec:
         - name: sentinel
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkeySentinel") | nindent 10 }}
-          # Sentinel records the monitored master by ADDRESS and, on CONFIG
-          # REWRITE, persists the RESOLVED address. A process that boots from a
-          # stale literal-IP conf can never follow the primary again after the
-          # primary pod is recycled onto a new IP (the 477 stall). But after a
-          # LEGITIMATE failover the recorded address is the PROMOTED replica and
-          # MUST be preserved. So this start path:
-          #   1. PRESERVES an existing learned conf (epoch, known replicas,
-          #      known sentinels, auth) across restarts; and
-          #   2. repairs ONLY a monitor address that is PROVABLY stale (the
-          #      recorded address is not a live master AND the primary SERVICE
-          #      hostname resolves to a live master), rewriting just the monitor
-          #      target back to the stable service hostname.
-          # It never runs SENTINEL RESET/MONITOR/REMOVE/FAILOVER and never
-          # overwrites a live (possibly promoted) master.
+          # Sentinel records the monitored master by ADDRESS. With the headless
+          # primary Service, resolve-hostnames rewrites the conf to the RESOLVED
+          # pod IP; a process that boots from a stale literal IP pins a dead
+          # address (the 477 stall), and a process that keeps the SERVICE
+          # hostname in the conf TILTS when the name is unresolvable after the
+          # pod is removed (no failover). This start path therefore:
+          #   1. PRESERVES a learned conf (epoch, known peers, auth);
+          #   2. if the recorded monitor is a HOSTNAME or a NON-LIVE address,
+          #      pins it to the RESOLVED LIVE MASTER IP (bounded wait) so runtime
+          #      monitoring uses an address and a removed primary fails over;
+          #   3. keeps a recorded LIVE MASTER (incl. a promoted replica) byte for
+          #      byte -- never a DNS rewrite back to the service, never a stale
+          #      conf reset, never a wrong promotion when no live master exists.
+          # No SENTINEL RESET/MONITOR/REMOVE/FAILOVER.
           command: ["/bin/sh", "-ec"]
           args:
             - |
@@ -60,6 +58,7 @@ spec:
               template=/etc/sentinel-template/sentinel.conf
               conf=/data/sentinel.conf
               monitor_target={{ include "palaceoftruth.valkeyPrimaryName" . | quote }}
+              wait_seconds={{ .Values.valkey.sentinel.bootstrapWaitSeconds | default 20 }}
               role_of() {
                 {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
                 REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
@@ -67,30 +66,44 @@ spec:
                 valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
                 {{- end }}
               }
+              resolve_live_master() {
+                for cand in $(getent ahosts "$monitor_target" 2>/dev/null | awk '{print $1}' | sort -u); do
+                  if [ "$(role_of "$cand")" = "master" ]; then echo "$cand"; return 0; fi
+                done
+                return 1
+              }
+              wait_live_master() {
+                i=0
+                while [ "$i" -lt "$wait_seconds" ]; do
+                  if out=$(resolve_live_master); then echo "$out"; return 0; fi
+                  i=$((i + 1))
+                  sleep 1
+                done
+                return 1
+              }
+              pin_monitor() {
+                # $1 = the live master IP to pin. Rewrites ONLY the monitor line.
+                tmp=/data/.sentinel.conf.$$
+                awk -v ip="$1" '/^sentinel monitor/{print $1" "$2" "$3" "ip" "$5" "$6; next}{print}' "$conf" > "$tmp"
+                mv "$tmp" "$conf"
+              }
               if [ -f "$conf" ] && grep -qi '^sentinel monitor' "$conf"; then
                 recorded=$(awk '/^sentinel monitor/{print $4}' "$conf")
+                target=""
                 case "$recorded" in
                   *[!0-9.]*|"")
-                    : ;;   # hostname or empty: keep the learned conf as-is
+                    target=$(wait_live_master || true) ;;   # hostname/empty: pin to the live IP
                   *)
                     if [ "$(role_of "$recorded")" != "master" ]; then
-                      resolved=$(getent hosts "$monitor_target" | awk '{print $1}' || true)
-                      if [ -n "$resolved" ] && [ "$(role_of "$resolved")" = "master" ]; then
-                        tmp=/data/.sentinel.conf.$$
-                        awk -v svc="$monitor_target" '/^sentinel monitor/{print $1" "$2" "$3" "svc" "$5" "$6; next}{print}' "$conf" > "$tmp"
-                        mv "$tmp" "$conf"
-                      fi
+                      target=$(wait_live_master || true)      # stale IP: pin to the live IP
                     fi ;;
                 esac
+                if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
               else
                 tmp=/data/.sentinel.conf.$$
                 trap 'rm -f "$tmp"' EXIT
                 cp "$template" "$tmp"
                 {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-                # Kept out of the ConfigMap: the monitored primary's password
-                # must not be readable to anyone who can read ConfigMaps. Reject
-                # control characters so a crafted secret value cannot inject an
-                # extra sentinel.conf directive through the printf below.
                 if printf '%s' "$VALKEY_PASSWORD" | grep -q '[[:cntrl:]]'; then
                   echo 'VALKEY_PASSWORD must not contain control characters' >&2
                   exit 1
@@ -100,6 +113,8 @@ spec:
                 chmod 600 "$tmp"
                 mv "$tmp" "$conf"
                 trap - EXIT
+                target=$(wait_live_master || true)
+                if [ -n "${target:-}" ]; then pin_monitor "$target"; fi
               fi
               exec valkey-sentinel "$conf"
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
@@ -156,9 +171,6 @@ spec:
         {{- include "palaceoftruth.valkeyExporterPasswordVolume" . | nindent 8 }}
         {{- end }}
   volumeClaimTemplates:
-    # One PVC per Sentinel so a full pod replace preserves the learned conf
-    # (epoch, known replicas/sentinels, promoted master). Retained on delete so a
-    # workload-kind migration cannot silently drop the learned state.
     - metadata:
         name: sentinel-data
       spec:
