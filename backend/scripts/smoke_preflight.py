@@ -6,6 +6,8 @@ mounts. They do not assume the currently installed chart grants that access.
 from __future__ import annotations
 import base64
 import gzip
+import hashlib
+import io
 import json
 import re
 from datetime import timedelta
@@ -309,30 +311,98 @@ def health_runtime_binding(smoke, client, report, args, kube):
     smoke._record_check(report, 'artifact_binding', 'passed', observations=found, phase_digest=digest)
 
 
+HELM_RELEASE_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024
+HELM_RELEASE_ENCODED_MAX_CHARS = 2 * HELM_RELEASE_PAYLOAD_MAX_BYTES
+HELM_MANIFEST_MAX_CHARS = 8 * 1024 * 1024
+YAML_MAX_NODES = 100000
+YAML_MAX_ALIASES = 1000
+YAML_MAX_DEPTH = 64
+HELM_RELEASE_STATUSES = frozenset({
+    'pending-install', 'pending-upgrade', 'pending-rollback', 'deployed',
+    'failed', 'superseded', 'uninstalled', 'uninstalling'})
+
+
 def _decode_helm_release(secret):
-    """Decode a Helm v3 release Secret (double base64 + gzip + JSON)."""
+    """Decode a Helm v3 release Secret with a HARD output bound.
+
+    The compressed payload is expanded through a capped reader (max+1 bytes)
+    BEFORE ``json.loads``, so a gzip bomb cannot expand without limit. The
+    encoded string is capped before its base64 decode. Errors are generic and
+    value-free: no payload bytes are ever emitted.
+    """
     data = (secret.get('data') or {}).get('release')
     if not isinstance(data, str) or not data:
         raise control.ControlError('installed helm release payload missing')
+    if len(data) > HELM_RELEASE_ENCODED_MAX_CHARS:
+        raise control.ControlError('installed helm release payload exceeds size bound')
     try:
-        blob = gzip.decompress(base64.b64decode(base64.b64decode(data, validate=True), validate=True))
-        release = json.loads(blob)
-    except (ValueError, OSError, EOFError) as exc:
+        outer = base64.b64decode(data, validate=True)
+        inner = base64.b64decode(outer, validate=True)
+    except ValueError as exc:
         raise control.ControlError('installed helm release payload unparsable') from exc
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(inner)) as gz:
+            blob = gz.read(HELM_RELEASE_PAYLOAD_MAX_BYTES + 1)
+    except (OSError, EOFError, ValueError) as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    if len(blob) > HELM_RELEASE_PAYLOAD_MAX_BYTES:
+        raise control.ControlError('installed helm release payload exceeds size bound')
+    try:
+        release = json.loads(blob)
+    except ValueError as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    except RecursionError as exc:
+        raise control.ControlError('installed helm release payload too deeply nested') from exc
     if not isinstance(release, dict):
         raise control.ControlError('installed helm release payload malformed')
     return release
 
 
 def _manifest_image_pins(manifest_text, wanted):
-    """Exact digest pins per wanted container from a Helm-rendered manifest."""
+    """Exact digest pins per wanted container from a Helm-rendered manifest.
+
+    Bounded TWICE: a hard character cap before any parse, and a bounded
+    SafeLoader that caps composed nodes, alias events, and nesting depth. A
+    rendered Helm manifest needs no anchors, so an alias/merge bomb is refused
+    (not merely truncated) and a deep/recursive structure cannot loop.
+    """
     if not isinstance(manifest_text, str) or not manifest_text.strip():
         raise control.ControlError('installed manifest missing')
+    if len(manifest_text) > HELM_MANIFEST_MAX_CHARS:
+        raise control.ControlError('installed manifest exceeds size bound')
     import yaml
+
+    class _BoundedSafeLoader(yaml.SafeLoader):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self._nodes = 0
+            self._aliases = 0
+            self._depth = 0
+
+        def compose_node(self, parent, index):
+            if self.check_event(yaml.events.AliasEvent):
+                self._aliases += 1
+                if self._aliases > YAML_MAX_ALIASES:
+                    raise control.ControlError('installed manifest alias limit exceeded')
+            self._nodes += 1
+            if self._nodes > YAML_MAX_NODES:
+                raise control.ControlError('installed manifest node limit exceeded')
+            self._depth += 1
+            try:
+                if self._depth > YAML_MAX_DEPTH:
+                    raise control.ControlError('installed manifest depth limit exceeded')
+                return super().compose_node(parent, index)
+            finally:
+                self._depth -= 1
+
     try:
-        docs = list(yaml.safe_load_all(manifest_text))
+        docs = list(yaml.load_all(manifest_text, Loader=_BoundedSafeLoader))
+    except control.ControlError:
+        raise
     except yaml.YAMLError as exc:
         raise control.ControlError('installed manifest unparsable') from exc
+    except RecursionError as exc:
+        raise control.ControlError('installed manifest too deeply nested') from exc
     pins = {}
     for doc in docs:
         if not isinstance(doc, dict) or doc.get('kind') != 'Deployment':
@@ -381,10 +451,103 @@ def _helm_release_revisions(kube, namespace, release_name):
             versions.append(int(tail))
     if not versions:
         raise control.ControlError('helm release revisions malformed')
+    if len(set(versions)) != len(versions):
+        # Two secret names mapping to one numeric revision is a conflict, not an
+        # ordering artefact: refuse rather than pick a max by list order.
+        raise control.ControlError('conflicting helm release revisions')
     return sorted(versions)
 
 
-def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest):
+def _pre_upgrade_frozen_facts(smoke, args, kube, doc):
+    """Read the EXACT frozen binding fields plus the max-revision installed payload.
+
+    Only frozen, stable fields are returned for TOCTOU comparison; unrelated and
+    unstable fields (resourceVersion, live status text, managedFields) are
+    deliberately excluded. Secret metadata is RBAC-controlled: this validates the
+    exact name, owner/name labels, Helm status label, numeric version label, and
+    the payload revision/status consistency. It is NOT a cryptographic provenance
+    claim. No secret value is returned for reporting.
+    """
+    kube.get('/api/v1/namespaces/kube-system')
+    kube.get('/api/v1/namespaces/' + args.namespace)
+    release = _live_release(kube, args.namespace, args.target_name)
+    spec = release.get('spec') or {}
+    declared = (spec.get('values') or {}).get('image') or {}
+    chart_ref = spec.get('chartRef') or {}
+    if chart_ref.get('kind') != 'OCIRepository' or not chart_ref.get('name'):
+        raise control.ControlError('declared chart OCI reference missing')
+    ref_ns = chart_ref.get('namespace') or args.namespace
+    oci = kube.get('/apis/source.toolkit.fluxcd.io/v1/namespaces/' + ref_ns + '/ocirepositories/' + chart_ref['name'])
+    revisions = _helm_release_revisions(kube, args.namespace, args.target_name)
+    max_rev = max(revisions)
+    secret_name = 'sh.helm.release.v1.' + args.target_name + '.v' + str(max_rev)
+    secret = kube.get('/api/v1/namespaces/' + args.namespace + '/secrets/' + secret_name)
+    meta = secret.get('metadata') or {}
+    labels = meta.get('labels') or {}
+    if (meta.get('namespace') or args.namespace) != args.namespace:
+        raise control.ControlError('helm release secret namespace mismatch')
+    if meta.get('name') != secret_name:
+        raise control.ControlError('helm release secret name mismatch')
+    if labels.get('owner') != 'helm' or labels.get('name') != args.target_name:
+        raise control.ControlError('helm release secret owner/name label mismatch')
+    status = labels.get('status')
+    if status not in HELM_RELEASE_STATUSES:
+        raise control.ControlError('helm release status label invalid')
+    version_label = labels.get('version')
+    if not isinstance(version_label, str) or not version_label.isdigit() or int(version_label) != max_rev:
+        raise control.ControlError('helm release version label mismatch')
+    installed = _decode_helm_release(secret)
+    if installed.get('version') != max_rev:
+        raise control.ControlError('installed release payload revision mismatch')
+    info = installed.get('info') or {}
+    if 'status' in info and (info.get('status') not in HELM_RELEASE_STATUSES or info.get('status') != status):
+        raise control.ControlError('installed release status conflicts with the secret label')
+    try:
+        payload_sha256 = hashlib.sha256(control.canonical(installed)).hexdigest()
+    except (control.ControlError, RecursionError) as exc:
+        raise control.ControlError('installed release payload not canonicalizable') from exc
+    facts = {
+        'release_uid': (release.get('metadata') or {}).get('uid'),
+        'suspend': spec.get('suspend'),
+        'backend': declared.get('backendDigest'),
+        'worker': declared.get('workerDigest'),
+        'frontend': declared.get('frontendDigest'),
+        'chart': ((oci.get('spec') or {}).get('ref') or {}).get('digest'),
+        'max_rev': max_rev,
+        'secret_uid': meta.get('uid'),
+        'secret_status': status,
+        'secret_version': version_label,
+        'payload_sha256': payload_sha256,
+    }
+    return facts, release, installed
+
+
+def _require_frozen_binding(facts, doc):
+    """The exact frozen tuple must hold in a read; raise a precise error otherwise."""
+    if facts['release_uid'] != doc['release_uid']:
+        raise control.ControlError('live HelmRelease UID differs from approved release')
+    if facts['suspend'] is not True:
+        raise control.ControlError('canonical hold is not suspended')
+    if facts['backend'] != doc['target_digest']:
+        raise control.ControlError('declared target image differs from approved target')
+    for key in ('worker', 'frontend'):
+        if not isinstance(facts[key], str) or not re.fullmatch('sha256:[0-9a-f]{64}', facts[key]):
+            raise control.ControlError('declared image pin tuple incomplete: ' + key)
+    if facts['chart'] != doc['chart_digest']:
+        raise control.ControlError('declared chart OCI differs from approved target')
+    if facts['max_rev'] != doc['expected_max_revision']:
+        raise control.ControlError('latest attempted revision differs from approved maximum')
+
+
+def _pre_upgrade_toctou_check(smoke, args, kube, doc, first_facts):
+    """Re-read the SAME release after ALL health calls; any frozen-field change fails."""
+    after_facts, _, _ = _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+    _require_frozen_binding(after_facts, doc)
+    if after_facts != first_facts:
+        raise control.ControlError('release/target changed during the pre-upgrade preflight')
+
+
+def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest, snapshot=None):
     """Read-only PRE-UPGRADE artifact binding for a held, declared-new window.
 
     The AUTOMATIC post-upgrade `health_runtime_binding` binds the DECLARED image
@@ -395,8 +558,9 @@ def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest):
     - the DECLARED HelmRelease target must equal the frozen APPROVED tuple:
       same release UID, suspend true, declared backend digest == target_digest,
       and the declared chart OCI reference digest == chart_digest;
-    - the highest attempted revision must equal the approved expected maximum
-      (no new attempt since the frozen window);
+    - the highest recorded Helm revision must equal the approved expected maximum
+      (no new attempt since the frozen window), sourced from the immutable Helm
+      release Secrets;
     - the RUNNING workload images must equal the ACTUAL INSTALLED artifact taken
       from the Helm release manifest of that max attempted revision, NOT from the
       declared target and NOT from a "first successful" history fallback;
@@ -410,43 +574,9 @@ def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest):
     manifest.active(smoke.utc_now())
     if doc['namespace'] != args.namespace or doc['release_name'] != args.target_name:
         raise control.ControlError('pre-upgrade binding differs from approved release')
-    kube.get('/api/v1/namespaces/kube-system')
-    kube.get('/api/v1/namespaces/' + args.namespace)
-    release = _live_release(kube, args.namespace, args.target_name)
-    if (release.get('metadata') or {}).get('uid') != doc['release_uid']:
-        raise control.ControlError('live HelmRelease UID differs from approved release')
-    spec = release.get('spec') or {}
-    if spec.get('suspend') is not True:
-        raise control.ControlError('canonical hold is not suspended')
-    # --- the DECLARED target must equal the frozen approved tuple ---
-    declared = (spec.get('values') or {}).get('image') or {}
-    if declared.get('backendDigest') != doc['target_digest']:
-        raise control.ControlError('declared target image differs from approved target')
-    for key in ('backendDigest', 'workerDigest', 'frontendDigest'):
-        if not isinstance(declared.get(key), str) or not re.fullmatch('sha256:[0-9a-f]{64}', declared[key]):
-            raise control.ControlError('declared image pin tuple incomplete: ' + key)
-    chart_ref = spec.get('chartRef') or {}
-    if chart_ref.get('kind') != 'OCIRepository' or not chart_ref.get('name'):
-        raise control.ControlError('declared chart OCI reference missing')
-    ref_ns = chart_ref.get('namespace') or args.namespace
-    oci = kube.get('/apis/source.toolkit.fluxcd.io/v1/namespaces/' + ref_ns + '/ocirepositories/' + chart_ref['name'])
-    declared_chart = ((oci.get('spec') or {}).get('ref') or {}).get('digest')
-    if declared_chart != doc['chart_digest']:
-        raise control.ControlError('declared chart OCI differs from approved target')
-    # --- highest recorded Helm revision == approved max (no new attempt) ---
-    # The revision source is the immutable Helm release Secrets, NOT the Flux
-    # status.history (which can lag behind partial attempts) and NOT a "first
-    # successful" fallback. Any revision NEWER than the approved maximum aborts.
-    revisions = _helm_release_revisions(kube, args.namespace, args.target_name)
-    max_rev = max(revisions)
-    if max_rev != doc['expected_max_revision']:
-        raise control.ControlError('latest attempted revision differs from approved maximum')
-    # --- actual INSTALLED artifact = the max attempted revision manifest ---
-    secret = kube.get('/api/v1/namespaces/' + args.namespace + '/secrets/' +
-                      'sh.helm.release.v1.' + args.target_name + '.v' + str(max_rev))
-    installed = _decode_helm_release(secret)
-    if installed.get('version') != max_rev:
-        raise control.ControlError('installed release payload revision mismatch')
+    facts, release, installed = snapshot if snapshot is not None else _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+    _require_frozen_binding(facts, doc)
+    max_rev = facts['max_rev']
     pins = _manifest_image_pins(installed.get('manifest'), set(WORKLOAD_CONTAINERS))
     # --- the RUNNING runtime must be the installed artifact, not the declared target ---
     expected = _expected_workload_replicas(release)
@@ -483,16 +613,26 @@ def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest):
     smoke._record_check(report, 'artifact_binding', 'passed', observations=found,
                         installed_revision=max_rev, installed_pins=pins,
                         declared_target_digest=doc['target_digest'],
-                        declared_chart_digest=doc['chart_digest'])
+                        declared_chart_digest=doc['chart_digest'],
+                        installed_payload_sha256=facts['payload_sha256'])
 
 
 def pre_upgrade_health_preflight(smoke, client, args, kube, manifest):
-    """Read-only pre-upgrade lane: same 8 evidence checks, installed-artifact bind."""
+    """Read-only pre-upgrade lane: 8 evidence checks, installed-artifact bind, TOCTOU close."""
     report = {'target': args.target_name, 'checks': [], 'alerts': [], 'generated_at': smoke.utc_now().isoformat()}
+    doc = manifest.doc
+    manifest.active(smoke.utc_now())
+    first = {}
+
+    def bind():
+        first['snapshot'] = _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+        pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest,
+                                     snapshot=first['snapshot'])
+
     calls = [lambda: smoke.check_api_health(client, report),
              lambda: smoke.check_runtime_dependencies(client, report, args, kube=kube),
              lambda: smoke.resolve_tenant_identity(client, report, args),
-             lambda: pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest),
+             bind,
              lambda: smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report), timeout=args.reader_budget.timeout(10))),
              lambda: smoke.check_mcp_reachable(args.mcp_url, report, timeout=min(args.request_timeout, 10), budget=args.reader_budget),
              lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube)),
@@ -509,6 +649,16 @@ def pre_upgrade_health_preflight(smoke, client, args, kube, manifest):
             calls[-1]()
         except Exception as exc:  # noqa: BLE001
             smoke._alert(report, 'required_preflight_exception', 'kubernetes alert stamp failed', error_class=type(exc).__name__)
+    # R2 (TOCTOU): after ALL health calls, re-read the SAME release and require
+    # the exact frozen fields unchanged. A hold/target/chart/revision change
+    # during the run -- or an absent first snapshot -- fails the gate.
+    try:
+        if 'snapshot' not in first:
+            raise control.ControlError('pre-upgrade binding snapshot unavailable')
+        _pre_upgrade_toctou_check(smoke, args, kube, doc, first['snapshot'][0])
+    except Exception as exc:  # noqa: BLE001
+        smoke._alert(report, 'required_preflight_exception',
+                     'pre-upgrade binding changed after the health passes', error_class=type(exc).__name__)
     return report
 
 

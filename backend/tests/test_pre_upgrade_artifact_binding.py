@@ -46,7 +46,7 @@ def _digest(tag):
     return tag
 
 
-def _encode_release(version, backend_image, mcp_image):
+def _encode_release(version, backend_image, mcp_image, status="failed"):
     """Encode a Helm v3 release Secret payload exactly as Helm stores it."""
     manifest = (
         "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: palace-sarvent-backend\n"
@@ -57,7 +57,8 @@ def _encode_release(version, backend_image, mcp_image):
         "spec:\n  template:\n    spec:\n      containers:\n"
         f"      - name: mcp\n        image: {mcp_image}\n"
     )
-    rel = {"version": version, "chart": {"metadata": {"version": "0.1.621"}}, "manifest": manifest}
+    rel = {"version": version, "chart": {"metadata": {"version": "0.1.621"}},
+           "manifest": manifest, "info": {"status": status}}
     inner = base64.b64encode(gzip.compress(json.dumps(rel).encode()))
     return base64.b64encode(inner).decode()
 
@@ -84,31 +85,56 @@ def _oci(digest=CHART):
 
 
 class Kube:
-    """Minimal fixture adapter for the pre-upgrade binding reads."""
+    """Minimal fixture adapter for the pre-upgrade binding reads.
+
+    The *_after fields return an ALTERNATE value on the second read of the same
+    kind, so the two-pass TOCTOU guard can be exercised deterministically.
+    """
 
     def __init__(self, *, hr=None, oci=None, secret=None, pods=None, ns=NS,
-                 secret_versions=(471, 472, 477)):
+                 secret_versions=(471, 472, 477),
+                 hr_after=None, oci_after=None, secret_after=None,
+                 secret_versions_after=None):
         self.hr = hr if hr is not None else _hr()
         self.oci = oci if oci is not None else _oci()
         self.secret = secret
         self.pods = pods if pods is not None else _pods()
         self.ns = ns
         self.secret_versions = secret_versions
+        self.hr_after = hr_after
+        self.oci_after = oci_after
+        self.secret_after = secret_after
+        self.secret_versions_after = secret_versions_after
+        self._hr_reads = 0
+        self._oci_reads = 0
+        self._list_reads = 0
 
-    def _secret_items(self):
+    def _secret_items(self, versions):
         return [{"metadata": {"name": "sh.helm.release.v1." + RELEASE + ".v" + str(v)}}
-                for v in self.secret_versions]
+                for v in versions]
 
     def get(self, path, query=None):
         if path.endswith("/pods"):
             return {"items": self.pods}
         if path.endswith("/secrets"):
-            return {"items": self._secret_items()}
+            self._list_reads += 1
+            versions = self.secret_versions
+            if self._list_reads >= 2 and self.secret_versions_after is not None:
+                versions = self.secret_versions_after
+            return {"items": self._secret_items(versions)}
         if "/helmreleases/" in path:
+            self._hr_reads += 1
+            if self._hr_reads >= 2 and self.hr_after is not None:
+                return self.hr_after
             return self.hr
         if "/ocirepositories/" in path:
+            self._oci_reads += 1
+            if self._oci_reads >= 2 and self.oci_after is not None:
+                return self.oci_after
             return self.oci
         if "/secrets/" in path:
+            if self._list_reads >= 2 and self.secret_after is not None:
+                return self.secret_after
             if self.secret is None:
                 raise control.ControlError("secret missing")
             return self.secret
@@ -148,8 +174,16 @@ def _pods(image=INSTALLED_IMG):
             _pod("mcp-a", "mcp", image, owner="rs-" + RELEASE + "-mcp")]
 
 
-def _secret(version=477, backend=INSTALLED_IMG, mcp=INSTALLED_IMG):
-    return {"data": {"release": _encode_release(version, backend, mcp)}}
+def _secret(version=477, backend=INSTALLED_IMG, mcp=INSTALLED_IMG, *, status="failed",
+            info_status="failed", owner="helm", name_label=RELEASE, secret_name=None,
+            secret_uid="sec-uid-477", namespace=NS):
+    name = secret_name or ("sh.helm.release.v1." + RELEASE + ".v" + str(version))
+    return {
+        "metadata": {"name": name, "namespace": namespace, "uid": secret_uid,
+                     "labels": {"owner": owner, "name": name_label,
+                                "status": status, "version": str(version)}},
+        "data": {"release": _encode_release(version, backend, mcp, status=info_status)},
+    }
 
 
 def _args():
@@ -250,8 +284,10 @@ def test_missing_installed_release_secret_fails_closed():
 
 
 def test_unparsable_installed_release_secret_fails_closed():
+    s = _secret()
+    s["data"]["release"] = "not-base64!!"
     with pytest.raises(control.ControlError):
-        _run(Kube(secret={"data": {"release": "not-base64!!"}}))
+        _run(Kube(secret=s))
 
 
 def test_installed_manifest_image_not_digest_pinned_fails_closed():
@@ -314,3 +350,165 @@ def test_manifest_outside_window_fails():
     with pytest.raises(control.ControlError):
         _manifest(starts_at=(_now() + timedelta(seconds=600)).isoformat(),
                   expires_at=(_now() + timedelta(seconds=1200)).isoformat())
+
+
+# --- R1: decode / manifest parse are memory-bounded ---------------------------
+
+def test_oversized_decoded_payload_fails_closed():
+    """A gzip bomb (tiny compressed, huge decompressed) is rejected BEFORE
+    json.loads, and the error does not echo payload content."""
+    rel = {"version": 477, "manifest": "SECRETMARKER" + "A" * (preflight.HELM_RELEASE_PAYLOAD_MAX_BYTES + 2048)}
+    payload = base64.b64encode(base64.b64encode(gzip.compress(json.dumps(rel).encode()))).decode()
+    with pytest.raises(control.ControlError) as exc:
+        preflight._decode_helm_release({"data": {"release": payload}})
+    assert "size bound" in str(exc.value)
+    assert "SECRETMARKER" not in str(exc.value)
+
+
+def test_oversized_encoded_payload_fails_closed(monkeypatch):
+    monkeypatch.setattr(preflight, "HELM_RELEASE_ENCODED_MAX_CHARS", 8)
+    with pytest.raises(control.ControlError) as exc:
+        preflight._decode_helm_release({"data": {"release": "AAAAAAAAAAAA"}})
+    assert "size bound" in str(exc.value)
+
+
+def test_deeply_nested_json_payload_fails_closed():
+    """Deep JSON is refused by the decoder or by the payload-hash walk; either
+    way it is a precise ControlError, never a raw RecursionError."""
+    deep = '{"version":477,"manifest":"","info":{"status":"failed"},"deep":' + "[" * 20000 + "]" * 20000 + "}"
+    payload = base64.b64encode(base64.b64encode(gzip.compress(deep.encode()))).decode()
+    s = _secret()
+    s["data"]["release"] = payload
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=s))
+
+
+def test_manifest_char_cap_fails_closed(monkeypatch):
+    monkeypatch.setattr(preflight, "HELM_MANIFEST_MAX_CHARS", 16)
+    with pytest.raises(control.ControlError) as exc:
+        preflight._manifest_image_pins("x" * 64, {"backend", "mcp"})
+    assert "size bound" in str(exc.value)
+
+
+def test_manifest_alias_bomb_fails_closed(monkeypatch):
+    """A YAML alias bomb is refused by the alias limit, not expanded."""
+    monkeypatch.setattr(preflight, "YAML_MAX_ALIASES", 4)
+    bomb = "a: &a [1]\nb: [" + ", ".join(["*a"] * 12) + "]\n"
+    with pytest.raises(control.ControlError) as exc:
+        preflight._manifest_image_pins(bomb, {"backend", "mcp"})
+    assert "alias limit" in str(exc.value)
+
+
+def test_manifest_depth_bomb_fails_closed(monkeypatch):
+    monkeypatch.setattr(preflight, "YAML_MAX_DEPTH", 4)
+    deep = "[" * 24 + "]" * 24
+    with pytest.raises(control.ControlError) as exc:
+        preflight._manifest_image_pins(deep, {"backend", "mcp"})
+    assert "depth limit" in str(exc.value)
+
+
+# --- R2: TOCTOU — a change between the passes fails the gate ------------------
+
+def _facts(kube, manifest=None):
+    manifest = manifest or _manifest()
+    return preflight._pre_upgrade_frozen_facts(smoke, _args(), kube, manifest.doc)
+
+
+def test_toctou_no_change_passes():
+    kube = Kube(secret=_secret())
+    first, _, _ = _facts(kube)
+    preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_release_uid_change_fails():
+    kube = Kube(secret=_secret(), hr_after=_hr(uid="other-uid"))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_suspend_change_fails():
+    kube = Kube(secret=_secret(), hr_after=_hr(suspend=False))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_target_digest_change_fails():
+    kube = Kube(secret=_secret(), hr_after=_hr(backend=INSTALLED))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_chart_change_fails():
+    kube = Kube(secret=_secret(), oci_after=_oci("sha256:" + "9" * 64))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_new_revision_fails():
+    kube = Kube(secret=_secret(), secret_versions_after=(471, 472, 477, 478))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+def test_toctou_secret_payload_change_fails():
+    """Same revision, same labels, but a different installed payload hash."""
+    kube = Kube(secret=_secret(),
+                secret_after=_secret(backend="ghcr.io/x/backend@sha256:" + "b" * 64))
+    first, _, _ = _facts(kube)
+    with pytest.raises(control.ControlError):
+        preflight._pre_upgrade_toctou_check(smoke, _args(), kube, _manifest().doc, first)
+
+
+# --- R3: Helm Secret metadata/label consistency (RBAC-controlled) ------------
+
+def test_secret_status_label_uppercase_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(status="FAILED", info_status="FAILED")))
+
+
+def test_secret_status_label_unknown_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(status="bogus", info_status="bogus")))
+
+
+def test_secret_payload_status_conflicts_with_label_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(status="failed", info_status="deployed")))
+
+
+def test_secret_version_label_mismatch_fails():
+    s = _secret(version=477)
+    s["metadata"]["labels"]["version"] = "476"
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=s))
+
+
+def test_secret_owner_label_mismatch_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(owner="not-helm")))
+
+
+def test_secret_name_label_mismatch_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(name_label="other-release")))
+
+
+def test_secret_namespace_mismatch_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(namespace="other-ns")))
+
+
+def test_secret_metadata_name_mismatch_fails():
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(secret_name="sh.helm.release.v1." + RELEASE + ".v470")))
+
+
+def test_conflicting_duplicate_revisions_fail():
+    """Two secret names mapping to one numeric revision are a conflict."""
+    with pytest.raises(control.ControlError):
+        _run(Kube(secret=_secret(), secret_versions=(471, 477, 477)))
