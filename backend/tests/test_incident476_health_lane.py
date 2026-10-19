@@ -425,10 +425,15 @@ def test_C6_empty_recent_oom_worker_fails():
         preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
 
 
-def test_C6_empty_worker_at_restart_threshold_fails():
+def test_C6_empty_worker_stable_counter_empty_laststate_old_container_passes():
+    """A non-zero counter with EMPTY lastState is admitted only with the
+    continuous-container proof: the live container started at/before the window
+    floor and the counter is stable across the two passes. The count's history is
+    unprovable, but the WINDOW is provably restart-free."""
     kube = FakeKube([_idle_worker_pod(restart_count=3)], lines={"media-worker-1": ""})
-    with pytest.raises(control.ControlError):
-        preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+    out = preflight.health_temporal(smoke, _args(), kube, broker=_idle_pulse())
+    assert out["passes"] == 2
+    assert out["historical_restarts"][0]["restart_count"] == 3
 
 
 def test_C6_empty_worker_malformed_heartbeat_ttl_fails():
@@ -604,11 +609,54 @@ def test_C8_historical_counter_outside_window_passes():
     assert out["lookback_start"]
 
 
-def test_C8_missing_laststate_with_nonzero_counter_fails():
-    """A live non-zero counter with no lastState cannot be scoped: fail closed."""
+def test_C8_stable_counter_empty_laststate_old_container_passes():
+    """The live PR #623 case: restartCount>0 with EMPTY lastState but a container
+    that has run continuously across the whole window. The counter's history is
+    unprovable, yet the WINDOW is provably restart-free (start before floor,
+    stable across both passes), so it is not a current fault."""
     pod = _pod("worker-1", "worker", started_ago_s=10800, restart_count=10)
+    out = preflight.health_temporal(smoke, _args(), FakeKube([pod]))
+    assert out["passes"] == 2
+    assert out["historical_restarts"][0]["restart_count"] == 10
+    assert out["historical_restarts"][0]["last_terminated_at"] is None
+
+
+def test_C8_empty_laststate_started_inside_window_fails():
+    pod = _pod("worker-1", "worker", started_ago_s=600, restart_count=10)
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(), FakeKube([pod]))
+
+
+def test_C8_empty_laststate_missing_start_fails():
+    pod = _pod("worker-1", "worker", restart_count=10)
+    del pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"]
+    fresh = (_now() - timedelta(seconds=20)).isoformat()
+    kube = FakeKube([pod], lines={"worker-1": f"{fresh} line\n"})
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), kube)
+
+
+def test_C8_empty_laststate_future_start_fails():
+    future = (_now() + timedelta(seconds=3600)).isoformat()
+    pod = _pod("worker-1", "worker", restart_count=10)
+    pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"] = future
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), FakeKube([pod]))
+
+
+def test_C8_empty_laststate_delta_during_observation_fails():
+    p1 = _pod("worker-1", "worker", started_ago_s=10800, restart_count=3)
+    p2 = _pod("worker-1", "worker", started_ago_s=10800, restart_count=4)
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), _StepKube([p1], [p2]))
+
+
+def test_C8_empty_laststate_uid_changed_fails():
+    p1 = _pod("worker-1", "worker", started_ago_s=10800, restart_count=3)
+    p2 = _pod("worker-1", "worker", started_ago_s=10800, restart_count=3)
+    p2["metadata"]["uid"] = "uid-worker-1-replaced"
+    with pytest.raises(control.ControlError):
+        preflight.health_temporal(smoke, _args(), _StepKube([p1], [p2]))
 
 
 def test_C8_recent_termination_at_threshold_fails():
