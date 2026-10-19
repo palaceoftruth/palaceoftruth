@@ -4,7 +4,10 @@ These queries require separately reviewed reader authority and control artifact
 mounts. They do not assume the currently installed chart grants that access.
 """
 from __future__ import annotations
+import base64
+import gzip
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 from scripts import smoke_control as control
@@ -306,6 +309,209 @@ def health_runtime_binding(smoke, client, report, args, kube):
     smoke._record_check(report, 'artifact_binding', 'passed', observations=found, phase_digest=digest)
 
 
+def _decode_helm_release(secret):
+    """Decode a Helm v3 release Secret (double base64 + gzip + JSON)."""
+    data = (secret.get('data') or {}).get('release')
+    if not isinstance(data, str) or not data:
+        raise control.ControlError('installed helm release payload missing')
+    try:
+        blob = gzip.decompress(base64.b64decode(base64.b64decode(data, validate=True), validate=True))
+        release = json.loads(blob)
+    except (ValueError, OSError, EOFError) as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    if not isinstance(release, dict):
+        raise control.ControlError('installed helm release payload malformed')
+    return release
+
+
+def _manifest_image_pins(manifest_text, wanted):
+    """Exact digest pins per wanted container from a Helm-rendered manifest."""
+    if not isinstance(manifest_text, str) or not manifest_text.strip():
+        raise control.ControlError('installed manifest missing')
+    import yaml
+    try:
+        docs = list(yaml.safe_load_all(manifest_text))
+    except yaml.YAMLError as exc:
+        raise control.ControlError('installed manifest unparsable') from exc
+    pins = {}
+    for doc in docs:
+        if not isinstance(doc, dict) or doc.get('kind') != 'Deployment':
+            continue
+        spec = ((doc.get('spec') or {}).get('template') or {}).get('spec') or {}
+        for c in spec.get('containers') or []:
+            name = c.get('name')
+            if name not in wanted:
+                continue
+            image = c.get('image')
+            if not isinstance(image, str) or '@sha256:' not in image:
+                raise control.ControlError('installed manifest image is not digest-pinned: ' + str(name))
+            pins[name] = image
+    missing = wanted - set(pins)
+    if missing:
+        raise control.ControlError('installed manifest misses workload container: ' + ','.join(sorted(missing)))
+    return pins
+
+
+def _image_matches(image_id, pin):
+    """Running imageID equals the installed pin by digest and repository tail."""
+    if not isinstance(image_id, str) or '@sha256:' not in image_id:
+        return False
+    if not isinstance(pin, str) or '@sha256:' not in pin:
+        return False
+    image_repo, image_digest = image_id.rsplit('@', 1)
+    pin_repo, pin_digest = pin.rsplit('@', 1)
+    return image_digest == pin_digest and image_repo.rsplit('/', 2)[-2:] == pin_repo.rsplit('/', 2)[-2:]
+
+
+def _helm_release_revisions(kube, namespace, release_name):
+    """Every numeric Helm v3 revision recorded for the release (read-only)."""
+    payload = kube.get('/api/v1/namespaces/' + namespace + '/secrets',
+                       query={'labelSelector': 'owner=helm,name=' + release_name})
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        raise control.ControlError('helm release revisions missing')
+    prefix = 'sh.helm.release.v1.' + release_name + '.v'
+    versions = []
+    for secret in items:
+        name = (secret.get('metadata') or {}).get('name', '')
+        if not name.startswith(prefix):
+            continue
+        tail = name[len(prefix):]
+        if tail.isdigit():
+            versions.append(int(tail))
+    if not versions:
+        raise control.ControlError('helm release revisions malformed')
+    return sorted(versions)
+
+
+def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest):
+    """Read-only PRE-UPGRADE artifact binding for a held, declared-new window.
+
+    The AUTOMATIC post-upgrade `health_runtime_binding` binds the DECLARED image
+    to the RUNNING image and stays strict. This separate pre-upgrade check runs
+    BEFORE the upgrade, while the release is held and the new target is declared
+    but NOT applied:
+
+    - the DECLARED HelmRelease target must equal the frozen APPROVED tuple:
+      same release UID, suspend true, declared backend digest == target_digest,
+      and the declared chart OCI reference digest == chart_digest;
+    - the highest attempted revision must equal the approved expected maximum
+      (no new attempt since the frozen window);
+    - the RUNNING workload images must equal the ACTUAL INSTALLED artifact taken
+      from the Helm release manifest of that max attempted revision, NOT from the
+      declared target and NOT from a "first successful" history fallback;
+    - every replica, owner, readiness, and exact image pin is checked (#575).
+
+    A FAILED max revision is expected for a held partial apply: release Ready is
+    NOT required. Any missing/unparsable installed artifact fails CLOSED with a
+    precise error; there is no image-ignore flag.
+    """
+    doc = manifest.doc
+    manifest.active(smoke.utc_now())
+    if doc['namespace'] != args.namespace or doc['release_name'] != args.target_name:
+        raise control.ControlError('pre-upgrade binding differs from approved release')
+    kube.get('/api/v1/namespaces/kube-system')
+    kube.get('/api/v1/namespaces/' + args.namespace)
+    release = _live_release(kube, args.namespace, args.target_name)
+    if (release.get('metadata') or {}).get('uid') != doc['release_uid']:
+        raise control.ControlError('live HelmRelease UID differs from approved release')
+    spec = release.get('spec') or {}
+    if spec.get('suspend') is not True:
+        raise control.ControlError('canonical hold is not suspended')
+    # --- the DECLARED target must equal the frozen approved tuple ---
+    declared = (spec.get('values') or {}).get('image') or {}
+    if declared.get('backendDigest') != doc['target_digest']:
+        raise control.ControlError('declared target image differs from approved target')
+    for key in ('backendDigest', 'workerDigest', 'frontendDigest'):
+        if not isinstance(declared.get(key), str) or not re.fullmatch('sha256:[0-9a-f]{64}', declared[key]):
+            raise control.ControlError('declared image pin tuple incomplete: ' + key)
+    chart_ref = spec.get('chartRef') or {}
+    if chart_ref.get('kind') != 'OCIRepository' or not chart_ref.get('name'):
+        raise control.ControlError('declared chart OCI reference missing')
+    ref_ns = chart_ref.get('namespace') or args.namespace
+    oci = kube.get('/apis/source.toolkit.fluxcd.io/v1/namespaces/' + ref_ns + '/ocirepositories/' + chart_ref['name'])
+    declared_chart = ((oci.get('spec') or {}).get('ref') or {}).get('digest')
+    if declared_chart != doc['chart_digest']:
+        raise control.ControlError('declared chart OCI differs from approved target')
+    # --- highest recorded Helm revision == approved max (no new attempt) ---
+    # The revision source is the immutable Helm release Secrets, NOT the Flux
+    # status.history (which can lag behind partial attempts) and NOT a "first
+    # successful" fallback. Any revision NEWER than the approved maximum aborts.
+    revisions = _helm_release_revisions(kube, args.namespace, args.target_name)
+    max_rev = max(revisions)
+    if max_rev != doc['expected_max_revision']:
+        raise control.ControlError('latest attempted revision differs from approved maximum')
+    # --- actual INSTALLED artifact = the max attempted revision manifest ---
+    secret = kube.get('/api/v1/namespaces/' + args.namespace + '/secrets/' +
+                      'sh.helm.release.v1.' + args.target_name + '.v' + str(max_rev))
+    installed = _decode_helm_release(secret)
+    if installed.get('version') != max_rev:
+        raise control.ControlError('installed release payload revision mismatch')
+    pins = _manifest_image_pins(installed.get('manifest'), set(WORKLOAD_CONTAINERS))
+    # --- the RUNNING runtime must be the installed artifact, not the declared target ---
+    expected = _expected_workload_replicas(release)
+    ancestry = {name: _deployment_ancestry(kube, args.namespace, args.target_name + '-' + name) for name in expected}
+    found = {name: [] for name in expected}
+    for pod in _workload_pods(kube, args.namespace, args.target_name):
+        if pod.get('metadata', {}).get('deletionTimestamp'):
+            continue
+        refs = (pod.get('metadata') or {}).get('ownerReferences') or []
+        if any(r.get('kind') in ('Job', 'CronJob') for r in refs):
+            continue
+        statuses = pod.get('status', {}).get('containerStatuses') or []
+        names = {c.get('name') for c in statuses}
+        if not (names & set(expected)):
+            continue
+        if (pod.get('status') or {}).get('phase') != 'Running':
+            raise control.ControlError('workload pod not running')
+        rs_uid = _replicaset_owner(pod)
+        for c in statuses:
+            name = c.get('name')
+            if name not in expected:
+                continue
+            if rs_uid not in ancestry[name][1]:
+                raise control.ControlError('pod owner is not the current ReplicaSet of ' + name)
+            if not _image_matches(c.get('imageID'), pins[name]):
+                raise control.ControlError('running workload image is not the installed release pin: ' + name)
+            if c.get('ready') is not True:
+                raise control.ControlError('workload container not ready: ' + name)
+            found[name].append({'pod_uid': pod.get('metadata', {}).get('uid'), 'container': name,
+                                'imageID': c.get('imageID'), 'ready': True})
+    for name, count in expected.items():
+        if len(found[name]) != count:
+            raise control.ControlError('expected replicas not all observed for ' + name)
+    smoke._record_check(report, 'artifact_binding', 'passed', observations=found,
+                        installed_revision=max_rev, installed_pins=pins,
+                        declared_target_digest=doc['target_digest'],
+                        declared_chart_digest=doc['chart_digest'])
+
+
+def pre_upgrade_health_preflight(smoke, client, args, kube, manifest):
+    """Read-only pre-upgrade lane: same 8 evidence checks, installed-artifact bind."""
+    report = {'target': args.target_name, 'checks': [], 'alerts': [], 'generated_at': smoke.utc_now().isoformat()}
+    calls = [lambda: smoke.check_api_health(client, report),
+             lambda: smoke.check_runtime_dependencies(client, report, args, kube=kube),
+             lambda: smoke.resolve_tenant_identity(client, report, args),
+             lambda: pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest),
+             lambda: smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report), timeout=args.reader_budget.timeout(10))),
+             lambda: smoke.check_mcp_reachable(args.mcp_url, report, timeout=min(args.request_timeout, 10), budget=args.reader_budget),
+             lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube)),
+             lambda: health_kubernetes_alerts(smoke, args, kube, smoke.utc_now()),
+             lambda: smoke._record_check(report, 'kubernetes_alerts', 'passed')]
+    for call in calls[:-1]:
+        try:
+            args.reader_budget.timeout(10)
+            call()
+        except Exception as exc:  # noqa: BLE001
+            smoke._alert(report, 'required_preflight_exception', 'read-only health prerequisite failed', error_class=type(exc).__name__)
+    if smoke._check_passed(report, 'baseline_temporal') and smoke._check_passed(report, 'runtime_dependencies'):
+        try:
+            calls[-1]()
+        except Exception as exc:  # noqa: BLE001
+            smoke._alert(report, 'required_preflight_exception', 'kubernetes alert stamp failed', error_class=type(exc).__name__)
+    return report
+
+
 def _termination_is_recent(term, floor):
     if not isinstance(term, dict) or not term:
         return False
@@ -376,6 +582,7 @@ def _health_workers(smoke, args, kube, floor):
             if type(count) is not int or count < 0:
                 raise control.ControlError('restart counter malformed')
             finished = None
+            empty_history_proven = False
             if term:
                 try:
                     finished = control.instant(term.get('finishedAt'))
@@ -387,20 +594,33 @@ def _health_workers(smoke, args, kube, floor):
                 if finished >= floor:
                     raise control.ControlError('recent worker termination is not proof of health')
             elif count > 0:
-                # A live non-zero counter with no lastState cannot be scoped:
-                # whether the restarts are old or current is unprovable.
-                raise control.ControlError('restart history absent for a non-zero counter')
-            if count >= args.restart_alert_threshold:
-                # Historical-only admission: the full window proof is required.
-                if finished is None:
-                    raise control.ControlError('historical restart count without termination evidence')
+                # A live non-zero counter with EMPTY lastState has no termination
+                # time to compare. It is admitted ONLY with the continuous-container
+                # proof: the current instance started AT or BEFORE the window floor
+                # (it has run across the whole window), and that start is coherent
+                # and not in the future. A restart would move startedAt and the
+                # counter; the two-pass stability in health_temporal is the
+                # independent witness. Empty lastState alone is NOT proof.
                 run_start = _running_started_at(c.get('state'))
                 if run_start is None:
-                    raise control.ControlError('container start metadata missing for a historical counter')
+                    raise control.ControlError('container start metadata missing for a non-zero counter with no lastState')
+                if run_start > now:
+                    raise control.ControlError('future container start evidence')
                 if run_start > floor:
-                    raise control.ControlError('container began inside the window; historical restart scope unproven')
-                if run_start <= finished:
-                    raise control.ControlError('incoherent container start and termination interval')
+                    raise control.ControlError('container began inside the window; restart scope unproven')
+                empty_history_proven = True
+            if count >= args.restart_alert_threshold:
+                # Historical-only admission: the full window proof is required.
+                if finished is not None:
+                    run_start = _running_started_at(c.get('state'))
+                    if run_start is None:
+                        raise control.ControlError('container start metadata missing for a historical counter')
+                    if run_start > floor:
+                        raise control.ControlError('container began inside the window; historical restart scope unproven')
+                    if run_start <= finished:
+                        raise control.ControlError('incoherent container start and termination interval')
+                elif not empty_history_proven:
+                    raise control.ControlError('historical restart count without termination evidence')
             rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
                          'container': c.get('name'), 'container_id': c.get('containerID'),
                          'restart_count': count,
