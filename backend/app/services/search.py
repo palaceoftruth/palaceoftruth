@@ -1927,13 +1927,15 @@ class SearchService:
             # A cap is requested: rank candidates within each scope_label before
             # the flat limit applies, so a scope with many close matches cannot
             # use up every slot and starve scopes with fewer, lower-scoring hits.
+            #
+            # Eligibility is resolved once per item, before the embedding join,
+            # and chunk_text is hydrated only for the capped rows. Filtering the
+            # embedding table directly repeated every item predicate once per
+            # embedding (measured: 153786 item lookups, 17.8s on live data).
             semantic_candidates_cte = f"""
-            WITH semantic_ranked AS MATERIALIZED (
+            WITH eligible_scoped_items AS MATERIALIZED (
                 SELECT
-                    e.item_id,
-                    e.chunk_text,
-                    e.chunk_index,
-                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance,
+                    i.id,
                     (
                         CASE
                             WHEN COALESCE(
@@ -1947,24 +1949,44 @@ class SearchService:
                             ELSE BTRIM(i.metadata->'memory_entry'->'scope'->>'type')
                         END
                     ) AS scope_label_partition
-                FROM {embedding_plan.table_name} e
-                JOIN items i ON e.item_id = i.id
-                {semantic_candidates_where}
+                FROM items i
+                WHERE {item_eligibility}
+            ),
+            semantic_ranked AS MATERIALIZED (
+                SELECT
+                    e.id AS embedding_id,
+                    e.item_id,
+                    e.chunk_index,
+                    e.{embedding_plan.half_column} <=> CAST(:vec AS halfvec({embedding_plan.dimensions})) AS distance,
+                    eligible.scope_label_partition
+                FROM eligible_scoped_items eligible
+                JOIN {embedding_plan.table_name} e ON e.item_id = eligible.id
+                WHERE TRUE {embedding_plan.profile_filter}
             ),
             semantic_candidates AS MATERIALIZED (
-                SELECT item_id, chunk_text, chunk_index, distance
+                SELECT
+                    capped.item_id,
+                    hydrate.chunk_text,
+                    capped.chunk_index,
+                    capped.distance
                 FROM (
-                    SELECT
-                        item_id, chunk_text, chunk_index, distance,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY scope_label_partition
-                            ORDER BY distance ASC
-                        ) AS rn
-                    FROM semantic_ranked
-                ) ranked_by_scope
-                WHERE rn <= :per_scope_candidate_cap
-                ORDER BY distance ASC
-                LIMIT :semantic_candidate_limit
+                    SELECT embedding_id, item_id, chunk_index, distance
+                    FROM (
+                        SELECT
+                            embedding_id, item_id, chunk_index, distance,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY scope_label_partition
+                                ORDER BY distance ASC
+                            ) AS rn
+                        FROM semantic_ranked
+                    ) ranked_by_scope
+                    WHERE rn <= :per_scope_candidate_cap
+                    ORDER BY ranked_by_scope.distance ASC
+                    LIMIT :semantic_candidate_limit
+                ) capped
+                JOIN {embedding_plan.table_name} hydrate
+                  ON hydrate.id = capped.embedding_id
+                ORDER BY capped.distance ASC
             ),
             """
         guarded_result_prefix = ", guarded_results AS (" if selective_rooms else ""
