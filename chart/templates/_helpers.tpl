@@ -81,12 +81,11 @@ template checksum changes only when the Sentinel runtime configuration changes,
 not when chart metadata changes.
 */}}
 {{- define "palaceoftruth.valkeySentinelConfig" -}}
-# Valkey Sentinel requires this when the monitored primary is configured
-# with Kubernetes service DNS instead of a literal IP address.
-sentinel resolve-hostnames yes
-
-# Monitor the primary. Quorum = minimum sentinels that must agree the
-# primary is down before triggering a failover.
+# Monitor the primary. The boot path (see the Sentinel workload start script)
+# rewrites this line to the RESOLVED LIVE primary IP before exec: Sentinel runs
+# with resolve-hostnames DISABLED, and a hostname here is a fatal config error
+# for it. Quorum = minimum sentinels that must agree the primary is down before
+# triggering a failover.
 sentinel monitor {{ .Values.valkey.sentinel.masterName }} {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379 {{ .Values.valkey.sentinel.quorum }}
 
 # How long (ms) a primary can be unreachable before it's considered down.
@@ -122,6 +121,189 @@ CNPG auto-generated app secret name: <cluster-name>-app
 {{- end }}
 
 {{/*
+Bounded, fail-closed AUTHORITY decision for a Sentinel-managed data node start.
+
+Distinguishes a legitimate NEW bootstrap from RECOVERY and never creates a blind
+writable master:
+  * explicit initialBootstrap (chart install opt-in) -> writable master (new install);
+  * consult the Sentinel ensemble and require a MAJORITY-consistent live answer
+    (not a single CKQUORUM): follow a live named master; become master only if the
+    ensemble names THIS node, or the named address is dead AND this pod is the
+    monitored service endpoint (no live promoted master exists, else the follow
+    branch wins) -> this can never prioritise the original service over a live
+    higher-epoch promoted master;
+  * anything ambiguous (no consistent answer, unresolvable address) -> READ-ONLY
+    (replica of an unreachable placeholder; writes refused) = FAIL CLOSED.
+The existing conf is PRESERVED and reconciled, and the auth/ACL sanitizer
+(requirepass/masterauth + the `user default` rewrite) runs last, so a rotated
+password is applied and a stale ACL line can never defeat requirepass.
+Identity uses the pod's own address and the primary SERVICE resolution -- no
+hardcoded/guessed numeric IPs.
+*/}}
+{{/*
+Bounded, fail-closed AUTHORITY decision for a Sentinel-managed data node start.
+
+Arguments: (dict "root" . "role" "primary"|"replica").
+
+Properties:
+  * ROLE-AWARE:
+      - fresh REPLICA (no data): follow a quorum-named LIVE master if one exists;
+        otherwise replicate the configured primary SERVICE as a READ-ONLY replica
+        (no self-promotion, no initial master).
+      - fresh PRIMARY (no data): bootstrap as master ONLY when initialBootstrap is
+        explicitly true AND no existing quorum master is observed; otherwise fail
+        closed (follow a live master, else READ-ONLY). Default = fail closed.
+      - REUSED data (any role): follow a quorum-named LIVE master; become master
+        only if the ensemble names THIS node, or the named address is dead AND this
+        pod is the monitored service endpoint (a live higher-epoch promoted master
+        is always preferred). Anything ambiguous -> READ-ONLY.
+  * Data presence is detected from AOF/appendonlydir/RDB ONLY -- never from the
+    presence of valkey.conf (which this start path itself generates).
+  * The ensemble answer is a MAJORITY over DISTINCT Sentinel instances (distinct
+    runids, matching master address and config-epoch), addressed by individual pod
+    IP, so a single ClusterIP round-robin cannot be triple-counted. No forced vote.
+  * The existing conf is PRESERVED and reconciled, and the auth/ACL sanitizer runs
+    last (rotated password applied; a stale `user default` line cannot defeat
+    requirepass).
+*/}}
+{{- define "palaceoftruth.valkeyAuthorityStartScript" -}}
+{{- $root := .root -}}
+{{- $role := .role -}}
+set -eu
+conf=/data/valkey.conf
+role="{{ $role }}"
+sentinel_headless={{ include "palaceoftruth.valkeySentinelBootstrapName" $root | quote }}
+master_name={{ $root.Values.valkey.sentinel.masterName | quote }}
+primary_service={{ include "palaceoftruth.valkeyPrimaryName" $root | quote }}
+replica_service={{ include "palaceoftruth.valkeyReplicaName" $root | quote }}
+quorum={{ $root.Values.valkey.sentinel.quorum }}
+wait_seconds={{ $root.Values.valkey.sentinel.bootstrapWaitSeconds | default 20 }}
+initial_bootstrap={{ $root.Values.valkey.sentinel.initialBootstrap | default false }}
+[ -f "$conf" ] || : > "$conf"
+grep -q '^appendonly ' "$conf" || echo "appendonly yes" >> "$conf"
+grep -q '^appendfilename ' "$conf" || echo "appendfilename appendonly.aof" >> "$conf"
+grep -q '^dir ' "$conf" || echo "dir /data" >> "$conf"
+sed -i '/^replicaof /d;/^slaveof /d;/^replica-read-only /d' "$conf"
+role_of() {
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" $root) "true" }}
+  timeout 2 env REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+{{- else }}
+  timeout 2 valkey-cli -h "$1" -p 6379 --raw role 2>/dev/null | head -n1 || true
+{{- end }}
+}
+# Data presence from durable files only. valkey.conf is generated by this script.
+data_present=0
+for f in appendonlydir appendonly.aof dump.rdb; do [ -e "/data/$f" ] && data_present=1; done
+myip=$(hostname -i 2>/dev/null | awk '{print $1}')
+# --- majority over DISTINCT Sentinel instances (individual pod IPs) ---
+consensus=""
+if getent ahosts "$sentinel_headless" >/dev/null 2>&1; then
+  sips=$(getent ahosts "$sentinel_headless" | awk '{print $1}' | sort -u)
+  i=0
+  while [ "$i" -lt "$wait_seconds" ]; do
+    answers=/tmp/.vk-ans.$$; : > "$answers"
+    for ip in $sips; do
+      rid=$(timeout 2 valkey-cli -h "$ip" -p 26379 --raw sentinel myid 2>/dev/null | tr -d '[:space:]')
+      [ -n "$rid" ] || continue
+      mraw=$(timeout 2 valkey-cli -h "$ip" -p 26379 --raw sentinel master "$master_name" 2>/dev/null || true)
+      madr=$(echo "$mraw" | awk '/^ip$/{getline; print; exit}')
+      mep=$(echo "$mraw" | awk '/^config-epoch$/{getline; print; exit}')
+      [ -n "$madr" ] && echo "$rid $madr $mep" >> "$answers"
+    done
+    nrun=$(awk '{print $1}' "$answers" | sort -u | wc -l | tr -d ' ')
+    if [ "${nrun:-0}" -ge "$quorum" ] && [ -s "$answers" ]; then
+      top=$(awk '{print $1" "$2" "$3}' "$answers" | sort | uniq -c | sort -rn | head -n1)
+      cnt=$(echo "$top" | awk '{print $1}')
+      cand=$(echo "$top" | awk '{print $2}')
+      if [ "${cnt:-0}" -ge "$quorum" ]; then consensus="$cand"; fi
+    fi
+    rm -f "$answers"
+    [ -n "$consensus" ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+fi
+# Enumerate the known data-node endpoints (primary + replica headless services).
+known_endpoints() {
+  {
+    getent ahosts "$primary_service" 2>/dev/null
+    getent ahosts "$replica_service" 2>/dev/null
+  } | awk '{print $1}' | sort -u
+}
+# Bounded, NON-DESTRUCTIVE discovery of the UNIQUE live master across the known
+# data-node endpoints. Echoes the address iff exactly ONE endpoint answers ROLE
+# master within the bound. It never picks arbitrarily: 0 or more than 1 live
+# masters means "no unique master" (fail closed, no self-promotion), so a
+# split brain can never be resolved by guessing.
+discover_unique_master() {
+  eps=$(known_endpoints)
+  [ -n "$eps" ] || return 1        # nothing to probe: fail closed immediately
+  i=0
+  while [ "$i" -lt "$wait_seconds" ]; do
+    found=""
+    n=0
+    for ip in $eps; do
+      if [ "$(role_of "$ip")" = "master" ]; then found="$ip"; n=$((n + 1)); fi
+    done
+    if [ "$n" -eq 1 ]; then echo "$found"; return 0; fi
+    if [ "$n" -gt 1 ]; then return 2; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+# --- authority decision (bounded, fail closed) ---------------------------------
+# When the Sentinel ensemble gives no consistent answer, fall back to a bounded
+# NON-DESTRUCTIVE probe of the known endpoints to find the UNIQUE live master.
+# A unique live master is followed READ-ONLY (never self-promoted over it); with
+# no unique master the node starts READ-ONLY (replica of an unreachable
+# placeholder = writes refused). No data is rewritten on any other node.
+unique_master=""
+if [ -z "$consensus" ]; then unique_master=$(discover_unique_master || true); fi
+ROLE=readonly
+FOLLOW=""
+if [ "$data_present" = 1 ]; then
+  if [ -n "$consensus" ] && [ "$consensus" = "$myip" ]; then
+    ROLE=master
+  elif [ -n "$consensus" ] && [ "$(role_of "$consensus")" = "master" ]; then
+    ROLE=replica; FOLLOW="$consensus"
+  elif [ -n "$unique_master" ] && [ "$unique_master" != "$myip" ]; then
+    ROLE=replica; FOLLOW="$unique_master"
+  elif [ -n "$unique_master" ] && [ "$unique_master" = "$myip" ]; then
+    ROLE=master
+  fi
+elif [ "$role" = "primary" ]; then
+  if [ "$initial_bootstrap" = "true" ] && [ -z "$consensus" ] && [ -z "$unique_master" ]; then
+    ROLE=master
+  elif [ -n "$consensus" ] && [ "$(role_of "$consensus")" = "master" ] && [ "$consensus" != "$myip" ]; then
+    ROLE=replica; FOLLOW="$consensus"
+  elif [ -n "$unique_master" ] && [ "$unique_master" != "$myip" ]; then
+    ROLE=replica; FOLLOW="$unique_master"
+  fi
+else
+  # Fresh replica: follow a live master (consensus or the unique endpoint probe),
+  # else replicate the primary SERVICE read-only (non-destructive; retries until
+  # the primary is up).
+  if [ -n "$consensus" ] && [ "$(role_of "$consensus")" = "master" ] && [ "$consensus" != "$myip" ]; then
+    ROLE=replica; FOLLOW="$consensus"
+  elif [ -n "$unique_master" ] && [ "$unique_master" != "$myip" ]; then
+    ROLE=replica; FOLLOW="$unique_master"
+  else
+    ROLE=replica; FOLLOW="$primary_service"
+  fi
+fi
+case "$ROLE" in
+  master) : ;;
+  replica) echo "replicaof $FOLLOW 6379" >> "$conf"; echo "replica-read-only yes" >> "$conf" ;;
+  readonly) echo "replicaof 127.0.0.1 1" >> "$conf"; echo "replica-read-only yes" >> "$conf" ;;
+esac
+{{- if eq (include "palaceoftruth.valkeyAuthEnabled" $root) "true" }}
+{{ include "palaceoftruth.valkeyAuthConfigScript" "$conf" }}
+{{- end }}
+{{- end }}
+
+
+{{/*
 Valkey service name: <fullname>-valkey  (single-instance mode)
 */}}
 {{- define "palaceoftruth.valkeyServiceName" -}}
@@ -147,6 +329,14 @@ Valkey sentinel service name (sentinel mode).
 */}}
 {{- define "palaceoftruth.valkeySentinelName" -}}
 {{- printf "%s-valkey-sentinel" (include "palaceoftruth.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Headless bootstrap service for the Sentinel ensemble. A data node enumerates the
+individual Sentinel pods through it to take a majority over DISTINCT instances.
+*/}}
+{{- define "palaceoftruth.valkeySentinelBootstrapName" -}}
+{{- printf "%s-bootstrap" (include "palaceoftruth.valkeySentinelName" .) | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{/*

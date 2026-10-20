@@ -1039,6 +1039,17 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
             pre = smoke_preflight.health_preflight(sys.modules[__name__], reader, args, kube)
             report.update(pre)
             smoke_control.require_health_checks(pre)
+        elif args.mode == "read-only-pre-upgrade":
+            # Explicit READ-ONLY PRE-UPGRADE lane: held release, declared-new but
+            # not applied. Binds the RUNNING images to the ACTUAL INSTALLED
+            # artifact (max attempted Helm release manifest) and the DECLARED
+            # target to the frozen, digest-verified action tuple. No writer
+            # approval, no POST; the automatic post-upgrade lane above is
+            # unchanged. Arbitrary CLI digests are not accepted.
+            manifest = smoke_control.PreUpgradeManifest.load(args.manifest, args.manifest_sha256, now=utc_now())
+            pre = smoke_preflight.pre_upgrade_health_preflight(sys.modules[__name__], reader, args, kube, manifest)
+            report.update(pre)
+            smoke_control.require_health_checks(pre)
         else:
             approval = smoke_control.Approval.load(args.manifest, args.manifest_sha256, now=utc_now())
             def preflight():
@@ -1047,9 +1058,9 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
             receipt = smoke_control.run_reserved(approval, journal, client, preflight, preflight, clock=utc_now)
             _record_check(report, "canonical_campaign_receipt", "passed", **receipt)
     except Exception as exc:
-        # The read-only lane has no writer approval, so a health-lane failure is
+        # The read-only lanes have no writer approval, so a health-lane failure is
         # reported as a required-preflight failure, not an approval failure.
-        _code = "control_approval_failed" if args.mode != "read-only" else "required_preflight_exception"
+        _code = "control_approval_failed" if args.mode == "bounded" else "required_preflight_exception"
         _alert(report, _code, "required contract failed", error_class=type(exc).__name__)
     report["status"] = "passed" if not report["alerts"] else "failed"
     report["alert_count"] = len(report["alerts"])
@@ -1065,7 +1076,7 @@ def safe_final_report(report):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run post-sync Palace memory dependency smoke checks.")
-    parser.add_argument("--mode", choices=["read-only", "bounded"], default="read-only")
+    parser.add_argument("--mode", choices=["read-only", "read-only-pre-upgrade", "bounded"], default="read-only")
     parser.add_argument("--manifest")
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--receipt-file")

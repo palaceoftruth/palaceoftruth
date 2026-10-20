@@ -439,7 +439,12 @@ def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods()
     sentinel = _deployment_by_name(manifests, "palaceoftruth-valkey-sentinel")
     sentinel_template = sentinel["spec"]["template"]
 
-    assert sentinel["spec"]["strategy"] == {"type": "Recreate"}
+    # Replace Sentinels ONE AT A TIME so a quorum always survives a coordinated
+    # upgrade; never surge a fourth identity (maxSurge=0).
+    assert sentinel["spec"]["strategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
+    }
     assert sentinel_template["metadata"]["labels"] == {
         "app": "palaceoftruth-valkey-sentinel",
         "app.kubernetes.io/name": "palaceoftruth",

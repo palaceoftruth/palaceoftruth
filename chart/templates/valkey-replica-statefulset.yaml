@@ -60,24 +60,10 @@ spec:
         - name: init-config
           image: {{ .Values.valkey.image }}
           {{- include "palaceoftruth.containerSecurityContext" (list . "valkey") | nindent 10 }}
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/sh", "-ec"]
           args:
             - |
-              # Reconcile the named replica back to the primary service after
-              # a pod/IP recycle; stale Sentinel rewrites can point at dead pod IPs.
-              if [ ! -f /data/valkey.conf ]; then
-                echo "replicaof {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379" > /data/valkey.conf
-                echo "appendonly yes" >> /data/valkey.conf
-                echo "appendfilename appendonly.aof" >> /data/valkey.conf
-              else
-                sed -i '/^replicaof /d;/^slaveof /d' /data/valkey.conf
-                echo "replicaof {{ include "palaceoftruth.valkeyPrimaryName" . }} 6379" >> /data/valkey.conf
-              fi
-              {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
-              # masterauth is what lets this replica finish its handshake with a
-              # password-protected primary.
-              {{- include "palaceoftruth.valkeyAuthConfigScript" "/data/valkey.conf" | nindent 14 }}
-              {{- end }}
+              {{- include "palaceoftruth.valkeyAuthorityStartScript" (dict "root" . "role" "replica") | nindent 14 }}
           {{- if eq (include "palaceoftruth.valkeyAuthEnabled" .) "true" }}
           env:
             {{- include "palaceoftruth.valkeyServerAuthEnvVars" . | nindent 12 }}
