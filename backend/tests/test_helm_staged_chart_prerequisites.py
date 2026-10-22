@@ -189,12 +189,26 @@ def test_on_delete_applies_to_both_data_statefulsets() -> None:
         assert manifest["spec"]["updateStrategy"] == {"type": "OnDelete"}, name
 
 
-def test_invalid_update_strategy_is_refused() -> None:
+@pytest.mark.parametrize("strategy", ["Recreate", "", "false", "0", "null"])
+def test_invalid_update_strategy_is_refused(strategy: str) -> None:
     result = _render_raw(
         "valkey.sentinel.enabled=true",
-        "valkey.dataUpdateStrategy=Recreate",
+        f"valkey.dataUpdateStrategy={strategy}",
     )
 
+    assert result.returncode != 0
+    assert "valkey.dataUpdateStrategy must be RollingUpdate or OnDelete" in result.stderr
+
+
+@pytest.mark.parametrize("strategy", [False, 0, None, [], {}])
+def test_non_string_update_strategy_is_refused(strategy: Any, tmp_path: Path) -> None:
+    values = tmp_path / "invalid-strategy.yaml"
+    values.write_text(yaml.safe_dump({"valkey": {"dataUpdateStrategy": strategy,
+                                               "sentinel": {"enabled": True}}}))
+    result = subprocess.run(
+        ["helm", "template", "palaceoftruth", str(CHART_DIR), "--is-upgrade",
+         "--values", str(values)], capture_output=True, text=True, check=False,
+    )
     assert result.returncode != 0
     assert "valkey.dataUpdateStrategy must be RollingUpdate or OnDelete" in result.stderr
 

@@ -403,9 +403,9 @@ replace the non-authoritative pod first. An unknown value fails rendering
 instead of silently falling back to RollingUpdate.
 */}}
 {{- define "palaceoftruth.valkeyDataUpdateStrategy" -}}
-{{- $strategy := default "RollingUpdate" .Values.valkey.dataUpdateStrategy -}}
-{{- if not (has $strategy (list "RollingUpdate" "OnDelete")) -}}
-{{- fail (printf "valkey.dataUpdateStrategy must be RollingUpdate or OnDelete; got %q" $strategy) -}}
+{{- $strategy := .Values.valkey.dataUpdateStrategy -}}
+{{- if or (not (kindIs "string" $strategy)) (not (has $strategy (list "RollingUpdate" "OnDelete"))) -}}
+{{- fail (printf "valkey.dataUpdateStrategy must be RollingUpdate or OnDelete; got %v" $strategy) -}}
 {{- end -}}
 {{- $strategy -}}
 {{- end -}}
