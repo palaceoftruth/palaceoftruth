@@ -6,6 +6,9 @@ import re
 from dataclasses import dataclass
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
+from types import SimpleNamespace
+
+import httpx
 
 from openai import (
     APIConnectionError,
@@ -17,7 +20,12 @@ from openai import (
 )
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from app.config import settings
+from app.config import (
+    SUPPORTED_TEXT_MODELS,
+    VISION_MODEL,
+    settings,
+    text_model_supports,
+)
 from app.services.relationship_classification_contract import (
     RELATIONSHIP_PROMPT_VERSION,
     build_relationship_classification_messages,
@@ -34,7 +42,6 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 4
 _BASE_BACKOFF = 2.0
 
-_OPENAI_FALLBACK_MODEL = "gpt-4o-mini"
 _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES = {401, 403, 404}
 _OPENROUTER_BACKOFF_FALLBACK_STATUSES = {429, 503}
 _OPENROUTER_TRANSIENT_RETRIES = 2
@@ -108,6 +115,24 @@ def _vision_gateway_base_url(raw: str) -> str:
 
 # Bound concurrent outbound LLM calls to avoid 429s under parallel ingest gather
 _LLM_SEMAPHORE = asyncio.Semaphore(4)
+
+
+def _ensure_supported_generation_model(model: str) -> str:
+    """Return ``model`` only when it is an approved MiniMax generation model.
+
+    Palace generation is MiniMax-only: chat, summarization, tagging, entity
+    extraction, relationship classification, and cloud image analysis all
+    resolve through this single policy. An unsupported configured value or a
+    request-time override raises here instead of silently generating text on a
+    different provider.
+    """
+    cleaned = (model or "").strip()
+    if cleaned not in SUPPORTED_TEXT_MODELS:
+        raise ValueError(
+            f"unsupported generation model {cleaned!r}; Palace generation is "
+            f"restricted to MiniMax models {sorted(SUPPORTED_TEXT_MODELS)}"
+        )
+    return cleaned
 
 
 class _MalformedCompletionResponse(RuntimeError):
@@ -215,6 +240,14 @@ class BrowserAction(BaseModel):
 
 class BrowserActions(BaseModel):
     actions: list[BrowserAction] = Field(default_factory=list)
+
+
+def _reasoning_extra_body(model: str) -> dict[str, Any]:
+    # Advertised reasoning support does not imply it can be disabled. Flash
+    # requires reasoning; leave its provider default untouched on every path.
+    if text_model_supports(model, "disable_reasoning"):
+        return {"reasoning": {"enabled": False}}
+    return {}
 
 
 def _strip_reasoning_blocks(raw: str) -> str:
@@ -355,9 +388,16 @@ class _VisionRoute:
 
 
 class LLMService:
-    """LLM operations via OpenRouter with OpenAI gpt-4o-mini as final fallback."""
+    """MiniMax-only generation via OpenRouter.
 
-    def __init__(self):
+    Every generation call is bounded to the approved MiniMax models
+    (``SUPPORTED_TEXT_MODELS``); an unsupported model fails visibly here rather
+    than falling through to a non-MiniMax provider. OpenAI is used only for
+    embeddings and transcription, never for generation.
+    """
+
+    def __init__(self, *, vision_transport: httpx.AsyncBaseTransport | None = None):
+        self._vision_transport = vision_transport
         self.client = AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
@@ -366,8 +406,6 @@ class LLMService:
                 "X-Title": "Palace of Truth",
             },
         )
-        # Direct OpenAI client — used only when all OpenRouter free models are exhausted
-        self._openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
         # Self-hosted vision gateway client. Built lazily and only when the
         # gateway vision route is selected, so an OpenRouter deployment never
         # constructs an object that holds the gateway credential.
@@ -380,12 +418,13 @@ class LLMService:
         ]
 
     def _build_model_chain(self, model: str | None) -> list[str]:
-        return [model or self.default_model] + self._fallback_models
+        chain = [model or self.default_model] + self._fallback_models
+        return [_ensure_supported_generation_model(candidate) for candidate in chain]
 
     @staticmethod
     def _get_openrouter_fallback_delay(status: int, attempt: int) -> float | None:
         # 401/403/404 usually mean the current model is not usable for this key,
-        # so move on immediately instead of jumping straight to direct OpenAI.
+        # so move on to the next MiniMax model immediately instead of waiting.
         if status in _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES:
             return 0.0
         if status in _OPENROUTER_BACKOFF_FALLBACK_STATUSES:
@@ -439,23 +478,6 @@ class LLMService:
             raise _MalformedCompletionResponse("completion response message content was not text")
         return content
 
-    async def _create_validated_openai_completion(
-        self,
-        messages: list[dict],
-        response_format: dict[str, Any] | None = None,
-        generation_settings: LLMGenerationSettings | None = None,
-    ) -> Any:
-        response = await self._create_openai_completion(
-            messages,
-            response_format=response_format,
-            generation_settings=generation_settings,
-        )
-        try:
-            self._completion_content(response)
-        except _MalformedCompletionResponse as exc:
-            raise RuntimeError("Direct OpenAI fallback returned a malformed completion") from exc
-        return response
-
     async def _create_openrouter_completion(
         self,
         current_model: str,
@@ -465,10 +487,19 @@ class LLMService:
         extra_body: dict[str, Any] | None = None,
     ) -> Any:
         generation_settings = generation_settings or LLMGenerationSettings()
+        request_kwargs = generation_settings.request_kwargs()
+        if "seed" in request_kwargs and not text_model_supports(current_model, "seed"):
+            # Flash does not advertise seed; keep requests within advertised
+            # capabilities rather than assuming the provider accepts it.
+            request_kwargs.pop("seed")
+            logger.warning(
+                "Model %s does not advertise sampling seed support; omitting seed",
+                current_model,
+            )
         kwargs: dict[str, Any] = {
             "model": current_model,
             "messages": messages,
-            **generation_settings.request_kwargs(),
+            **request_kwargs,
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
@@ -478,25 +509,15 @@ class LLMService:
                 **kwargs.get("extra_body", {}),
                 **extra_body,
             }
+        # Preserve bounded visible-output budgets for M3/M2.7, but never send
+        # a reasoning override to Flash, even if a caller supplied one.
+        kwargs.get("extra_body", {}).pop("reasoning", None)
+        kwargs["extra_body"] = {
+            **kwargs.get("extra_body", {}),
+            **_reasoning_extra_body(current_model),
+        }
         async with _LLM_SEMAPHORE:
             return await self.client.chat.completions.create(**kwargs)
-
-    async def _create_openai_completion(
-        self,
-        messages: list[dict],
-        response_format: dict[str, Any] | None = None,
-        generation_settings: LLMGenerationSettings | None = None,
-    ) -> Any:
-        generation_settings = generation_settings or LLMGenerationSettings()
-        kwargs: dict[str, Any] = {
-            "model": _OPENAI_FALLBACK_MODEL,
-            "messages": messages,
-            **generation_settings.request_kwargs(),
-        }
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        async with _LLM_SEMAPHORE:
-            return await self._openai_client.chat.completions.create(**kwargs)
 
     async def _get_vision_gateway_client(self) -> AsyncOpenAI:
         """Build the gateway client on first use, carrying only the gateway key."""
@@ -558,21 +579,18 @@ class LLMService:
         if response_format is not None:
             kwargs["response_format"] = response_format
         if route.openrouter_extras:
-            # OpenRouter filters providers by every supplied parameter. Gemini
-            # accepts the reasoning control, while the gpt-4o-mini fallback has
-            # no compatible route when it is present.
-            kwargs["extra_body"] = {"provider": {"require_parameters": True}}
-            if current_model.startswith("google/gemini-"):
-                kwargs["extra_body"] = {
-                    "provider": {"require_parameters": True},
-                    "reasoning": {"enabled": False},
-                }
+            # Cloud vision is M3-only; keep its bounded visible-output budget.
+            # Gateway requests never receive OpenRouter-specific parameters.
+            kwargs["extra_body"] = {
+                "provider": {"require_parameters": True},
+                **_reasoning_extra_body(current_model),
+            }
         async with _LLM_SEMAPHORE:
             return await route.client.chat.completions.create(**kwargs)
 
     async def aclose(self) -> None:
         """Close every outbound client this service owns."""
-        for client in (self.client, self._openai_client, self._vision_gateway_client):
+        for client in (self.client, self._vision_gateway_client):
             if client is None:
                 continue
             close = getattr(client, "close", None)
@@ -592,14 +610,30 @@ class LLMService:
         diagnostics: LLMCompletionDiagnostics | None = None,
         generation_settings: LLMGenerationSettings | None = None,
         allow_model_fallbacks: bool = True,
+        response_format_for_model: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> Any:
         generation_settings = generation_settings or LLMGenerationSettings()
-        chain = self._build_model_chain(model) if allow_model_fallbacks else [model or self.default_model]
+        if allow_model_fallbacks:
+            chain = self._build_model_chain(model)
+        else:
+            chain = [_ensure_supported_generation_model(model or self.default_model)]
         if diagnostics is not None:
             diagnostics.requested_model = chain[0]
             diagnostics.temperature = generation_settings.temperature
-            diagnostics.seed = generation_settings.seed
         for attempt, current_model in enumerate(chain):
+            if diagnostics is not None:
+                # Track the effective seed even when fallback changes model
+                # capabilities; Flash never receives one.
+                diagnostics.seed = (
+                    generation_settings.seed
+                    if text_model_supports(current_model, "seed")
+                    else None
+                )
+            attempt_response_format = (
+                response_format_for_model(current_model)
+                if response_format_for_model is not None
+                else response_format
+            )
             transient_retry = 0
             while True:
                 try:
@@ -608,7 +642,7 @@ class LLMService:
                     response = await self._create_openrouter_completion(
                         current_model,
                         messages,
-                        response_format=response_format,
+                        response_format=attempt_response_format,
                         generation_settings=generation_settings,
                     )
                     self._completion_content(response)
@@ -654,25 +688,15 @@ class LLMService:
                             f"calibrated model {current_model} returned malformed completions"
                         ) from exc
                     logger.warning(
-                        "OpenRouter chain returned malformed completion from %s after %d retries, falling back to %s",
+                        "MiniMax generation chain exhausted: %s returned malformed completion "
+                        "after %d retries; failing closed",
                         current_model,
                         transient_retry,
-                        _OPENAI_FALLBACK_MODEL,
                     )
-                    if diagnostics is not None:
-                        diagnostics.provider = "openai"
-                        diagnostics.fallback_used = True
-                    response = await self._create_validated_openai_completion(
-                        messages,
-                        response_format=response_format,
-                        generation_settings=generation_settings,
-                    )
-                    self._record_completion_identity(
-                        diagnostics,
-                        response,
-                        fallback_model=_OPENAI_FALLBACK_MODEL,
-                    )
-                    return response
+                    raise RuntimeError(
+                        f"MiniMax generation chain exhausted: {current_model} "
+                        "returned malformed completions"
+                    ) from exc
                 except (RateLimitError, APIStatusError) as e:
                     status = getattr(e, "status_code", 429)
                     if (
@@ -717,25 +741,14 @@ class LLMService:
                             f"calibrated model {current_model} failed with status {status}"
                         ) from e
                     logger.warning(
-                        "OpenRouter chain exhausted (%s %d), falling back to %s",
+                        "MiniMax generation chain exhausted (%s %d); failing closed",
                         current_model,
                         status,
-                        _OPENAI_FALLBACK_MODEL,
                     )
-                    if diagnostics is not None:
-                        diagnostics.provider = "openai"
-                        diagnostics.fallback_used = True
-                    response = await self._create_validated_openai_completion(
-                        messages,
-                        response_format=response_format,
-                        generation_settings=generation_settings,
-                    )
-                    self._record_completion_identity(
-                        diagnostics,
-                        response,
-                        fallback_model=_OPENAI_FALLBACK_MODEL,
-                    )
-                    return response
+                    raise RuntimeError(
+                        f"MiniMax generation chain exhausted: {current_model} "
+                        f"failed with status {status}"
+                    ) from e
         raise RuntimeError("LLM completion failed after all retries and fallbacks")
 
     async def complete(
@@ -749,7 +762,9 @@ class LLMService:
     ) -> str:
         """Send chat completion with automatic fallback through the model chain.
 
-        Order: OpenRouter primary → OpenRouter fallbacks → OpenAI gpt-4o-mini (direct).
+        Order: MiniMax primary → MiniMax fallbacks. The chain is bounded to the
+        approved MiniMax models; an exhausted chain fails closed instead of
+        falling through to a non-MiniMax provider.
         """
         response = await self._complete_with_fallback(
             messages,
@@ -771,23 +786,50 @@ class LLMService:
         generation_settings: LLMGenerationSettings | None = None,
         allow_model_fallbacks: bool = True,
     ) -> BaseModel:
-        """Request schema-shaped JSON, with one legacy-parser retry for older providers."""
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": _strict_json_schema(schema.model_json_schema()),
-            },
-        }
+        """Request schema-shaped JSON, with one legacy-parser retry.
+
+        Models that advertise strict structured outputs receive the full
+        ``json_schema`` response format. Catalog entries that only advertise
+        ``response_format`` (MiniMax M2.7/Flash) instead receive plain ``json_object``
+        and are validated locally by the same Pydantic schema. In both cases the
+        existing legacy JSON retry stays the final boundary, so a provider that
+        ignores the requested shape cannot bypass typed validation.
+        """
+
+        def _response_format_for(model: str) -> dict[str, Any] | None:
+            if text_model_supports(model, "structured_outputs"):
+                return {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": _strict_json_schema(schema.model_json_schema()),
+                    },
+                }
+            if text_model_supports(model, "response_format"):
+                logger.warning(
+                    "Model %s does not advertise structured outputs; requesting "
+                    "json_object for %s and enforcing the typed schema",
+                    model,
+                    schema_name,
+                )
+                return {"type": "json_object"}
+            logger.warning(
+                "Model %s does not advertise response_format; relying on prompt "
+                "plus typed validation for %s",
+                model,
+                schema_name,
+            )
+            return None
+
         try:
             response = await self._complete_with_fallback(
                 messages,
                 model=model,
-                response_format=response_format,
                 diagnostics=diagnostics,
                 generation_settings=generation_settings,
                 allow_model_fallbacks=allow_model_fallbacks,
+                response_format_for_model=_response_format_for,
             )
             return schema.model_validate(_json_loads_from_response(self._completion_content(response)))
         except Exception as exc:
@@ -825,23 +867,26 @@ class LLMService:
 
         Iterate the token_stream to receive text chunks. After the stream is exhausted,
         call get_usage() to retrieve {"input_tokens": N, "output_tokens": M} or None.
-        Falls back to complete() (full retry + gpt-4o-mini) on streaming errors.
+        Falls back to complete() (full bounded MiniMax retry) on streaming errors.
+        An unsupported model override fails before any request is made.
 
         Note: some OpenRouter upstreams (e.g. xAI/Grok) reject stream_options — on
         BadRequestError containing "stream_options", the stream is retried without usage
         tracking and get_usage() returns None.
         """
+        resolved_model = _ensure_supported_generation_model(model or self.default_model)
         usage_store: dict[str, dict | None] = {"value": None}
 
         async def _stream_inner() -> AsyncIterator[str]:
             try:
                 async with _LLM_SEMAPHORE:
                     stream = await self.client.chat.completions.create(
-                        model=model or self.default_model,
+                        model=resolved_model,
                         messages=messages,
                         max_tokens=1024,
                         stream=True,
                         stream_options={"include_usage": True},
+                        extra_body=_reasoning_extra_body(resolved_model),
                     )
                 async for chunk in stream:
                     choices = chunk.choices or []
@@ -864,10 +909,11 @@ class LLMService:
                     try:
                         async with _LLM_SEMAPHORE:
                             stream = await self.client.chat.completions.create(
-                                model=model or self.default_model,
+                                model=resolved_model,
                                 messages=messages,
                                 max_tokens=1024,
                                 stream=True,
+                                extra_body=_reasoning_extra_body(resolved_model),
                             )
                         async for chunk in stream:
                             choices = chunk.choices or []
@@ -886,6 +932,7 @@ class LLMService:
                         yield response
                 except Exception as fallback_exc:
                     logger.error("Fallback complete() also failed: %s", fallback_exc)
+                    raise
             except Exception as exc:
                 logger.warning("Streaming failed (%s), falling back to complete(): %s", type(exc).__name__, exc)
                 try:
@@ -894,6 +941,7 @@ class LLMService:
                         yield response
                 except Exception as fallback_exc:
                     logger.error("Fallback complete() also failed: %s", fallback_exc)
+                    raise
 
         def get_usage() -> dict | None:
             return usage_store["value"]
@@ -1079,7 +1127,9 @@ class LLMService:
         )
         # Keep a malformed configuration from causing duplicate requests while
         # preserving the configured order and the dedicated vision boundary.
-        return list(dict.fromkeys(model for model in configured if model.strip()))
+        if settings.openrouter_vision_model != VISION_MODEL or settings.openrouter_vision_fallback_models.strip():
+            raise ValueError("Cloud vision requires MiniMax M3 only, without fallbacks")
+        return [VISION_MODEL]
 
     @staticmethod
     def _sanitize_vision_usage(response: Any) -> VisionUsage | None:
@@ -1117,7 +1167,7 @@ class LLMService:
         response: Any,
         requested_model: str,
         *,
-        provider: Literal["openrouter", "gateway"] = "openrouter",
+        provider: Literal["openrouter", "gateway", "custom"] = "openrouter",
     ) -> VisionAnalysisResult:
         content = cls._completion_content(response).strip()
         if not content:
@@ -1257,6 +1307,68 @@ class LLMService:
             status_code=last_status_code,
         )
 
+    async def _complete_custom_vision(self, messages: list[dict]) -> VisionAnalysisResult:
+        """Dedicated endpoint; one schema-unsupported retry, no cloud escape.
+
+        Avoid SDK auth defaults, ambient proxies/netrc and redirects. Neither
+        provider error bodies nor endpoint/credential/payload enter exceptions.
+        """
+        headers = {"Content-Type": "application/json"}
+        if settings.vision_api_key:
+            headers["Authorization"] = f"Bearer {settings.vision_api_key}"
+        body = {
+            "model": settings.vision_model,
+            "messages": messages,
+            "max_tokens": _VISION_MAX_TOKENS,
+            "temperature": 0.0,
+            "response_format": self._vision_response_format(),
+        }
+        url = settings.vision_base_url.rstrip("/") + "/chat/completions"
+        async with httpx.AsyncClient(
+            transport=self._vision_transport,
+            timeout=httpx.Timeout(settings.vision_timeout_seconds),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            for attempt in range(2):
+                try:
+                    async with _LLM_SEMAPHORE:
+                        response = await client.post(url, headers=headers, json=body)
+                except httpx.RequestError:
+                    raise VisionAnalysisTransportError(
+                        "Custom vision provider unavailable", retryable=True
+                    ) from None
+                status = response.status_code
+                if status >= 300:
+                    # Inspect only to classify explicit schema/format rejection.
+                    # Never expose or log this untrusted response body.
+                    message = response.text[:4096].lower()
+                    schema_unsupported = (
+                        status in {400, 422}
+                        and any(word in message for word in ("response_format", "json_schema"))
+                        and any(word in message for word in ("unsupported", "not supported", "unknown", "unrecognized"))
+                    )
+                    if attempt == 0 and schema_unsupported:
+                        body.pop("response_format")
+                        continue
+                    raise VisionAnalysisTransportError(
+                        "Custom vision provider rejected request" if status < 500 and status != 429
+                        else "Custom vision provider unavailable",
+                        retryable=status == 429 or status >= 500,
+                        status_code=status,
+                    ) from None
+                try:
+                    data = response.json()
+                    # Share bounded parsing/validation, never text generation.
+                    completion = json.loads(json.dumps(data), object_hook=lambda obj: SimpleNamespace(**obj))
+                    return self._parse_vision_response(completion, settings.vision_model, provider="custom")
+                except (ValueError, TypeError, AttributeError, _MalformedCompletionResponse):
+                    raise VisionAnalysisTransportError(
+                        "Custom vision provider returned invalid structured output",
+                        retryable=False, status_code=422,
+                    ) from None
+        raise VisionAnalysisTransportError("Custom vision provider unavailable", retryable=True)
+
     async def analyze_image(self, image_b64: str, media_type: str, filename: str) -> VisionAnalysisResult:
         """Analyze an image through the configured vision route.
 
@@ -1267,7 +1379,9 @@ class LLMService:
         OpenRouter or OpenAI.
         """
         safe_media_type = _safe_vision_media_type(media_type)
-        route = await self._build_vision_route()
+        # Custom transport owns its HTTP client and must not resolve a cloud
+        # model chain or construct a gateway client.
+        route = None if settings.vision_provider == "custom" else await self._build_vision_route()
         data_uri = f"data:{safe_media_type};base64,{image_b64}"
         instruction = (
             f'Analyze the image "{filename}" for a factual knowledge-base summary. '
@@ -1277,7 +1391,7 @@ class LLMService:
             "If text or a relationship is unreadable or ambiguous, report it in uncertainties "
             "instead of guessing."
         )
-        if route.provider == "gateway":
+        if route is not None and route.provider == "gateway":
             # The gateway enforces only valid JSON, not a schema, so the shape
             # must be stated in the prompt for the typed result to round-trip.
             instruction += _GATEWAY_VISION_FIELD_CONTRACT
@@ -1288,6 +1402,9 @@ class LLMService:
                 {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
             ],
         }]
+        if settings.vision_provider == "custom":
+            return await self._complete_custom_vision(messages)
+        assert route is not None
         return await self._complete_vision_with_fallback(messages, route=route)
 
     async def generate_tags(

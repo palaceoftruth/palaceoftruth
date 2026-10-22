@@ -1,5 +1,81 @@
 # Integrations Guide
 
+## SAR-1484 operator handoff — no deployment performed
+
+Before a separately authorized rollout, update CURRENT live generation
+overrides (including environment/extraEnv/secret env overrides, which can
+supersede ConfigMap values) on the backend and every worker:
+
+| Setting | Required value |
+| --- | --- |
+| OPENROUTER_DEFAULT_MODEL / config.openrouterDefaultModel | minimax/minimax-m3 |
+| OPENROUTER_FALLBACK_MODELS / config.openrouterFallbackModels | minimax/minimax-m2.7 (remove Nemotron) |
+| RELATIONSHIP_CLASSIFICATION_MODEL / config.relationshipClassificationModel | minimax/minimax-m3 (remove GPT) |
+| OPENROUTER_VISION_MODEL / config.openrouterVisionModel | minimax/minimax-m3 |
+| OPENROUTER_VISION_FALLBACK_MODELS / config.openrouterVisionFallbackModels | empty (remove all GPT; do not add text-only M2.7) |
+| CLIENT_LLM_ALLOWED_MODELS / config.clientLlmAllowedModels | empty or only exact MiniMax M3/M2.7 IDs |
+
+Stale Nemotron/GPT policies fail startup validation, including stale cloud
+vision settings when custom mode is selected; they are not silently ignored.
+Relationship classification uses M3 only by default, retaining bounded
+same-model transport retries and one legacy parser retry, never generic model
+fallbacks. Generic text uses M3 then M2.7 and fails closed. Keep the current
+embedding/index profile and live local WhisperX transcription primary intact.
+Do not change transcription provider/gateway/token or embedding dimensions
+as part of this generation rollout. No migration or chart/release version
+bump is included.
+M3/M2.7 generation sends `reasoning.enabled=false` on schema requests,
+legacy JSON retries, and streaming requests; custom vision transport does not
+receive this OpenRouter-specific control. Existing JSON compatibility is retained.
+
+The text-only opt-in candidate `minimax/minimax-m3.1-flash` is also accepted in
+explicit text settings/allowlists, but defaults above remain unchanged. Flash
+requires reasoning and rejects `reasoning.enabled=false` with HTTP 400; every
+completion, streaming and retry path omits its reasoning override. Its catalog
+does not advertise seed or structured_outputs: omit seed and use `json_object`.
+M2.7 likewise advertises response_format, not structured_outputs, so it uses
+`json_object`; M3 retains strict `json_schema`. Both paths enforce the same
+typed validation and legacy JSON retry. Cloud vision stays M3-only.
+Parent-reported synthetic Flash calls succeeded with both `json_object` and
+strict `json_schema`, no reasoning override, and max_tokens=1024. That is not
+catalog-advertised strict-schema support or classification-quality evidence;
+this candidate keeps catalog-conservative routing and existing token budgets.
+
+The existing `config.visionProvider=gateway` route remains supported and is
+independent of both OpenRouter and optional custom vision. Keep the deployed
+`LLM_GATEWAY_URL` / `LLM_GATEWAY_TOKEN` and `visionGatewayModel=qwen-vl`
+unchanged. It uses `json_object` with a prompt field contract and strict local
+validation, never a paid fallback; its lazy client is closed on shutdown.
+Selecting custom vision is opt-in, not a replacement for the deployed gateway.
+
+Optional custom vision uses `config.visionProvider=custom`,
+`config.visionBaseUrl`, `config.visionModel`, and
+`config.visionTimeoutSeconds` (default 60, finite >0 and <=300). The URL is
+the API base; `/chat/completions` is appended without dropping `/v1` or any
+custom prefix. Private/Lux HTTP hosts are allowed only because configuration
+is trusted operator input. No real Lux URL/model/key is invented here.
+URLs must not contain userinfo/query/fragment. Redirects are disabled.
+No user API can override the endpoint. Arbitrary local model IDs are allowed.
+Custom vision has no cloud fallback and never inherits cloud credentials;
+an optional VISION_API_KEY supplies bearer auth, otherwise Authorization is
+omitted. Explicit unsupported-schema 400/422 permits one retry to that same
+endpoint without response_format; output still must validate locally.
+
+Provide VISION_API_KEY through the app existingSecret or
+additionalEnvFromSecrets; alternatively set
+`externalSecrets.visionApiKeyProperty` to an existing appSecretItemId property.
+Leave that property blank when not configured: it is conditional and does not
+require an optional remote secret field. Never put the credential in the
+ConfigMap. Non-secret settings are shared by the chart app/worker envFrom
+and propagated to Compose backend, worker, and palace-worker. Configure
+narrow `networkPolicy.additionalEgress` rules separately if the chosen private
+endpoint needs access; this change grants no new private egress.
+
+This is code/PR preparation only: no push, merge, deployment, real provider
+call, live override inspection or secret read was performed. Offline HTTP
+tests establish request isolation and parsing, not live Lux compatibility or
+actual M3 quality. A later authorized evaluation/rollout must establish those.
+
 This document describes how to integrate the Palace of Truth Helm chart into external systems, how to configure required external dependencies, and how to wire in optional services.
 
 For the current project snapshot, use [PROJECT_STATUS.md](./PROJECT_STATUS.md). This file documents portable integration patterns. Operator-specific deployment values, ArgoCD applications, secret-manager IDs, DNS targets, and private runbooks belong in a separate private deployment repository.

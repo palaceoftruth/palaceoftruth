@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 
-from pydantic import model_validator
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
 from urllib.parse import parse_qs, urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.embedding_profile import (
@@ -38,6 +40,57 @@ _DEPRECATED_VISION_GATEWAY_MODELS = frozenset({"qwen3-vl"})
 
 def _is_placeholder_credential(value: str) -> bool:
     return value.strip() in _PLACEHOLDER_CREDENTIAL_VALUES
+
+
+# Palace routes every generation request (chat, summarize, tag, entity
+# extraction, relationship classification, and cloud image analysis) through
+# MiniMax. These are the only accepted model identifiers; any other configured
+# or request-time value fails visibly instead of silently generating text on a
+# non-MiniMax provider. Embeddings and transcription are separate OpenAI paths
+# and are deliberately not covered by this policy.
+SUPPORTED_TEXT_MODELS = frozenset(
+    {
+        "minimax/minimax-m3",
+        "minimax/minimax-m2.7",
+        # Text-only canary candidate. It must never be selected for cloud
+        # vision (openrouter_vision_model stays pinned to M3) and it does not
+        # advertise every M3 request capability — see below.
+        "minimax/minimax-m3.1-flash",
+    }
+)
+
+# Advertised request capabilities plus the verified reasoning-disable policy.
+# ``structured_outputs`` means the model can be sent a strict ``json_schema``
+# response format; models without it still accept a plain ``json_object``
+# response format and are validated by the same Pydantic schema locally.
+# ``seed`` means the provider accepts a sampling seed. Omitted capabilities are
+# deliberately never sent, so a request is not rejected for an unsupported
+# parameter; the typed validation/JSON retry path remains mandatory either way.
+# ``disable_reasoning`` is separate from advertised reasoning support: Flash
+# accepts reasoning but requires it to remain enabled (parent live canary).
+TEXT_MODEL_CAPABILITIES: dict[str, frozenset[str]] = {
+    "minimax/minimax-m3": frozenset(
+        {"structured_outputs", "response_format", "reasoning", "disable_reasoning", "seed"}
+    ),
+    "minimax/minimax-m2.7": frozenset(
+        {"response_format", "reasoning", "disable_reasoning", "seed"}
+    ),
+    # MiniMax's Flash catalog entry supports response_format and reasoning but
+    # does not advertise structured_outputs or seed. Reasoning is mandatory:
+    # reasoning.enabled=false is rejected with HTTP 400, so omit the override.
+    "minimax/minimax-m3.1-flash": frozenset({"response_format", "reasoning"}),
+}
+
+# The cloud vision boundary remains M3-only, independent of TEXT capability
+# declarations.
+VISION_MODEL = "minimax/minimax-m3"
+
+
+def text_model_supports(model: str, capability: str) -> bool:
+    """Return whether text requests may use the capability under this policy."""
+
+    return capability in TEXT_MODEL_CAPABILITIES.get(model, frozenset())
+
 
 
 class Settings(BaseSettings):
@@ -132,26 +185,37 @@ class Settings(BaseSettings):
     # failures exhausted), retry the chunk on OpenAI instead of failing the job.
     # Disable to guarantee audio never leaves the configured provider.
     transcription_fallback_to_openai: bool = True
-    # OpenRouter (LLM)
+    # OpenRouter (MiniMax-only generation). M3 is the calibrated primary for
+    # every text task; M2.7 is the bounded generic fallback. Any other value is
+    # rejected at boot by validate_minimax_generation_policy.
     openrouter_api_key: str
-    openrouter_default_model: str = "minimax/minimax-m2.7"
-    openrouter_fallback_models: str = "nvidia/nemotron-3-super-120b-a12b"
+    openrouter_default_model: str = "minimax/minimax-m3"
+    openrouter_fallback_models: str = "minimax/minimax-m2.7"
     openrouter_vision_model: str = "minimax/minimax-m3"
-    openrouter_vision_fallback_models: str = "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+    openrouter_vision_fallback_models: str = ""
+    # Trusted operator settings only; never populated from an API request.
+    vision_provider: Literal["openrouter", "gateway", "custom"] = "openrouter"
+    vision_base_url: str = ""
+    vision_model: str = ""
+    vision_api_key: str = Field(default="", repr=False)
+    vision_timeout_seconds: float = Field(default=60.0, gt=0, le=300, allow_inf_nan=False)
+
     # Vision route. "openrouter" (default) keeps the existing OpenRouter vision
     # chain. "gateway" sends image analysis to the self-hosted OpenAI-compatible
     # LLM gateway (LLM_GATEWAY_URL / LLM_GATEWAY_TOKEN) with a dedicated model.
     # The gateway route is independent of the OpenRouter and OpenAI credentials,
     # carries no cross-provider fallback, and never lets a missing gateway
     # credential fall through to a paid provider.
-    vision_provider: str = "openrouter"
+
     vision_gateway_model: str = "qwen-vl"
     vision_gateway_timeout_seconds: float = 60.0
     vision_max_image_bytes: int = 20 * 1024 * 1024
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
-    relationship_classification_model: str = "openai/gpt-4.1"
+    # Relationship classification is a single fail-closed M3 call: the
+    # calibrated contract never borrows a generic model fallback.
+    relationship_classification_model: str = "minimax/minimax-m3"
     relationship_classification_temperature: float = 0.0
     relationship_classification_seed: int = 1083
     relationship_extraction_min_confidence: float = 0.7
@@ -340,11 +404,7 @@ class Settings(BaseSettings):
         if transcription_provider not in {"openai", "assemblyai", "local_whisperx"}:
             raise ValueError("TRANSCRIPTION_PROVIDER must be one of: openai, assemblyai, local_whisperx")
         self.transcription_provider = transcription_provider
-        vision_provider = self.vision_provider.strip().lower()
-        if vision_provider not in {"openrouter", "gateway"}:
-            raise ValueError("VISION_PROVIDER must be one of: openrouter, gateway")
-        self.vision_provider = vision_provider
-        if vision_provider == "gateway":
+        if self.vision_provider == "gateway":
             gateway_model = self.vision_gateway_model.strip()
             if not gateway_model:
                 raise ValueError("VISION_GATEWAY_MODEL must not be empty")
@@ -490,6 +550,71 @@ class Settings(BaseSettings):
         # Chart-driven deployments always populate DEPLOYMENT_CLUSTER; local
         # dev and the test suite never do, so this gate only applies to real
         # clusters and never breaks `docker compose up` or `pytest`.
+        return self
+
+    @field_validator("vision_provider", mode="before")
+    @classmethod
+    def normalize_vision_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"openrouter", "gateway", "custom"}:
+            raise ValueError("VISION_PROVIDER must be one of: openrouter, gateway, custom")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_minimax_generation_policy(self) -> "Settings":
+        """Refuse to boot with any non-MiniMax generation model configured.
+
+        A single generation policy keeps chat, summarization, tagging,
+        relationship classification, and cloud image analysis on the approved
+        MiniMax models. The alternative — silently routing one of these paths to
+        a different provider — is exactly the hidden behavior this gate
+        prevents.
+        """
+        configured_models = (
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
+            ("OPENROUTER_FALLBACK_MODELS", self.openrouter_fallback_models),
+            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+
+            ("CLIENT_LLM_ALLOWED_MODELS", self.client_llm_allowed_models),
+        )
+        for field_name, raw_value in configured_models:
+            for model in (entry.strip() for entry in raw_value.split(",")):
+                if not model:
+                    continue
+                if model not in SUPPORTED_TEXT_MODELS:
+                    raise ValueError(
+                        f"{field_name} must be a supported MiniMax generation model "
+                        f"{sorted(SUPPORTED_TEXT_MODELS)}; got {model!r}"
+                    )
+        for field_name, value in (
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
+            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+        ):
+            if value not in SUPPORTED_TEXT_MODELS:
+                raise ValueError(f"{field_name} must be one supported MiniMax model")
+        if self.openrouter_vision_model != VISION_MODEL:
+            raise ValueError("OPENROUTER_VISION_MODEL must be minimax/minimax-m3")
+        if self.openrouter_vision_fallback_models.strip():
+            raise ValueError("OPENROUTER_VISION_FALLBACK_MODELS must be empty; M2.7 is text only")
+        if self.vision_base_url:
+            try:
+                parsed = urlparse(self.vision_base_url)
+                port = parsed.port
+                valid = (
+                    parsed.scheme in {"http", "https"} and parsed.hostname
+                    and parsed.username is None and parsed.password is None
+                    and "?" not in self.vision_base_url and "#" not in self.vision_base_url
+                    and not any(char.isspace() for char in self.vision_base_url)
+                    and "\\" not in self.vision_base_url
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError("VISION_BASE_URL must be an HTTP(S) base URL without userinfo/query/fragment")
+        if self.vision_provider == "custom" and (
+            not self.vision_base_url or not self.vision_model.strip() or len(self.vision_model) > 200
+        ):
+            raise ValueError("custom vision requires VISION_BASE_URL and VISION_MODEL (1-200 characters)")
         return self
 
 

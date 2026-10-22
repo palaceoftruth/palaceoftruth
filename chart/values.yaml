@@ -32,27 +32,34 @@ config:
   redisSentinelStartupInitialBackoffSeconds: "1"
   redisSentinelStartupMaxBackoffSeconds: "10"
   # Default OpenRouter model for all text-generation tasks (summarize, tag, chat, etc.).
-  openrouterDefaultModel: "minimax/minimax-m2.7"
+  openrouterDefaultModel: "minimax/minimax-m3"
   clientLlmAllowedModels: ""
   tenantLlmMaxConcurrentRequests: "2"
   tenantLlmDailyTokenLimit: "250000"
   # Ordered fallback models for OpenRouter when the default model is unavailable.
-  openrouterFallbackModels: "nvidia/nemotron-3-super-120b-a12b"
-  # Dedicated low-cost OpenRouter vision chain. The fallback is also routed
-  # through OpenRouter; OPENAI_API_KEY is never used for image analysis.
+  openrouterFallbackModels: "minimax/minimax-m2.7"
+  # Cloud vision is M3 ONLY; M2.7 is text-only, not a vision fallback.
   openrouterVisionModel: "minimax/minimax-m3"
-  openrouterVisionFallbackModels: "openai/gpt-4o-mini,openai/gpt-4.1-mini"
+
+  openrouterVisionFallbackModels: ""
+  # custom uses ONLY these dedicated settings. No cloud credential inheritance.
+  visionProvider: openrouter
+  visionBaseUrl: ""
+  visionModel: ""
+  visionTimeoutSeconds: "60"
+  # Relationship classification stays fail-closed on M3 (no generic fallback).
+  relationshipClassificationModel: "minimax/minimax-m3"
+
   # Vision route. "openrouter" (default) keeps the OpenRouter vision chain above.
   # "gateway" routes image analysis to the self-hosted OpenAI-compatible gateway
   # (llmGatewayUrl / externalSecrets.llmGatewayTokenProperty) with a dedicated
   # model. The gateway route never uses the OpenAI or OpenRouter credential and
   # has no automatic paid fallback.
-  visionProvider: "openrouter"
+
   visionGatewayModel: "qwen-vl"
   visionGatewayTimeoutSeconds: "60"
   visionMaxImageBytes: "20971520"
-  # Frozen relationship-classifier profile. Change only with a calibrated eval.
-  relationshipClassificationModel: "openai/gpt-4.1"
+
   relationshipClassificationTemperature: "0.0"
   relationshipClassificationSeed: "1083"
   relationshipExtractionMinConfidence: "0.7"
@@ -286,6 +293,8 @@ externalSecrets:
   facebookOembedAccessTokenProperty: ""
   # Optional local embedding proxy bearer token property.
   embeddingLocalHttpApiKeyProperty: ""
+  # Optional dedicated custom vision bearer secret. Blank adds no remote field.
+  visionApiKeyProperty: ""
   # Optional AssemblyAI API key property for hosted diarized transcription.
   assemblyaiApiKeyProperty: ""
   # Optional TypeSafe (Jev) API key for the jev retrieval reranker. The key
@@ -320,6 +329,7 @@ externalSecrets:
 #   GITHUB_PAT / PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY for Palace repo sync,
 #   FACEBOOK_OEMBED_ACCESS_TOKEN for no-JavaScript Facebook post capture,
 #   EMBEDDING_LOCAL_HTTP_API_KEY for authenticated local embedding proxies, and
+#   VISION_API_KEY for authenticated custom vision endpoints (optional), and
 #   ASSEMBLYAI_API_KEY when config.transcriptionProvider=assemblyai,
 #   LLM_GATEWAY_TOKEN when config.transcriptionProvider=local_whisperx, and
 #   FIRECRAWL_API_KEY when config.webpageScraperProvider=firecrawl-cloud or an

@@ -145,7 +145,7 @@ def test_settings_validation_errors_do_not_disclose_secret_inputs() -> None:
 def test_settings_expose_frozen_relationship_classifier_profile() -> None:
     settings = config.Settings(**_settings_kwargs())
 
-    assert settings.relationship_classification_model == "openai/gpt-4.1"
+    assert settings.relationship_classification_model == "minimax/minimax-m3"
     assert settings.relationship_classification_temperature == 0.0
     assert settings.relationship_classification_seed == 1083
     assert settings.relationship_extraction_min_confidence == 0.7
@@ -155,9 +155,7 @@ def test_settings_expose_dedicated_openrouter_vision_chain_defaults() -> None:
     settings = config.Settings(**_settings_kwargs())
 
     assert settings.openrouter_vision_model == "minimax/minimax-m3"
-    assert settings.openrouter_vision_fallback_models == (
-        "openai/gpt-4o-mini,openai/gpt-4.1-mini"
-    )
+    assert settings.openrouter_vision_fallback_models == ""
 
 
 @pytest.mark.parametrize(
@@ -597,6 +595,83 @@ def test_typesafe_settings_are_not_validated_while_the_reranker_is_off() -> None
 
     assert settings.typesafe_api_key == ""
 
+
+
+# MiniMax-only generation routing: every text/relationship/vision generation
+# model must resolve to the exact supported MiniMax set. Any other configured
+# value fails visibly at boot instead of quietly routing to a non-MiniMax
+# provider. Embeddings and transcription are untouched.
+def test_settings_default_text_generation_models_are_minimax_m3_and_m27() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.openrouter_default_model == "minimax/minimax-m3"
+    assert settings.openrouter_fallback_models == "minimax/minimax-m2.7"
+
+
+def test_settings_default_relationship_classifier_is_minimax_m3() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.relationship_classification_model == "minimax/minimax-m3"
+
+
+@pytest.mark.parametrize("field", [
+    "openrouter_default_model", "openrouter_fallback_models",
+    "relationship_classification_model", "client_llm_allowed_models",
+])
+def test_settings_accept_explicit_flash_text_candidate(field: str) -> None:
+    settings = config.Settings(**_settings_kwargs(**{field: "minimax/minimax-m3.1-flash"}))
+    assert getattr(settings, field) == "minimax/minimax-m3.1-flash"
+    assert settings.openrouter_vision_model == "minimax/minimax-m3"
+
+
+@pytest.mark.parametrize("field", ["openrouter_vision_model", "openrouter_vision_fallback_models"])
+def test_settings_reject_flash_cloud_vision(field: str) -> None:
+    with pytest.raises(ValidationError, match=field.upper()):
+        config.Settings(**_settings_kwargs(**{field: "minimax/minimax-m3.1-flash"}))
+
+
+def test_text_model_capabilities_distinguish_schema_seed_and_reasoning_control() -> None:
+    assert config.text_model_supports("minimax/minimax-m3", "structured_outputs")
+    for model in ("minimax/minimax-m2.7", "minimax/minimax-m3.1-flash"):
+        assert config.text_model_supports(model, "response_format")
+        assert not config.text_model_supports(model, "structured_outputs")
+    for model in ("minimax/minimax-m3", "minimax/minimax-m2.7"):
+        assert config.text_model_supports(model, "seed")
+        assert config.text_model_supports(model, "disable_reasoning")
+    assert not config.text_model_supports("minimax/minimax-m3.1-flash", "seed")
+    assert not config.text_model_supports("minimax/minimax-m3.1-flash", "disable_reasoning")
+
+
+def test_settings_vision_defaults_have_no_gpt_fallback() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.openrouter_vision_model == "minimax/minimax-m3"
+    assert settings.openrouter_vision_fallback_models == ""
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("openrouter_default_model", "openai/gpt-4.1"),
+        ("openrouter_fallback_models", "nvidia/nemotron-3-super-120b-a12b"),
+        ("relationship_classification_model", "openai/gpt-4.1"),
+        ("openrouter_vision_model", "google/gemini-2.5-flash-lite"),
+        ("openrouter_vision_fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        ("client_llm_allowed_models", "openai/gpt-4.1"),
+    ],
+)
+def test_settings_reject_non_minimax_generation_models(field: str, value: str) -> None:
+    with pytest.raises(ValidationError, match=field.upper()):
+        config.Settings(**_settings_kwargs(**{field: value}))
+
+
+def test_settings_preserve_openai_embedding_and_transcription_defaults() -> None:
+    settings = config.Settings(**_settings_kwargs())
+
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-small"
+    assert settings.transcription_provider == "openai"
+    assert settings.whisper_model == "gpt-4o-transcribe-diarize"
 
 # --- Vision provider route (VISION_PROVIDER / VISION_GATEWAY_MODEL) -------------
 
