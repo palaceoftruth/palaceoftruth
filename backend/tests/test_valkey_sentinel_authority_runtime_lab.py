@@ -16,11 +16,13 @@ NOT claimed: the Sentinel StatefulSet+PVC durability migration (not implemented)
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -35,7 +37,55 @@ CHART = Path(__file__).resolve().parents[2] / "chart"
 IMAGE = "valkey/valkey:8-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec"
 PW = "lab-password"
 SVC, RPL, SENT, SENT_BOOT = "palaceoftruth-valkey-primary", "palaceoftruth-valkey-replica", "palaceoftruth-valkey-sentinel", "palaceoftruth-valkey-sentinel-bootstrap"
-TAG, NET = "psllab", "psl-lab"
+RUN_ID = os.environ.get("PALACE_VALKEY_LAB_OWNER") or uuid.uuid4().hex
+OWNER_LABEL = "io.palace.valkey-lab.owner"
+TAG, NET = f"psllab-{RUN_ID}", f"psl-lab-{RUN_ID}"
+_LEDGERS = []
+
+
+class _Ownership:
+    """Only remove ledger entries after inspecting their exact ownership label."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.resources = []
+
+    def remember(self, kind, name):
+        if (kind, name) not in self.resources:
+            self.resources.append((kind, name))
+
+    def remove(self, kind, name):
+        if (kind, name) not in self.resources:
+            raise RuntimeError(f"{name}: not in ownership ledger")
+        result = _docker(kind, "inspect", name, timeout=10)
+        if result.returncode:
+            if "No such container" in result.stderr or "No such network" in result.stderr or "No such object" in result.stderr:
+                return
+            raise RuntimeError(result.stderr)
+        resource = json.loads(result.stdout)[0]
+        labels = (resource.get("Config", {}).get("Labels") if kind == "container" else resource.get("Labels")) or {}
+        if labels.get(OWNER_LABEL) != self.owner:
+            raise RuntimeError(f"{name}: ownership mismatch; refusing removal")
+        args = ("rm", "-f") if kind == "container" else ("network", "rm")
+        _docker(*args, resource["Id"], check=True, timeout=10)
+
+    def cleanup(self):
+        errors = []
+        for kind, name in reversed(self.resources):
+            try:
+                self.remove(kind, name)
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+
+def _remove_container(name):
+    for ledger in _LEDGERS:
+        if ("container", name) in ledger.resources:
+            ledger.remove("container", name)
+            return
+    raise RuntimeError(f"{name}: not in ownership ledger")
 
 
 def _render(*sets):
@@ -100,16 +150,18 @@ def _build_lab(tag, net_name):
     for n in ("prim", "repl", "s1", "s2", "s3"):
         (d / n).mkdir(); os.chmod(d / n, 0o777)
 
-    _docker("network", "rm", net_name)
-    _docker("network", "create", net_name)
+    ledger = _LEDGERS[-1]
+    ledger.remember("network", net_name)
+    _docker("network", "create", "--label", f"{OWNER_LABEL}={RUN_ID}", net_name, check=True)
     sub = _docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Subnet}}", net_name).stdout.strip()
     net = ipaddress.ip_network(sub)
 
     def data_node(name, alias, ip, vol, init):
-        _docker("rm", "-f", f"{tag}-{name}")
-        _docker("run", "-d", "--name", f"{tag}-{name}", "--network", net_name, "--ip", ip,
+        ledger.remember("container", f"{tag}-{name}")
+        _remove_container(f"{tag}-{name}")
+        _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", f"{tag}-{name}", "--network", net_name, "--ip", ip,
                 "--network-alias", alias, "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / vol}:/data",
-                IMAGE, "sh", "-ec", init + "\nexec valkey-server /data/valkey.conf")
+                IMAGE, "sh", "-ec", init + "\nexec valkey-server /data/valkey.conf", check=True)
 
     def start_primary(ip, fresh=False):
         if fresh and (d / "prim").exists():
@@ -121,10 +173,11 @@ def _build_lab(tag, net_name):
         data_node("repl", RPL, ip, "repl", repl_init)
 
     def run_sentinel(i):
-        _docker("rm", "-f", f"{tag}-s{i}")
-        _docker("run", "-d", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
+        ledger.remember("container", f"{tag}-s{i}")
+        _remove_container(f"{tag}-s{i}")
+        _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
                 "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
-                "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start)
+                "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start, check=True)
 
     def start_sentinels():
         for i in (1, 2, 3):
@@ -137,7 +190,7 @@ def _build_lab(tag, net_name):
     def wipe_sentinels():
         # FULL Sentinel state loss: remove the pods AND their learned conf.
         for i in (1, 2, 3):
-            _docker("rm", "-f", f"{tag}-s{i}")
+            _remove_container(f"{tag}-s{i}")
             sd = d / f"s{i}"
             for x in list(sd.iterdir()):
                 if x.is_dir():
@@ -153,52 +206,40 @@ def _build_lab(tag, net_name):
             "start_primary": start_primary, "start_replica": start_replica, "_dir": d, "_net_name": net_name}
 
 
-@pytest.fixture(scope="module")
-def lab():
-    state = _build_lab(TAG, NET)
+def _lab_fixture(tag, net_name):
+    ledger = _Ownership(RUN_ID)
+    _LEDGERS.append(ledger)
+    state = None
     try:
+        state = _build_lab(tag, net_name)
         yield state
     finally:
-        for c in ("prim", "repl", "s1", "s2", "s3"):
-            _docker("rm", "-f", f"{TAG}-{c}")
-        _docker("network", "rm", NET)
-        shutil.rmtree(state["_dir"], ignore_errors=True)
+        try:
+            ledger.cleanup()
+        finally:
+            _LEDGERS.remove(ledger)
+            if state is not None:
+                shutil.rmtree(state["_dir"], ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def lab():
+    yield from _lab_fixture(TAG, NET)
 
 
 @pytest.fixture(scope="module")
 def lab_churn():
-    state = _build_lab("pslchurn", "psl-churn")
-    try:
-        yield state
-    finally:
-        for c in ("prim", "repl", "s1", "s2", "s3"):
-            _docker("rm", "-f", f"pslchurn-{c}")
-        _docker("network", "rm", "psl-churn")
-        shutil.rmtree(state["_dir"], ignore_errors=True)
+    yield from _lab_fixture(f"pslchurn-{RUN_ID}", f"psl-churn-{RUN_ID}")
 
 
 @pytest.fixture(scope="module")
 def lab_reconverge():
-    state = _build_lab("pslrcv", "psl-rcv")
-    try:
-        yield state
-    finally:
-        for c in ("prim", "repl", "s1", "s2", "s3"):
-            _docker("rm", "-f", f"pslrcv-{c}")
-        _docker("network", "rm", "psl-rcv")
-        shutil.rmtree(state["_dir"], ignore_errors=True)
+    yield from _lab_fixture(f"pslrcv-{RUN_ID}", f"psl-rcv-{RUN_ID}")
 
 
 @pytest.fixture(scope="module")
 def lab_roll():
-    state = _build_lab("pslroll", "psl-roll")
-    try:
-        yield state
-    finally:
-        for c in ("prim", "repl", "s1", "s2", "s3"):
-            _docker("rm", "-f", f"pslroll-{c}")
-        _docker("network", "rm", "psl-roll")
-        shutil.rmtree(state["_dir"], ignore_errors=True)
+    yield from _lab_fixture(f"pslroll-{RUN_ID}", f"psl-roll-{RUN_ID}")
 
 
 def _quorum_ok():
@@ -217,7 +258,7 @@ def test_lab_failover_sentinel_restart_and_old_primary_return(lab):
     assert _wait(lambda: _cli(f"{TAG}-repl", "GET", "lab:marker") == "v1", 90), "replica did not sync"
 
     # natural failover: remove the (master) primary; the ensemble must promote the replica
-    _docker("rm", "-f", f"{TAG}-prim")
+    _remove_container(f"{TAG}-prim")
     repl_ip = _ipof(f"{TAG}-repl")
     assert _wait(lambda: (_sent(f"{TAG}-s1", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split() or [""])[0] == repl_ip, 180), "natural failover did not promote the replica"
     assert _role(f"{TAG}-repl") == "master"
@@ -240,7 +281,7 @@ def test_lab_failover_sentinel_restart_and_old_primary_return(lab):
 
 def test_lab_no_ensemble_with_reused_data_fails_closed(lab):
     for i in (1, 2, 3):
-        _docker("rm", "-f", f"{TAG}-s{i}")
+        _remove_container(f"{TAG}-s{i}")
     lab["start_primary"](str(lab["net"][216]))
     time.sleep(70)  # bounded wait for the ensemble, then the fail-closed path
     assert _role(f"{TAG}-prim") != "master", "reused data with no ensemble must not be a writable master"
@@ -296,7 +337,7 @@ def test_lab_full_sentinel_state_wipe_reconverges_to_the_newer_master(lab_reconv
     assert _wait(lambda: _cli(f"{tag}-repl", "GET", "rc:marker") == "v1", 90), "replica did not sync"
 
     # natural failover to the replica
-    _docker("rm", "-f", f"{tag}-prim")
+    _remove_container(f"{tag}-prim")
     repl_ip = _ipof(f"{tag}-repl")
     assert _wait(lambda: (_sent(f"{tag}-s1", "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").split() or [""])[0] == repl_ip, 180), "natural failover did not promote the replica"
     _cli(f"{tag}-repl", "SET", "rc:marker", "v2-NEWER")
