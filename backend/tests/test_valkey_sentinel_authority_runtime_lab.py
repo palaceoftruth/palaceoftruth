@@ -137,6 +137,8 @@ class _Ownership:
             self.resources.append((kind, name))
         if resource_id:
             self.ids[(kind, name)] = resource_id
+            # A new incarnation must not inherit the prior name's tombstone.
+            self.removed.discard((kind, name))
         self.flush()
 
     def remove(self, kind, name):
