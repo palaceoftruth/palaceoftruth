@@ -19,6 +19,7 @@ import ipaddress
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -42,40 +43,154 @@ OWNER_LABEL = "io.palace.valkey-lab.owner"
 TAG, NET = f"psllab-{RUN_ID}", f"psl-lab-{RUN_ID}"
 _LEDGERS = []
 
+# Every external command is bounded. Docker CLI calls are cheap but a wedged
+# daemon (or a container whose pipe is inherited by a shim) must never hang the
+# runner, so inspect/remove get explicit finite bounds too.
+DOCKER_TIMEOUT = 30
+CLEANUP_BUDGET = 90.0
+_LEDGER_DIR = Path(tempfile.gettempdir())
+
+
+def _kill_group(proc):
+    """Kill the whole process group of a bounded child, best effort."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
+def _bounded(argv, *, timeout, check=False, env=None):
+    """Run argv in its own session with a FINITE bound on both wait and drain.
+
+    subprocess.run(timeout=...) kills only the direct child and then re-enters
+    communicate() with no bound; when a surviving grandchild inherited the
+    stdout pipe, that second wait blocks forever (the observed hang: cleanup
+    never returned and the enclosing 300s killed the runner). Owning the
+    process group lets us kill the entire tree and drain under a hard bound.
+    """
+    proc = subprocess.Popen(
+        list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True, env=env,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        err = (err or "") + f"\n{argv[0]}: timed out after {timeout}s"
+    cp = subprocess.CompletedProcess(list(argv), proc.returncode, out or "", err or "")
+    if check:
+        raise_for_status(cp)
+    return cp
+
+
+def raise_for_status(cp):
+    if cp.returncode:
+        raise subprocess.CalledProcessError(cp.returncode, cp.args, cp.stdout, cp.stderr)
+
+
+def _vanished(stderr):
+    text = (stderr or "").lower()
+    return any(m in text for m in ("no such container", "no such network", "no such object"))
+
 
 class _Ownership:
-    """Only remove ledger entries after inspecting their exact ownership label."""
+    """Only remove ledger entries after inspecting their exact ownership label.
 
-    def __init__(self, owner):
+    The ledger is flushed to disk BEFORE each resource is created, so a runner
+    that dies still leaves an audit record of exactly what it owned. Removal is
+    always by inspected immutable ID after an owner-label match; a resource that
+    vanished underneath us is an already-satisfied race, never a foreign delete.
+    """
+
+    def __init__(self, owner, path=None):
         self.owner = owner
         self.resources = []
+        self.ids = {}
+        self.removed = set()
+        self.tempdir = None
+        self.status = "open"
+        self.path = Path(path) if path else _LEDGER_DIR / f"valkey-lab-ledger-{owner}.json"
+        self.flush()
 
-    def remember(self, kind, name):
+    def _payload(self):
+        return {
+            "owner": self.owner,
+            "status": self.status,
+            "resources": [{"kind": k, "name": n, "id": self.ids.get((k, n))} for k, n in self.resources],
+        }
+
+    def flush(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._payload(), indent=2) + "\n")
+        os.replace(tmp, self.path)
+
+    def remember(self, kind, name, resource_id=None):
         if (kind, name) not in self.resources:
             self.resources.append((kind, name))
+        if resource_id:
+            self.ids[(kind, name)] = resource_id
+        self.flush()
 
     def remove(self, kind, name):
         if (kind, name) not in self.resources:
             raise RuntimeError(f"{name}: not in ownership ledger")
-        result = _docker(kind, "inspect", name, timeout=10)
+        if (kind, name) in self.removed:
+            return
+        result = _docker(kind, "inspect", name, timeout=15)
         if result.returncode:
-            if "No such container" in result.stderr or "No such network" in result.stderr or "No such object" in result.stderr:
+            if _vanished(result.stderr):
+                self.removed.add((kind, name))
+                self.ids.pop((kind, name), None)
+                self.flush()
                 return
-            raise RuntimeError(result.stderr)
+            raise RuntimeError(result.stderr.strip() or f"{name}: inspect failed")
         resource = json.loads(result.stdout)[0]
         labels = (resource.get("Config", {}).get("Labels") if kind == "container" else resource.get("Labels")) or {}
         if labels.get(OWNER_LABEL) != self.owner:
             raise RuntimeError(f"{name}: ownership mismatch; refusing removal")
+        resource_id = resource.get("Id") or ""
+        if not resource_id:
+            raise RuntimeError(f"{name}: inspect returned no immutable ID; refusing removal")
         args = ("rm", "-f") if kind == "container" else ("network", "rm")
-        _docker(*args, resource["Id"], check=True, timeout=10)
+        removal = _docker(*args, resource_id, timeout=DOCKER_TIMEOUT)
+        if removal.returncode:
+            probe = _docker(kind, "inspect", name, timeout=15)
+            if probe.returncode and _vanished(probe.stderr):
+                # Raced with another remover: gone is gone, and we only ever
+                # touched the ID we inspected and label-matched.
+                self.removed.add((kind, name))
+                self.ids.pop((kind, name), None)
+                self.flush()
+                return
+            raise RuntimeError(removal.stderr.strip() or f"{name}: removal failed")
+        self.removed.add((kind, name))
+        self.ids.pop((kind, name), None)
+        self.flush()
 
-    def cleanup(self):
+    def cleanup(self, budget=CLEANUP_BUDGET):
         errors = []
-        for kind, name in reversed(self.resources):
+        deadline = time.monotonic() + budget
+        for kind, name in list(reversed(self.resources)):
+            if time.monotonic() > deadline:
+                errors.append(f"cleanup budget exhausted before {kind} {name}")
+                break
             try:
                 self.remove(kind, name)
             except Exception as exc:
-                errors.append(str(exc))
+                errors.append(f"{kind} {name}: {exc}")
+        self.status = "failed" if errors else "cleaned"
+        self.flush()
+        if self.tempdir is not None:
+            shutil.rmtree(self.tempdir, ignore_errors=True)
+            self.tempdir = None
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -94,7 +209,7 @@ def _render(*sets):
     cmd = ["helm", "template", "palaceoftruth", str(CHART)]
     for a in sets:
         cmd += ["--set", a]
-    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    out = _bounded(cmd, timeout=120, check=True).stdout
     return [d for d in yaml.safe_load_all(out) if isinstance(d, dict)]
 
 
@@ -102,17 +217,17 @@ def _by(m, kind, name):
     return next(x for x in m if x.get("kind") == kind and x["metadata"]["name"] == name)
 
 
-def _docker(*a, **kw):
-    return subprocess.run(["docker", *a], capture_output=True, text=True, **kw)
+def _docker(*a, timeout=DOCKER_TIMEOUT, check=False):
+    return _bounded(["docker", *a], timeout=timeout, check=check)
 
 
 def _cli(c, *a, auth=True):
     base = ["docker", "exec", c, "valkey-cli"] + (["-a", PW, "--no-auth-warning"] if auth else [])
-    return subprocess.run(base + list(a), capture_output=True, text=True, timeout=20).stdout.strip()
+    return _bounded(base + list(a), timeout=20).stdout.strip()
 
 
 def _sent(c, *a):
-    return subprocess.run(["docker", "exec", c, "valkey-cli", "-p", "26379", *a], capture_output=True, text=True, timeout=20).stdout.strip()
+    return _bounded(["docker", "exec", c, "valkey-cli", "-p", "26379", *a], timeout=20).stdout.strip()
 
 
 def _role(c):
@@ -135,7 +250,7 @@ def _wait(pred, timeout=150, interval=2.0):
     return False
 
 
-def _build_lab(tag, net_name):
+def _build_lab(tag, net_name, ledger):
     """Start a disposable Valkey primary + replica + 3 Sentinels. Returns a dict."""
     if shutil.which("docker") is None:
         pytest.skip("docker is required")
@@ -146,22 +261,30 @@ def _build_lab(tag, net_name):
     cm = _by(m, "ConfigMap", "palaceoftruth-valkey-sentinel-config")["data"]["sentinel.conf"]
 
     d = Path(tempfile.mkdtemp(prefix=f"{tag}-"))
+    # Registered on the ledger (not on the returned state) so the temp dir is
+    # removed even when this function raises before returning.
+    ledger.tempdir = d
     (d / "tpl").mkdir(); (d / "tpl" / "sentinel.conf").write_text(cm)
     for n in ("prim", "repl", "s1", "s2", "s3"):
         (d / n).mkdir(); os.chmod(d / n, 0o777)
 
-    ledger = _LEDGERS[-1]
+    # Ownership is persisted BEFORE the resource exists, then the immutable ID
+    # is recorded from the create output.
     ledger.remember("network", net_name)
-    _docker("network", "create", "--label", f"{OWNER_LABEL}={RUN_ID}", net_name, check=True)
+    created_net = _docker("network", "create", "--label", f"{OWNER_LABEL}={RUN_ID}", net_name,
+                          check=True, timeout=DOCKER_TIMEOUT)
+    ledger.remember("network", net_name, created_net.stdout.strip())
     sub = _docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Subnet}}", net_name).stdout.strip()
     net = ipaddress.ip_network(sub)
 
     def data_node(name, alias, ip, vol, init):
-        ledger.remember("container", f"{tag}-{name}")
-        _remove_container(f"{tag}-{name}")
-        _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", f"{tag}-{name}", "--network", net_name, "--ip", ip,
-                "--network-alias", alias, "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / vol}:/data",
-                IMAGE, "sh", "-ec", init + "\nexec valkey-server /data/valkey.conf", check=True)
+        cname = f"{tag}-{name}"
+        ledger.remember("container", cname)
+        _remove_container(cname)
+        cid = _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", cname, "--network", net_name, "--ip", ip,
+                      "--network-alias", alias, "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / vol}:/data",
+                      IMAGE, "sh", "-ec", init + "\nexec valkey-server /data/valkey.conf", check=True).stdout.strip()
+        ledger.remember("container", cname, cid)
 
     def start_primary(ip, fresh=False):
         if fresh and (d / "prim").exists():
@@ -173,11 +296,13 @@ def _build_lab(tag, net_name):
         data_node("repl", RPL, ip, "repl", repl_init)
 
     def run_sentinel(i):
-        ledger.remember("container", f"{tag}-s{i}")
-        _remove_container(f"{tag}-s{i}")
-        _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", f"{tag}-s{i}", "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
-                "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
-                "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start, check=True)
+        cname = f"{tag}-s{i}"
+        ledger.remember("container", cname)
+        _remove_container(cname)
+        cid = _docker("run", "-d", "--label", f"{OWNER_LABEL}={RUN_ID}", "--name", cname, "--network", net_name, "--network-alias", SENT, "--network-alias", SENT_BOOT,
+                      "-e", f"VALKEY_PASSWORD={PW}", "-v", f"{d / 'tpl'}:/etc/sentinel-template:ro",
+                      "-v", f"{d / f's{i}'}:/data", IMAGE, "sh", "-ec", sent_start, check=True).stdout.strip()
+        ledger.remember("container", cname, cid)
 
     def start_sentinels():
         for i in (1, 2, 3):
@@ -207,19 +332,21 @@ def _build_lab(tag, net_name):
 
 
 def _lab_fixture(tag, net_name):
-    ledger = _Ownership(RUN_ID)
+    ledger = _Ownership(RUN_ID, _LEDGER_DIR / f"valkey-lab-ledger-{RUN_ID}-{tag}.json")
     _LEDGERS.append(ledger)
-    state = None
     try:
-        state = _build_lab(tag, net_name)
+        state = _build_lab(tag, net_name, ledger)
         yield state
     finally:
         try:
             ledger.cleanup()
         finally:
             _LEDGERS.remove(ledger)
-            if state is not None:
-                shutil.rmtree(state["_dir"], ignore_errors=True)
+            # The temp dir is owned by the ledger and registered before any
+            # resource exists, so it is removed even when the fixture raised.
+            if ledger.tempdir is not None:
+                shutil.rmtree(ledger.tempdir, ignore_errors=True)
+                ledger.tempdir = None
 
 
 @pytest.fixture(scope="module")
