@@ -536,6 +536,13 @@ valkey:
       interval: 30s
       labels: {}
 
+  # Update strategy for the Sentinel-mode primary and replica StatefulSets.
+  # RollingUpdate is the default and preserves the previous behavior. OnDelete
+  # renders on both data nodes so a staged maintenance window can replace the
+  # non-authoritative pod under separate approval; it does not delete pods by
+  # itself. Any other value fails rendering.
+  dataUpdateStrategy: RollingUpdate
+
   # Sentinel high-availability mode.
   # When enabled, replaces the single Deployment with a primary StatefulSet,
   # a replica StatefulSet, and 3 Sentinel pods. The app connects via Sentinel,

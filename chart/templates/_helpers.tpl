@@ -392,7 +392,23 @@ Sentinel mode is enabled either directly or by the HA profile.
 */}}
 {{- define "palaceoftruth.valkeySentinelEnabled" -}}
 {{- if and .Values.valkey.enabled (or .Values.valkey.sentinel.enabled .Values.highAvailability.enabled) }}true{{ else }}false{{ end -}}
-{{- end }}
+{{- end -}}
+
+{{/*
+Update strategy for the Sentinel-mode primary and replica StatefulSets. Only
+the two Kubernetes StatefulSet strategies are accepted. RollingUpdate is the
+default and preserves the previous implicit API default; OnDelete holds both
+data pods in place so a separately approved staged maintenance window can
+replace the non-authoritative pod first. An unknown value fails rendering
+instead of silently falling back to RollingUpdate.
+*/}}
+{{- define "palaceoftruth.valkeyDataUpdateStrategy" -}}
+{{- $strategy := default "RollingUpdate" .Values.valkey.dataUpdateStrategy -}}
+{{- if not (has $strategy (list "RollingUpdate" "OnDelete")) -}}
+{{- fail (printf "valkey.dataUpdateStrategy must be RollingUpdate or OnDelete; got %q" $strategy) -}}
+{{- end -}}
+{{- $strategy -}}
+{{- end -}}
 
 {{/*
 Redis URL: uses config.redisUrl override, or derives from Valkey service name,
@@ -680,6 +696,30 @@ the compose stack cannot drift apart.
 - name: HOME
   value: {{ .Values.podSecurity.homeDir | quote }}
 {{- end }}
+
+{{/*
+Generation-model policy env for the pre-upgrade migration hook. The hook runs
+before the normal ConfigMap replacement, so its envFrom block still carries the
+old generation policy. The current backend validates every generation model at
+import time, so the hook would refuse to start until the old ConfigMap existed
+no more. These explicit entries come from the desired chart config and override
+envFrom (Kubernetes gives explicit env precedence); they add no credentials and
+do not change vision provider, gateway, or transcription settings.
+*/}}
+{{- define "palaceoftruth.generationModelPolicyEnv" -}}
+- name: OPENROUTER_DEFAULT_MODEL
+  value: {{ .Values.config.openrouterDefaultModel | quote }}
+- name: OPENROUTER_FALLBACK_MODELS
+  value: {{ .Values.config.openrouterFallbackModels | quote }}
+- name: RELATIONSHIP_CLASSIFICATION_MODEL
+  value: {{ .Values.config.relationshipClassificationModel | quote }}
+- name: CLIENT_LLM_ALLOWED_MODELS
+  value: {{ .Values.config.clientLlmAllowedModels | quote }}
+- name: OPENROUTER_VISION_MODEL
+  value: {{ .Values.config.openrouterVisionModel | quote }}
+- name: OPENROUTER_VISION_FALLBACK_MODELS
+  value: {{ .Values.config.openrouterVisionFallbackModels | quote }}
+{{- end -}}
 
 {{/*
 Image tag reference.
