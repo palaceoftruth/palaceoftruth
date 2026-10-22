@@ -12,8 +12,13 @@ same-model retries and one legacy JSON parsing retry remain, but it never
 borrows the generic M2.7 fallback. Schema, semantic abstention, confidence
 thresholds and the SAR-1068 contract remain unchanged. Offline tests verify
 routing and parsing, not actual M3 classification quality.
-Cloud MiniMax requests disable reasoning (`reasoning.enabled=false`), including
+M3/M2.7 requests disable reasoning (`reasoning.enabled=false`), including
 streaming and legacy JSON retries, to preserve bounded visible-output budgets.
+The text-only opt-in candidate `minimax/minimax-m3.1-flash` requires reasoning:
+all completion, streaming and retry paths omit the reasoning override and seed.
+M3 keeps strict `json_schema`; M2.7 and Flash use advertised `json_object`
+support with the same local typed validation and one legacy JSON retry.
+Flash is not a default or an automatic fallback and is not cloud vision.
 Custom vision transport receives no OpenRouter-specific reasoning controls.
 
 Cloud vision defaults to M3 ONLY; `OPENROUTER_VISION_FALLBACK_MODELS` must be

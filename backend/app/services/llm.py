@@ -20,7 +20,12 @@ from openai import (
 )
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from app.config import SUPPORTED_TEXT_MODELS, settings
+from app.config import (
+    SUPPORTED_TEXT_MODELS,
+    VISION_MODEL,
+    settings,
+    text_model_supports,
+)
 from app.services.relationship_classification_contract import (
     RELATIONSHIP_PROMPT_VERSION,
     build_relationship_classification_messages,
@@ -185,6 +190,14 @@ class BrowserAction(BaseModel):
 
 class BrowserActions(BaseModel):
     actions: list[BrowserAction] = Field(default_factory=list)
+
+
+def _reasoning_extra_body(model: str) -> dict[str, Any]:
+    # Advertised reasoning support does not imply it can be disabled. Flash
+    # requires reasoning; leave its provider default untouched on every path.
+    if text_model_supports(model, "disable_reasoning"):
+        return {"reasoning": {"enabled": False}}
+    return {}
 
 
 def _strip_reasoning_blocks(raw: str) -> str:
@@ -406,10 +419,19 @@ class LLMService:
         extra_body: dict[str, Any] | None = None,
     ) -> Any:
         generation_settings = generation_settings or LLMGenerationSettings()
+        request_kwargs = generation_settings.request_kwargs()
+        if "seed" in request_kwargs and not text_model_supports(current_model, "seed"):
+            # Flash does not advertise seed; keep requests within advertised
+            # capabilities rather than assuming the provider accepts it.
+            request_kwargs.pop("seed")
+            logger.warning(
+                "Model %s does not advertise sampling seed support; omitting seed",
+                current_model,
+            )
         kwargs: dict[str, Any] = {
             "model": current_model,
             "messages": messages,
-            **generation_settings.request_kwargs(),
+            **request_kwargs,
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
@@ -419,10 +441,12 @@ class LLMService:
                 **kwargs.get("extra_body", {}),
                 **extra_body,
             }
-        # Keep bounded MiniMax output budgets available for visible content.
+        # Preserve bounded visible-output budgets for M3/M2.7, but never send
+        # a reasoning override to Flash, even if a caller supplied one.
+        kwargs.get("extra_body", {}).pop("reasoning", None)
         kwargs["extra_body"] = {
             **kwargs.get("extra_body", {}),
-            "reasoning": {"enabled": False},
+            **_reasoning_extra_body(current_model),
         }
         async with _LLM_SEMAPHORE:
             return await self.client.chat.completions.create(**kwargs)
@@ -435,6 +459,7 @@ class LLMService:
         diagnostics: LLMCompletionDiagnostics | None = None,
         generation_settings: LLMGenerationSettings | None = None,
         allow_model_fallbacks: bool = True,
+        response_format_for_model: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> Any:
         generation_settings = generation_settings or LLMGenerationSettings()
         if allow_model_fallbacks:
@@ -444,8 +469,20 @@ class LLMService:
         if diagnostics is not None:
             diagnostics.requested_model = chain[0]
             diagnostics.temperature = generation_settings.temperature
-            diagnostics.seed = generation_settings.seed
         for attempt, current_model in enumerate(chain):
+            if diagnostics is not None:
+                # Track the effective seed even when fallback changes model
+                # capabilities; Flash never receives one.
+                diagnostics.seed = (
+                    generation_settings.seed
+                    if text_model_supports(current_model, "seed")
+                    else None
+                )
+            attempt_response_format = (
+                response_format_for_model(current_model)
+                if response_format_for_model is not None
+                else response_format
+            )
             transient_retry = 0
             while True:
                 try:
@@ -454,7 +491,7 @@ class LLMService:
                     response = await self._create_openrouter_completion(
                         current_model,
                         messages,
-                        response_format=response_format,
+                        response_format=attempt_response_format,
                         generation_settings=generation_settings,
                     )
                     self._completion_content(response)
@@ -598,23 +635,50 @@ class LLMService:
         generation_settings: LLMGenerationSettings | None = None,
         allow_model_fallbacks: bool = True,
     ) -> BaseModel:
-        """Request schema-shaped JSON, with one legacy-parser retry for older providers."""
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": _strict_json_schema(schema.model_json_schema()),
-            },
-        }
+        """Request schema-shaped JSON, with one legacy-parser retry.
+
+        Models that advertise strict structured outputs receive the full
+        ``json_schema`` response format. Catalog entries that only advertise
+        ``response_format`` (MiniMax M2.7/Flash) instead receive plain ``json_object``
+        and are validated locally by the same Pydantic schema. In both cases the
+        existing legacy JSON retry stays the final boundary, so a provider that
+        ignores the requested shape cannot bypass typed validation.
+        """
+
+        def _response_format_for(model: str) -> dict[str, Any] | None:
+            if text_model_supports(model, "structured_outputs"):
+                return {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": _strict_json_schema(schema.model_json_schema()),
+                    },
+                }
+            if text_model_supports(model, "response_format"):
+                logger.warning(
+                    "Model %s does not advertise structured outputs; requesting "
+                    "json_object for %s and enforcing the typed schema",
+                    model,
+                    schema_name,
+                )
+                return {"type": "json_object"}
+            logger.warning(
+                "Model %s does not advertise response_format; relying on prompt "
+                "plus typed validation for %s",
+                model,
+                schema_name,
+            )
+            return None
+
         try:
             response = await self._complete_with_fallback(
                 messages,
                 model=model,
-                response_format=response_format,
                 diagnostics=diagnostics,
                 generation_settings=generation_settings,
                 allow_model_fallbacks=allow_model_fallbacks,
+                response_format_for_model=_response_format_for,
             )
             return schema.model_validate(_json_loads_from_response(self._completion_content(response)))
         except Exception as exc:
@@ -671,7 +735,7 @@ class LLMService:
                         max_tokens=1024,
                         stream=True,
                         stream_options={"include_usage": True},
-                        extra_body={"reasoning": {"enabled": False}},
+                        extra_body=_reasoning_extra_body(resolved_model),
                     )
                 async for chunk in stream:
                     choices = chunk.choices or []
@@ -698,7 +762,7 @@ class LLMService:
                                 messages=messages,
                                 max_tokens=1024,
                                 stream=True,
-                                extra_body={"reasoning": {"enabled": False}},
+                                extra_body=_reasoning_extra_body(resolved_model),
                             )
                         async for chunk in stream:
                             choices = chunk.choices or []
@@ -912,9 +976,9 @@ class LLMService:
         )
         # Keep a malformed configuration from causing duplicate requests while
         # preserving the configured order and the dedicated vision boundary.
-        if settings.openrouter_vision_model != "minimax/minimax-m3" or settings.openrouter_vision_fallback_models.strip():
+        if settings.openrouter_vision_model != VISION_MODEL or settings.openrouter_vision_fallback_models.strip():
             raise ValueError("Cloud vision requires MiniMax M3 only, without fallbacks")
-        return ["minimax/minimax-m3"]
+        return [VISION_MODEL]
 
     @staticmethod
     def _sanitize_vision_usage(response: Any) -> VisionUsage | None:

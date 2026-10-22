@@ -24,9 +24,22 @@ embedding/index profile and live local WhisperX transcription primary intact.
 Do not change transcription provider/gateway/token or embedding dimensions
 as part of this generation rollout. No migration or chart/release version
 bump is included.
-Cloud MiniMax generation sends `reasoning.enabled=false` on schema requests,
+M3/M2.7 generation sends `reasoning.enabled=false` on schema requests,
 legacy JSON retries, and streaming requests; custom vision transport does not
 receive this OpenRouter-specific control. Existing JSON compatibility is retained.
+
+The text-only opt-in candidate `minimax/minimax-m3.1-flash` is also accepted in
+explicit text settings/allowlists, but defaults above remain unchanged. Flash
+requires reasoning and rejects `reasoning.enabled=false` with HTTP 400; every
+completion, streaming and retry path omits its reasoning override. Its catalog
+does not advertise seed or structured_outputs: omit seed and use `json_object`.
+M2.7 likewise advertises response_format, not structured_outputs, so it uses
+`json_object`; M3 retains strict `json_schema`. Both paths enforce the same
+typed validation and legacy JSON retry. Cloud vision stays M3-only.
+Parent-reported synthetic Flash calls succeeded with both `json_object` and
+strict `json_schema`, no reasoning override, and max_tokens=1024. That is not
+catalog-advertised strict-schema support or classification-quality evidence;
+this candidate keeps catalog-conservative routing and existing token budgets.
 
 Optional custom vision uses `config.visionProvider=custom`,
 `config.visionBaseUrl`, `config.visionModel`, and

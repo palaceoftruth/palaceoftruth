@@ -613,6 +613,34 @@ def test_settings_default_relationship_classifier_is_minimax_m3() -> None:
     assert settings.relationship_classification_model == "minimax/minimax-m3"
 
 
+@pytest.mark.parametrize("field", [
+    "openrouter_default_model", "openrouter_fallback_models",
+    "relationship_classification_model", "client_llm_allowed_models",
+])
+def test_settings_accept_explicit_flash_text_candidate(field: str) -> None:
+    settings = config.Settings(**_settings_kwargs(**{field: "minimax/minimax-m3.1-flash"}))
+    assert getattr(settings, field) == "minimax/minimax-m3.1-flash"
+    assert settings.openrouter_vision_model == "minimax/minimax-m3"
+
+
+@pytest.mark.parametrize("field", ["openrouter_vision_model", "openrouter_vision_fallback_models"])
+def test_settings_reject_flash_cloud_vision(field: str) -> None:
+    with pytest.raises(ValidationError, match=field.upper()):
+        config.Settings(**_settings_kwargs(**{field: "minimax/minimax-m3.1-flash"}))
+
+
+def test_text_model_capabilities_distinguish_schema_seed_and_reasoning_control() -> None:
+    assert config.text_model_supports("minimax/minimax-m3", "structured_outputs")
+    for model in ("minimax/minimax-m2.7", "minimax/minimax-m3.1-flash"):
+        assert config.text_model_supports(model, "response_format")
+        assert not config.text_model_supports(model, "structured_outputs")
+    for model in ("minimax/minimax-m3", "minimax/minimax-m2.7"):
+        assert config.text_model_supports(model, "seed")
+        assert config.text_model_supports(model, "disable_reasoning")
+    assert not config.text_model_supports("minimax/minimax-m3.1-flash", "seed")
+    assert not config.text_model_supports("minimax/minimax-m3.1-flash", "disable_reasoning")
+
+
 def test_settings_vision_defaults_have_no_gpt_fallback() -> None:
     settings = config.Settings(**_settings_kwargs())
 

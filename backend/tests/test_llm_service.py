@@ -7,15 +7,19 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
 
+from app.config import SUPPORTED_TEXT_MODELS, VISION_MODEL
 from app.services.llm import (
     BrowserActions,
     LLMCompletionDiagnostics,
+    LLMGenerationSettings,
     LLMService,
     TagExtraction,
     VisionAnalysisTransportError,
     _strict_json_schema,
 )
 from app.services.image_analysis import VisionAnalysisResult
+
+FLASH_MODEL = "minimax/minimax-m3.1-flash"
 
 
 class _FakeCompletionsAPI:
@@ -919,6 +923,230 @@ async def test_relationship_classifier_schema_and_legacy_retry_disable_reasoning
         assert call["model"] == "minimax/minimax-m3"
         assert call["max_tokens"] == 256
     assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_flash_classification_uses_json_object_without_seed(llm_service, monkeypatch) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    monkeypatch.setattr(
+        "app.services.llm.settings.relationship_classification_model",
+        FLASH_MODEL,
+    )
+    openrouter_completions.outcomes = [
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "expands_on", "confidence": 0.7}',
+            model=FLASH_MODEL,
+            provider="Minimax",
+        ),
+    ]
+
+    result = await service.classify_relationship_detailed("Backup", "Procedure", "Restore", "Testing")
+
+    assert result.validation_outcome == "valid"
+    assert result.relationship == "expands_on"
+    assert result.confidence == 0.7
+    assert result.retry_count == 0
+    # The seed is not advertised by Flash, so the request omits it and the
+    # diagnostics report the effective request rather than a phantom seed.
+    assert result.seed is None
+    (call,) = openrouter_completions.calls
+    assert call["model"] == FLASH_MODEL
+    assert call["response_format"] == {"type": "json_object"}
+    assert "json_schema" not in call["response_format"]
+    assert "seed" not in call
+    assert call["max_tokens"] == 256
+    assert call["extra_body"] == {"provider": {"require_parameters": True}}
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_flash_classification_legacy_retry_still_enforces_typed_schema(
+    llm_service, monkeypatch
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+    monkeypatch.setattr(
+        "app.services.llm.settings.relationship_classification_model",
+        FLASH_MODEL,
+    )
+    # Simulate a response_format routing failure; this is not a live probe.
+    # The legacy JSON retry must still validate.
+    openrouter_completions.outcomes = [
+        _api_status_error(404),
+        _completion_response(
+            '```json\n{"relationship_exists": false, "relationship": "none", "confidence": 0.0}\n```',
+            model=FLASH_MODEL,
+        ),
+    ]
+
+    result = await service.classify_relationship_detailed("Backup", "Procedure", "Restore", "Testing")
+
+    assert result.validation_outcome == "empty"
+    assert result.relationship == "none"
+    assert result.retry_count == 1
+    assert len(openrouter_completions.calls) == 2
+    structured_call, legacy_call = openrouter_completions.calls
+    assert structured_call["response_format"] == {"type": "json_object"}
+    assert "response_format" not in legacy_call
+    for call in openrouter_completions.calls:
+        assert call["model"] == FLASH_MODEL
+        assert "seed" not in call
+        assert "reasoning" not in call.get("extra_body", {})
+    assert openai_completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [FLASH_MODEL, "minimax/minimax-m3", "minimax/minimax-m2.7"])
+@pytest.mark.parametrize("path", ["completion", "transient_retry", "stream", "stream_retry", "stream_fallback"])
+async def test_model_reasoning_policy_on_every_request_path(llm_service, model, path) -> None:
+    service, completions, direct_completions = llm_service
+    if path == "completion":
+        completions.outcomes = [_completion_response("ok")]
+    elif path == "transient_retry":
+        completions.outcomes = [_api_status_error(503), _completion_response("ok")]
+    elif path == "stream":
+        completions.outcomes = [_FakeStream([_stream_content_chunk("ok")])]
+    elif path == "stream_retry":
+        completions.outcomes = [
+            _bad_request_error("Provider does not support stream_options"),
+            _FakeStream([_stream_content_chunk("ok")]),
+        ]
+    else:
+        completions.outcomes = [RuntimeError("stream failed"), _completion_response("ok")]
+
+    if path.startswith("stream"):
+        stream, _usage = await service.stream_complete([{"role": "user", "content": "Hi"}], model=model)
+        assert "".join([chunk async for chunk in stream]) == "ok"
+    else:
+        assert await service.complete([{"role": "user", "content": "Hi"}], model=model) == "ok"
+
+    assert len(completions.calls) == (2 if path in {"transient_retry", "stream_retry", "stream_fallback"} else 1)
+    for call in completions.calls:
+        assert call["model"] == model
+        if model == FLASH_MODEL:
+            assert "reasoning" not in call.get("extra_body", {})
+            assert "seed" not in call
+        else:
+            assert call["extra_body"]["reasoning"] == {"enabled": False}
+    assert direct_completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [FLASH_MODEL, "minimax/minimax-m2.7"])
+async def test_json_object_models_reject_invalid_typed_output_on_both_attempts(llm_service, model) -> None:
+    service, completions, _direct = llm_service
+    completions.outcomes = [_completion_response('{"tags": 123}')] * 2
+
+    with pytest.raises(ValueError):
+        await service.complete_structured(
+            [{"role": "user", "content": "Extract tags as JSON"}],
+            TagExtraction,
+            schema_name="tag_extraction",
+            model=model,
+            allow_model_fallbacks=False,
+        )
+
+    first, retry = completions.calls
+    assert first["response_format"] == {"type": "json_object"}
+    assert "response_format" not in retry
+    for call in completions.calls:
+        assert ("reasoning" in call.get("extra_body", {})) == (model != FLASH_MODEL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary,fallback", [
+    ("minimax/minimax-m3", FLASH_MODEL),
+    (FLASH_MODEL, "minimax/minimax-m2.7"),
+])
+async def test_structured_fallback_recalculates_capabilities(llm_service, monkeypatch, primary, fallback) -> None:
+    service, completions, _direct = llm_service
+    monkeypatch.setattr(service, "_fallback_models", [fallback])
+    completions.outcomes = [_api_status_error(404), _completion_response('{"tags": ["backup"], "categories": []}')]
+    diagnostics = LLMCompletionDiagnostics()
+
+    result = await service.complete_structured(
+        [{"role": "user", "content": "Extract JSON tags"}], TagExtraction,
+        schema_name="tags", model=primary,
+        generation_settings=LLMGenerationSettings(seed=1083),
+        diagnostics=diagnostics,
+    )
+
+    assert result.tags == ["backup"]
+    assert diagnostics.seed == (None if fallback == FLASH_MODEL else 1083)
+    assert [call["model"] for call in completions.calls] == [primary, fallback]
+    for call in completions.calls:
+        model = call["model"]
+        assert call["response_format"]["type"] == ("json_schema" if model == VISION_MODEL else "json_object")
+        assert ("seed" in call) == (model != FLASH_MODEL)
+        assert ("reasoning" in call["extra_body"]) == (model != FLASH_MODEL)
+
+
+@pytest.mark.asyncio
+async def test_flash_explicit_schema_request_removes_caller_reasoning_override(llm_service) -> None:
+    service, completions, _direct = llm_service
+    completions.outcomes = [_completion_response("{}")]
+
+    await service._create_openrouter_completion(
+        FLASH_MODEL, [{"role": "user", "content": "Return JSON"}],
+        response_format={"type": "json_schema", "json_schema": {"name": "test", "strict": True, "schema": {"type": "object"}}},
+        extra_body={"reasoning": {"enabled": False}},
+    )
+
+    (call,) = completions.calls
+    assert call["response_format"]["type"] == "json_schema"
+    assert call["extra_body"] == {"provider": {"require_parameters": True}}
+
+
+@pytest.mark.asyncio
+async def test_m3_classification_keeps_strict_schema_and_seed(llm_service) -> None:
+    service, openrouter_completions, _openai_completions = llm_service
+    openrouter_completions.outcomes = [
+        _completion_response(
+            '{"relationship_exists": true, "relationship": "related_to", "confidence": 0.5}'
+        ),
+    ]
+
+    result = await service.classify_relationship_detailed("Backup", "Procedure", "Restore", "Testing")
+
+    assert result.validation_outcome == "valid"
+    assert result.seed == 1083
+    (call,) = openrouter_completions.calls
+    assert call["model"] == VISION_MODEL == "minimax/minimax-m3"
+    assert call["response_format"]["type"] == "json_schema"
+    assert call["response_format"]["json_schema"]["name"] == "relationship_classification_v3"
+    assert call["seed"] == 1083
+
+
+@pytest.mark.asyncio
+async def test_complete_structured_refuses_unsupported_provider_before_request(
+    llm_service,
+) -> None:
+    service, openrouter_completions, openai_completions = llm_service
+
+    with pytest.raises(ValueError, match="unsupported generation model"):
+        await service.complete_structured(
+            [{"role": "user", "content": "Classify"}],
+            TagExtraction,
+            schema_name="tag_extraction",
+            model="openai/gpt-4.1",
+            allow_model_fallbacks=False,
+        )
+
+    assert openrouter_completions.calls == []
+    assert openai_completions.calls == []
+
+
+def test_flash_is_text_only_and_cloud_vision_stays_m3(llm_service, monkeypatch) -> None:
+    service, _openrouter_completions, _openai_completions = llm_service
+    assert FLASH_MODEL in SUPPORTED_TEXT_MODELS
+
+    # Cloud vision must keep its dedicated M3 boundary even when Flash is a
+    # permitted text model.
+    monkeypatch.setattr(
+        "app.services.llm.settings.openrouter_vision_model",
+        FLASH_MODEL,
+    )
+    with pytest.raises(ValueError, match="M3 only"):
+        service._build_vision_model_chain()
 
 
 @pytest.mark.asyncio

@@ -47,8 +47,45 @@ SUPPORTED_TEXT_MODELS = frozenset(
     {
         "minimax/minimax-m3",
         "minimax/minimax-m2.7",
+        # Text-only canary candidate. It must never be selected for cloud
+        # vision (openrouter_vision_model stays pinned to M3) and it does not
+        # advertise every M3 request capability — see below.
+        "minimax/minimax-m3.1-flash",
     }
 )
+
+# Advertised request capabilities plus the verified reasoning-disable policy.
+# ``structured_outputs`` means the model can be sent a strict ``json_schema``
+# response format; models without it still accept a plain ``json_object``
+# response format and are validated by the same Pydantic schema locally.
+# ``seed`` means the provider accepts a sampling seed. Omitted capabilities are
+# deliberately never sent, so a request is not rejected for an unsupported
+# parameter; the typed validation/JSON retry path remains mandatory either way.
+# ``disable_reasoning`` is separate from advertised reasoning support: Flash
+# accepts reasoning but requires it to remain enabled (parent live canary).
+TEXT_MODEL_CAPABILITIES: dict[str, frozenset[str]] = {
+    "minimax/minimax-m3": frozenset(
+        {"structured_outputs", "response_format", "reasoning", "disable_reasoning", "seed"}
+    ),
+    "minimax/minimax-m2.7": frozenset(
+        {"response_format", "reasoning", "disable_reasoning", "seed"}
+    ),
+    # MiniMax's Flash catalog entry supports response_format and reasoning but
+    # does not advertise structured_outputs or seed. Reasoning is mandatory:
+    # reasoning.enabled=false is rejected with HTTP 400, so omit the override.
+    "minimax/minimax-m3.1-flash": frozenset({"response_format", "reasoning"}),
+}
+
+# The cloud vision boundary remains M3-only, independent of TEXT capability
+# declarations.
+VISION_MODEL = "minimax/minimax-m3"
+
+
+def text_model_supports(model: str, capability: str) -> bool:
+    """Return whether text requests may use the capability under this policy."""
+
+    return capability in TEXT_MODEL_CAPABILITIES.get(model, frozenset())
+
 
 
 class Settings(BaseSettings):
@@ -517,7 +554,7 @@ class Settings(BaseSettings):
         ):
             if value not in SUPPORTED_TEXT_MODELS:
                 raise ValueError(f"{field_name} must be one supported MiniMax model")
-        if self.openrouter_vision_model != "minimax/minimax-m3":
+        if self.openrouter_vision_model != VISION_MODEL:
             raise ValueError("OPENROUTER_VISION_MODEL must be minimax/minimax-m3")
         if self.openrouter_vision_fallback_models.strip():
             raise ValueError("OPENROUTER_VISION_FALLBACK_MODELS must be empty; M2.7 is text only")

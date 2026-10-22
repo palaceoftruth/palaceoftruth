@@ -34,11 +34,22 @@ _REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 
 
 @pytest.fixture(autouse=True)
-def _allow_test_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+def _allow_test_minimax_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.llm_admission.settings.client_llm_allowed_models",
-        "media-model,note-model,page-model,doc-model",
+        "minimax/minimax-m3,minimax/minimax-m2.7",
     )
+
+
+@pytest.fixture(autouse=True)
+def _public_fixture_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These API tests enqueue fixture URLs; they must not resolve real hosts.
+    # Keep URL/IP validation active (including private-address rejection).
+    def resolve(host, *_args, **_kwargs):
+        assert host in {"example.com", "x.com", "youtube.com", "pbs.twimg.com"}
+        return [(None, None, None, None, ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(outbound_http.socket, "getaddrinfo", resolve)
 
 
 class _ScalarResult:
@@ -277,7 +288,7 @@ def test_ingest_media_replaces_failed_item_for_same_source_url() -> None:
 
     response = client.post(
         "/api/v1/ingest/media",
-        json={"url": "https://example.com/watch?v=media", "model": "media-model"},
+        json={"url": "https://example.com/watch?v=media", "model": "minimax/minimax-m2.7"},
     )
 
     assert response.status_code == 202
@@ -361,7 +372,7 @@ def test_browser_capture_routes_media_to_media_queue_and_preserves_metadata() ->
             "tags": [" demo ", "demo", "video"],
             "browser_extension_version": "0.2.0",
             "extension_metadata": {"tab_id": 42},
-            "model": "media-model",
+            "model": "minimax/minimax-m2.7",
         },
     )
 
@@ -390,7 +401,7 @@ def test_browser_capture_routes_media_to_media_queue_and_preserves_metadata() ->
     assert job.payload == {
         "retry_task": {
             "name": "process_media",
-            "kwargs": {"url": "https://youtube.com/watch?v=abc123", "model": "media-model"},
+            "kwargs": {"url": "https://youtube.com/watch?v=abc123", "model": "minimax/minimax-m2.7"},
         }
     }
     assert arq_pool.enqueued == [
@@ -1139,11 +1150,11 @@ def test_ingest_batch_rejects_invalid_entries_before_creating_jobs_or_items() ->
                     "type": "note",
                     "title": "Valid note that should not be processed",
                     "content": "This batch should fail before any inserts or enqueues.",
-                    "model": "note-model",
+                    "model": "minimax/minimax-m3",
                 },
                 {
                     "type": "webpage",
-                    "model": "page-model",
+                    "model": "minimax/minimax-m2.7",
                 },
             ]
         },
@@ -1169,7 +1180,7 @@ def test_ingest_batch_rejects_invalid_urls_before_creating_jobs_or_items() -> No
                 {
                     "type": "media",
                     "url": "ftp://example.com/audio",
-                    "model": "media-model",
+                    "model": "minimax/minimax-m2.7",
                 }
             ]
         },
@@ -1190,7 +1201,7 @@ def test_ingest_media_routes_to_bounded_media_queue() -> None:
 
     response = client.post(
         "/api/v1/ingest/media",
-        json={"url": "https://example.com/watch?v=media", "model": "media-model"},
+        json={"url": "https://example.com/watch?v=media", "model": "minimax/minimax-m2.7"},
     )
 
     assert response.status_code == 202
@@ -1223,12 +1234,12 @@ def test_ingest_batch_enqueues_note_and_webpage_with_expected_payloads() -> None
                     "type": "note",
                     "title": "Quarterly planning",
                     "content": "Capture decisions and follow-ups.",
-                    "model": "note-model",
+                    "model": "minimax/minimax-m3",
                 },
                 {
                     "type": "webpage",
                     "url": "https://example.com/story",
-                    "model": "page-model",
+                    "model": "minimax/minimax-m2.7",
                 },
             ]
         },
@@ -1265,7 +1276,7 @@ def test_ingest_batch_enqueues_note_and_webpage_with_expected_payloads() -> None
             "name": "process_note",
             "kwargs": {
                 "tenant_id": "tenant-a",
-                "model": "note-model",
+                "model": "minimax/minimax-m3",
                 "title": "Quarterly planning",
                 "content": "Capture decisions and follow-ups.",
             },
@@ -1281,7 +1292,7 @@ def test_ingest_batch_enqueues_note_and_webpage_with_expected_payloads() -> None
             "name": "process_webpage",
             "kwargs": {
                 "tenant_id": "tenant-a",
-                "model": "page-model",
+                "model": "minimax/minimax-m2.7",
                 "url": "https://example.com/story",
             },
         }
@@ -1293,7 +1304,7 @@ def test_ingest_batch_enqueues_note_and_webpage_with_expected_payloads() -> None
             {
                 "job_id": str(note_job.id),
                 "tenant_id": "tenant-a",
-                "model": "note-model",
+                "model": "minimax/minimax-m3",
                 "title": "Quarterly planning",
                 "content": "Capture decisions and follow-ups.",
             },
@@ -1303,7 +1314,7 @@ def test_ingest_batch_enqueues_note_and_webpage_with_expected_payloads() -> None
             {
                 "job_id": str(webpage_job.id),
                 "tenant_id": "tenant-a",
-                "model": "page-model",
+                "model": "minimax/minimax-m2.7",
                 "url": "https://example.com/story",
             },
         ),
@@ -1322,13 +1333,13 @@ def test_ingest_batch_routes_media_without_moving_default_tasks() -> None:
                 {
                     "type": "media",
                     "url": "https://example.com/watch?v=media",
-                    "model": "media-model",
+                    "model": "minimax/minimax-m2.7",
                 },
                 {
                     "type": "note",
                     "title": "Quarterly planning",
                     "content": "Capture decisions and follow-ups.",
-                    "model": "note-model",
+                    "model": "minimax/minimax-m3",
                 },
             ]
         },
@@ -1349,7 +1360,7 @@ def test_ingest_batch_routes_media_without_moving_default_tasks() -> None:
             {
                 "job_id": str(note_job.id),
                 "tenant_id": "tenant-a",
-                "model": "note-model",
+                "model": "minimax/minimax-m3",
                 "title": "Quarterly planning",
                 "content": "Capture decisions and follow-ups.",
             },
@@ -1371,7 +1382,7 @@ def test_ingest_note_marks_job_and_item_failed_when_enqueue_fails() -> None:
         json={
             "title": "Quarterly planning",
             "content": "Capture decisions and follow-ups.",
-            "model": "note-model",
+            "model": "minimax/minimax-m3",
         },
     )
 
@@ -1402,7 +1413,7 @@ def test_ingest_note_marks_job_and_item_failed_when_enqueue_fails() -> None:
                 "content": "Capture decisions and follow-ups.",
                 "tags": None,
                 "tenant_id": "tenant-a",
-                "model": "note-model",
+                "model": "minimax/minimax-m3",
             },
         )
     ]
@@ -1429,12 +1440,12 @@ def test_ingest_batch_marks_only_failed_enqueue_entries_failed() -> None:
                     "type": "note",
                     "title": "Quarterly planning",
                     "content": "Capture decisions and follow-ups.",
-                    "model": "note-model",
+                    "model": "minimax/minimax-m3",
                 },
                 {
                     "type": "webpage",
                     "url": "https://example.com/story",
-                    "model": "page-model",
+                    "model": "minimax/minimax-m2.7",
                 },
             ]
         },
@@ -1474,7 +1485,7 @@ def test_ingest_batch_marks_only_failed_enqueue_entries_failed() -> None:
             {
                 "job_id": str(note_job.id),
                 "tenant_id": "tenant-a",
-                "model": "note-model",
+                "model": "minimax/minimax-m3",
                 "title": "Quarterly planning",
                 "content": "Capture decisions and follow-ups.",
             },
@@ -1484,7 +1495,7 @@ def test_ingest_batch_marks_only_failed_enqueue_entries_failed() -> None:
             {
                 "job_id": str(webpage_job.id),
                 "tenant_id": "tenant-a",
-                "model": "page-model",
+                "model": "minimax/minimax-m2.7",
                 "url": "https://example.com/story",
             },
         ),
@@ -1515,7 +1526,7 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
     response = client.post(
         "/api/v1/ingest/doc",
         files={"file": ("brief.pdf", b"%PDF-1.7", "application/pdf")},
-        data={"model": "doc-model"},
+        data={"model": "minimax/minimax-m3"},
     )
 
     assert response.status_code == 202
@@ -1545,7 +1556,7 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
             "kwargs": {
                 "extracted_text": "Recovered text",
                 "doc_metadata": {"doc_title": "Recovered brief", "pages": 2},
-                "model": "doc-model",
+                "model": "minimax/minimax-m3",
             },
         }
     }
@@ -1557,7 +1568,7 @@ def test_ingest_doc_stores_upload_provenance_metadata(tmp_path: Path, monkeypatc
                 "extracted_text": "Recovered text",
                 "doc_metadata": {"doc_title": "Recovered brief", "pages": 2},
                 "tenant_id": "tenant-a",
-                "model": "doc-model",
+                "model": "minimax/minimax-m3",
             },
         )
     ]
