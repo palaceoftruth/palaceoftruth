@@ -1,4 +1,5 @@
 import asyncio
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -272,6 +273,142 @@ def test_vector_search_partitions_semantic_candidates_by_scope_when_cap_given() 
     assert "scope_label_partition" in db.last_sql
     assert "rn <= :per_scope_candidate_cap" in db.last_sql
     assert db.last_params["per_scope_candidate_cap"] == 5
+
+
+def test_vector_search_per_scope_cap_resolves_item_eligibility_once_before_embedding_join() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(
+        service.vector_search(
+            query="test",
+            scope_labels=["workspace/a", "workspace/b"],
+            room_ids=[uuid.uuid4()],
+            tags=["ops"],
+            date_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            per_scope_candidate_cap=5,
+        )
+    )
+
+    sql = db.last_sql
+    assert sql is not None
+    eligible_cte = sql[
+        sql.index("eligible_scoped_items AS MATERIALIZED"):
+        sql.index("semantic_ranked AS MATERIALIZED")
+    ]
+    # Eligibility is resolved against items only: one pass per item, and no
+    # embedding column is touched while the item predicates are computed.
+    assert "FROM items i" in eligible_cte
+    assert "JOIN" not in eligible_cte
+    assert re.search(r"\be\.", eligible_cte) is None
+    assert "i.id," in eligible_cte
+    assert "AS scope_label_partition" in eligible_cte
+    # Tenant isolation, currentness, room, scope, tag, and date gates all stay
+    # inside the once-per-item eligibility pass.
+    assert "i.tenant_id = :tenant_id" in eligible_cte
+    assert "i.status = 'ready'" in eligible_cte
+    assert "i.deleted_at IS NULL" in eligible_cte
+    assert "FROM memory_entries current_me" in eligible_cte
+    assert "FROM source_records current_sr" in eligible_cte
+    assert "CAST(:room_ids AS uuid[])" in eligible_cte
+    assert "CAST(:scope_labels AS text[])" in eligible_cte
+    assert "CAST(:tags AS text[])" in eligible_cte
+    assert "CAST(:date_from AS timestamptz)" in eligible_cte
+    assert "CAST(:date_to AS timestamptz)" in re.sub(r"\s+", " ", eligible_cte)
+
+    ranked_cte = sql[
+        sql.index("semantic_ranked AS MATERIALIZED"):
+        sql.index("semantic_candidates AS MATERIALIZED")
+    ]
+    assert "e.id AS embedding_id" in ranked_cte
+    assert "JOIN embeddings e ON e.item_id = eligible.id" in ranked_cte
+    assert "eligible.scope_label_partition" in ranked_cte
+    assert "halfvec(1536)" in ranked_cte
+    # The ranking pass must not read or carry chunk text.
+    assert "chunk_text" not in ranked_cte
+
+
+def test_vector_search_per_scope_cap_hydrates_chunk_text_only_for_capped_rows() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(
+        service.vector_search(
+            query="test",
+            scope_labels=["workspace/a", "workspace/b"],
+            per_scope_candidate_cap=5,
+        )
+    )
+
+    sql = db.last_sql
+    assert sql is not None
+    candidates_cte = sql[
+        sql.index("semantic_candidates AS MATERIALIZED"):
+        sql.index("lexical_match_window AS MATERIALIZED")
+    ]
+    assert "JOIN embeddings hydrate" in candidates_cte
+    assert "hydrate.id = capped.embedding_id" in candidates_cte
+    assert "hydrate.chunk_text" in candidates_cte
+    # Scope fairness and exact ranking order are preserved.
+    assert "PARTITION BY scope_label_partition" in candidates_cte
+    assert "ORDER BY distance ASC" in candidates_cte
+    assert "WHERE rn <= :per_scope_candidate_cap" in candidates_cte
+    assert "ORDER BY ranked_by_scope.distance ASC" in candidates_cte
+    assert "LIMIT :semantic_candidate_limit" in candidates_cte
+    # The per-scope cap is applied before chunk text is fetched.
+    assert candidates_cte.index("ROW_NUMBER() OVER") < candidates_cte.index(
+        "WHERE rn <= :per_scope_candidate_cap"
+    )
+    assert candidates_cte.index("WHERE rn <= :per_scope_candidate_cap") < candidates_cte.index(
+        "JOIN embeddings hydrate"
+    )
+    assert db.last_params["per_scope_candidate_cap"] == 5
+
+
+def test_vector_search_per_scope_cap_keeps_profile_filter_on_embeddings() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeLocalEmbedder(), tenant_id="default")
+
+    asyncio.run(
+        service.vector_search(
+            query="test",
+            scope_labels=["workspace/a"],
+            per_scope_candidate_cap=5,
+        )
+    )
+
+    sql = db.last_sql
+    assert sql is not None
+    eligible_cte = sql[
+        sql.index("eligible_scoped_items AS MATERIALIZED"):
+        sql.index("semantic_ranked AS MATERIALIZED")
+    ]
+    ranked_cte = sql[
+        sql.index("semantic_ranked AS MATERIALIZED"):
+        sql.index("semantic_candidates AS MATERIALIZED")
+    ]
+    assert "profile_name" not in eligible_cte
+    assert "JOIN embedding_profile_vectors e ON e.item_id = eligible.id" in ranked_cte
+    assert "e.profile_name = :embedding_profile_name" in ranked_cte
+    assert "e.dimensions = 768" in ranked_cte
+    assert "halfvec(768)" in ranked_cte
+    assert db.last_params["embedding_profile_name"] == "local-http-gte-modernbert-base"
+
+
+def test_vector_search_flat_branch_is_unchanged_by_per_scope_rewrite() -> None:
+    db = _FakeDB()
+    service = SearchService(db, _FakeEmbedder(), tenant_id="default")
+
+    asyncio.run(service.vector_search(query="test", scope_labels=["workspace/a"]))
+
+    sql = db.last_sql
+    assert sql is not None
+    assert "eligible_scoped_items" not in sql
+    assert "semantic_ranked" not in sql
+    assert "JOIN embeddings hydrate" not in sql
+    assert "FROM embeddings e" in sql
+    assert "JOIN items i ON e.item_id = i.id" in sql
+    assert "LIMIT :semantic_candidate_limit" in sql
 
 
 def test_vector_search_bounds_ann_and_lexical_candidates_before_hybrid_rerank() -> None:

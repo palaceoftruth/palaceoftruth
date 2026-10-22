@@ -33,6 +33,9 @@ data:
   VISION_BASE_URL: {{ .Values.config.visionBaseUrl | quote }}
   VISION_MODEL: {{ .Values.config.visionModel | quote }}
   VISION_TIMEOUT_SECONDS: {{ .Values.config.visionTimeoutSeconds | quote }}
+  VISION_GATEWAY_MODEL: {{ .Values.config.visionGatewayModel | quote }}
+  VISION_GATEWAY_TIMEOUT_SECONDS: {{ .Values.config.visionGatewayTimeoutSeconds | quote }}
+  VISION_MAX_IMAGE_BYTES: {{ .Values.config.visionMaxImageBytes | quote }}
   RELATIONSHIP_CLASSIFICATION_MODEL: {{ .Values.config.relationshipClassificationModel | quote }}
   RELATIONSHIP_CLASSIFICATION_TEMPERATURE: {{ .Values.config.relationshipClassificationTemperature | quote }}
   RELATIONSHIP_CLASSIFICATION_SEED: {{ .Values.config.relationshipClassificationSeed | quote }}

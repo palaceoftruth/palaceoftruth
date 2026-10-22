@@ -136,6 +136,35 @@ def validate_worker_schema(row):
         fp=row['master_error_fingerprint']
         if not isinstance(fp,dict) or set(fp)!={'count','sha256'} or type(fp['count']) is not int or not re.fullmatch('[0-9a-f]{64}',str(fp['sha256'])):raise ControlError('error fingerprint schema mismatch')
 
+# A frozen, digest-pinned READ-ONLY pre-upgrade action tuple. It authorizes
+# nothing (no POST, no writer payload, no store binding); it only states which
+# release and target the read-only pre-upgrade preflight must bind. Arbitrary
+# CLI digests are NOT accepted: the tuple is one digest-verified document, so a
+# spoofed --expected-digest cannot enter the gate.
+PRE_UPGRADE_FIELDS = {'schema_version','action_id','namespace','release_name','release_uid',
+                      'target_digest','chart_digest','expected_max_revision','starts_at','expires_at'}
+class PreUpgradeManifest:
+    def __init__(self,doc,expected_sha256,*,now):
+        self._bytes=canonical(doc);self.digest=hashlib.sha256(self._bytes).hexdigest()
+        if not isinstance(expected_sha256,str) or not re.fullmatch('[0-9a-f]{64}',expected_sha256) or self.digest!=expected_sha256:raise ControlError('pre-upgrade manifest digest mismatch')
+        if not isinstance(doc,dict) or set(doc)!=PRE_UPGRADE_FIELDS or doc.get('schema_version')!=1:raise ControlError('pre-upgrade manifest schema mismatch')
+        for k in ['action_id','namespace','release_name','release_uid']:
+            if not isinstance(doc[k],str) or not doc[k] or len(doc[k])>256 or any(ord(c)<32 for c in doc[k]):raise ControlError('invalid pre-upgrade binding: '+k)
+        for k in ['target_digest','chart_digest']:
+            if not isinstance(doc[k],str) or not re.fullmatch('sha256:[0-9a-f]{64}',doc[k]):raise ControlError('immutable pre-upgrade digest required: '+k)
+        if type(doc.get('expected_max_revision')) is not int or doc['expected_max_revision']<1:raise ControlError('expected max revision required')
+        self.active(now)
+    @property
+    def doc(self):return json.loads(self._bytes)
+    def active(self,now):
+        d=self.doc
+        if not instant(d['starts_at'])<=now<instant(d['expires_at']):raise ControlError('pre-upgrade manifest not active')
+    @classmethod
+    def load(cls,path,expected_sha256,*,now):
+        try:return cls(json.loads(read_private(Path(path),262144)),expected_sha256,now=now)
+        except (OSError,ValueError) as exc:raise ControlError('pre-upgrade manifest unreadable') from exc
+
+
 def temporal_gate(approval,workers,logs,*,now,threshold=3):
     approval.active(now)
     if threshold!=3:raise ControlError('restart delta threshold must remain three')

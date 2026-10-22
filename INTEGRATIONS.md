@@ -41,6 +41,13 @@ strict `json_schema`, no reasoning override, and max_tokens=1024. That is not
 catalog-advertised strict-schema support or classification-quality evidence;
 this candidate keeps catalog-conservative routing and existing token budgets.
 
+The existing `config.visionProvider=gateway` route remains supported and is
+independent of both OpenRouter and optional custom vision. Keep the deployed
+`LLM_GATEWAY_URL` / `LLM_GATEWAY_TOKEN` and `visionGatewayModel=qwen-vl`
+unchanged. It uses `json_object` with a prompt field contract and strict local
+validation, never a paid fallback; its lazy client is closed on shutdown.
+Selecting custom vision is opt-in, not a replacement for the deployed gateway.
+
 Optional custom vision uses `config.visionProvider=custom`,
 `config.visionBaseUrl`, `config.visionModel`, and
 `config.visionTimeoutSeconds` (default 60, finite >0 and <=300). The URL is

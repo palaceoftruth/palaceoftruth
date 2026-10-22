@@ -116,9 +116,11 @@ def test_sentinel_topology_authenticates_data_nodes_and_replication() -> None:
 
     # Sentinel needs the primary's password to run its own health checks, but
     # its own port stays unauthenticated because redis-py cannot pass
-    # credentials to sentinel connections.
+    # credentials to sentinel connections. The auth-pass is written by the
+    # sentinel CONTAINER start path (which preserves the learned conf and
+    # repairs only a stale monitor pin), not an init container.
     sentinel = specs["palaceoftruth-valkey-sentinel"]
-    assert "sentinel auth-pass" in yaml.safe_dump(sentinel["initContainers"])
+    assert "sentinel auth-pass" in yaml.safe_dump(sentinel["containers"][0]["args"])
     assert "REDISCLI_AUTH" not in _env_names(sentinel["containers"][0])
 
 

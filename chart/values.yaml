@@ -8,9 +8,9 @@ image:
   frontendRepository: palaceoftruth/palaceoftruth/frontend
   # Published releases set these to exact OCI manifest digests. Blank values
   # preserve tag-based local chart development only.
-  backendDigest: "sha256:38d872000d652c660dc7ff06428621459ccbf27684d1e3b6269de7d118a2b339"
-  workerDigest: "sha256:c8785c3a2e786773c9cbe154218d7fa4fe8f2bedd0572829ad4f85570c0f68ef"
-  frontendDigest: "sha256:e1c8881d2341ca82def3ea7887028b7682d832cbc8aef25356bfe8a79719475b"
+  backendDigest: "sha256:a568cde28902db5bd397c592a87f958418e401d698d130d249e8b260bc37858b"
+  workerDigest: "sha256:f8085ceb944a935c1b654ede68f3fa5976dee25ff19f2d1f8cc9bf45a2009758"
+  frontendDigest: "sha256:8b7e99cc1d180da4b7cac0b2fa5008a198807ed669da7ffbd0df3e8e406e67e8"
   # Leave blank to default both app images to Chart.appVersion.
   # CI publishes a new chart with appVersion set to the immutable image SHA.
   tag: ""
@@ -40,6 +40,7 @@ config:
   openrouterFallbackModels: "minimax/minimax-m2.7"
   # Cloud vision is M3 ONLY; M2.7 is text-only, not a vision fallback.
   openrouterVisionModel: "minimax/minimax-m3"
+
   openrouterVisionFallbackModels: ""
   # custom uses ONLY these dedicated settings. No cloud credential inheritance.
   visionProvider: openrouter
@@ -48,6 +49,17 @@ config:
   visionTimeoutSeconds: "60"
   # Relationship classification stays fail-closed on M3 (no generic fallback).
   relationshipClassificationModel: "minimax/minimax-m3"
+
+  # Vision route. "openrouter" (default) keeps the OpenRouter vision chain above.
+  # "gateway" routes image analysis to the self-hosted OpenAI-compatible gateway
+  # (llmGatewayUrl / externalSecrets.llmGatewayTokenProperty) with a dedicated
+  # model. The gateway route never uses the OpenAI or OpenRouter credential and
+  # has no automatic paid fallback.
+
+  visionGatewayModel: "qwen-vl"
+  visionGatewayTimeoutSeconds: "60"
+  visionMaxImageBytes: "20971520"
+
   relationshipClassificationTemperature: "0.0"
   relationshipClassificationSeed: "1083"
   relationshipExtractionMinConfidence: "0.7"
@@ -530,6 +542,22 @@ valkey:
   # which transparently redirects clients to the current primary. A failing
   # primary is automatically replaced by the replica (failover in ~5 s).
   sentinel:
+
+    # Explicit initial-bootstrap for a genuinely NEW install. Default false so a
+    # recovery never blind-boots a writable master. Set true ONLY for the very
+    # first rollout onto a fresh, empty data volume.
+    initialBootstrap: false
+    # Bounded wait (seconds) for a quorum-consistent Sentinel answer at start.
+    bootstrapWaitSeconds: 20
+    # Workload kind for the Sentinel ensemble: 'deployment' (default, backward
+    # compatible) or 'statefulset' (opt-in, persists each Sentinel's conf on a
+    # PVC). Exactly one renders at a time, so two ensembles never coexist.
+    workload: deployment
+    persistence:
+      storageClassName: ""
+      size: 100Mi
+      whenDeleted: Retain
+      whenScaled: Retain
     enabled: false
     # Number of replica pods (1 is sufficient for HA; replicas also serve reads).
     replicas: 1

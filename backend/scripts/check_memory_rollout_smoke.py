@@ -19,7 +19,11 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from redis.asyncio import Redis
+from redis.asyncio.sentinel import Sentinel
+
 from scripts.check_redis_sentinel_rollout_gate import check_rollout_gate
+from scripts.wait_for_redis_sentinel import load_config_from_env, redis_auth_kwargs
 from scripts import smoke_control
 from scripts import smoke_preflight
 from scripts import smoke_transport
@@ -745,6 +749,47 @@ async def check_sentinel(report: dict[str, Any]) -> None:
     )
 
 
+async def _broker_pulse_async(queue_name: str, pod_name: str, *, timeout: float) -> dict[str, Any]:
+    """Read-only ARQ heartbeat probe. EXISTS/TTL/LLEN only: no enqueue, no SQL.
+
+    The ARQ worker refreshes `{queue}:health-check:{pod}` every
+    WORKER_HEALTH_CHECK_INTERVAL_SECONDS from its event loop, so a present key is
+    up-to-now liveness proof for an idle worker. Nothing is written.
+    """
+    config = load_config_from_env()
+    if config is None:
+        raise RuntimeError("REDIS_SENTINEL_HOSTS must be set for the broker heartbeat probe")
+    sentinel = Sentinel(config.hosts, socket_timeout=timeout, socket_connect_timeout=timeout)
+    redis = None
+    key = f"{queue_name}:health-check:{pod_name}"
+    try:
+        master_host, master_port = await sentinel.discover_master(config.master_name)
+        redis = Redis(host=master_host, port=master_port, socket_timeout=timeout,
+                      socket_connect_timeout=timeout, **redis_auth_kwargs())
+        # RAW Redis TTL, never normalized: -2 = key missing, -1 = exists with NO
+        # expiry (not being refreshed), >= 0 = seconds remaining. Clamping a
+        # negative value into the acceptable range would be a fail-open.
+        raw_ttl = int(await redis.ttl(key))
+        queue_length = int(await redis.llen(queue_name))
+    finally:
+        if redis is not None:
+            await redis.aclose()
+        sentinel_close = getattr(sentinel, "aclose", None)
+        if sentinel_close is not None:
+            await sentinel_close()
+    return {"present": raw_ttl != -2,
+            "ttl_seconds": raw_ttl,
+            "queue": queue_name,
+            "pod": pod_name,
+            "queue_length": queue_length,
+            "as_of": utc_now().isoformat().replace("+00:00", "Z")}
+
+
+def broker_pulse(queue_name: str, pod_name: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    """Injected read-only worker-heartbeat probe for the idle-worker coverage kind."""
+    return asyncio.run(_broker_pulse_async(queue_name, pod_name, timeout=timeout))
+
+
 def resolve_tenant_identity(client: HttpClient, report: dict[str, Any], args: argparse.Namespace | None = None) -> str | None:
     whoami = client.request("GET", "/memory/whoami")
     if whoami.status >= 400 or not isinstance(whoami.payload, dict) or not whoami.payload.get("tenant_id"):
@@ -994,6 +1039,17 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
             pre = smoke_preflight.health_preflight(sys.modules[__name__], reader, args, kube)
             report.update(pre)
             smoke_control.require_health_checks(pre)
+        elif args.mode == "read-only-pre-upgrade":
+            # Explicit READ-ONLY PRE-UPGRADE lane: held release, declared-new but
+            # not applied. Binds the RUNNING images to the ACTUAL INSTALLED
+            # artifact (max attempted Helm release manifest) and the DECLARED
+            # target to the frozen, digest-verified action tuple. No writer
+            # approval, no POST; the automatic post-upgrade lane above is
+            # unchanged. Arbitrary CLI digests are not accepted.
+            manifest = smoke_control.PreUpgradeManifest.load(args.manifest, args.manifest_sha256, now=utc_now())
+            pre = smoke_preflight.pre_upgrade_health_preflight(sys.modules[__name__], reader, args, kube, manifest)
+            report.update(pre)
+            smoke_control.require_health_checks(pre)
         else:
             approval = smoke_control.Approval.load(args.manifest, args.manifest_sha256, now=utc_now())
             def preflight():
@@ -1002,9 +1058,9 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
             receipt = smoke_control.run_reserved(approval, journal, client, preflight, preflight, clock=utc_now)
             _record_check(report, "canonical_campaign_receipt", "passed", **receipt)
     except Exception as exc:
-        # The read-only lane has no writer approval, so a health-lane failure is
+        # The read-only lanes have no writer approval, so a health-lane failure is
         # reported as a required-preflight failure, not an approval failure.
-        _code = "control_approval_failed" if args.mode != "read-only" else "required_preflight_exception"
+        _code = "control_approval_failed" if args.mode == "bounded" else "required_preflight_exception"
         _alert(report, _code, "required contract failed", error_class=type(exc).__name__)
     report["status"] = "passed" if not report["alerts"] else "failed"
     report["alert_count"] = len(report["alerts"])
@@ -1020,7 +1076,7 @@ def safe_final_report(report):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run post-sync Palace memory dependency smoke checks.")
-    parser.add_argument("--mode", choices=["read-only", "bounded"], default="read-only")
+    parser.add_argument("--mode", choices=["read-only", "read-only-pre-upgrade", "bounded"], default="read-only")
     parser.add_argument("--manifest")
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--receipt-file")

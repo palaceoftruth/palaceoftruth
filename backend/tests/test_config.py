@@ -596,6 +596,7 @@ def test_typesafe_settings_are_not_validated_while_the_reranker_is_off() -> None
     assert settings.typesafe_api_key == ""
 
 
+
 # MiniMax-only generation routing: every text/relationship/vision generation
 # model must resolve to the exact supported MiniMax set. Any other configured
 # value fails visibly at boot instead of quietly routing to a non-MiniMax
@@ -671,3 +672,45 @@ def test_settings_preserve_openai_embedding_and_transcription_defaults() -> None
     assert settings.embedding_model == "text-embedding-3-small"
     assert settings.transcription_provider == "openai"
     assert settings.whisper_model == "gpt-4o-transcribe-diarize"
+
+# --- Vision provider route (VISION_PROVIDER / VISION_GATEWAY_MODEL) -------------
+
+
+def test_settings_default_to_openrouter_vision_with_qwen_vl_gateway_model() -> None:
+    settings = config.Settings(**_settings_kwargs())
+    assert settings.vision_provider == "openrouter"
+    assert settings.vision_gateway_model == "qwen-vl"
+
+
+def test_settings_accept_gateway_vision_provider() -> None:
+    settings = config.Settings(
+        **_settings_kwargs(vision_provider="Gateway", vision_gateway_model="qwen-vl")
+    )
+    assert settings.vision_provider == "gateway"
+    assert settings.vision_gateway_model == "qwen-vl"
+
+
+def test_settings_reject_unknown_vision_provider() -> None:
+    with pytest.raises(ValidationError, match="VISION_PROVIDER"):
+        config.Settings(**_settings_kwargs(vision_provider="bedrock"))
+
+
+def test_settings_reject_deprecated_vision_gateway_model() -> None:
+    with pytest.raises(ValidationError, match="deprecated"):
+        config.Settings(**_settings_kwargs(vision_provider="gateway", vision_gateway_model="qwen3-vl"))
+
+
+def test_settings_reject_empty_gateway_vision_model() -> None:
+    with pytest.raises(ValidationError, match="VISION_GATEWAY_MODEL"):
+        config.Settings(**_settings_kwargs(vision_provider="gateway", vision_gateway_model="   "))
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_settings_reject_non_positive_vision_max_image_bytes(value: int) -> None:
+    with pytest.raises(ValidationError, match="VISION_MAX_IMAGE_BYTES"):
+        config.Settings(**_settings_kwargs(vision_max_image_bytes=value))
+
+
+def test_settings_reject_non_positive_vision_gateway_timeout() -> None:
+    with pytest.raises(ValidationError, match="VISION_GATEWAY_TIMEOUT_SECONDS"):
+        config.Settings(**_settings_kwargs(vision_gateway_timeout_seconds=0))

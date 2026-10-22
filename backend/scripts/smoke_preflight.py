@@ -4,7 +4,12 @@ These queries require separately reviewed reader authority and control artifact
 mounts. They do not assume the currently installed chart grants that access.
 """
 from __future__ import annotations
+import base64
+import gzip
+import hashlib
+import io
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 from scripts import smoke_control as control
@@ -174,6 +179,26 @@ OOM_EVENT_REASONS = {"OOMKilling", "OOMKilled"}
 # less often than this needs the operator to justify a different bound.
 FRESHNESS_SECONDS = 300
 COVERAGE_TOLERANCE_SECONDS = 120
+# ARQ workers refresh a pod-specific broker health key on this cadence
+# (app/workers/queues.py). A live, pod-specific key is up-to-now liveness
+# evidence for a worker that legitimately emits NO log line inside the window:
+# the refresh runs in the worker's event loop, so a stale/absent key means the
+# loop is not servicing the broker.
+BROKER_HEARTBEAT_INTERVAL_SECONDS = 15
+BROKER_HEARTBEAT_TOLERANCE_SECONDS = 30
+# Coverage kinds are explicit and honest. An idle worker proved by container
+# state + a live broker heartbeat is NEVER reported as having satisfied a
+# log-coverage check it did not satisfy.
+LOG_COVERAGE_KIND = "log"
+IDLE_WORKER_COVERAGE_KIND = "state_and_events_for_idle_worker"
+# Known ARQ worker containers -> broker queue name. Only these workloads have a
+# broker heartbeat that can prove an idle worker is alive; an unknown container
+# (including a non-worker API service) with empty logs still fails closed.
+WORKER_QUEUE_BY_CONTAINER = {
+    "worker": "arq:queue",
+    "media-worker": "arq:queue:media",
+    "palace-worker": "arq:queue:palace",
+}
 
 
 def _live_release(kube, namespace, release_name):
@@ -286,6 +311,357 @@ def health_runtime_binding(smoke, client, report, args, kube):
     smoke._record_check(report, 'artifact_binding', 'passed', observations=found, phase_digest=digest)
 
 
+HELM_RELEASE_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024
+HELM_RELEASE_ENCODED_MAX_CHARS = 2 * HELM_RELEASE_PAYLOAD_MAX_BYTES
+HELM_MANIFEST_MAX_CHARS = 8 * 1024 * 1024
+YAML_MAX_NODES = 100000
+YAML_MAX_ALIASES = 1000
+YAML_MAX_DEPTH = 64
+HELM_RELEASE_STATUSES = frozenset({
+    'pending-install', 'pending-upgrade', 'pending-rollback', 'deployed',
+    'failed', 'superseded', 'uninstalled', 'uninstalling'})
+
+
+def _decode_helm_release(secret):
+    """Decode a Helm v3 release Secret with a HARD output bound.
+
+    The compressed payload is expanded through a capped reader (max+1 bytes)
+    BEFORE ``json.loads``, so a gzip bomb cannot expand without limit. The
+    encoded string is capped before its base64 decode. Errors are generic and
+    value-free: no payload bytes are ever emitted.
+    """
+    data = (secret.get('data') or {}).get('release')
+    if not isinstance(data, str) or not data:
+        raise control.ControlError('installed helm release payload missing')
+    if len(data) > HELM_RELEASE_ENCODED_MAX_CHARS:
+        raise control.ControlError('installed helm release payload exceeds size bound')
+    try:
+        outer = base64.b64decode(data, validate=True)
+        inner = base64.b64decode(outer, validate=True)
+    except ValueError as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(inner)) as gz:
+            blob = gz.read(HELM_RELEASE_PAYLOAD_MAX_BYTES + 1)
+    except (OSError, EOFError, ValueError) as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    if len(blob) > HELM_RELEASE_PAYLOAD_MAX_BYTES:
+        raise control.ControlError('installed helm release payload exceeds size bound')
+    try:
+        release = json.loads(blob)
+    except ValueError as exc:
+        raise control.ControlError('installed helm release payload unparsable') from exc
+    except RecursionError as exc:
+        raise control.ControlError('installed helm release payload too deeply nested') from exc
+    if not isinstance(release, dict):
+        raise control.ControlError('installed helm release payload malformed')
+    return release
+
+
+def _manifest_image_pins(manifest_text, wanted):
+    """Exact digest pins per wanted container from a Helm-rendered manifest.
+
+    Bounded TWICE: a hard character cap before any parse, and a bounded
+    SafeLoader that caps composed nodes, alias events, and nesting depth. A
+    rendered Helm manifest needs no anchors, so an alias/merge bomb is refused
+    (not merely truncated) and a deep/recursive structure cannot loop.
+    """
+    if not isinstance(manifest_text, str) or not manifest_text.strip():
+        raise control.ControlError('installed manifest missing')
+    if len(manifest_text) > HELM_MANIFEST_MAX_CHARS:
+        raise control.ControlError('installed manifest exceeds size bound')
+    import yaml
+
+    class _BoundedSafeLoader(yaml.SafeLoader):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self._nodes = 0
+            self._aliases = 0
+            self._depth = 0
+
+        def compose_node(self, parent, index):
+            if self.check_event(yaml.events.AliasEvent):
+                self._aliases += 1
+                if self._aliases > YAML_MAX_ALIASES:
+                    raise control.ControlError('installed manifest alias limit exceeded')
+            self._nodes += 1
+            if self._nodes > YAML_MAX_NODES:
+                raise control.ControlError('installed manifest node limit exceeded')
+            self._depth += 1
+            try:
+                if self._depth > YAML_MAX_DEPTH:
+                    raise control.ControlError('installed manifest depth limit exceeded')
+                return super().compose_node(parent, index)
+            finally:
+                self._depth -= 1
+
+    try:
+        docs = list(yaml.load_all(manifest_text, Loader=_BoundedSafeLoader))
+    except control.ControlError:
+        raise
+    except yaml.YAMLError as exc:
+        raise control.ControlError('installed manifest unparsable') from exc
+    except RecursionError as exc:
+        raise control.ControlError('installed manifest too deeply nested') from exc
+    pins = {}
+    for doc in docs:
+        if not isinstance(doc, dict) or doc.get('kind') != 'Deployment':
+            continue
+        spec = ((doc.get('spec') or {}).get('template') or {}).get('spec') or {}
+        for c in spec.get('containers') or []:
+            name = c.get('name')
+            if name not in wanted:
+                continue
+            image = c.get('image')
+            if not isinstance(image, str) or '@sha256:' not in image:
+                raise control.ControlError('installed manifest image is not digest-pinned: ' + str(name))
+            pins[name] = image
+    missing = wanted - set(pins)
+    if missing:
+        raise control.ControlError('installed manifest misses workload container: ' + ','.join(sorted(missing)))
+    return pins
+
+
+def _image_matches(image_id, pin):
+    """Running imageID equals the installed pin by digest and repository tail."""
+    if not isinstance(image_id, str) or '@sha256:' not in image_id:
+        return False
+    if not isinstance(pin, str) or '@sha256:' not in pin:
+        return False
+    image_repo, image_digest = image_id.rsplit('@', 1)
+    pin_repo, pin_digest = pin.rsplit('@', 1)
+    return image_digest == pin_digest and image_repo.rsplit('/', 2)[-2:] == pin_repo.rsplit('/', 2)[-2:]
+
+
+def _helm_release_revisions(kube, namespace, release_name):
+    """Every numeric Helm v3 revision recorded for the release (read-only)."""
+    payload = kube.get('/api/v1/namespaces/' + namespace + '/secrets',
+                       query={'labelSelector': 'owner=helm,name=' + release_name})
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        raise control.ControlError('helm release revisions missing')
+    prefix = 'sh.helm.release.v1.' + release_name + '.v'
+    versions = []
+    for secret in items:
+        name = (secret.get('metadata') or {}).get('name', '')
+        if not name.startswith(prefix):
+            continue
+        tail = name[len(prefix):]
+        if tail.isdigit():
+            versions.append(int(tail))
+    if not versions:
+        raise control.ControlError('helm release revisions malformed')
+    if len(set(versions)) != len(versions):
+        # Two secret names mapping to one numeric revision is a conflict, not an
+        # ordering artefact: refuse rather than pick a max by list order.
+        raise control.ControlError('conflicting helm release revisions')
+    return sorted(versions)
+
+
+def _pre_upgrade_frozen_facts(smoke, args, kube, doc):
+    """Read the EXACT frozen binding fields plus the max-revision installed payload.
+
+    Only frozen, stable fields are returned for TOCTOU comparison; unrelated and
+    unstable fields (resourceVersion, live status text, managedFields) are
+    deliberately excluded. Secret metadata is RBAC-controlled: this validates the
+    exact name, owner/name labels, Helm status label, numeric version label, and
+    the payload revision/status consistency. It is NOT a cryptographic provenance
+    claim. No secret value is returned for reporting.
+    """
+    kube.get('/api/v1/namespaces/kube-system')
+    kube.get('/api/v1/namespaces/' + args.namespace)
+    release = _live_release(kube, args.namespace, args.target_name)
+    spec = release.get('spec') or {}
+    declared = (spec.get('values') or {}).get('image') or {}
+    chart_ref = spec.get('chartRef') or {}
+    if chart_ref.get('kind') != 'OCIRepository' or not chart_ref.get('name'):
+        raise control.ControlError('declared chart OCI reference missing')
+    ref_ns = chart_ref.get('namespace') or args.namespace
+    oci = kube.get('/apis/source.toolkit.fluxcd.io/v1/namespaces/' + ref_ns + '/ocirepositories/' + chart_ref['name'])
+    revisions = _helm_release_revisions(kube, args.namespace, args.target_name)
+    max_rev = max(revisions)
+    secret_name = 'sh.helm.release.v1.' + args.target_name + '.v' + str(max_rev)
+    secret = kube.get('/api/v1/namespaces/' + args.namespace + '/secrets/' + secret_name)
+    meta = secret.get('metadata') or {}
+    labels = meta.get('labels') or {}
+    if (meta.get('namespace') or args.namespace) != args.namespace:
+        raise control.ControlError('helm release secret namespace mismatch')
+    if meta.get('name') != secret_name:
+        raise control.ControlError('helm release secret name mismatch')
+    if labels.get('owner') != 'helm' or labels.get('name') != args.target_name:
+        raise control.ControlError('helm release secret owner/name label mismatch')
+    status = labels.get('status')
+    if status not in HELM_RELEASE_STATUSES:
+        raise control.ControlError('helm release status label invalid')
+    version_label = labels.get('version')
+    if not isinstance(version_label, str) or not version_label.isdigit() or int(version_label) != max_rev:
+        raise control.ControlError('helm release version label mismatch')
+    installed = _decode_helm_release(secret)
+    if installed.get('version') != max_rev:
+        raise control.ControlError('installed release payload revision mismatch')
+    info = installed.get('info') or {}
+    if 'status' in info and (info.get('status') not in HELM_RELEASE_STATUSES or info.get('status') != status):
+        raise control.ControlError('installed release status conflicts with the secret label')
+    try:
+        payload_sha256 = hashlib.sha256(control.canonical(installed)).hexdigest()
+    except (control.ControlError, RecursionError) as exc:
+        raise control.ControlError('installed release payload not canonicalizable') from exc
+    facts = {
+        'release_uid': (release.get('metadata') or {}).get('uid'),
+        'suspend': spec.get('suspend'),
+        'backend': declared.get('backendDigest'),
+        'worker': declared.get('workerDigest'),
+        'frontend': declared.get('frontendDigest'),
+        'chart': ((oci.get('spec') or {}).get('ref') or {}).get('digest'),
+        'max_rev': max_rev,
+        'secret_uid': meta.get('uid'),
+        'secret_status': status,
+        'secret_version': version_label,
+        'payload_sha256': payload_sha256,
+    }
+    return facts, release, installed
+
+
+def _require_frozen_binding(facts, doc):
+    """The exact frozen tuple must hold in a read; raise a precise error otherwise."""
+    if facts['release_uid'] != doc['release_uid']:
+        raise control.ControlError('live HelmRelease UID differs from approved release')
+    if facts['suspend'] is not True:
+        raise control.ControlError('canonical hold is not suspended')
+    if facts['backend'] != doc['target_digest']:
+        raise control.ControlError('declared target image differs from approved target')
+    for key in ('worker', 'frontend'):
+        if not isinstance(facts[key], str) or not re.fullmatch('sha256:[0-9a-f]{64}', facts[key]):
+            raise control.ControlError('declared image pin tuple incomplete: ' + key)
+    if facts['chart'] != doc['chart_digest']:
+        raise control.ControlError('declared chart OCI differs from approved target')
+    if facts['max_rev'] != doc['expected_max_revision']:
+        raise control.ControlError('latest attempted revision differs from approved maximum')
+
+
+def _pre_upgrade_toctou_check(smoke, args, kube, doc, first_facts):
+    """Re-read the SAME release after ALL health calls; any frozen-field change fails."""
+    after_facts, _, _ = _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+    _require_frozen_binding(after_facts, doc)
+    if after_facts != first_facts:
+        raise control.ControlError('release/target changed during the pre-upgrade preflight')
+
+
+def pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest, snapshot=None):
+    """Read-only PRE-UPGRADE artifact binding for a held, declared-new window.
+
+    The AUTOMATIC post-upgrade `health_runtime_binding` binds the DECLARED image
+    to the RUNNING image and stays strict. This separate pre-upgrade check runs
+    BEFORE the upgrade, while the release is held and the new target is declared
+    but NOT applied:
+
+    - the DECLARED HelmRelease target must equal the frozen APPROVED tuple:
+      same release UID, suspend true, declared backend digest == target_digest,
+      and the declared chart OCI reference digest == chart_digest;
+    - the highest recorded Helm revision must equal the approved expected maximum
+      (no new attempt since the frozen window), sourced from the immutable Helm
+      release Secrets;
+    - the RUNNING workload images must equal the ACTUAL INSTALLED artifact taken
+      from the Helm release manifest of that max attempted revision, NOT from the
+      declared target and NOT from a "first successful" history fallback;
+    - every replica, owner, readiness, and exact image pin is checked (#575).
+
+    A FAILED max revision is expected for a held partial apply: release Ready is
+    NOT required. Any missing/unparsable installed artifact fails CLOSED with a
+    precise error; there is no image-ignore flag.
+    """
+    doc = manifest.doc
+    manifest.active(smoke.utc_now())
+    if doc['namespace'] != args.namespace or doc['release_name'] != args.target_name:
+        raise control.ControlError('pre-upgrade binding differs from approved release')
+    facts, release, installed = snapshot if snapshot is not None else _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+    _require_frozen_binding(facts, doc)
+    max_rev = facts['max_rev']
+    pins = _manifest_image_pins(installed.get('manifest'), set(WORKLOAD_CONTAINERS))
+    # --- the RUNNING runtime must be the installed artifact, not the declared target ---
+    expected = _expected_workload_replicas(release)
+    ancestry = {name: _deployment_ancestry(kube, args.namespace, args.target_name + '-' + name) for name in expected}
+    found = {name: [] for name in expected}
+    for pod in _workload_pods(kube, args.namespace, args.target_name):
+        if pod.get('metadata', {}).get('deletionTimestamp'):
+            continue
+        refs = (pod.get('metadata') or {}).get('ownerReferences') or []
+        if any(r.get('kind') in ('Job', 'CronJob') for r in refs):
+            continue
+        statuses = pod.get('status', {}).get('containerStatuses') or []
+        names = {c.get('name') for c in statuses}
+        if not (names & set(expected)):
+            continue
+        if (pod.get('status') or {}).get('phase') != 'Running':
+            raise control.ControlError('workload pod not running')
+        rs_uid = _replicaset_owner(pod)
+        for c in statuses:
+            name = c.get('name')
+            if name not in expected:
+                continue
+            if rs_uid not in ancestry[name][1]:
+                raise control.ControlError('pod owner is not the current ReplicaSet of ' + name)
+            if not _image_matches(c.get('imageID'), pins[name]):
+                raise control.ControlError('running workload image is not the installed release pin: ' + name)
+            if c.get('ready') is not True:
+                raise control.ControlError('workload container not ready: ' + name)
+            found[name].append({'pod_uid': pod.get('metadata', {}).get('uid'), 'container': name,
+                                'imageID': c.get('imageID'), 'ready': True})
+    for name, count in expected.items():
+        if len(found[name]) != count:
+            raise control.ControlError('expected replicas not all observed for ' + name)
+    smoke._record_check(report, 'artifact_binding', 'passed', observations=found,
+                        installed_revision=max_rev, installed_pins=pins,
+                        declared_target_digest=doc['target_digest'],
+                        declared_chart_digest=doc['chart_digest'],
+                        installed_payload_sha256=facts['payload_sha256'])
+
+
+def pre_upgrade_health_preflight(smoke, client, args, kube, manifest):
+    """Read-only pre-upgrade lane: 8 evidence checks, installed-artifact bind, TOCTOU close."""
+    report = {'target': args.target_name, 'checks': [], 'alerts': [], 'generated_at': smoke.utc_now().isoformat()}
+    doc = manifest.doc
+    manifest.active(smoke.utc_now())
+    first = {}
+
+    def bind():
+        first['snapshot'] = _pre_upgrade_frozen_facts(smoke, args, kube, doc)
+        pre_upgrade_artifact_binding(smoke, client, report, args, kube, manifest,
+                                     snapshot=first['snapshot'])
+
+    calls = [lambda: smoke.check_api_health(client, report),
+             lambda: smoke.check_runtime_dependencies(client, report, args, kube=kube),
+             lambda: smoke.resolve_tenant_identity(client, report, args),
+             bind,
+             lambda: smoke.asyncio.run(smoke.asyncio.wait_for(smoke.check_sentinel(report), timeout=args.reader_budget.timeout(10))),
+             lambda: smoke.check_mcp_reachable(args.mcp_url, report, timeout=min(args.request_timeout, 10), budget=args.reader_budget),
+             lambda: smoke._record_check(report, 'baseline_temporal', 'passed', **health_temporal(smoke, args, kube)),
+             lambda: health_kubernetes_alerts(smoke, args, kube, smoke.utc_now()),
+             lambda: smoke._record_check(report, 'kubernetes_alerts', 'passed')]
+    for call in calls[:-1]:
+        try:
+            args.reader_budget.timeout(10)
+            call()
+        except Exception as exc:  # noqa: BLE001
+            smoke._alert(report, 'required_preflight_exception', 'read-only health prerequisite failed', error_class=type(exc).__name__)
+    if smoke._check_passed(report, 'baseline_temporal') and smoke._check_passed(report, 'runtime_dependencies'):
+        try:
+            calls[-1]()
+        except Exception as exc:  # noqa: BLE001
+            smoke._alert(report, 'required_preflight_exception', 'kubernetes alert stamp failed', error_class=type(exc).__name__)
+    # R2 (TOCTOU): after ALL health calls, re-read the SAME release and require
+    # the exact frozen fields unchanged. A hold/target/chart/revision change
+    # during the run -- or an absent first snapshot -- fails the gate.
+    try:
+        if 'snapshot' not in first:
+            raise control.ControlError('pre-upgrade binding snapshot unavailable')
+        _pre_upgrade_toctou_check(smoke, args, kube, doc, first['snapshot'][0])
+    except Exception as exc:  # noqa: BLE001
+        smoke._alert(report, 'required_preflight_exception',
+                     'pre-upgrade binding changed after the health passes', error_class=type(exc).__name__)
+    return report
+
+
 def _termination_is_recent(term, floor):
     if not isinstance(term, dict) or not term:
         return False
@@ -296,8 +672,40 @@ def _termination_is_recent(term, floor):
     return finished >= floor
 
 
+def _running_started_at(state):
+    """Parse ``state.running.startedAt``; None when absent or invalid."""
+    if not isinstance(state, dict):
+        return None
+    running = state.get('running')
+    if not isinstance(running, dict):
+        return None
+    try:
+        return control.instant(running.get('startedAt'))
+    except control.ControlError:
+        return None
+
+
 def _health_workers(smoke, args, kube, floor):
-    """Two-pass worker observations; recent OOM or a restart since the floor fails."""
+    """Two-pass worker observations judged in the CURRENT observation window.
+
+    The restart counter is an ACTIVE-window signal, not an absolute historical
+    total. A counter at/over ``restart_alert_threshold`` is admitted ONLY with
+    the full historical proof: the container's most recent termination is
+    provably OUTSIDE the window (``lastState.terminated.finishedAt < floor``),
+    the live container has run continuously across the whole window
+    (``state.running.startedAt <= floor``), that start is coherent with the
+    termination (``startedAt > finishedAt``), and every timestamp is valid and
+    not in the future.
+
+    Fail-closed edges: a non-zero counter with no ``lastState`` evidence, a
+    termination inside the window, an absent/unparsable/future timestamp, a
+    container that began inside the window, or an incoherent start/termination
+    interval all refuse the gate. The threshold (3) and the log window (>=3600s)
+    are unchanged: this is a windowed scope, not a threshold raise and not a
+    label-capture bypass. An OLD counter with old terminations passes; a
+    contemporary or unprovable counter still fails.
+    """
+    now = smoke.utc_now()
     selector = 'app.kubernetes.io/instance=' + args.target_name
     payload = kube.get('/api/v1/namespaces/' + args.namespace + '/pods', query={'labelSelector': selector})
     items = payload.get('items')
@@ -323,21 +731,143 @@ def _health_workers(smoke, args, kube, floor):
             count = c.get('restartCount')
             if type(count) is not int or count < 0:
                 raise control.ControlError('restart counter malformed')
+            finished = None
+            empty_history_proven = False
+            if term:
+                try:
+                    finished = control.instant(term.get('finishedAt'))
+                except control.ControlError as exc:
+                    # Unparsable evidence is not proof of health.
+                    raise control.ControlError('termination timestamp unparsable') from exc
+                if finished > now:
+                    raise control.ControlError('future termination evidence')
+                if finished >= floor:
+                    raise control.ControlError('recent worker termination is not proof of health')
+            elif count > 0:
+                # A live non-zero counter with EMPTY lastState has no termination
+                # time to compare. It is admitted ONLY with the continuous-container
+                # proof: the current instance started AT or BEFORE the window floor
+                # (it has run across the whole window), and that start is coherent
+                # and not in the future. A restart would move startedAt and the
+                # counter; the two-pass stability in health_temporal is the
+                # independent witness. Empty lastState alone is NOT proof.
+                run_start = _running_started_at(c.get('state'))
+                if run_start is None:
+                    raise control.ControlError('container start metadata missing for a non-zero counter with no lastState')
+                if run_start > now:
+                    raise control.ControlError('future container start evidence')
+                if run_start > floor:
+                    raise control.ControlError('container began inside the window; restart scope unproven')
+                empty_history_proven = True
             if count >= args.restart_alert_threshold:
-                raise control.ControlError('restart counter at/over threshold')
-            if term and (_termination_is_recent(term, floor)):
-                raise control.ControlError('recent worker termination is not proof of health')
+                # Historical-only admission: the full window proof is required.
+                if finished is not None:
+                    run_start = _running_started_at(c.get('state'))
+                    if run_start is None:
+                        raise control.ControlError('container start metadata missing for a historical counter')
+                    if run_start > floor:
+                        raise control.ControlError('container began inside the window; historical restart scope unproven')
+                    if run_start <= finished:
+                        raise control.ControlError('incoherent container start and termination interval')
+                elif not empty_history_proven:
+                    raise control.ControlError('historical restart count without termination evidence')
             rows.append({'pod': name, 'uid': pod.get('metadata', {}).get('uid'),
                          'container': c.get('name'), 'container_id': c.get('containerID'),
                          'restart_count': count,
-                         'started_at': (c.get('state', {}).get('running') or {}).get('startedAt')})
+                         'started_at': (c.get('state', {}).get('running') or {}).get('startedAt'),
+                         'last_terminated_at': finished.isoformat() if finished is not None else None})
     if not rows:
         raise control.ControlError('no approved workers observed')
     return rows
 
 
-def _health_log_coverage(smoke, args, kube, rows, now, floor):
-    """Explicit coverage record; bounded freshness; truncation is rejected."""
+def _idle_worker_queue(container_name):
+    """Map a KNOWN ARQ worker container to its broker queue, else None."""
+    return WORKER_QUEUE_BY_CONTAINER.get(container_name)
+
+
+def _broker_heartbeat_proof(broker, queue_name, pod_name, now):
+    """Read-only ARQ heartbeat proof for an idle worker, else None.
+
+    The probe is INJECTED (host harness) or resolves to the in-cluster lane's
+    live Redis EXISTS/TTL read (check_memory_rollout_smoke.broker_pulse). An
+    absent probe, an absent key, or a stale/implausible value returns None so the
+    caller fails closed. The probe never enqueues, pushes, or mutates SQL.
+    """
+    if not callable(broker):
+        return None
+    try:
+        pulse = broker(queue_name, pod_name)
+    except Exception:  # noqa: BLE001 - an unavailable probe is not proof
+        return None
+    if not isinstance(pulse, dict) or pulse.get('present') is not True:
+        return None
+    # The heartbeat must be for THIS queue and pod (the same key), not a sibling.
+    if pulse.get('queue') != queue_name or pulse.get('pod') != pod_name:
+        return None
+    ttl = pulse.get('ttl_seconds')
+    # `type(...) is int` excludes bool. A RAW Redis TTL of -2 (key missing), -1
+    # (exists with no expiry: NOT being refreshed), 0 (imminent expiry), or
+    # > interval+tolerance (stale) is NOT a fresh heartbeat. Never clamp a
+    # negative TTL into this range; only a live, refreshing key qualifies.
+    if type(ttl) is not int or ttl < 1 or ttl > BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS:
+        return None
+    try:
+        heartbeat_at = control.instant(pulse.get('as_of'))
+    except control.ControlError:
+        return None
+    skew = timedelta(seconds=BROKER_HEARTBEAT_TOLERANCE_SECONDS)
+    fresh_window = timedelta(seconds=BROKER_HEARTBEAT_INTERVAL_SECONDS + BROKER_HEARTBEAT_TOLERANCE_SECONDS)
+    # The caller's probe stamp must be FRESH: recent enough that the observation
+    # is about the live key, yet not fabricated far into the future.
+    if heartbeat_at < now - fresh_window or heartbeat_at > now + skew:
+        return None
+    return {'heartbeat_at': heartbeat_at.isoformat(), 'ttl_seconds': ttl,
+            'queue_length': pulse.get('queue_length')}
+
+
+def _idle_worker_coverage(args, row, now, floor, broker):
+    """Explicit `state_and_events_for_idle_worker` proof, else None.
+
+    Only a KNOWN ARQ worker whose container has run continuously across the whole
+    window (start metadata present and started <= floor) AND whose live,
+    pod-specific broker heartbeat is fresh qualifies. Every other empty capture
+    still fails closed. This never asserts log coverage.
+    """
+    tail = getattr(args, 'log_tail_lines', None)
+    if type(tail) is not int or tail < 1:
+        return None                       # a degenerate cap is not a complete capture
+    queue_name = _idle_worker_queue(row.get('container'))
+    if queue_name is None:
+        return None                       # not a known ARQ worker: no broker heartbeat
+    try:
+        started = control.instant(row.get('started_at'))
+    except control.ControlError:
+        return None                       # start metadata missing -> coverage unproven
+    if started > floor:
+        return None                       # began inside the window: not a long-idle worker
+    proof = _broker_heartbeat_proof(broker, queue_name, row.get('pod'), now)
+    if proof is None:
+        return None
+    return {'pod': row['pod'], 'container': row['container'],
+            'coverage_kind': IDLE_WORKER_COVERAGE_KIND,
+            'coverage_start': started.isoformat(),
+            'coverage_end': proof['heartbeat_at'],
+            'heartbeat_at': proof['heartbeat_at'],
+            'heartbeat_ttl_seconds': proof['ttl_seconds'],
+            'queue_length': proof['queue_length'],
+            'captured_at': now.isoformat(),
+            'collection_complete': True}
+
+
+def _health_log_coverage(smoke, args, kube, rows, now, floor, broker=None):
+    """Explicit coverage record; bounded freshness; truncation is rejected.
+
+    A worker with an EMPTY capture is covered only when it is a known ARQ worker
+    proven live by its pod-specific broker heartbeat and by continuous container
+    state; that record carries an explicit `state_and_events_for_idle_worker`
+    kind and never claims log coverage.
+    """
     seconds = max(args.log_since_seconds, 3600)
     records = []
     for row in rows:
@@ -348,8 +878,12 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
             raise control.ControlError('log read failed')
         lines = text.splitlines()
         if not lines:
-            # A newly started container with no lines cannot prove coverage.
-            raise control.ControlError('empty logs cannot prove coverage')
+            record = _idle_worker_coverage(args, row, now, floor, broker)
+            if record is None:
+                # No complete log capture and no idle-worker proof: fail closed.
+                raise control.ControlError('empty logs cannot prove coverage')
+            records.append(record)
+            continue
         if len(text.encode()) > 1048576 or len(lines) >= args.log_tail_lines:
             raise control.ControlError('log capture truncated (cap/overflow)')
         stamps = []
@@ -364,44 +898,92 @@ def _health_log_coverage(smoke, args, kube, rows, now, floor):
             started = control.instant(row.get('started_at'))
         except control.ControlError:
             started = None
-        # The floor is the later of the log window and this container's own
-        # start: a freshly rolled pod legitimately has no older history.
-        start_floor = floor if started is None else max(floor, started)
+        # Startup metadata is required. Without it the coverage-start guard cannot
+        # run, so refuse here instead of skipping the check (fail closed).
+        if started is None:
+            raise control.ControlError('container start metadata missing; coverage start unproven')
+        # The floor is the later of the log window and this container's own start:
+        # a freshly rolled pod legitimately has no older history.
+        start_floor = max(floor, started)
         coverage_start = max(stamps[0], start_floor)
-        if stamps[0] > start_floor + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
-            raise control.ControlError('coverage does not start at the floor')
+        # A container that began AT or INSIDE the observation window must have
+        # logged near its own start: its first line is real startup evidence. A
+        # container OLDER than the window is instead sampled from an ARBITRARY
+        # boundary (now - log_since_seconds). A sparse worker with no heartbeat
+        # contract can legitimately emit its next line well after that boundary,
+        # so a line exactly at the floor is NOT required. Non-empty, complete,
+        # ordered capture plus the workload freshness bound below carry the
+        # coverage proof; this does not relax the truncation, stale-freshness, or
+        # OOM gates.
+        if started >= floor:
+            if stamps[0] > started + timedelta(seconds=COVERAGE_TOLERANCE_SECONDS):
+                raise control.ControlError('coverage does not start at the container start')
         if stamps[-1] > now:
             raise control.ControlError('log coverage is in the future')
         records.append({'pod': row['pod'], 'container': row['container'],
+                        'coverage_kind': LOG_COVERAGE_KIND,
                         'coverage_start': coverage_start.isoformat(),
                         'coverage_end': stamps[-1].isoformat(),
                         'captured_at': now.isoformat(),
                         'collection_complete': True})
     # Coverage contract (documented): a container proves it has logged since its
-    # floor; the WORKLOAD's up-to-now liveness is proven by (a) at least one
-    # selected worker logging within FRESHNESS_SECONDS and (b) the second-pass
-    # identity/counter equality in health_temporal. FRESHNESS_SECONDS is a policy
-    # bound, not an up-to-now guarantee -- an idle media worker may legitimately
-    # be silent for longer.
-    freshest = max(control.instant(r['coverage_end']) for r in records)
+    # floor, OR -- for a known ARQ worker with an empty window -- it proves
+    # up-to-now liveness by continuous container state plus a fresh, pod-specific
+    # broker heartbeat recorded under `state_and_events_for_idle_worker`. Either
+    # way the WORKLOAD must expose a fresh evidence stream within FRESHNESS_SECONDS;
+    # the second-pass identity/counter equality in health_temporal is unchanged.
+    # FRESHNESS_SECONDS is a policy bound, not an up-to-now guarantee.
+    log_ends = [control.instant(r['coverage_end']) for r in records
+                if r.get('coverage_kind') == LOG_COVERAGE_KIND]
+    beat_ends = [control.instant(r['heartbeat_at']) for r in records
+                 if r.get('coverage_kind') == IDLE_WORKER_COVERAGE_KIND]
+    if not log_ends and not beat_ends:
+        raise control.ControlError('no selected worker logged within the freshness bound')
+    freshest = max(log_ends + beat_ends)
     if freshest < now - timedelta(seconds=FRESHNESS_SECONDS):
         raise control.ControlError('no selected worker logged within the freshness bound')
     return records
 
 
-def health_temporal(smoke, args, kube):
-    """Live two-pass temporal baseline with explicit coverage and freshness."""
+def health_temporal(smoke, args, kube, broker=None):
+    """Live two-pass temporal baseline with explicit coverage and freshness.
+
+    The restart policy is WINDOWED: an at/over-threshold counter is admitted
+    only with proof -- from BOTH passes -- that it is historical: the most
+    recent termination is outside the window, the container has run across the
+    whole window, and no counter move (even 1) occurred during the observation.
+    This mirrors the control path's baseline delta (smoke_control.temporal_gate)
+    while preserving threshold 3 and the >=3600s window. Any counter advance,
+    termination-metadata change, or identity/container change refuses the gate.
+    """
     if args.restart_alert_threshold != 3 or args.log_since_seconds < 3600:
         raise control.ControlError('required mode forbids weaker gates')
+    if broker is None:
+        broker = getattr(smoke, 'broker_pulse', None)
     now = smoke.utc_now()
     floor = now - timedelta(seconds=max(args.log_since_seconds, 3600))
     first = _health_workers(smoke, args, kube, floor)
-    coverage = _health_log_coverage(smoke, args, kube, first, now, floor)
+    coverage = _health_log_coverage(smoke, args, kube, first, now, floor, broker)
     second = _health_workers(smoke, args, kube, floor)
-    keys = lambda rows: sorted((r['uid'], r['container'], r['container_id'], r['restart_count']) for r in rows)
-    if keys(first) != keys(second):
-        raise control.ControlError('worker identity/counter changed during the observation window')
-    return {'workers': second, 'passes': 2, 'coverage': coverage}
+    first_by = {(r['uid'], r['container']): r for r in first}
+    if len(first_by) != len(first) or len(first_by) != len(second):
+        raise control.ControlError('worker identity set changed during the observation window')
+    history = []
+    for r in second:
+        b = first_by.get((r['uid'], r['container']))
+        if b is None or r['container_id'] != b['container_id']:
+            raise control.ControlError('worker identity/container changed during the observation window')
+        if r['restart_count'] != b['restart_count']:
+            # Any in-window counter movement (even 1) is an active restart signal.
+            raise control.ControlError('restart counter advanced during the observation window')
+        if r['started_at'] != b['started_at'] or r['last_terminated_at'] != b['last_terminated_at']:
+            raise control.ControlError('worker termination metadata changed during the observation window')
+        if r['restart_count'] >= args.restart_alert_threshold:
+            history.append({'pod': r['pod'], 'uid': r['uid'], 'container': r['container'],
+                            'restart_count': r['restart_count'],
+                            'last_terminated_at': r['last_terminated_at']})
+    return {'workers': second, 'passes': 2, 'coverage': coverage,
+            'lookback_start': floor.isoformat(), 'historical_restarts': history}
 
 
 def health_kubernetes_alerts(smoke, args, kube, now):

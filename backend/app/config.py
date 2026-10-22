@@ -4,7 +4,7 @@ import os
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from urllib.parse import parse_qs, urlparse
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.embedding_profile import (
@@ -31,6 +31,11 @@ _PLACEHOLDER_CREDENTIAL_VALUES = frozenset(
         "sk-or-...",
     }
 )
+
+# Retired vision gateway model aliases. The gateway does not serve these any
+# more, and a stale value must fail loudly instead of being rewritten silently
+# to a different model.
+_DEPRECATED_VISION_GATEWAY_MODELS = frozenset({"qwen3-vl"})
 
 
 def _is_placeholder_credential(value: str) -> bool:
@@ -189,11 +194,22 @@ class Settings(BaseSettings):
     openrouter_vision_model: str = "minimax/minimax-m3"
     openrouter_vision_fallback_models: str = ""
     # Trusted operator settings only; never populated from an API request.
-    vision_provider: Literal["openrouter", "custom"] = "openrouter"
+    vision_provider: Literal["openrouter", "gateway", "custom"] = "openrouter"
     vision_base_url: str = ""
     vision_model: str = ""
     vision_api_key: str = Field(default="", repr=False)
     vision_timeout_seconds: float = Field(default=60.0, gt=0, le=300, allow_inf_nan=False)
+
+    # Vision route. "openrouter" (default) keeps the existing OpenRouter vision
+    # chain. "gateway" sends image analysis to the self-hosted OpenAI-compatible
+    # LLM gateway (LLM_GATEWAY_URL / LLM_GATEWAY_TOKEN) with a dedicated model.
+    # The gateway route is independent of the OpenRouter and OpenAI credentials,
+    # carries no cross-provider fallback, and never lets a missing gateway
+    # credential fall through to a paid provider.
+
+    vision_gateway_model: str = "qwen-vl"
+    vision_gateway_timeout_seconds: float = 60.0
+    vision_max_image_bytes: int = 20 * 1024 * 1024
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
@@ -388,6 +404,20 @@ class Settings(BaseSettings):
         if transcription_provider not in {"openai", "assemblyai", "local_whisperx"}:
             raise ValueError("TRANSCRIPTION_PROVIDER must be one of: openai, assemblyai, local_whisperx")
         self.transcription_provider = transcription_provider
+        if self.vision_provider == "gateway":
+            gateway_model = self.vision_gateway_model.strip()
+            if not gateway_model:
+                raise ValueError("VISION_GATEWAY_MODEL must not be empty")
+            if gateway_model.lower() in _DEPRECATED_VISION_GATEWAY_MODELS:
+                raise ValueError(
+                    f"VISION_GATEWAY_MODEL {gateway_model!r} is deprecated and no longer served; "
+                    "use 'qwen-vl'"
+                )
+            self.vision_gateway_model = gateway_model
+        if self.vision_gateway_timeout_seconds <= 0:
+            raise ValueError("VISION_GATEWAY_TIMEOUT_SECONDS must be greater than 0")
+        if self.vision_max_image_bytes <= 0:
+            raise ValueError("VISION_MAX_IMAGE_BYTES must be greater than 0")
         if self.llm_gateway_url:
             parsed = urlparse(self.llm_gateway_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -521,6 +551,14 @@ class Settings(BaseSettings):
         # dev and the test suite never do, so this gate only applies to real
         # clusters and never breaks `docker compose up` or `pytest`.
         return self
+
+    @field_validator("vision_provider", mode="before")
+    @classmethod
+    def normalize_vision_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"openrouter", "gateway", "custom"}:
+            raise ValueError("VISION_PROVIDER must be one of: openrouter, gateway, custom")
+        return normalized
 
     @model_validator(mode="after")
     def validate_minimax_generation_policy(self) -> "Settings":

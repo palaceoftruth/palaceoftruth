@@ -224,6 +224,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    await app.state.llm.aclose()
     await app.state.arq_pool.close()
 
 

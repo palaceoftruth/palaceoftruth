@@ -16,6 +16,7 @@ from app.services.llm import (
     TagExtraction,
     VisionAnalysisTransportError,
     _strict_json_schema,
+    _vision_gateway_base_url,
 )
 from app.services.image_analysis import VisionAnalysisResult
 
@@ -1261,3 +1262,242 @@ async def test_stream_exhaustion_fails_closed_without_openai(llm_service) -> Non
         "minimax/minimax-m2.7",
     ]
     assert openai_completions.calls == []
+
+
+# --- Gateway vision route (VISION_PROVIDER=gateway, model qwen-vl) -------------
+
+
+class _ClosingFakeOpenAIClient(_FakeOpenAIClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.ctor_kwargs: dict = {}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def gateway_llm_service(monkeypatch):
+    created: list[_ClosingFakeOpenAIClient] = []
+
+    def _fake_async_openai(*_args, **_kwargs):
+        client = _ClosingFakeOpenAIClient()
+        client.ctor_kwargs = dict(_kwargs)
+        created.append(client)
+        return client
+
+    async def _fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.services.llm.AsyncOpenAI", _fake_async_openai)
+    monkeypatch.setattr("app.services.llm.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr("app.services.llm.settings.openai_api_key", "test-openai-key")
+    monkeypatch.setattr("app.services.llm.settings.vision_provider", "gateway")
+    monkeypatch.setattr(
+        "app.services.llm.settings.llm_gateway_url", "http://gateway.example.invalid:8080"
+    )
+    monkeypatch.setattr("app.services.llm.settings.llm_gateway_token", "synthetic-gateway-token")
+    monkeypatch.setattr("app.services.llm.settings.vision_gateway_model", "qwen-vl")
+
+    service = LLMService()
+    # Only OpenRouter exists initially; no direct OpenAI generation client.
+    assert len(created) == 1
+    return service, created
+
+
+def _gateway_completions(client):
+    return client.chat.completions
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("http://gateway.example.invalid:8080", "http://gateway.example.invalid:8080/v1"),
+        ("http://gateway.example.invalid:8080/", "http://gateway.example.invalid:8080/v1"),
+        ("https://gateway.example.invalid/v1", "https://gateway.example.invalid/v1"),
+        ("https://gateway.example.invalid/v1/", "https://gateway.example.invalid/v1"),
+    ],
+)
+def test_vision_gateway_base_url_joins_v1_once(raw: str, expected: str) -> None:
+    assert _vision_gateway_base_url(raw) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ["image/png", "image/jpeg"])
+async def test_gateway_vision_sends_text_and_image_blocks_without_fallback(
+    gateway_llm_service, media_type: str
+) -> None:
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [
+        _completion_response(
+            '{"summary":"A legible diagram.","image_type":"diagram",'
+            '"visible_text":["HELLO"],"objects":[],"entities":[],'
+            '"relationships":[],"visual_details":[],"uncertainties":[]}',
+            model="qwen-vl",
+        )
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", media_type, "ocr.png")
+
+    assert result.provider.provider == "gateway"
+    assert result.provider.requested_model == "qwen-vl"
+    assert result.provider.returned_model == "qwen-vl"
+    assert result.analysis.visible_text == ["HELLO"]
+    # The gateway client carries only the gateway credential and a /v1 base URL.
+    assert gateway_client.ctor_kwargs["api_key"] == "synthetic-gateway-token"
+    assert gateway_client.ctor_kwargs["base_url"] == "http://gateway.example.invalid:8080/v1"
+    assert gateway_client.ctor_kwargs["max_retries"] == 0
+    call = _gateway_completions(gateway_client).calls[0]
+    assert call["model"] == "qwen-vl"
+    assert call["temperature"] == 0.0
+    assert call["max_tokens"] == 4096
+    assert "extra_body" not in call
+    # The gateway accepts JSON-object mode, not a full JSON schema.
+    assert call["response_format"] == {"type": "json_object"}
+    content = call["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "exactly these keys: summary" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"] == f"data:{media_type};base64,aW1hZ2U="
+    # No paid request or direct OpenAI generation client exists.
+    assert created[0].chat.completions.calls == []
+    assert len(created) == 2
+    assert not hasattr(service, "_openai_client")
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_fails_closed_without_url_or_token(
+    gateway_llm_service, monkeypatch
+) -> None:
+    service, created = gateway_llm_service
+    monkeypatch.setattr("app.services.llm.settings.llm_gateway_url", "")
+    with pytest.raises(VisionAnalysisTransportError, match="gateway URL") as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+    assert failure.value.retryable is False
+
+    monkeypatch.setattr(
+        "app.services.llm.settings.llm_gateway_url", "http://gateway.example.invalid:8080"
+    )
+    monkeypatch.setattr("app.services.llm.settings.llm_gateway_token", "")
+    with pytest.raises(VisionAnalysisTransportError, match="credential"):
+        await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    # No gateway client was ever constructed, so no request left the host.
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_rejects_unsupported_media_type(gateway_llm_service) -> None:
+    service, created = gateway_llm_service
+    with pytest.raises(VisionAnalysisTransportError, match="media type"):
+        await service.analyze_image("aW1hZ2U=", "text/html", "ocr.png")
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_invalid_output_fails_closed(gateway_llm_service) -> None:
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [_completion_response("not json")]
+
+    with pytest.raises(RuntimeError, match="invalid structured output"):
+        await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    assert created[0].chat.completions.calls == []
+    assert len(created) == 2
+    assert len(_gateway_completions(gateway_client).calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_provider_error_has_no_paid_fallback(gateway_llm_service) -> None:
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [_api_status_error(503)] * 3
+
+    with pytest.raises(VisionAnalysisTransportError, match="unavailable") as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    assert failure.value.retryable is True
+    assert len(_gateway_completions(gateway_client).calls) == 3
+    assert created[0].chat.completions.calls == []
+    assert len(created) == 2
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_401_is_terminal(gateway_llm_service) -> None:
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [_api_status_error(401)]
+
+    with pytest.raises(VisionAnalysisTransportError, match="authentication failed") as failure:
+        await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    assert failure.value.retryable is False
+    assert len(_gateway_completions(gateway_client).calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_client_closed_on_aclose(gateway_llm_service) -> None:
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+
+    await service.aclose()
+
+    assert gateway_client.closed is True
+    assert created[0].closed is True
+    assert service._vision_gateway_client is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_parses_fenced_json_response(gateway_llm_service) -> None:
+    """The live llama.cpp gateway wraps its JSON in a code fence; the shared
+    tolerant parser must strip it and still validate the typed result."""
+    service, created = gateway_llm_service
+    await service._get_vision_gateway_client()
+    gateway_client = created[-1]
+    _gateway_completions(gateway_client).outcomes = [
+        _completion_response(
+            '```json\n{"summary":"Text \'PALACE 42\' in a bold font.","image_type":"OCR fixture",'
+            '"visible_text":["PALACE 42"],"objects":[],"entities":[],"relationships":[],'
+            '"visual_details":[],"uncertainties":[]}\n```',
+            model="qwen2.5-vl-7b",
+        )
+    ]
+
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+
+    assert result.analysis.visible_text == ["PALACE 42"]
+    assert result.provider.provider == "gateway"
+    assert result.provider.returned_model == "qwen2.5-vl-7b"
+
+
+@pytest.mark.asyncio
+async def test_gateway_vision_does_not_resolve_cloud_or_custom_route(
+    gateway_llm_service, monkeypatch
+) -> None:
+    service, created = gateway_llm_service
+
+    def forbidden_cloud_chain():
+        pytest.fail("gateway resolved a cloud vision chain")
+
+    async def forbidden_custom(*args, **kwargs):
+        pytest.fail("gateway entered custom vision transport")
+
+    monkeypatch.setattr(service, "_build_vision_model_chain", forbidden_cloud_chain)
+    monkeypatch.setattr(service, "_complete_custom_vision", forbidden_custom)
+    await service._get_vision_gateway_client()
+    _gateway_completions(created[-1]).outcomes = [
+        _completion_response('{"summary":"Gateway only","image_type":"diagram"}', model="qwen-vl")
+    ]
+    result = await service.analyze_image("aW1hZ2U=", "image/png", "ocr.png")
+    assert result.provider.provider == "gateway"
+    assert created[0].chat.completions.calls == []
+    assert len(created) == 2

@@ -52,7 +52,12 @@ async def test_lifespan_waits_for_sentinel_before_creating_the_arq_pool(
     monkeypatch.setattr(app_main, "wait_for_sentinel_master", fake_sentinel_wait)
     monkeypatch.setattr(app_main, "create_pool", fake_create_pool)
     monkeypatch.setattr(app_main, "EmbeddingService", lambda: object())
-    monkeypatch.setattr(app_main, "LLMService", lambda: object())
+
+    class FakeLLM:
+        async def aclose(self) -> None:
+            events.append("close-llm")
+
+    monkeypatch.setattr(app_main, "LLMService", FakeLLM)
 
     async with app_main.lifespan(app_main.app):
         pass
@@ -65,6 +70,7 @@ async def test_lifespan_waits_for_sentinel_before_creating_the_arq_pool(
         "seed-sync-source",
         "sentinel",
         "create-pool",
+        "close-llm",
         "close-pool",
     ]
 

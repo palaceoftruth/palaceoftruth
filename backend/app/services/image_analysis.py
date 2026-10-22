@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 _MAX_SUMMARY_LENGTH = 2_000
@@ -73,7 +75,7 @@ class VisionUsage(BaseModel):
 class VisionProviderMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    provider: Literal["openrouter", "custom"] = "openrouter"
+    provider: Literal["openrouter", "gateway", "custom"] = "openrouter"
     requested_model: str = Field(min_length=1, max_length=200)
     returned_model: str = Field(min_length=1, max_length=200)
     usage: VisionUsage | None = None
@@ -187,6 +189,14 @@ async def analyze_image_artifact(
 
     with open(storage_path, "rb") as f:
         image_bytes = f.read()
+
+    # Bound the bytes handed to the vision provider on every route. Upload
+    # validation already caps the stored artifact, but the ceiling is enforced
+    # again here so no caller can push an oversized inline payload off-box.
+    if len(image_bytes) > settings.vision_max_image_bytes:
+        raise ImageAnalysisError(
+            "Image artifact exceeds the vision size limit", retryable=False
+        )
 
     image_b64 = base64.b64encode(image_bytes).decode()
     try:
