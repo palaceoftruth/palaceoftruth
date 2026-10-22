@@ -75,6 +75,7 @@ spec:
               value: {{ include "palaceoftruth.redisUrl" . | quote }}
             - name: DEFER_TENANT_RLS_ENFORCEMENT
               value: "true"
+            {{- include "palaceoftruth.generationModelPolicyEnv" . | nindent 12 }}
           envFrom:
             - configMapRef:
                 name: {{ include "palaceoftruth.fullname" . }}-config

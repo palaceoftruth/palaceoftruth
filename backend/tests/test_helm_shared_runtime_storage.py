@@ -464,7 +464,9 @@ def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods()
     # normal StatefulSet update strategies and receive no reset/failover command.
     for name in ("palaceoftruth-valkey-primary", "palaceoftruth-valkey-replica"):
         stateful_set = _manifest_by_kind_name(manifests, "StatefulSet", name)
-        assert "updateStrategy" not in stateful_set["spec"]
+        # The chart now declares the same strategy that Kubernetes previously
+        # supplied implicitly; the default lifecycle behavior is unchanged.
+        assert stateful_set["spec"]["updateStrategy"] == {"type": "RollingUpdate"}
 
     # Fail closed across every rendered workload command, including probes,
     # lifecycle hooks, init containers, and Helm hook Jobs.

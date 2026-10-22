@@ -33,6 +33,8 @@ metadata:
     {{- include "palaceoftruth.labels" . | nindent 4 }}
 spec:
   replicas: {{ include "palaceoftruth.valkeyReplicaCount" . }}
+  updateStrategy:
+    type: {{ include "palaceoftruth.valkeyDataUpdateStrategy" . }}
   serviceName: {{ include "palaceoftruth.valkeyReplicaName" . }}
   selector:
     matchLabels:
