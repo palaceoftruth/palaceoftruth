@@ -21,6 +21,21 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # health_kubernetes_alerts reads namespace events for OOM evidence. The
+  # missing rule made every run raise ControlError('event query failed').
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  # health_runtime_binding reads the live HelmRelease to bind the running
+  # images to the installed artifact. Without this rule the read was 403.
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list"]
+  # It also walks Deployment -> ReplicaSet -> Pod ownership to prove every
+  # replica belongs to the current template.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

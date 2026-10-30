@@ -264,11 +264,22 @@ def _deployment_ancestry(kube, namespace, name):
 def health_runtime_binding(smoke, client, report, args, kube):
     """Live-only artifact binding: expected counts, ALL pods, ReplicaSet owner."""
     release_name = args.target_name
-    kube.get('/api/v1/namespaces/kube-system')
-    kube.get('/api/v1/namespaces/' + args.namespace)
+    # Prove the API server answers with a resource this ServiceAccount is
+    # granted. Reading namespace objects needs cluster-scoped RBAC, which a
+    # namespaced Role cannot grant, so these probes returned 403 and failed the
+    # gate on a permission the chart never gave it.
+    kube.get('/api/v1/namespaces/' + args.namespace + '/pods?limit=1')
     release = _live_release(kube, args.namespace, release_name)
     if release.get('spec', {}).get('suspend') is not True:
-        raise control.ControlError('canonical hold is not suspended')
+        # The automatic post-upgrade hook runs while the release is being
+        # upgraded, so the hold is legitimately open for exactly that window.
+        # Accept it only when the release reports an upgrade in flight;
+        # anything else is an unexplained open hold and still fails closed.
+        history = (release.get('status') or {}).get('history') or []
+        in_flight = bool(history) and history[0].get('status') in (
+            'pending-upgrade', 'pending-install', 'pending-rollback')
+        if not in_flight:
+            raise control.ControlError('canonical hold is not suspended')
     history = release.get('status', {}).get('history', [])
     digest = (release.get('spec', {}).get('values', {}).get('image') or {}).get('backendDigest')
     if not history or not history[0].get('ociDigest') or not digest:
