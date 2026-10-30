@@ -127,13 +127,24 @@ def test_unknown_provider_fails_at_boot() -> None:
 
 
 def test_refuseless_provider_requires_a_key() -> None:
-    with pytest.raises(ValidationError, match="LLM_API_KEY"):
-        _settings(llm_api_key="")
+    # Settings can be built without a key so a migration job can import the
+    # module for its database URL; the model client is what refuses to start.
+    settings = _settings(llm_api_key="")
+    with pytest.raises(ValueError, match="LLM_API_KEY"):
+        settings.require_llm_credentials()
 
 
 def test_refuseless_provider_rejects_a_placeholder_key() -> None:
-    with pytest.raises(ValidationError, match="placeholder"):
-        _settings(llm_api_key="sk-refuseless-...")
+    settings = _settings(llm_api_key="sk-refuseless-...")
+    with pytest.raises(ValueError, match="placeholder"):
+        settings.require_llm_credentials()
+
+
+def test_llm_service_refuses_to_start_without_a_key(monkeypatch) -> None:
+    settings = _settings(llm_api_key="")
+    monkeypatch.setattr("app.services.llm.settings", settings)
+    with pytest.raises(ValueError, match="LLM_API_KEY"):
+        LLMService()
 
 
 def test_no_openrouter_client_is_constructed_for_refuseless(refuseless) -> None:

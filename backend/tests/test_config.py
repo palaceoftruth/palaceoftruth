@@ -434,7 +434,10 @@ def test_settings_reject_invalid_firecrawl_base_url_when_enabled() -> None:
         # The OpenRouter key is only read when that provider is selected, so its
         # placeholder is rejected on the OpenRouter route and ignored otherwise.
         ("openrouter_api_key", "sk-or-...", "OPENROUTER_API_KEY", {"llm_provider": "openrouter"}),
-        ("llm_api_key", "sk-refuseless-...", "LLM_API_KEY", {}),
+        # LLM_API_KEY placeholders are rejected by Settings.require_llm_credentials()
+        # when the model client is constructed, not at import, so a migration job
+        # can run before the ExternalSecret that carries the key is applied.
+        # Covered in tests/test_refuseless_text_provider.py.
         ("credential_pepper", "change_me_api_key", "CREDENTIAL_PEPPER", {}),
         ("redis_password", "change_me_redis_password", "REDIS_PASSWORD", {}),
     ],
