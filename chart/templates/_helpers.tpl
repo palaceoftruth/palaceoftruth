@@ -201,7 +201,10 @@ if getent ahosts "$sentinel_headless" >/dev/null 2>&1; then
   sips=$(getent ahosts "$sentinel_headless" | awk '{print $1}' | sort -u)
   i=0
   while [ "$i" -lt "$wait_seconds" ]; do
-    answers=/tmp/.vk-ans.$$; : > "$answers"
+    # Scratch answers file. /data is the writable volume; the containers run
+    # with a read-only root filesystem, so /tmp does not exist for this script
+    # and writing there aborted the init container on every start.
+    answers=/data/.vk-ans.$$; : > "$answers"
     for ip in $sips; do
       rid=$(timeout 2 valkey-cli -h "$ip" -p 26379 --raw sentinel myid 2>/dev/null | tr -d '[:space:]')
       [ -n "$rid" ] || continue

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import os
 import ssl
 import sys
@@ -1069,8 +1070,21 @@ def build_report(args: argparse.Namespace, *, kube: KubernetesClient | None = No
 def safe_final_report(report):
     """Public diagnostics never contain server bodies, arbitrary messages or identifiers."""
     checks=[{"name":r["name"],"status":r["status"]} for r in report.get("checks",[]) if r.get("name") in set(smoke_control.REQUIRED_CHECKS)|{"canonical_campaign_receipt"} and r.get("status") in {"passed","failed","skipped"}]
-    known_codes={"control_approval_failed","api_health_failed","required_preflight_exception","mcp_unreachable","mcp_unhealthy","sentinel_or_valkey_failed","tenant_identity_failed","runtime_dependencies_not_ready"}
-    alerts=[{"code":r.get("code") if r.get("code") in known_codes else "required_preflight_exception"} for r in report.get("alerts",[])]
+    # Every code this script and its preflight can raise. An unknown code used
+    # to collapse into "required_preflight_exception", which told an operator
+    # nothing: a restart spike, a failed log scan, and a broken contract all
+    # looked identical. Known codes are listed explicitly; anything else that
+    # is already a bounded slug is passed through, and only a code that cannot
+    # be printed safely is replaced.
+    known_codes={"control_approval_failed","api_health_failed","required_preflight_exception","mcp_unreachable","mcp_unhealthy","sentinel_or_valkey_failed","tenant_identity_failed","runtime_dependencies_not_ready","runtime_dependencies_unqueryable","kubernetes_query_failed","master_not_found","tenant_identity_mismatch","unreserved_memory_write_forbidden","worker_log_scan_failed","worker_pod_not_running","worker_pods_not_found","worker_restart_spike"}
+    def _public_code(value):
+        code = value if isinstance(value, str) else ""
+        if code in known_codes:
+            return code
+        if re.fullmatch(r"[a-z][a-z0-9_]{2,47}", code):
+            return code
+        return "required_preflight_exception"
+    alerts=[{"code":_public_code(r.get("code"))} for r in report.get("alerts",[])]
     return {"report":"palace-memory-rollout-smoke","status":report["status"],"alert_count":len(alerts),"checks":checks,"alerts":alerts}
 
 

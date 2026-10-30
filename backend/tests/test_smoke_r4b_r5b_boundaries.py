@@ -227,3 +227,27 @@ def test_process_buffering_preserves_aggregate_byte_accounting():
         with pytest.raises(Exception):t.strict_open(request,timeout=1,budget=budget)
         assert budget.remaining<=0
     finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_alert_codes_survive_sanitization():
+    """A failing rollout must name its cause, not one opaque preflight code."""
+    report = s.safe_final_report(
+        {
+            "status": "failed",
+            "checks": [],
+            "alerts": [
+                {"code": "worker_restart_spike"},
+                {"code": "worker_pod_not_running"},
+                {"code": "master_not_found"},
+                {"code": "../../etc/passwd"},
+            ],
+        }
+    )
+
+    codes = [alert["code"] for alert in report["alerts"]]
+    assert codes == [
+        "worker_restart_spike",
+        "worker_pod_not_running",
+        "master_not_found",
+        "required_preflight_exception",
+    ]
