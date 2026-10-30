@@ -78,6 +78,8 @@ def run_alembic(database_url: str, *arguments: str) -> None:
         "API_KEY": "migration-harness-unused",
         "OPENAI_API_KEY": "migration-harness-unused",
         "OPENROUTER_API_KEY": "migration-harness-unused",
+        "LLM_API_KEY": "migration-harness-unused",
+        "LLM_BASE_URL": "https://llm.invalid/v1",
     }
     subprocess.run(
         [sys.executable, "-m", "alembic", *arguments],
