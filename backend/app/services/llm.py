@@ -408,6 +408,11 @@ class LLMService:
     def __init__(self, *, vision_transport: httpx.AsyncBaseTransport | None = None):
         self._vision_transport = vision_transport
         self.provider: Literal["openrouter", "refuseless"] = settings.llm_provider
+        # Fail closed here rather than at config import: only a process that
+        # actually calls the model needs the key. The migration job imports the
+        # config module for the database URL and must be able to run before the
+        # ExternalSecret carrying the key is applied.
+        settings.require_llm_credentials()
         if self.provider == "refuseless":
             # Same client type and timeout behavior as the OpenRouter route, but
             # with the refuseless credential and base URL only. No OpenRouter

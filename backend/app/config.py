@@ -652,10 +652,6 @@ class Settings(BaseSettings):
         if not self.vision_api_key.strip():
             self.vision_api_key = self.llm_api_key
 
-        if self.llm_provider == "refuseless" and not self.llm_api_key.strip():
-            raise ValueError("LLM_API_KEY is required when LLM_PROVIDER=refuseless")
-        if self.llm_provider == "refuseless" and _is_placeholder_credential(self.llm_api_key):
-            raise ValueError("LLM_API_KEY is still the .env.example placeholder value")
         if self.llm_provider == "openrouter" and (
             self.relationship_classification_model == DEFAULT_REFUSELESS_TEXT_MODEL
         ):
@@ -737,6 +733,22 @@ class Settings(BaseSettings):
         ):
             raise ValueError("custom vision requires VISION_BASE_URL and VISION_MODEL (1-200 characters)")
         return self
+
+    def require_llm_credentials(self) -> None:
+        """Fail closed when the text provider has no usable key.
+
+        Called by the processes that call the model (API startup and the
+        worker), not at import time. A migration job imports this module to
+        reach the database and never calls the provider, so a credential it
+        does not use must not stop it: Helm runs pre-upgrade hooks before it
+        applies the ExternalSecret that carries the key, and an import-time
+        check therefore failed the migration hook of an otherwise valid
+        release.
+        """
+        if self.llm_provider == "refuseless" and not self.llm_api_key.strip():
+            raise ValueError("LLM_API_KEY is required when LLM_PROVIDER=refuseless")
+        if self.llm_provider == "refuseless" and _is_placeholder_credential(self.llm_api_key):
+            raise ValueError("LLM_API_KEY is still the .env.example placeholder value")
 
 
 settings = Settings()
