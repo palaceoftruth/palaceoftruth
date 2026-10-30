@@ -266,6 +266,7 @@ jobs:
             uv run --frozen --python 3.12 python ../scripts/verify_migration_roundtrip.py
           DATABASE_URL=postgresql+asyncpg://palace:palace@localhost:5432/palace_migration_gate \
           OPENAI_API_KEY=ci-placeholder OPENROUTER_API_KEY=ci-placeholder API_KEY=ci-test-key \
+          LLM_API_KEY=ci-placeholder-llm-key LLM_BASE_URL=https://llm.invalid/v1 \
             sh -e -c '
               uv run --frozen --python 3.12 alembic check
               PROMOTION_TEST_DATABASE_URL="$DATABASE_URL" \
