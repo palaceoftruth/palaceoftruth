@@ -23,6 +23,7 @@ sys.path.insert(0, str(BACKEND_ROOT))
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://unused:unused@localhost/unused")
 os.environ.setdefault("OPENAI_API_KEY", "")
 os.environ.setdefault("OPENROUTER_API_KEY", "")
+os.environ.setdefault("LLM_API_KEY", "")
 os.environ.setdefault("API_KEY", "unused")
 
 from app.config import settings  # noqa: E402

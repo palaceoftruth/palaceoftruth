@@ -19,6 +19,7 @@ os.environ.setdefault("API_KEY", "conversation-facts-unused")
 os.environ.setdefault("OPENAI_API_KEY", "conversation-facts-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "conversation-facts-unused")
 
+os.environ.setdefault("LLM_API_KEY", "conversation-facts-unused")
 from app.database import tenant_async_session  # noqa: E402
 from app.services.conversation_facts import backfill_conversation_facts  # noqa: E402
 

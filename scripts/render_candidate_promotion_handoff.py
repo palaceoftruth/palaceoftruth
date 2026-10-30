@@ -23,6 +23,7 @@ os.environ.setdefault("API_KEY", "curation-promotion-unused")
 os.environ.setdefault("OPENAI_API_KEY", "curation-promotion-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "curation-promotion-unused")
 
+os.environ.setdefault("LLM_API_KEY", "curation-promotion-unused")
 from app.services.candidate_curation_promotion import render_candidate_promotion_handoff  # noqa: E402
 from app.services.curation_artifacts import CandidateCurationArtifactError  # noqa: E402
 

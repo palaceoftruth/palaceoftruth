@@ -13,6 +13,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("OPENROUTER_API_KEY", "test-openrouter-key")
+os.environ.setdefault("LLM_API_KEY", "test-openrouter-key")
 os.environ.setdefault("API_KEY", "test-api-key")
 
 from app.evals.palace import (

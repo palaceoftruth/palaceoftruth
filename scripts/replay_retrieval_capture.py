@@ -66,6 +66,7 @@ async def _generate_currentness_records() -> list[dict]:
     os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://fixture:fixture@localhost/fixture")
     os.environ.setdefault("OPENAI_API_KEY", "fixture-openai-key")
     os.environ.setdefault("OPENROUTER_API_KEY", "fixture-openrouter-key")
+    os.environ.setdefault("LLM_API_KEY", "fixture-openrouter-key")
     os.environ.setdefault("API_KEY", "fixture-api-key")
     from app.services.search import SearchService
 

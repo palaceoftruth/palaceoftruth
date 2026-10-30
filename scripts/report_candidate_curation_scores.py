@@ -19,6 +19,7 @@ os.environ.setdefault("API_KEY", "curation-scoring-unused")
 os.environ.setdefault("OPENAI_API_KEY", "curation-scoring-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "curation-scoring-unused")
 
+os.environ.setdefault("LLM_API_KEY", "curation-scoring-unused")
 from app.services.candidate_curation_scoring import (  # noqa: E402
     CandidateCurationScoringError,
     candidate_curation_report_to_json,
