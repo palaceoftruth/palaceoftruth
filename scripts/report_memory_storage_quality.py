@@ -19,6 +19,7 @@ os.environ.setdefault("API_KEY", "memory-quality-unused")
 os.environ.setdefault("OPENAI_API_KEY", "memory-quality-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "memory-quality-unused")
 
+os.environ.setdefault("LLM_API_KEY", "memory-quality-unused")
 from app.database import tenant_async_session  # noqa: E402
 from app.services.memory_storage_quality import (  # noqa: E402
     memory_storage_quality_report_to_json,

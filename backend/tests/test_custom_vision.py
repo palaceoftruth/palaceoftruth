@@ -45,7 +45,7 @@ async def test_custom_request_and_parse(custom, monkeypatch, auth, schema_reject
     service = LLMService(vision_transport=httpx.MockTransport(handle))
     async def forbidden(*args, **kwargs):
         pytest.fail("custom vision escaped to cloud/text")
-    monkeypatch.setattr(service, "_create_openrouter_completion", forbidden)
+    monkeypatch.setattr(service, "_create_text_completion", forbidden)
     monkeypatch.setattr(service, "complete", forbidden)
     result = await service.analyze_image("aW1hZ2U=", "image/png", "diagram.png")
     assert len(requests) == (2 if schema_rejected else 1)
@@ -75,7 +75,7 @@ async def test_custom_failures_never_escape(custom, monkeypatch, failure):
     service = LLMService(vision_transport=httpx.MockTransport(handle))
     async def forbidden(*args, **kwargs):
         pytest.fail("custom vision escaped")
-    monkeypatch.setattr(service, "_create_openrouter_completion", forbidden)
+    monkeypatch.setattr(service, "_create_text_completion", forbidden)
     monkeypatch.setattr(service, "complete", forbidden)
     with pytest.raises(VisionAnalysisTransportError) as error:
         await service.analyze_image("private-image", "image/png", "private-file")
@@ -85,7 +85,7 @@ async def test_custom_failures_never_escape(custom, monkeypatch, failure):
 
 
 def configured(**kwargs):
-    return Settings(_env_file=None, database_url="postgresql+asyncpg://u:p@localhost/test", redis_url="redis://localhost", openai_api_key="test", openrouter_api_key="test", api_key="test", **kwargs)
+    return Settings(_env_file=None, database_url="postgresql+asyncpg://u:p@localhost/test", redis_url="redis://localhost", openai_api_key="test", openrouter_api_key="test", llm_api_key="test-llm-key", api_key="test", **kwargs)
 
 
 @pytest.mark.parametrize("url", ["http://u:p@host/v1", "http://host/v1?key=x", "http://host/v1#fragment", "file:///v1", "http://", "http://host/?", "http://host/#"])
@@ -101,8 +101,11 @@ def test_bad_timeout(timeout):
 
 
 def test_custom_requires_dedicated_configuration():
+    # The route ships refuseless defaults, so the guard is proven by explicitly
+    # blanking them: custom vision still refuses to run without a dedicated
+    # base URL and model.
     with pytest.raises(ValidationError):
-        configured(vision_provider="custom")
+        configured(vision_provider="custom", vision_base_url="", vision_model="")
 
 
 def test_m27_is_not_vision():

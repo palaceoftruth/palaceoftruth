@@ -13,6 +13,8 @@ from app.services.llm_admission import (
 
 
 def test_client_model_override_requires_operator_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The OpenRouter lane: the provider default and its allowlist catalog.
+    monkeypatch.setattr("app.services.llm_admission.settings.llm_provider", "openrouter")
     monkeypatch.setattr("app.services.llm_admission.settings.openrouter_default_model", "minimax/minimax-m3")
     monkeypatch.setattr("app.services.llm_admission.settings.client_llm_allowed_models", "minimax/minimax-m2.7,expensive/model")
 

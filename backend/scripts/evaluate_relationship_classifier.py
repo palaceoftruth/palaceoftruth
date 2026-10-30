@@ -18,6 +18,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("OPENAI_API_KEY", "offline-not-configured")
 os.environ.setdefault("OPENROUTER_API_KEY", "offline-not-configured")
+os.environ.setdefault("LLM_API_KEY", "offline-not-configured")
 os.environ.setdefault("API_KEY", "offline-not-configured")
 
 from app.services.llm import LLMService

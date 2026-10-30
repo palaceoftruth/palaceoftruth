@@ -20,6 +20,7 @@ os.environ.setdefault("API_KEY", "health-check-unused")
 os.environ.setdefault("OPENAI_API_KEY", "health-check-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "health-check-unused")
 
+os.environ.setdefault("LLM_API_KEY", "health-check-unused")
 from app.services.database_health import (  # noqa: E402
     render_report,
     report_to_json,

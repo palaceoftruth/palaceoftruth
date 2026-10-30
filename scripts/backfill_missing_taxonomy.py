@@ -20,6 +20,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://taxonomy-backfill:un
 os.environ.setdefault("OPENAI_API_KEY", "taxonomy-backfill-unused")
 os.environ.setdefault("OPENROUTER_API_KEY", "taxonomy-backfill-unused")
 
+os.environ.setdefault("LLM_API_KEY", "taxonomy-backfill-unused")
 from arq import create_pool  # noqa: E402
 
 from app.config import make_redis_settings  # noqa: E402

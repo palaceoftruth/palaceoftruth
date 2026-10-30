@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from app.config import SUPPORTED_TEXT_MODELS, settings
+from app.config import active_text_models, settings
 
 
 @dataclass
@@ -37,13 +37,18 @@ def validate_client_llm_model(model: str | None) -> str | None:
     cleaned = model.strip()
     if not cleaned:
         raise ValueError("model must not be blank")
-    allowed = {settings.openrouter_default_model}
+    default_model = (
+        settings.llm_default_model
+        if settings.llm_provider == "refuseless"
+        else settings.openrouter_default_model
+    )
+    allowed = {default_model}
     allowed.update(
         value.strip()
         for value in settings.client_llm_allowed_models.split(",")
         if value.strip()
     )
-    if cleaned not in SUPPORTED_TEXT_MODELS or cleaned not in allowed:
+    if cleaned not in active_text_models(settings.llm_provider) or cleaned not in allowed:
         raise ValueError("model is not allowed for client-selected LLM work")
     return cleaned
 

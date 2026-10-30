@@ -31,7 +31,18 @@ config:
   redisSentinelStartupTimeoutSeconds: "180"
   redisSentinelStartupInitialBackoffSeconds: "1"
   redisSentinelStartupMaxBackoffSeconds: "10"
-  # Default OpenRouter model for all text-generation tasks (summarize, tag, chat, etc.).
+  # Text generation provider for every task (summarize, tag, chat, entity
+  # extraction, relationship classification). "refuseless" (default) sends the
+  # chain to llmBaseUrl with the refuseless credential. "openrouter" keeps the
+  # historical MiniMax-only OpenRouter route and its settings below.
+  llmProvider: refuseless
+  llmBaseUrl: "https://api.refuseless.com/v1"
+  llmDefaultModel: "deepseek-v4.1-flash-fast"
+  # Ordered fallback models for the refuseless provider.
+  llmFallbackModels: "minimax-m3.1-flash"
+  # Default OpenRouter model for all text-generation tasks. Only read when
+  # llmProvider=openrouter; kept so a deployment can switch back without a
+  # chart change.
   openrouterDefaultModel: "minimax/minimax-m3"
   clientLlmAllowedModels: ""
   tenantLlmMaxConcurrentRequests: "2"
@@ -42,13 +53,17 @@ config:
   openrouterVisionModel: "minimax/minimax-m3"
 
   openrouterVisionFallbackModels: ""
-  # custom uses ONLY these dedicated settings. No cloud credential inheritance.
-  visionProvider: openrouter
-  visionBaseUrl: ""
-  visionModel: ""
+  # custom (default) uses ONLY these dedicated settings and no gateway or
+  # OpenRouter fallback. visionApiKey falls back to the refuseless key, so one
+  # secret covers text and vision.
+  visionProvider: custom
+  visionBaseUrl: "https://api.refuseless.com/v1"
+  visionModel: "deepseek-v4.1-flash-fast"
   visionTimeoutSeconds: "60"
-  # Relationship classification stays fail-closed on M3 (no generic fallback).
-  relationshipClassificationModel: "minimax/minimax-m3"
+  # Relationship classification is a single fail-closed call with no generic
+  # fallback. The refuseless default needs re-calibration against the frozen
+  # M3 profile before its labels are compared with stored results.
+  relationshipClassificationModel: "deepseek-v4.1-flash-fast"
 
   # Vision route. "openrouter" (default) keeps the OpenRouter vision chain above.
   # "gateway" routes image analysis to the self-hosted OpenAI-compatible gateway
@@ -293,6 +308,15 @@ externalSecrets:
   facebookOembedAccessTokenProperty: ""
   # Optional local embedding proxy bearer token property.
   embeddingLocalHttpApiKeyProperty: ""
+  # Refuseless text/vision API key property. When set, it is synced as
+  # REFUSELESS_API_KEY and also as LLM_API_KEY (and as VISION_API_KEY when no
+  # dedicated vision key property is set), so one item property serves both the
+  # text and vision routes. The property must exist on the resolved item: a
+  # missing property fails the whole ExternalSecret, not just this key.
+  refuselessApiKeyProperty: "refuseless-api-key"
+  # Optional secret-manager item for the refuseless key. Blank reads the
+  # property from appSecretItemId.
+  refuselessSecretItemId: ""
   # Optional dedicated custom vision bearer secret. Blank adds no remote field.
   visionApiKeyProperty: ""
   # Optional AssemblyAI API key property for hosted diarized transcription.
@@ -323,8 +347,10 @@ externalSecrets:
   credentialPepperProperty: ""
 
 # Used when externalSecrets.enabled=false — caller must pre-create these secrets.
-# existingSecret must contain: OPENAI_API_KEY, OPENROUTER_API_KEY, API_KEY,
-#   and DATABASE_URL (when postgres.enabled=false). It may also contain
+# existingSecret must contain: OPENAI_API_KEY, LLM_API_KEY (or the same value
+#   under REFUSELESS_API_KEY), API_KEY, and DATABASE_URL (when
+#   postgres.enabled=false). It may also contain OPENROUTER_API_KEY when
+#   config.llmProvider=openrouter, and REFUSELESS_API_KEY / VISION_API_KEY.
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN for Palace S3 sync,
 #   GITHUB_PAT / PALACEOFTRUTH_SYNC_SOURCE_CREDENTIAL_KEY for Palace repo sync,
 #   FACEBOOK_OEMBED_ACCESS_TOKEN for no-JavaScript Facebook post capture,

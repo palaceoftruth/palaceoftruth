@@ -60,8 +60,10 @@ def record_relationship_extraction(
 ) -> None:
     """Record only bounded labels; never include item ids, prompts, or raw errors."""
 
-    safe_provider = provider if provider in {"openrouter", "openai"} else "unknown"
-    safe_retry_provider = retry_provider if retry_provider in {"openrouter", "openai"} else "unknown"
+    safe_provider = provider if provider in {"openrouter", "refuseless", "openai"} else "unknown"
+    safe_retry_provider = (
+        retry_provider if retry_provider in {"openrouter", "refuseless", "openai"} else "unknown"
+    )
     safe_outcome = validation_outcome if validation_outcome in {
         "valid", "empty", "malformed", "timeout", "provider_error"
     } else "provider_error"
