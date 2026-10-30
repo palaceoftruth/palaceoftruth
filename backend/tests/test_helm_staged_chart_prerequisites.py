@@ -54,7 +54,10 @@ DESIRED_POLICY = {
     "OPENROUTER_DEFAULT_MODEL": "minimax/minimax-m3",
     "OPENROUTER_FALLBACK_MODELS": "minimax/minimax-m2.7",
     "RELATIONSHIP_CLASSIFICATION_MODEL": "deepseek-v4.1-flash-fast",
-    "CLIENT_LLM_ALLOWED_MODELS": "deepseek-v4.1-flash-fast,minimax-m3.1-flash",
+    # Client model overrides stay disabled by default: the allowlist is empty
+    # and no catalog is forced into it. A deployment that wants client-selected
+    # models opts in explicitly.
+    "CLIENT_LLM_ALLOWED_MODELS": "",
     "OPENROUTER_VISION_MODEL": "minimax/minimax-m3",
     "OPENROUTER_VISION_FALLBACK_MODELS": "",
 }
@@ -91,7 +94,7 @@ DESIRED_SET_ARGS = (
     f"{DESIRED_POLICY['RELATIONSHIP_CLASSIFICATION_MODEL']}",
     "config.openrouterVisionModel="
     f"{DESIRED_POLICY['OPENROUTER_VISION_MODEL']}",
-    # Commas separate --set entries, so the list value is escaped.
+    # Empty by default: no client model allowlist is forced into the chart.
     "config.clientLlmAllowedModels="
     + DESIRED_POLICY["CLIENT_LLM_ALLOWED_MODELS"].replace(",", "\\,"),
 )
