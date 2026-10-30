@@ -68,7 +68,7 @@ def _healthy_pods():
 
 class FakeKube:
     def __init__(self, pods, *, events=None, lines=None, history=None, digest=BACKEND, replicas=REPLICAS,
-                 owner_deploy=None, owner_ok=None):
+                 owner_deploy=None, owner_ok=None, suspend=True):
         self.pods = pods
         self.owner_deploy = owner_deploy or {}
         self.owner_ok = owner_ok or {}
@@ -77,6 +77,7 @@ class FakeKube:
         self.history = history or [{"ociDigest": "sha256:" + "c" * 64}]
         self.digest = digest
         self.replicas = replicas
+        self.suspend = suspend
 
     def get(self, path, query=None):
         if path.endswith("/pods"):
@@ -106,7 +107,7 @@ class FakeKube:
             return {"items": items}
         if "helmreleases" in path:
             return {"metadata": {"uid": "rel"},
-                    "spec": {"suspend": True,
+                    "spec": {"suspend": self.suspend,
                              "values": {"image": {"backendDigest": self.digest},
                                         "highAvailability": {"replicas": self.replicas}}},
                     "status": {"history": self.history}}
@@ -760,3 +761,19 @@ def test_C8_weaker_threshold_or_window_is_still_forbidden():
         preflight.health_temporal(smoke, _args(restart_alert_threshold=5), FakeKube([_pod("worker-1", "worker")]))
     with pytest.raises(control.ControlError):
         preflight.health_temporal(smoke, _args(log_since_seconds=600), FakeKube([_pod("worker-1", "worker")]))
+
+
+# --- the open hold is legal only while an upgrade is in flight ---------------
+
+def test_open_hold_is_accepted_only_during_an_upgrade():
+    """The automatic post-upgrade hook runs with the hold open by design.
+
+    Anything else is an unexplained open hold and must still fail closed.
+    """
+    in_flight = [{"ociDigest": "sha256:" + "c" * 64, "status": "pending-upgrade"}]
+    report = _binding(FakeKube(_healthy_pods(), suspend=False, history=in_flight))
+    assert report["checks"][0]["status"] == "passed"
+
+    settled = [{"ociDigest": "sha256:" + "c" * 64, "status": "deployed"}]
+    with pytest.raises(control.ControlError):
+        _binding(FakeKube(_healthy_pods(), suspend=False, history=settled))

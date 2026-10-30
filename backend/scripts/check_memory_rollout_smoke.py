@@ -1084,7 +1084,21 @@ def safe_final_report(report):
         if re.fullmatch(r"[a-z][a-z0-9_]{2,47}", code):
             return code
         return "required_preflight_exception"
-    alerts=[{"code":_public_code(r.get("code"))} for r in report.get("alerts",[])]
+    def _public_reason(alert):
+        # A bounded identifier only: an exception class name or a short slug.
+        # Bodies, messages and arbitrary text stay out of the public report.
+        for key in ("error_class", "detail", "reason"):
+            value = alert.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{2,47}", value):
+                return value
+        return ""
+    alerts=[]
+    for alert in report.get("alerts",[]):
+        item={"code":_public_code(alert.get("code"))}
+        reason=_public_reason(alert)
+        if reason:
+            item["reason"]=reason
+        alerts.append(item)
     return {"report":"palace-memory-rollout-smoke","status":report["status"],"alert_count":len(alerts),"checks":checks,"alerts":alerts}
 
 
