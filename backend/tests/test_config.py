@@ -11,6 +11,7 @@ def _settings_kwargs(**overrides):
         "database_url": "postgresql+asyncpg://palace:secret@example.test/palace",
         "openai_api_key": "test-openai-key",
         "openrouter_api_key": "test-openrouter-key",
+        "llm_api_key": "test-llm-key",
         "api_key": "test-api-key",
     }
     values.update(overrides)
@@ -145,7 +146,9 @@ def test_settings_validation_errors_do_not_disclose_secret_inputs() -> None:
 def test_settings_expose_frozen_relationship_classifier_profile() -> None:
     settings = config.Settings(**_settings_kwargs())
 
-    assert settings.relationship_classification_model == "minimax/minimax-m3"
+    # The frozen profile is the sampling identity; the model follows the text
+    # provider and defaults to the refuseless primary.
+    assert settings.relationship_classification_model == "deepseek-v4.1-flash-fast"
     assert settings.relationship_classification_temperature == 0.0
     assert settings.relationship_classification_seed == 1083
     assert settings.relationship_extraction_min_confidence == 0.7
@@ -424,18 +427,32 @@ def test_settings_reject_invalid_firecrawl_base_url_when_enabled() -> None:
 # B-03 / M-05: refuse to boot on any credential that is still the exact
 # placeholder published in .env.example.
 @pytest.mark.parametrize(
-    ("field", "value", "match"),
+    ("field", "value", "match", "overrides"),
     [
-        ("api_key", "change_me_api_key", "API_KEY"),
-        ("openai_api_key", "sk-...", "OPENAI_API_KEY"),
-        ("openrouter_api_key", "sk-or-...", "OPENROUTER_API_KEY"),
-        ("credential_pepper", "change_me_api_key", "CREDENTIAL_PEPPER"),
-        ("redis_password", "change_me_redis_password", "REDIS_PASSWORD"),
+        ("api_key", "change_me_api_key", "API_KEY", {}),
+        ("openai_api_key", "sk-...", "OPENAI_API_KEY", {}),
+        # The OpenRouter key is only read when that provider is selected, so its
+        # placeholder is rejected on the OpenRouter route and ignored otherwise.
+        ("openrouter_api_key", "sk-or-...", "OPENROUTER_API_KEY", {"llm_provider": "openrouter"}),
+        ("llm_api_key", "sk-refuseless-...", "LLM_API_KEY", {}),
+        ("credential_pepper", "change_me_api_key", "CREDENTIAL_PEPPER", {}),
+        ("redis_password", "change_me_redis_password", "REDIS_PASSWORD", {}),
     ],
 )
-def test_settings_reject_placeholder_credential_values(field: str, value: str, match: str) -> None:
+def test_settings_reject_placeholder_credential_values(
+    field: str, value: str, match: str, overrides: dict
+) -> None:
     with pytest.raises(ValidationError, match=match):
-        config.Settings(**_settings_kwargs(**{field: value}))
+        config.Settings(**_settings_kwargs(**{field: value}, **overrides))
+
+
+def test_settings_ignore_the_openrouter_placeholder_on_the_refuseless_route() -> None:
+    # A refuseless-only deployment copied from .env.example must still boot with
+    # the untouched OpenRouter placeholder present.
+    settings = config.Settings(**_settings_kwargs(openrouter_api_key="sk-or-..."))
+
+    assert settings.llm_provider == "refuseless"
+    assert settings.openrouter_api_key == "sk-or-..."
 
 
 def test_settings_accept_empty_redis_password_for_unauthenticated_local_redis() -> None:
@@ -608,10 +625,17 @@ def test_settings_default_text_generation_models_are_minimax_m3_and_m27() -> Non
     assert settings.openrouter_fallback_models == "minimax/minimax-m2.7"
 
 
-def test_settings_default_relationship_classifier_is_minimax_m3() -> None:
-    settings = config.Settings(**_settings_kwargs())
-
-    assert settings.relationship_classification_model == "minimax/minimax-m3"
+def test_settings_default_relationship_classifier_follows_text_provider() -> None:
+    assert (
+        config.Settings(**_settings_kwargs()).relationship_classification_model
+        == "deepseek-v4.1-flash-fast"
+    )
+    # An OpenRouter deployment that never set the classifier keeps the
+    # calibrated M3 default instead of inheriting the refuseless id.
+    assert (
+        config.Settings(**_settings_kwargs(llm_provider="openrouter")).relationship_classification_model
+        == "minimax/minimax-m3"
+    )
 
 
 @pytest.mark.parametrize("field", [
@@ -619,7 +643,9 @@ def test_settings_default_relationship_classifier_is_minimax_m3() -> None:
     "relationship_classification_model", "client_llm_allowed_models",
 ])
 def test_settings_accept_explicit_flash_text_candidate(field: str) -> None:
-    settings = config.Settings(**_settings_kwargs(**{field: "minimax/minimax-m3.1-flash"}))
+    settings = config.Settings(
+        **_settings_kwargs(llm_provider="openrouter", **{field: "minimax/minimax-m3.1-flash"})
+    )
     assert getattr(settings, field) == "minimax/minimax-m3.1-flash"
     assert settings.openrouter_vision_model == "minimax/minimax-m3"
 
@@ -676,9 +702,14 @@ def test_settings_preserve_openai_embedding_and_transcription_defaults() -> None
 # --- Vision provider route (VISION_PROVIDER / VISION_GATEWAY_MODEL) -------------
 
 
-def test_settings_default_to_openrouter_vision_with_qwen_vl_gateway_model() -> None:
+def test_settings_default_to_the_dedicated_refuseless_vision_route() -> None:
     settings = config.Settings(**_settings_kwargs())
-    assert settings.vision_provider == "openrouter"
+    assert settings.vision_provider == "custom"
+    assert settings.vision_base_url == "https://api.refuseless.com/v1"
+    assert settings.vision_model == "deepseek-v4.1-flash-fast"
+    # One deployed secret serves text and vision: the vision key falls back to
+    # the text provider key instead of a second secret.
+    assert settings.vision_api_key == "test-llm-key"
     assert settings.vision_gateway_model == "qwen-vl"
 
 

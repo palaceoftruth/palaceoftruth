@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from app.config import (
     SUPPORTED_TEXT_MODELS,
     VISION_MODEL,
+    active_text_models,
     settings,
     text_model_supports,
 )
@@ -45,6 +46,10 @@ _BASE_BACKOFF = 2.0
 _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES = {401, 403, 404}
 _OPENROUTER_BACKOFF_FALLBACK_STATUSES = {429, 503}
 _OPENROUTER_TRANSIENT_RETRIES = 2
+# The refuseless endpoint reports gateway and upstream faults as plain 5xx, so
+# its chain retries those on the same bounded schedule before moving to the next
+# configured model. The OpenRouter route keeps its original status set.
+_REFUSELESS_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 
 # Text-dense diagrams can use most of the bounded 64-entry evidence lists.
 # Keep enough room for the provider to close the strict JSON document instead
@@ -118,19 +123,20 @@ _LLM_SEMAPHORE = asyncio.Semaphore(4)
 
 
 def _ensure_supported_generation_model(model: str) -> str:
-    """Return ``model`` only when it is an approved MiniMax generation model.
+    """Return ``model`` only when it belongs to the active provider's catalog.
 
-    Palace generation is MiniMax-only: chat, summarization, tagging, entity
-    extraction, relationship classification, and cloud image analysis all
-    resolve through this single policy. An unsupported configured value or a
+    Generation resolves through one provider at a time: the selected text
+    provider (``LLM_PROVIDER``) owns the whole chain, and each provider accepts
+    only its own reviewed models. An unsupported configured value or a
     request-time override raises here instead of silently generating text on a
     different provider.
     """
     cleaned = (model or "").strip()
-    if cleaned not in SUPPORTED_TEXT_MODELS:
+    catalog = active_text_models(settings.llm_provider)
+    if cleaned not in catalog:
         raise ValueError(
-            f"unsupported generation model {cleaned!r}; Palace generation is "
-            f"restricted to MiniMax models {sorted(SUPPORTED_TEXT_MODELS)}"
+            f"unsupported generation model {cleaned!r}; generation for "
+            f"LLM_PROVIDER={settings.llm_provider} is restricted to {sorted(catalog)}"
         )
     return cleaned
 
@@ -206,7 +212,7 @@ class LLMGenerationSettings:
 class LLMCompletionDiagnostics:
     """Bounded, non-sensitive completion metadata for operational callers."""
 
-    provider: Literal["openrouter", "openai", "unknown"] = "unknown"
+    provider: Literal["openrouter", "refuseless", "openai", "unknown"] = "unknown"
     upstream_provider: str = "unknown"
     requested_model: str = "unknown"
     actual_model: str = "unknown"
@@ -221,11 +227,11 @@ class RelationshipClassificationResult:
     relationship: str
     confidence: float
     validation_outcome: Literal["valid", "empty", "malformed", "timeout", "provider_error"]
-    provider: Literal["openrouter", "openai", "unknown"]
+    provider: Literal["openrouter", "refuseless", "openai", "unknown"]
     upstream_provider: str
     requested_model: str
     model: str
-    retry_provider: Literal["openrouter", "openai", "unknown"]
+    retry_provider: Literal["openrouter", "refuseless", "openai", "unknown"]
     fallback_used: bool
     retry_count: int
     prompt_version: str
@@ -388,34 +394,53 @@ class _VisionRoute:
 
 
 class LLMService:
-    """MiniMax-only generation via OpenRouter.
+    """Text generation through the configured provider.
 
-    Every generation call is bounded to the approved MiniMax models
-    (``SUPPORTED_TEXT_MODELS``); an unsupported model fails visibly here rather
-    than falling through to a non-MiniMax provider. OpenAI is used only for
-    embeddings and transcription, never for generation.
+    ``LLM_PROVIDER=refuseless`` (default) sends every generation call to the
+    [OI]-compatible endpoint at ``LLM_BASE_URL`` with ``LLM_API_KEY`` and the
+    reviewed refuseless catalog. ``LLM_PROVIDER=openrouter`` keeps the
+    MiniMax-only OpenRouter route. Only one provider's client is ever
+    constructed; an unsupported model fails visibly here rather than falling
+    through to the other provider. [OI] is used only for embeddings and
+    transcription, never for generation.
     """
 
     def __init__(self, *, vision_transport: httpx.AsyncBaseTransport | None = None):
         self._vision_transport = vision_transport
-        self.client = AsyncOpenAI(
-            api_key=settings.openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={
-                "HTTP-Referer": "https://github.com/palaceoftruth/palaceoftruth",
-                "X-Title": "Palace of Truth",
-            },
-        )
+        self.provider: Literal["openrouter", "refuseless"] = settings.llm_provider
+        if self.provider == "refuseless":
+            # Same client type and timeout behavior as the OpenRouter route, but
+            # with the refuseless credential and base URL only. No OpenRouter
+            # header or credential is attached.
+            self.client = AsyncOpenAI(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
+            )
+            self.default_model = settings.llm_default_model
+            self._fallback_models = [
+                m.strip()
+                for m in settings.llm_fallback_models.split(",")
+                if m.strip()
+            ]
+        else:
+            self.client = AsyncOpenAI(
+                api_key=settings.openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                default_headers={
+                    "HTTP-Referer": "https://github.com/palaceoftruth/palaceoftruth",
+                    "X-Title": "Palace of Truth",
+                },
+            )
+            self.default_model = settings.openrouter_default_model
+            self._fallback_models = [
+                m.strip()
+                for m in settings.openrouter_fallback_models.split(",")
+                if m.strip()
+            ]
         # Self-hosted vision gateway client. Built lazily and only when the
         # gateway vision route is selected, so an OpenRouter deployment never
         # constructs an object that holds the gateway credential.
         self._vision_gateway_client: AsyncOpenAI | None = None
-        self.default_model = settings.openrouter_default_model
-        self._fallback_models = [
-            m.strip()
-            for m in settings.openrouter_fallback_models.split(",")
-            if m.strip()
-        ]
 
     def _build_model_chain(self, model: str | None) -> list[str]:
         chain = [model or self.default_model] + self._fallback_models
@@ -424,12 +449,26 @@ class LLMService:
     @staticmethod
     def _get_openrouter_fallback_delay(status: int, attempt: int) -> float | None:
         # 401/403/404 usually mean the current model is not usable for this key,
-        # so move on to the next MiniMax model immediately instead of waiting.
+        # so move on to the next configured model immediately instead of waiting.
         if status in _OPENROUTER_IMMEDIATE_FALLBACK_STATUSES:
             return 0.0
         if status in _OPENROUTER_BACKOFF_FALLBACK_STATUSES:
             return min(_BASE_BACKOFF * (2 ** attempt), 16.0)
         return None
+
+    def _transient_statuses(self) -> frozenset[int]:
+        """Statuses that earn a bounded same-model retry on this provider."""
+
+        if self.provider == "refuseless":
+            return frozenset(_OPENROUTER_BACKOFF_FALLBACK_STATUSES) | _REFUSELESS_TRANSIENT_STATUSES
+        return frozenset(_OPENROUTER_BACKOFF_FALLBACK_STATUSES)
+
+    def _get_fallback_delay(self, status: int, attempt: int) -> float | None:
+        """Delay before the next configured model, or None to fail closed."""
+
+        if self.provider == "refuseless" and status in _REFUSELESS_TRANSIENT_STATUSES:
+            return min(_BASE_BACKOFF * (2 ** attempt), 16.0)
+        return self._get_openrouter_fallback_delay(status, attempt)
 
     @staticmethod
     def _get_openrouter_transient_retry_delay(retry: int) -> float:
@@ -478,7 +517,7 @@ class LLMService:
             raise _MalformedCompletionResponse("completion response message content was not text")
         return content
 
-    async def _create_openrouter_completion(
+    async def _create_text_completion(
         self,
         current_model: str,
         messages: list[dict],
@@ -503,7 +542,10 @@ class LLMService:
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
-            kwargs["extra_body"] = {"provider": {"require_parameters": True}}
+            if self.provider == "openrouter":
+                # OpenRouter-only routing hint: require an upstream that honors
+                # the requested parameters. Refuseless never receives it.
+                kwargs["extra_body"] = {"provider": {"require_parameters": True}}
         if extra_body:
             kwargs["extra_body"] = {
                 **kwargs.get("extra_body", {}),
@@ -516,6 +558,8 @@ class LLMService:
             **kwargs.get("extra_body", {}),
             **_reasoning_extra_body(current_model),
         }
+        if not kwargs["extra_body"]:
+            kwargs.pop("extra_body")
         async with _LLM_SEMAPHORE:
             return await self.client.chat.completions.create(**kwargs)
 
@@ -638,8 +682,8 @@ class LLMService:
             while True:
                 try:
                     if diagnostics is not None:
-                        diagnostics.provider = "openrouter"
-                    response = await self._create_openrouter_completion(
+                        diagnostics.provider = self.provider
+                    response = await self._create_text_completion(
                         current_model,
                         messages,
                         response_format=attempt_response_format,
@@ -688,19 +732,19 @@ class LLMService:
                             f"calibrated model {current_model} returned malformed completions"
                         ) from exc
                     logger.warning(
-                        "MiniMax generation chain exhausted: %s returned malformed completion "
+                        "Generation chain exhausted: %s returned malformed completion "
                         "after %d retries; failing closed",
                         current_model,
                         transient_retry,
                     )
                     raise RuntimeError(
-                        f"MiniMax generation chain exhausted: {current_model} "
+                        f"generation chain exhausted: {current_model} "
                         "returned malformed completions"
                     ) from exc
                 except (RateLimitError, APIStatusError) as e:
                     status = getattr(e, "status_code", 429)
                     if (
-                        status in _OPENROUTER_BACKOFF_FALLBACK_STATUSES
+                        status in self._transient_statuses()
                         and transient_retry < _OPENROUTER_TRANSIENT_RETRIES
                     ):
                         delay = self._get_openrouter_transient_retry_delay(transient_retry)
@@ -715,7 +759,7 @@ class LLMService:
                         if diagnostics is not None:
                             diagnostics.retry_count += 1
                         continue
-                    delay = self._get_openrouter_fallback_delay(status, attempt)
+                    delay = self._get_fallback_delay(status, attempt)
                     if delay is not None and attempt < len(chain) - 1:
                         next_model = chain[attempt + 1]
                         logger.warning(
@@ -741,12 +785,12 @@ class LLMService:
                             f"calibrated model {current_model} failed with status {status}"
                         ) from e
                     logger.warning(
-                        "MiniMax generation chain exhausted (%s %d); failing closed",
+                        "Generation chain exhausted (%s %d); failing closed",
                         current_model,
                         status,
                     )
                     raise RuntimeError(
-                        f"MiniMax generation chain exhausted: {current_model} "
+                        f"generation chain exhausted: {current_model} "
                         f"failed with status {status}"
                     ) from e
         raise RuntimeError("LLM completion failed after all retries and fallbacks")
@@ -762,9 +806,10 @@ class LLMService:
     ) -> str:
         """Send chat completion with automatic fallback through the model chain.
 
-        Order: MiniMax primary → MiniMax fallbacks. The chain is bounded to the
-        approved MiniMax models; an exhausted chain fails closed instead of
-        falling through to a non-MiniMax provider.
+        Order: configured primary model, then its configured fallbacks. The
+        chain is bounded to the active provider's reviewed catalog; an
+        exhausted chain fails closed instead of falling through to another
+        provider.
         """
         response = await self._complete_with_fallback(
             messages,
@@ -867,7 +912,7 @@ class LLMService:
 
         Iterate the token_stream to receive text chunks. After the stream is exhausted,
         call get_usage() to retrieve {"input_tokens": N, "output_tokens": M} or None.
-        Falls back to complete() (full bounded MiniMax retry) on streaming errors.
+        Falls back to complete() (the full bounded provider retry) on streaming errors.
         An unsupported model override fails before any request is made.
 
         Note: some OpenRouter upstreams (e.g. xAI/Grok) reject stream_options — on
@@ -1031,7 +1076,9 @@ class LLMService:
                 model=diagnostics.actual_model,
                 # Current bounded retry loops execute against OpenRouter models;
                 # direct OpenAI is a terminal fallback, never a retry target.
-                retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
+                # Every bounded retry runs against the same configured
+                # provider; there is no cross-provider retry target.
+                retry_provider=diagnostics.provider,
                 fallback_used=diagnostics.fallback_used,
                 retry_count=diagnostics.retry_count,
                 prompt_version=RELATIONSHIP_PROMPT_VERSION,
@@ -1055,7 +1102,7 @@ class LLMService:
             upstream_provider=diagnostics.upstream_provider,
             requested_model=diagnostics.requested_model,
             model=diagnostics.actual_model,
-            retry_provider="openrouter" if diagnostics.retry_count else diagnostics.provider,
+            retry_provider=diagnostics.provider,
             fallback_used=diagnostics.fallback_used,
             retry_count=diagnostics.retry_count,
             prompt_version=RELATIONSHIP_PROMPT_VERSION,

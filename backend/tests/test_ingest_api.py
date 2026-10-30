@@ -35,6 +35,10 @@ _REAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 
 @pytest.fixture(autouse=True)
 def _allow_test_minimax_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These requests carry OpenRouter catalog model ids, so the lane pins the
+    # OpenRouter provider and its allowlist together. The refuseless catalog is
+    # covered by test_refuseless_text_provider.py.
+    monkeypatch.setattr("app.services.llm_admission.settings.llm_provider", "openrouter")
     monkeypatch.setattr(
         "app.services.llm_admission.settings.client_llm_allowed_models",
         "minimax/minimax-m3,minimax/minimax-m2.7",
@@ -1713,7 +1717,8 @@ def test_ingest_image_stores_upload_provenance_metadata(tmp_path: Path, monkeypa
                 "storage_path": str(storage_path),
             },
             "vision": {
-                "provider": "openrouter",
+                # The default vision route is the dedicated refuseless endpoint.
+                "provider": "custom",
                 "model": None,
                 "requested_model": None,
                 "returned_model": None,

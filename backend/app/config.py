@@ -29,6 +29,7 @@ _PLACEHOLDER_CREDENTIAL_VALUES = frozenset(
         "change_me_redis_password",
         "sk-...",
         "sk-or-...",
+        "sk-refuseless-...",
     }
 )
 
@@ -59,6 +60,37 @@ SUPPORTED_TEXT_MODELS = frozenset(
     }
 )
 
+# Text generation providers. "refuseless" is the default and talks to the
+# [OI]-compatible endpoint at LLM_BASE_URL; "openrouter" keeps the historical
+# MiniMax-only OpenRouter route intact. Each provider accepts only its own
+# catalog, so a model id from the other provider fails at boot instead of
+# being sent to an endpoint that does not serve it.
+TEXT_PROVIDERS = frozenset({"openrouter", "refuseless"})
+DEFAULT_TEXT_PROVIDER = "refuseless"
+# Primary model for every text task on the refuseless provider. Named so the
+# OpenRouter compatibility path can recognize "still the refuseless default".
+DEFAULT_REFUSELESS_TEXT_MODEL = "deepseek-v4.1-flash-fast"
+
+# Models served by the refuseless endpoint (verified live with the deployment
+# key against https://api.refuseless.com/v1/models). The abliterated and glm
+# variants are deliberately excluded: generation must stay on the reviewed
+# pair so the frozen classification profile keeps a known behavior.
+REFUSELESS_TEXT_MODELS = frozenset(
+    {
+        "deepseek-v4.1-flash-fast",
+        "minimax-m3.1-flash",
+    }
+)
+
+
+def active_text_models(provider: str) -> frozenset[str]:
+    """Return the text-generation catalog allowed for ``provider``."""
+
+    if provider == "refuseless":
+        return REFUSELESS_TEXT_MODELS
+    return SUPPORTED_TEXT_MODELS
+
+
 # Advertised request capabilities plus the verified reasoning-disable policy.
 # ``structured_outputs`` means the model can be sent a strict ``json_schema``
 # response format; models without it still accept a plain ``json_object``
@@ -79,6 +111,15 @@ TEXT_MODEL_CAPABILITIES: dict[str, frozenset[str]] = {
     # does not advertise structured_outputs or seed. Reasoning is mandatory:
     # reasoning.enabled=false is rejected with HTTP 400, so omit the override.
     "minimax/minimax-m3.1-flash": frozenset({"response_format", "reasoning"}),
+    # Refuseless catalog. A live probe of both entries accepted a strict
+    # json_schema response format, a json_object response format, and a
+    # sampling seed. No reasoning override is declared, so none is ever sent.
+    "deepseek-v4.1-flash-fast": frozenset(
+        {"structured_outputs", "response_format", "seed"}
+    ),
+    "minimax-m3.1-flash": frozenset(
+        {"structured_outputs", "response_format", "seed"}
+    ),
 }
 
 # The cloud vision boundary remains M3-only, independent of TEXT capability
@@ -185,27 +226,43 @@ class Settings(BaseSettings):
     # failures exhausted), retry the chunk on OpenAI instead of failing the job.
     # Disable to guarantee audio never leaves the configured provider.
     transcription_fallback_to_openai: bool = True
-    # OpenRouter (MiniMax-only generation). M3 is the calibrated primary for
-    # every text task; M2.7 is the bounded generic fallback. Any other value is
-    # rejected at boot by validate_minimax_generation_policy.
-    openrouter_api_key: str
+    # Text generation provider. "refuseless" (default) sends every text task to
+    # the [OI]-compatible endpoint at LLM_BASE_URL with LLM_API_KEY. "openrouter"
+    # keeps the historical OpenRouter route below, settings and all, for a
+    # deployment that must stay where it is. The selector only chooses which
+    # credentials and model catalog are used; it never merges the two.
+    llm_provider: Literal["openrouter", "refuseless"] = DEFAULT_TEXT_PROVIDER
+    llm_base_url: str = "https://api.refuseless.com/v1"
+    llm_api_key: str = Field(default="", repr=False)
+    llm_default_model: str = DEFAULT_REFUSELESS_TEXT_MODEL
+    llm_fallback_models: str = "minimax-m3.1-flash"
+    # OpenRouter (MiniMax-only generation). Only read when LLM_PROVIDER picks
+    # it; a refuseless-only deployment does not need this key. M3 is the
+    # calibrated primary for every text task; M2.7 is the bounded generic
+    # fallback. Any other value is rejected at boot by
+    # validate_minimax_generation_policy.
+    openrouter_api_key: str = ""
     openrouter_default_model: str = "minimax/minimax-m3"
     openrouter_fallback_models: str = "minimax/minimax-m2.7"
     openrouter_vision_model: str = "minimax/minimax-m3"
     openrouter_vision_fallback_models: str = ""
     # Trusted operator settings only; never populated from an API request.
-    vision_provider: Literal["openrouter", "gateway", "custom"] = "openrouter"
-    vision_base_url: str = ""
-    vision_model: str = ""
+    # The default route is the dedicated [OI]-compatible vision endpoint. It
+    # uses VISION_API_KEY, which falls back to LLM_API_KEY when unset, so one
+    # deployed secret covers both text and vision. No gateway or OpenRouter
+    # credential is ever inherited by this route.
+    vision_provider: Literal["openrouter", "gateway", "custom"] = "custom"
+    vision_base_url: str = "https://api.refuseless.com/v1"
+    vision_model: str = "deepseek-v4.1-flash-fast"
     vision_api_key: str = Field(default="", repr=False)
     vision_timeout_seconds: float = Field(default=60.0, gt=0, le=300, allow_inf_nan=False)
 
-    # Vision route. "openrouter" (default) keeps the existing OpenRouter vision
-    # chain. "gateway" sends image analysis to the self-hosted OpenAI-compatible
-    # LLM gateway (LLM_GATEWAY_URL / LLM_GATEWAY_TOKEN) with a dedicated model.
-    # The gateway route is independent of the OpenRouter and OpenAI credentials,
-    # carries no cross-provider fallback, and never lets a missing gateway
-    # credential fall through to a paid provider.
+    # Vision route. "custom" (default) uses only vision_base_url/vision_model/
+    # vision_api_key. "openrouter" keeps the historical OpenRouter vision chain.
+    # "gateway" sends image analysis to the self-hosted [OI]-compatible gateway
+    # (LLM_GATEWAY_URL / LLM_GATEWAY_TOKEN) with a dedicated model. Neither the
+    # gateway nor the custom route carries a cross-provider fallback, and
+    # neither lets a missing credential fall through to a paid provider.
 
     vision_gateway_model: str = "qwen-vl"
     vision_gateway_timeout_seconds: float = 60.0
@@ -213,9 +270,15 @@ class Settings(BaseSettings):
     client_llm_allowed_models: str = ""
     tenant_llm_max_concurrent_requests: int = 2
     tenant_llm_daily_token_limit: int = 0
-    # Relationship classification is a single fail-closed M3 call: the
-    # calibrated contract never borrows a generic model fallback.
-    relationship_classification_model: str = "minimax/minimax-m3"
+    # Relationship classification is a single fail-closed call: the calibrated
+    # contract never borrows a generic model fallback. The model follows the
+    # text provider: the refuseless default is deepseek-v4.1-flash-fast, and the
+    # OpenRouter default stays minimax/minimax-m3. The frozen profile is bound
+    # to the OpenRouter M3 canary; the refuseless default needs re-calibration
+    # before its labels are compared with stored M3 results. Temperature and
+    # seed stay unchanged so re-calibration starts from the same sampling
+    # identity.
+    relationship_classification_model: str = DEFAULT_REFUSELESS_TEXT_MODEL
     relationship_classification_temperature: float = 0.0
     relationship_classification_seed: int = 1083
     relationship_extraction_min_confidence: float = 0.7
@@ -483,7 +546,7 @@ class Settings(BaseSettings):
             )
         if _is_placeholder_credential(self.openai_api_key):
             raise ValueError("OPENAI_API_KEY is still the .env.example placeholder value")
-        if _is_placeholder_credential(self.openrouter_api_key):
+        if self.llm_provider == "openrouter" and _is_placeholder_credential(self.openrouter_api_key):
             raise ValueError("OPENROUTER_API_KEY is still the .env.example placeholder value")
         if _is_placeholder_credential(self.credential_pepper):
             raise ValueError("CREDENTIAL_PEPPER is still a known placeholder value")
@@ -560,42 +623,100 @@ class Settings(BaseSettings):
             raise ValueError("VISION_PROVIDER must be one of: openrouter, gateway, custom")
         return normalized
 
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def normalize_llm_provider(cls, value: str) -> str:
+        """Reject an unknown text provider at boot, with the accepted values."""
+
+        normalized = str(value).strip().lower()
+        if normalized not in TEXT_PROVIDERS:
+            raise ValueError(
+                "LLM_PROVIDER must be one of: " + ", ".join(sorted(TEXT_PROVIDERS))
+            )
+        return normalized
+
     @model_validator(mode="after")
     def validate_minimax_generation_policy(self) -> "Settings":
-        """Refuse to boot with any non-MiniMax generation model configured.
+        """Refuse to boot with a generation model the active provider cannot serve.
 
         A single generation policy keeps chat, summarization, tagging,
-        relationship classification, and cloud image analysis on the approved
-        MiniMax models. The alternative — silently routing one of these paths to
-        a different provider — is exactly the hidden behavior this gate
-        prevents.
+        relationship classification, and cloud image analysis on the reviewed
+        catalog for the selected text provider. The alternative — silently
+        routing one of these paths to a model the configured endpoint does not
+        serve— is exactly the hidden behavior this gate prevents. The dormant
+        OpenRouter settings stay validated against the MiniMax-only catalog so
+        selecting "openrouter" can never point at an unreviewed model.
         """
-        configured_models = (
-            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
-            ("OPENROUTER_FALLBACK_MODELS", self.openrouter_fallback_models),
-            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+        # One deployed secret serves text and vision: VISION_API_KEY falls back
+        # to LLM_API_KEY when a deployment sets only the provider key.
+        if not self.vision_api_key.strip():
+            self.vision_api_key = self.llm_api_key
 
-            ("CLIENT_LLM_ALLOWED_MODELS", self.client_llm_allowed_models),
+        if self.llm_provider == "refuseless" and not self.llm_api_key.strip():
+            raise ValueError("LLM_API_KEY is required when LLM_PROVIDER=refuseless")
+        if self.llm_provider == "refuseless" and _is_placeholder_credential(self.llm_api_key):
+            raise ValueError("LLM_API_KEY is still the .env.example placeholder value")
+        if self.llm_provider == "openrouter" and (
+            self.relationship_classification_model == DEFAULT_REFUSELESS_TEXT_MODEL
+        ):
+            # Backward-compatible default handling: an OpenRouter deployment
+            # that never set the classifier keeps the calibrated M3 model
+            # instead of inheriting the refuseless default it cannot serve.
+            self.relationship_classification_model = "minimax/minimax-m3"
+
+        active_models = active_text_models(self.llm_provider)
+        configured_models = (
+            ("LLM_DEFAULT_MODEL", self.llm_default_model, REFUSELESS_TEXT_MODELS),
+            ("LLM_FALLBACK_MODELS", self.llm_fallback_models, REFUSELESS_TEXT_MODELS),
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model, SUPPORTED_TEXT_MODELS),
+            ("OPENROUTER_FALLBACK_MODELS", self.openrouter_fallback_models, SUPPORTED_TEXT_MODELS),
+            (
+                "RELATIONSHIP_CLASSIFICATION_MODEL",
+                self.relationship_classification_model,
+                active_models,
+            ),
+            ("CLIENT_LLM_ALLOWED_MODELS", self.client_llm_allowed_models, active_models),
         )
-        for field_name, raw_value in configured_models:
+        for field_name, raw_value, catalog in configured_models:
             for model in (entry.strip() for entry in raw_value.split(",")):
                 if not model:
                     continue
-                if model not in SUPPORTED_TEXT_MODELS:
+                if model not in catalog:
                     raise ValueError(
-                        f"{field_name} must be a supported MiniMax generation model "
-                        f"{sorted(SUPPORTED_TEXT_MODELS)}; got {model!r}"
+                        f"{field_name} must be a supported model for "
+                        f"LLM_PROVIDER={self.llm_provider} {sorted(catalog)}; got {model!r}"
                     )
-        for field_name, value in (
-            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model),
-            ("RELATIONSHIP_CLASSIFICATION_MODEL", self.relationship_classification_model),
+        for field_name, value, catalog in (
+            ("LLM_DEFAULT_MODEL", self.llm_default_model, REFUSELESS_TEXT_MODELS),
+            ("OPENROUTER_DEFAULT_MODEL", self.openrouter_default_model, SUPPORTED_TEXT_MODELS),
+            (
+                "RELATIONSHIP_CLASSIFICATION_MODEL",
+                self.relationship_classification_model,
+                active_models,
+            ),
         ):
-            if value not in SUPPORTED_TEXT_MODELS:
-                raise ValueError(f"{field_name} must be one supported MiniMax model")
+            if value not in catalog:
+                raise ValueError(f"{field_name} must be one supported model {sorted(catalog)}")
         if self.openrouter_vision_model != VISION_MODEL:
             raise ValueError("OPENROUTER_VISION_MODEL must be minimax/minimax-m3")
         if self.openrouter_vision_fallback_models.strip():
             raise ValueError("OPENROUTER_VISION_FALLBACK_MODELS must be empty; M2.7 is text only")
+        if self.llm_base_url:
+            try:
+                parsed = urlparse(self.llm_base_url)
+                llm_url_valid = (
+                    parsed.scheme in {"http", "https"} and parsed.hostname
+                    and parsed.username is None and parsed.password is None
+                    and "?" not in self.llm_base_url and "#" not in self.llm_base_url
+                    and not any(char.isspace() for char in self.llm_base_url)
+                    and "\\" not in self.llm_base_url
+                )
+            except ValueError:
+                llm_url_valid = False
+            if not llm_url_valid:
+                raise ValueError("LLM_BASE_URL must be an HTTP(S) base URL without userinfo/query/fragment")
+        elif self.llm_provider == "refuseless":
+            raise ValueError("LLM_BASE_URL is required when LLM_PROVIDER=refuseless")
         if self.vision_base_url:
             try:
                 parsed = urlparse(self.vision_base_url)

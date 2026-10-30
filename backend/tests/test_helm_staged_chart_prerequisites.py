@@ -33,9 +33,12 @@ from app.config import Settings
 CHART_DIR = Path(__file__).resolve().parents[2] / "chart"
 DATA_STATEFULSETS = ("palaceoftruth-valkey-primary", "palaceoftruth-valkey-replica")
 
-# The six generation settings Settings validates at import time. Keep this list
+# The generation settings Settings validates at import time. Keep this list
 # aligned with validate_minimax_generation_policy in backend/app/config.py.
 POLICY_ENV = (
+    "LLM_PROVIDER",
+    "LLM_DEFAULT_MODEL",
+    "LLM_FALLBACK_MODELS",
     "OPENROUTER_DEFAULT_MODEL",
     "OPENROUTER_FALLBACK_MODELS",
     "RELATIONSHIP_CLASSIFICATION_MODEL",
@@ -45,12 +48,13 @@ POLICY_ENV = (
 )
 
 DESIRED_POLICY = {
+    "LLM_PROVIDER": "refuseless",
+    "LLM_DEFAULT_MODEL": "deepseek-v4.1-flash-fast",
+    "LLM_FALLBACK_MODELS": "minimax-m3.1-flash",
     "OPENROUTER_DEFAULT_MODEL": "minimax/minimax-m3",
     "OPENROUTER_FALLBACK_MODELS": "minimax/minimax-m2.7",
-    "RELATIONSHIP_CLASSIFICATION_MODEL": "minimax/minimax-m3",
-    "CLIENT_LLM_ALLOWED_MODELS": (
-        "minimax/minimax-m3,minimax/minimax-m2.7,minimax/minimax-m3.1-flash"
-    ),
+    "RELATIONSHIP_CLASSIFICATION_MODEL": "deepseek-v4.1-flash-fast",
+    "CLIENT_LLM_ALLOWED_MODELS": "deepseek-v4.1-flash-fast,minimax-m3.1-flash",
     "OPENROUTER_VISION_MODEL": "minimax/minimax-m3",
     "OPENROUTER_VISION_FALLBACK_MODELS": "",
 }
@@ -59,6 +63,7 @@ DESIRED_POLICY = {
 # hook. Every one of these values is independently rejected by the current
 # Settings validator.
 LEGACY_POLICY = {
+    "LLM_PROVIDER": "openrouter",
     "OPENROUTER_DEFAULT_MODEL": "openai/gpt-4.1",
     "OPENROUTER_FALLBACK_MODELS": "nvidia/nemotron-3-super-120b-a12b",
     "RELATIONSHIP_CLASSIFICATION_MODEL": "openai/gpt-4.1",
@@ -72,10 +77,14 @@ FAKE_CREDENTIALS = {
     "database_url": "postgresql+asyncpg://palace:fake-db-pass@db.example.test/palace",
     "openai_api_key": "fake-openai-key",
     "openrouter_api_key": "fake-openrouter-key",
+    "llm_api_key": "fake-refuseless-key",
     "api_key": "fake-api-key",
 }
 
 DESIRED_SET_ARGS = (
+    f"config.llmProvider={DESIRED_POLICY['LLM_PROVIDER']}",
+    f"config.llmDefaultModel={DESIRED_POLICY['LLM_DEFAULT_MODEL']}",
+    f"config.llmFallbackModels={DESIRED_POLICY['LLM_FALLBACK_MODELS']}",
     f"config.openrouterDefaultModel={DESIRED_POLICY['OPENROUTER_DEFAULT_MODEL']}",
     f"config.openrouterFallbackModels={DESIRED_POLICY['OPENROUTER_FALLBACK_MODELS']}",
     "config.relationshipClassificationModel="
@@ -254,9 +263,12 @@ def test_migration_policy_env_satisfies_actual_settings_over_legacy_configmap() 
     effective = {**LEGACY_POLICY, **explicit}
     settings = _settings_from_environment(effective)
 
+    assert settings.llm_provider == "refuseless"
+    assert settings.llm_default_model == "deepseek-v4.1-flash-fast"
+    assert settings.llm_fallback_models == "minimax-m3.1-flash"
     assert settings.openrouter_default_model == "minimax/minimax-m3"
     assert settings.openrouter_fallback_models == "minimax/minimax-m2.7"
-    assert settings.relationship_classification_model == "minimax/minimax-m3"
+    assert settings.relationship_classification_model == "deepseek-v4.1-flash-fast"
     assert settings.client_llm_allowed_models == DESIRED_POLICY["CLIENT_LLM_ALLOWED_MODELS"]
     assert settings.openrouter_vision_model == "minimax/minimax-m3"
     assert settings.openrouter_vision_fallback_models == ""

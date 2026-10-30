@@ -5,6 +5,9 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("OPENROUTER_API_KEY", "test-openrouter-key")
+# Text generation defaults to the refuseless provider, which requires a
+# key at boot. Unit tests stay hermetic with a synthetic value.
+os.environ.setdefault("LLM_API_KEY", "test-llm-key")
 os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.setdefault("PALACEOFTRUTH_ADMIN_SECRET", "test-admin-secret")
 

@@ -22,6 +22,10 @@ data:
   REDIS_SENTINEL_HOSTS: {{ printf "%s:26379" (include "palaceoftruth.valkeySentinelName" .) | quote }}
   REDIS_SENTINEL_MASTER: {{ .Values.valkey.sentinel.masterName | quote }}
   {{- end }}
+  LLM_PROVIDER: {{ .Values.config.llmProvider | quote }}
+  LLM_BASE_URL: {{ .Values.config.llmBaseUrl | quote }}
+  LLM_DEFAULT_MODEL: {{ .Values.config.llmDefaultModel | quote }}
+  LLM_FALLBACK_MODELS: {{ .Values.config.llmFallbackModels | quote }}
   OPENROUTER_DEFAULT_MODEL: {{ .Values.config.openrouterDefaultModel | quote }}
   CLIENT_LLM_ALLOWED_MODELS: {{ .Values.config.clientLlmAllowedModels | quote }}
   TENANT_LLM_MAX_CONCURRENT_REQUESTS: {{ .Values.config.tenantLlmMaxConcurrentRequests | quote }}

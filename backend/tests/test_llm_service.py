@@ -178,6 +178,15 @@ def llm_service(monkeypatch):
     monkeypatch.setattr("app.services.llm.asyncio.sleep", _fake_sleep)
     monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
     monkeypatch.setattr("app.services.llm.settings.openai_api_key", "test-openai-key")
+    # This lane exercises the OpenRouter route; the refuseless route has its own
+    # lane in test_refuseless_text_provider.py.
+    monkeypatch.setattr("app.services.llm.settings.llm_provider", "openrouter")
+    # OpenRouter vision chain and the calibrated M3 classifier are what this
+    # lane pins; the refuseless vision/custom route has its own lane.
+    monkeypatch.setattr("app.services.llm.settings.vision_provider", "openrouter")
+    monkeypatch.setattr(
+        "app.services.llm.settings.relationship_classification_model", "minimax/minimax-m3"
+    )
     monkeypatch.setattr("app.services.llm.settings.openrouter_default_model", "minimax/minimax-m3")
     monkeypatch.setattr(
         "app.services.llm.settings.openrouter_fallback_models",
@@ -815,6 +824,7 @@ def test_llm_service_does_not_construct_an_openai_generation_client(
 
     monkeypatch.setattr("app.services.llm.AsyncOpenAI", _fake_async_openai)
     monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr("app.services.llm.settings.llm_provider", "openrouter")
     monkeypatch.setattr("app.services.llm.settings.openrouter_default_model", "minimax/minimax-m3")
     monkeypatch.setattr("app.services.llm.settings.openrouter_fallback_models", "minimax/minimax-m2.7")
 
@@ -828,7 +838,7 @@ def test_llm_service_does_not_construct_an_openai_generation_client(
 async def test_complete_rejects_unsupported_model_override(llm_service) -> None:
     service, openrouter_completions, _openai_completions = llm_service
 
-    with pytest.raises(ValueError, match="MiniMax"):
+    with pytest.raises(ValueError, match="unsupported generation model"):
         await service.complete(
             [{"role": "user", "content": "Hello"}],
             model="openai/gpt-4.1",
@@ -841,7 +851,7 @@ async def test_complete_rejects_unsupported_model_override(llm_service) -> None:
 async def test_stream_complete_rejects_unsupported_model_override(llm_service) -> None:
     service, openrouter_completions, _openai_completions = llm_service
 
-    with pytest.raises(ValueError, match="MiniMax"):
+    with pytest.raises(ValueError, match="unsupported generation model"):
         await service.stream_complete(
             [{"role": "user", "content": "Hello"}],
             model="openai/gpt-4.1",
@@ -1086,7 +1096,7 @@ async def test_flash_explicit_schema_request_removes_caller_reasoning_override(l
     service, completions, _direct = llm_service
     completions.outcomes = [_completion_response("{}")]
 
-    await service._create_openrouter_completion(
+    await service._create_text_completion(
         FLASH_MODEL, [{"role": "user", "content": "Return JSON"}],
         response_format={"type": "json_schema", "json_schema": {"name": "test", "strict": True, "schema": {"type": "object"}}},
         extra_body={"reasoning": {"enabled": False}},
@@ -1294,6 +1304,7 @@ def gateway_llm_service(monkeypatch):
     monkeypatch.setattr("app.services.llm.asyncio.sleep", _fake_sleep)
     monkeypatch.setattr("app.services.llm.settings.openrouter_api_key", "test-openrouter-key")
     monkeypatch.setattr("app.services.llm.settings.openai_api_key", "test-openai-key")
+    monkeypatch.setattr("app.services.llm.settings.llm_provider", "openrouter")
     monkeypatch.setattr("app.services.llm.settings.vision_provider", "gateway")
     monkeypatch.setattr(
         "app.services.llm.settings.llm_gateway_url", "http://gateway.example.invalid:8080"

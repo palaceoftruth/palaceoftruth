@@ -707,6 +707,12 @@ envFrom (Kubernetes gives explicit env precedence); they add no credentials and
 do not change vision provider, gateway, or transcription settings.
 */}}
 {{- define "palaceoftruth.generationModelPolicyEnv" -}}
+- name: LLM_PROVIDER
+  value: {{ .Values.config.llmProvider | quote }}
+- name: LLM_DEFAULT_MODEL
+  value: {{ .Values.config.llmDefaultModel | quote }}
+- name: LLM_FALLBACK_MODELS
+  value: {{ .Values.config.llmFallbackModels | quote }}
 - name: OPENROUTER_DEFAULT_MODEL
   value: {{ .Values.config.openrouterDefaultModel | quote }}
 - name: OPENROUTER_FALLBACK_MODELS
