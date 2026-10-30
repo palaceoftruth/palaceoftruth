@@ -125,8 +125,17 @@ def test_smoke_hook_uses_backend_image_and_read_only_rbac() -> None:
     assert len(roles) == 1
     verbs = {verb for rule in roles[0]["rules"] for verb in rule["verbs"]}
     assert verbs == {"get", "list"}
+    # Read-only, and exactly the objects the lane reads: pods and their logs,
+    # namespace events for OOM evidence, the live HelmRelease it binds the
+    # running images to, and the Deployment/ReplicaSet chain behind each pod.
+    # Every extra resource here is a permission the gate genuinely uses; none
+    # of them is writable.
     resources = {resource for rule in roles[0]["rules"] for resource in rule["resources"]}
-    assert resources == {"pods", "pods/log"}
+    assert resources == {
+        "pods", "pods/log", "events", "helmreleases", "deployments", "replicasets",
+    }
+    api_groups = {group for rule in roles[0]["rules"] for group in rule["apiGroups"]}
+    assert api_groups == {"", "helm.toolkit.fluxcd.io", "apps"}
 
 
 def test_smoke_disabled_removes_both_job_and_rbac() -> None:
