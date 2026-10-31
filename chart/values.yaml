@@ -1062,3 +1062,4 @@ certificate:
 namespace:
   create: true
 # Chart-only republish: sentinel data-fingerprint annotation (see PR #644).
+# Republish 0.1.638 (sentinel data-fingerprint, PR #644).
