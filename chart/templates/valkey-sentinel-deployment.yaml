@@ -225,6 +225,23 @@ spec:
                   continue
                 fi
                 if [ "$(role_of "$recorded")" = "master" ]; then break; fi
+                # A recorded address that is no longer one of the live data-node
+                # endpoints is a pod IP from a PREVIOUS incarnation. Sentinel
+                # would monitor that dead address forever and could never
+                # recover: it marks +sdown, failover aborts with no good slave,
+                # and every application pod blocks on master discovery. Move to a
+                # current endpoint even when none of them is a master yet, so
+                # Sentinel monitors the right pod and detects it as it boots.
+                endpoints="$({ getent ahosts "$monitor_target" 2>/dev/null; getent ahosts "$replica_target" 2>/dev/null; } | awk '{print $1}' | sort -u)"
+                if [ -n "$endpoints" ] && ! printf '%s\n' "$endpoints" | grep -qx "$recorded"; then
+                  target=$(live_master || true)
+                  if [ -z "${target:-}" ]; then target=$(printf '%s\n' "$endpoints" | head -n1); fi
+                  if [ -n "${target:-}" ] && [ "$target" != "$recorded" ]; then
+                    pin_monitor "$target"
+                    sleep 1
+                    continue
+                  fi
+                fi
                 target=$(follow_replication_upstream "$recorded" || true)
                 if [ -z "${target:-}" ]; then target=$(unique_live_master || true); fi
                 if [ -n "${target:-}" ] && [ "$target" != "$recorded" ]; then

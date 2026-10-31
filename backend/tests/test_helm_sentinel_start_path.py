@@ -159,6 +159,30 @@ def test_existing_stale_address_is_repinned_to_the_live_master(tmp_path) -> None
     assert conf.count("sentinel monitor ") == 1
 
 
+def test_recorded_address_outside_live_endpoints_is_replaced(tmp_path) -> None:
+    """The 2026-10-31 outage, as a regression test.
+
+    The Valkey primary was recreated with a new IP. Sentinel still had the old
+    pod IP recorded, and no node was a master yet (both were booting as
+    replicas). The start path kept the dead address, Sentinel monitored a pod
+    that no longer existed, failover aborted with no good slave, and every app
+    pod blocked on master discovery.
+
+    A recorded address that is not one of the live data-node endpoints must be
+    replaced by a current endpoint even when none of them is a master yet.
+    """
+    script = _start_script("highAvailability.enabled=true")
+    data = tmp_path / "data"; data.mkdir(parents=True, exist_ok=True)
+    (data / "sentinel.conf").write_text("sentinel monitor mymaster 10.9.9.9 6379 2\nport 26379\n")
+    # 10.9.9.9 is gone (no role file => unreachable); the live endpoint is a
+    # replica that has not been promoted, so there is no master anywhere.
+    rc, conf = _run_script(tmp_path, script, getent_ip="10.0.0.5", roles={"10.0.0.5": "slave"})
+    assert rc == 0
+    addr = _monitor_addr(conf)
+    assert addr == "10.0.0.5", f"a dead recorded IP must be replaced by a live endpoint, got {addr!r}"
+    assert conf.count("sentinel monitor ") == 1
+
+
 def test_pin_guard_is_atomic_and_refuses_to_blank_the_conf(tmp_path) -> None:
     # the shipped guard is present: swap only from a complete, non-empty rewrite
     script = _start_script("highAvailability.enabled=true")
