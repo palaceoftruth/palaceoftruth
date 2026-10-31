@@ -11,6 +11,9 @@ CandidateArtifactKind = Literal[
     "candidate_prompt_guardrail",
     "candidate_memory_reflection",
     "candidate_source_drift",
+    # The agent contribution path for canon. Agents cannot write canon directly,
+    # so this is how they propose an edit for human review (design section 6).
+    "candidate_canon_edit",
 ]
 CandidateArtifactStatus = Literal[
     "draft",

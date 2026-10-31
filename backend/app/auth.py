@@ -1104,6 +1104,54 @@ def _insufficient_scope_detail(auth_mode: str, required_capability: str) -> str:
     return f"MCP bearer token missing {required_capability} scope"
 
 
+# Canon is authored by humans. Only a human-held browser session may write it;
+# every other principal is refused even when it holds a write grant. An agent
+# that wants a page changed files a candidate_canon_edit artifact instead. The
+# set is a single constant so widening it later is a one-line, reviewable change
+# rather than a hunt through handlers.
+CANON_HUMAN_AUTHOR_AUTH_MODES = frozenset({"browser_session"})
+
+CANON_HUMAN_AUTHOR_REASON = (
+    "Canon is authored by humans. This principal is not a human browser session. "
+    "Agents contribute by filing a candidate_canon_edit artifact for review."
+)
+
+
+def require_human_author(*, error_code: str = "canon_human_author_only"):
+    """Refuse every non-human principal, whatever grants it carries.
+
+    This runs BEFORE the capability dependency on purpose: an agent that also
+    holds a write grant must receive the canon refusal, not an insufficient-scope
+    error, because the refusal is a policy about who may author and not about
+    what the credential was scoped for.
+    """
+
+    async def dependency(
+        request: Request,
+        _: str = Depends(verify_memory_auth),
+    ) -> None:
+        auth_mode = getattr(request.state, "auth_mode", None)
+        if auth_mode in CANON_HUMAN_AUTHOR_AUTH_MODES:
+            return
+        logger.warning(
+            "Refusing canon write for non-human principal auth_mode=%r on %s",
+            auth_mode,
+            _request_route(request),
+        )
+        # The code travels in the body AND in the Bearer error parameter, so a
+        # client can branch on it without parsing prose, and a human sees why.
+        raise HTTPException(
+            status_code=403,
+            detail={"error": error_code, "reason": CANON_HUMAN_AUTHOR_REASON},
+            headers=_bearer_auth_headers(request, error=error_code),
+        )
+
+    # Stable marker so a route-coverage test can prove every mutating canon
+    # handler still carries this gate, without matching on a closure name.
+    dependency.canon_human_author_gate = True  # type: ignore[attr-defined]
+    return dependency
+
+
 def require_mcp_scope(required_scope: str):
     return require_capability(required_scope)
 

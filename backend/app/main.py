@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app.api import (
     admin,
     browser_session,
+    canon,
     capture,
     chat,
     conversations,
@@ -320,3 +321,4 @@ app.include_router(tags.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 app.include_router(palace.router, prefix="/api/v1")
+app.include_router(canon.router, prefix="/api/v1")
