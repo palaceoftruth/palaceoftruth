@@ -16,6 +16,7 @@ spec:
     metadata:
       annotations:
         checksum/valkey-sentinel-config: {{ include "palaceoftruth.valkeySentinelConfig" . | sha256sum }}
+        checksum/valkey-data-fingerprint: {{ include "palaceoftruth.valkeyDataFingerprint" . | sha256sum }}
       labels:
         app: {{ include "palaceoftruth.valkeySentinelName" . }}
         # Pod labels intentionally exclude chart/app versions so unrelated
