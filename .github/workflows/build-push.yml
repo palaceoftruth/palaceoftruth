@@ -969,7 +969,16 @@ jobs:
     needs:
       - build-backend
       - build-frontend
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    # always() is required: on the chart_release_only path both build jobs are
+    # SKIPPED, and a job that only lists needs without always() is itself
+    # skipped when its needs are skipped. That made the chart-only path unable
+    # to publish anything. Skipped builds are acceptable here (no image change);
+    # a FAILED build is not, so it is excluded explicitly.
+    if: >-
+      always() &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) &&
+      needs.build-backend.result != 'failure' &&
+      needs.build-frontend.result != 'failure'
     runs-on: palace-trusted-amd64
     timeout-minutes: 20
     permissions:
