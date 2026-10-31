@@ -128,6 +128,42 @@ status, updated_at) plus the budget. Cache miss rebuilds.
 - Authored cross references (`related: [slug, ...]` in front matter) also insert
   a `room_tunnels` row with `tunnel_type = 'authored-link'` when both pages have
   rooms. Derived tunnels keep `shared-tag`.
+- The charter membership is written by the canon service as
+  `room_memberships.source = 'authored'`, `membership_kind = 'primary'`. The room
+  rebuild must never write or delete that row.
+
+### Embedding and linking
+
+Palace already has the machinery. No new vector stack.
+
+- Publishing a page calls `process_prebuilt_item` (`backend/app/services/
+  item_processing.py`), the same function `wakeup_briefs.py` and
+  `diary_rollups.py` already call for Palace's own generated items. That gives
+  chunking, embeddings under the default profile, and the generated `tsvector`.
+- Embedding uses the **default profile**, the same vector space as every other
+  item. A private canon profile is rejected: it would make canon similarity to
+  real items impossible and duplicate the ANN index for no benefit.
+- `content_hash` guard: re-publishing an unchanged body makes zero new embedding
+  calls. Only changed bodies re-embed.
+- Linking then falls out of existing services:
+  - `item_relationships` via `RelationshipService.find_relationships`, which
+    takes the item's embedding centroid, finds the top 5 similar items, and
+    classifies the edge with the LLM at confidence >= 0.5. That is how a charter
+    acquires "these are the items it governs". It requires a non-empty
+    `summary`, which the mandatory 200 char summary already guarantees.
+  - `room_memberships` as above, giving room-scoped retrieval the charter.
+  - `room_tunnels` for authored cross references.
+- **Routing guard, non-negotiable.** `_apply_room_routing` in
+  `backend/app/services/palace.py` auto-assigns every ready item to a wing and
+  room and bumps `room.membership_generation`. A canon item must be excluded
+  explicitly there, and must carry `metadata_.sync_active = false`. Without this
+  guard, every canon publish reroutes the page, bumps the room generation, and
+  the drift detector fires against the page's own edit. Self-induced drift on
+  every save. The guard is the difference between a working feature and a
+  permanent false alarm.
+- `search.py` gains a canon source label so results display as authored canon
+  rather than as an unsourced capture. Canon results count as authored support,
+  never as `unsupported` or `partial_source`.
 
 ## 5. Authoring API
 
@@ -320,17 +356,26 @@ tables plus one constraint alteration.
   existing hybrid ordering tests.
 - Drift: after a room generation bump, the page reports `drift-suspected` and a
   curation artifact exists; ratify clears both.
+- Routing guard: publishing a canon page creates no `auto` room membership and
+  bumps no room generation. This is the self-drift regression test.
+- Embedding: publishing a page produces `embeddings` rows plus relationship
+  edges; re-publishing an unchanged body produces neither.
+- Linking: a charter page's relationships point at the source items it governs,
+  and those edges respect the confidence threshold.
 
 ## 14. Build packets
 
 Sequenced so each packet ships green on its own.
 
 1. **Schema and service.** Migration 072, models, `services/canon.py` with digest,
-   get, search, caps. Tests for caps and digest.
+   get, search, caps. The `_apply_room_routing` canon guard and the `search.py`
+   source label. Tests for caps, digest, and the routing guard.
 2. **Authoring API and the wall.** CRUD, publish, ratify, archive, revisions, the
-   human-principal guard, contract tests.
+   human-principal guard, contract tests. Publish calls `process_prebuilt_item`
+   behind a `content_hash` guard and writes the authored charter membership.
 3. **Retrieval wiring.** Canon boost in search, `palace_canon` read tool, MCP
-   instruction text, wake-up brief canon block.
+   instruction text, wake-up brief canon block, relationship edges from
+   `RelationshipService` now that pages are embedded.
 4. **Folder import.** Two phase preview and commit, plus conflict UI copy.
 5. **UI.** Charter tab in room detail, Canon route with editor and revision diff.
 6. **Drift and ratification.** Detector, curation artifacts, pills, ratify path.
@@ -348,6 +393,14 @@ Sequenced so each packet ships green on its own.
 ## 16. Risks
 
 - **Canon rot.** Mitigated by drift detection and ratification, not by generation.
+- **Self-induced drift.** A canon item auto-routed into a room bumps the very
+  generation the drift detector compares against, so every publish would flag
+  itself stale. Mitigated by the routing guard in section 4, and covered by a
+  named regression test.
+- **Canon flooding general search.** Embedded canon chunks compete with real
+  corpus in hybrid retrieval because instruction text is dense and matches
+  broadly. Mitigated by the boost being bounded, the canon result cap, and canon
+  search as the preferred path. Watch result-mix telemetry after release.
 - **Two sources of room truth.** Charter and snapshot can disagree in front of a
   user. Mitigated by strict labeling, charter above snapshot, and never merging
   them in one block.
