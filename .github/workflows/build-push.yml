@@ -545,13 +545,23 @@ jobs:
 
       - name: Detect Hermes plugin release inputs
         id: hermes_plugin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(python3 scripts/package_hermes_memory_plugin.py --print-version)
           TAG="hermes-memory-plugin-v${VERSION}"
           ASSET_BASE="palaceoftruth-hermes-memory-plugin-v${VERSION}"
           BEFORE="${{ github.event.before }}"
           if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            CHANGED=true
+            # No before-SHA (workflow_dispatch, or a brand-new branch): there is
+            # no diff to inspect. Release only when this version has no release
+            # yet; otherwise the create step would fail on an existing tag and
+            # take the whole build, and chart publication, down with it.
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              CHANGED=false
+            else
+              CHANGED=true
+            fi
           elif git diff --name-only "$BEFORE" "$GITHUB_SHA" -- third_party_plugins/hermes/memory/palaceoftruth scripts/package_hermes_memory_plugin.py | grep -q .; then
             CHANGED=$(python3 scripts/detect_hermes_plugin_release.py --before "$BEFORE" --after "$GITHUB_SHA")
           else
