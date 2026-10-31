@@ -17,3 +17,4 @@ maintainers:
 annotations:
   artifacthub.io/license: AGPL-3.0-only
 # Chart-only republish: sentinel data-fingerprint annotation (see PR #644).
+# Republish 0.1.638 (sentinel data-fingerprint, PR #644).
