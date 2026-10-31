@@ -165,3 +165,54 @@ class CanonSearchResponse(BaseModel):
     query: str
     hits: list[CanonSearchHitOut]
     total: int
+
+
+# --- Folder import ---------------------------------------------------------
+#
+# The preview and the commit are two phases of one operator decision. A preview
+# says what each file would do and hands back a content-addressed `plan_id`; the
+# commit must quote that id, so it cannot apply a folder the operator never saw.
+
+
+class CanonImportFileOut(BaseModel):
+    """What one uploaded file would do, as the preview shows it."""
+
+    path: str
+    slug: str
+    title: str
+    section: str
+    # create | update | skip-unchanged | conflict. Plain `str`, like every other
+    # canon output field: the vocabulary belongs to the service, and an output
+    # schema that re-declared it would be a second owner of the same list.
+    action: str
+    content_hash: str
+    existing_status: str | None = None
+    reason: str
+
+
+class CanonImportPlanOut(BaseModel):
+    plan_id: str
+    files: list[CanonImportFileOut]
+    counts: dict[str, int]
+
+
+class CanonImportCommitIn(BaseModel):
+    """The operator's answer to a preview: which conflicts to apply, rename, or skip."""
+
+    plan_id: str = Field(min_length=1)
+    decisions: dict[str, str] = Field(default_factory=dict)
+    publish: bool = False
+
+
+class CanonImportResultOut(BaseModel):
+    """What a commit did to one file: created | updated | skipped | renamed."""
+
+    slug: str
+    action: str
+    new_slug: str | None = None
+
+
+class CanonImportCommitOut(BaseModel):
+    results: list[CanonImportResultOut]
+    applied: int
+    skipped: int

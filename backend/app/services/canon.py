@@ -42,6 +42,9 @@ CANON_PAGE_BODY_MAX_CHARS = 20000
 CANON_PAGE_EDITOR_WARN_CHARS = 8000
 CANON_SUMMARY_MAX_CHARS = 200
 CANON_PAGES_PER_TENANT_SOFT = 500
+CANON_IMPORT_MAX_FILES = 500
+CANON_IMPORT_MAX_FILE_BYTES = 250_000
+CANON_IMPORT_MAX_TOTAL_BYTES = 5_000_000
 
 # Rough characters-per-token for the per-connect estimate. Deliberately
 # conservative: it over-counts tokens rather than under-counting them.

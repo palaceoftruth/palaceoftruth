@@ -325,13 +325,16 @@ async def create_canon_page(
     db: AsyncSession, *, tenant_id: str, author_subject: str, slug: str, title: str,
     summary: str, section: str, body: str, room_id: uuid.UUID | None = None,
     priority: int = 100, pinned_in_digest: bool = False, parent_slug: str | None = None,
-    tags: list[str] | None = None,
+    tags: list[str] | None = None, commit: bool = True,
 ) -> CanonPageWrite:
     """Create a draft page, its item, and revision 1; never embed here.
 
     Always a draft: nothing reaches the digest or an agent's context until a
     human publishes, so a half-written page is harmless. Publish owns the
     embedding cost.
+
+    ``commit=False`` leaves the transaction open because the folder importer
+    commits once for the whole batch instead of once per file.
     """
     now = datetime.now(timezone.utc)
     validate_section(section)
@@ -374,6 +377,13 @@ async def create_canon_page(
     revision = await _append_revision(
         db, page=page, item=item, author_subject=author_subject, change_note="create", now=now
     )
+    if not commit:
+        # The folder importer commits once for the whole batch, so this write
+        # joins its transaction instead of ending it. Nothing was rolled back,
+        # so the instances below are still readable without a reload.
+        await db.flush()
+        return CanonPageWrite(page=page, item=item, revision=revision, embedded=False)
+
     await db.commit()
     # Re-read after the commit: a rollback inside the write path expires the
     # instances, and projecting an expired attribute would raise MissingGreenlet
@@ -388,13 +398,16 @@ async def update_canon_page(
     body: str | None = None, room_id: Any = UNSET, priority: int | None = None,
     pinned_in_digest: bool | None = None, parent_slug: Any = UNSET,
     change_note: str | None = None, embedder: EmbeddingService | None = None,
-    llm: LLMService | None = None,
+    llm: LLMService | None = None, commit: bool = True,
 ) -> CanonPageWrite:
     """Apply a partial edit; ``None`` leaves a field alone, ``UNSET`` clears one.
 
     A body or summary change to a published page demotes it to ``draft`` and
     drops its authored charter membership, so the published text an agent read
     cannot change without a fresh publish.
+
+    ``commit=False`` leaves the transaction open because the folder importer
+    commits once for the whole batch instead of once per file.
     """
     now = datetime.now(timezone.utc)
     page, item = await _load_page(db, tenant_id=tenant_id, slug=slug)
@@ -447,6 +460,13 @@ async def update_canon_page(
         # process_prebuilt_item marks a successfully embedded item ready. A page
         # that is not published must not become retrievable as a side effect.
         item.status = _item_status_for(page)
+    if not commit:
+        # The folder importer commits once for the whole batch, so this write
+        # joins its transaction instead of ending it. Nothing was rolled back,
+        # so the instances below are still readable without a reload.
+        await db.flush()
+        return CanonPageWrite(page=page, item=item, revision=revision, embedded=embedded)
+
     await db.commit()
     # Re-read after the commit: a rollback inside the write path expires the
     # instances, and projecting an expired attribute would raise MissingGreenlet
