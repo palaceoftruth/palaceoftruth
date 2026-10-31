@@ -76,6 +76,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Fingerprint of the Valkey DATA pod template. Sentinel pods must restart whenever
+the data nodes are replaced, because Sentinel resolves the master to an IP only
+at container start and never re-resolves. If the primary pod is recreated with a
+new IP while Sentinel keeps running, Sentinel keeps a dead address, its failover
+aborts, and every application pod blocks waiting for master discovery.
+
+This fingerprint changes when the data image or either authority start script
+changes, which is exactly when the data StatefulSets roll.
+*/}}
+{{- define "palaceoftruth.valkeyDataFingerprint" -}}
+{{ .Values.valkey.image }}|{{ include "palaceoftruth.valkeyAuthorityStartScript" (dict "root" . "role" "primary") }}|{{ include "palaceoftruth.valkeyAuthorityStartScript" (dict "root" . "role" "replica") }}
+{{- end }}
+{{/*
 Writable Sentinel configuration content. Keep this in one helper so the pod
 template checksum changes only when the Sentinel runtime configuration changes,
 not when chart metadata changes.
