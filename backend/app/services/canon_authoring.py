@@ -211,6 +211,26 @@ async def _load_page(db: AsyncSession, *, tenant_id: str, slug: str) -> tuple[Ca
     return row[0], row[1]
 
 
+async def _reload_for_response(
+    db: AsyncSession, *, tenant_id: str, slug: str
+) -> tuple[CanonPage, Item]:
+    """Re-read the page and item after a write, before anyone projects them.
+
+    A rollback anywhere in the write path expires every ORM instance in the
+    session, and an expired attribute on an async session raises
+    ``MissingGreenlet`` the moment it is touched — outside a greenlet there is no
+    way to run the SELECT it wants. ``process_prebuilt_item`` rolls back on its
+    own error paths, so a write that fully succeeded can still hand back a page
+    whose attributes are unreadable.
+
+    Projecting the objects the write path happened to be holding therefore cannot
+    work, and the failure is invisible in a test session that never expires
+    anything. One SELECT here makes the returned objects safe to read, at the cost
+    of a single round trip on a write.
+    """
+    return await _load_page(db, tenant_id=tenant_id, slug=slug)
+
+
 async def _room_generation(db: AsyncSession, *, room_id: uuid.UUID | None) -> int:
     """The room's ``membership_generation``; 0 when unbound or gone.
 
@@ -355,6 +375,10 @@ async def create_canon_page(
         db, page=page, item=item, author_subject=author_subject, change_note="create", now=now
     )
     await db.commit()
+    # Re-read after the commit: a rollback inside the write path expires the
+    # instances, and projecting an expired attribute would raise MissingGreenlet
+    # on a request that actually succeeded.
+    page, item = await _reload_for_response(db, tenant_id=tenant_id, slug=slug)
     return CanonPageWrite(page=page, item=item, revision=revision, embedded=False)
 
 
@@ -424,6 +448,10 @@ async def update_canon_page(
         # that is not published must not become retrievable as a side effect.
         item.status = _item_status_for(page)
     await db.commit()
+    # Re-read after the commit: a rollback inside the write path expires the
+    # instances, and projecting an expired attribute would raise MissingGreenlet
+    # on a request that actually succeeded.
+    page, item = await _reload_for_response(db, tenant_id=tenant_id, slug=slug)
     return CanonPageWrite(page=page, item=item, revision=revision, embedded=embedded)
 
 
@@ -490,6 +518,10 @@ async def publish_canon_page(
             raise CanonConflictError(conflict) from exc
 
     await db.commit()
+    # Re-read after the commit: a rollback inside the write path expires the
+    # instances, and projecting an expired attribute would raise MissingGreenlet
+    # on a request that actually succeeded.
+    page, item = await _reload_for_response(db, tenant_id=tenant_id, slug=slug)
     return CanonPageWrite(page=page, item=item, revision=revision, embedded=embedded)
 
 
@@ -517,6 +549,10 @@ async def ratify_canon_page(
 
     revision = await _latest_revision(db, page_id=page.id)
     await db.commit()
+    # Re-read after the commit: a rollback inside the write path expires the
+    # instances, and projecting an expired attribute would raise MissingGreenlet
+    # on a request that actually succeeded.
+    page, item = await _reload_for_response(db, tenant_id=tenant_id, slug=slug)
     return CanonPageWrite(page=page, item=item, revision=revision, embedded=False)
 
 
@@ -535,6 +571,10 @@ async def archive_canon_page(
 
     revision = await _latest_revision(db, page_id=page.id)
     await db.commit()
+    # Re-read after the commit: a rollback inside the write path expires the
+    # instances, and projecting an expired attribute would raise MissingGreenlet
+    # on a request that actually succeeded.
+    page, item = await _reload_for_response(db, tenant_id=tenant_id, slug=slug)
     return CanonPageWrite(page=page, item=item, revision=revision, embedded=False)
 
 
@@ -579,6 +619,33 @@ async def get_canon_page_revision(
     if row is None:
         raise CanonNotFoundError(f"canon page {slug} has no revision {revision}")
     return row
+
+
+async def canon_revision_counts(
+    db: AsyncSession, *, tenant_id: str, page_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """Count revisions per page for a set of pages, in one query.
+
+    The list view shows "rev N" per row, and a page row does not carry its own
+    revision count: the revisions live in their own table and only the detail
+    view ever asked for them. Returning a dict rather than `len(await ...)` per
+    page keeps the list at one query regardless of page count.
+
+    Pages with no revisions are absent from the mapping rather than present as
+    zero, so a caller must use `.get(page.id, 0)` and cannot mistake a missing
+    key for a real count.
+    """
+    if not page_ids:
+        return {}
+    rows = await db.execute(
+        select(CanonPageRevision.page_id, func.count())
+        .where(
+            CanonPageRevision.tenant_id == tenant_id,
+            CanonPageRevision.page_id.in_(page_ids),
+        )
+        .group_by(CanonPageRevision.page_id)
+    )
+    return {page_id: int(count) for page_id, count in rows}
 
 
 async def list_canon_pages(

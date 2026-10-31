@@ -4,6 +4,7 @@ import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 
 const Ingest = lazy(() => import("./pages/Ingest"));
+const Canon = lazy(() => import("./pages/Canon"));
 const Search = lazy(() => import("./pages/Search"));
 const Chat = lazy(() => import("./pages/Chat"));
 const Browse = lazy(() => import("./pages/Browse"));
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="ingest" element={<Ingest />} />
+          <Route path="canon" element={<Canon />} />
           <Route path="search" element={<Search />} />
           <Route path="chat" element={<Chat />} />
           <Route path="browse" element={<Browse />} />
