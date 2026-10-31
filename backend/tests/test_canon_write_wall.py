@@ -18,6 +18,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import ast
+import pathlib
+
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -265,3 +268,83 @@ def test_an_agent_can_read_canon(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"pages": [], "total": 0, "limit": 50, "offset": 0}
+
+
+# --- projection safety -------------------------------------------------------
+#
+# A write can succeed and still hand back ORM instances whose attributes are
+# unreadable. ``process_prebuilt_item`` rolls back on its own error paths, and a
+# rollback in an async session expires every loaded instance; the next attribute
+# read then raises MissingGreenlet, so the request 500s *after* the change was
+# committed. The user is told it failed while it is actually live.
+#
+# Nothing in the request path can prove this from behaviour without a real
+# Postgres, so the invariant is asserted on the source: every writer must re-read
+# the page and item after its final commit and before it builds the response.
+
+def _write_functions() -> list[ast.AsyncFunctionDef]:
+    source = pathlib.Path("app/services/canon_authoring.py").read_text()
+    tree = ast.parse(source)
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name.endswith("_canon_page")
+    ]
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def test_every_canon_writer_reloads_before_returning() -> None:
+    writers = _write_functions()
+    assert {fn.name for fn in writers} == {
+        "create_canon_page",
+        "update_canon_page",
+        "publish_canon_page",
+        "ratify_canon_page",
+        "archive_canon_page",
+    }, "the writer set changed; check that the new writer also reloads"
+
+    for fn in writers:
+        # Source order, not tree order: the reload must follow the commit.
+        ordered = sorted(
+            (
+                (node.lineno, "commit" if _is_db_commit(node) else "reload")
+                for node in ast.walk(fn)
+                if _is_db_commit(node) or _call_name(node) == "_reload_for_response"
+            )
+        )
+        kinds = [kind for _, kind in ordered]
+        assert "commit" in kinds, f"{fn.name} never commits"
+        assert "reload" in kinds, f"{fn.name} never reloads the page before returning"
+        last_commit = max(lineno for lineno, kind in ordered if kind == "commit")
+        first_reload = min(lineno for lineno, kind in ordered if kind == "reload")
+        assert first_reload > last_commit, (
+            f"{fn.name} reloads before its final commit, so the objects it returns "
+            "can still be expired"
+        )
+
+        return_node = next(
+            (node for node in ast.walk(fn) if isinstance(node, ast.Return)), None
+        )
+        assert return_node is not None, f"{fn.name} has no return"
+        assert return_node.lineno > first_reload, (
+            f"{fn.name} returns before reloading, so the response is built from "
+            "instances that may be expired"
+        )
+
+
+def _is_db_commit(node: ast.AST) -> bool:
+    """True for an ``await db.commit()`` expression."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "commit"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "db"
+    )
