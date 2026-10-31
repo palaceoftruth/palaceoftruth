@@ -16,3 +16,4 @@ maintainers:
     url: https://github.com/palaceoftruth/palaceoftruth
 annotations:
   artifacthub.io/license: AGPL-3.0-only
+# Chart-only republish: sentinel data-fingerprint annotation (see PR #644).
