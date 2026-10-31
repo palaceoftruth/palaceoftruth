@@ -191,6 +191,33 @@ Banner copy should state:
 
 Use freshness pills for narrow subsystem status, not broad alert messaging.
 
+### Canon vocabulary
+
+Canon is the tenant's authored, authoritative corpus. It is written by a person,
+not generated from captures, and it outranks derived memory when an agent answers.
+
+- **canon**: the authored corpus as a whole. One tenant has one canon.
+- **page**: one document in canon, addressed by `slug`. A page has a `section`, a
+  `status`, and a revision history.
+- **charter**: the canon page with `section = 'charter'` for a room. It states what
+  that room is for. A room has at most one published charter.
+- **digest**: the bounded summary of canon served on connect. Identity, rules, and a
+  page index. It is a view of canon, not a copy of it.
+- **ratify**: a person confirming that a page still matches the room it describes,
+  without editing it. Ratifying moves the confirmation generation forward and clears
+  the drift pill.
+
+**A charter is not a snapshot, and the two are never interchangeable.** A snapshot
+is derived from captured items, regenerated when the corpus changes, and can be
+wrong in the same way the corpus is wrong. A charter is written by a person, stays
+fixed until someone edits or ratifies it, and is the authority the snapshot is
+measured against. In the room detail pane the charter always renders above the
+snapshot, always carries its own label, and is never merged into snapshot copy.
+
+When a page falls behind its room, the UI says `drift-suspected` or `stale` using
+the existing freshness pills. Those describe the page's relationship to the room,
+not the room's own freshness.
+
 ## Palace page patterns
 
 ### Empty and pre-built states
