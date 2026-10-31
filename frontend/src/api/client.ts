@@ -29,6 +29,12 @@ import type {
   PalaceControlTower,
   PalaceRoomClusterReview,
   PalaceOverview,
+  CanonDigest,
+  CanonPage,
+  CanonPageListResponse,
+  CanonRevisionListResponse,
+  CanonSearchResponse,
+  CanonWriteResponse,
   PalaceRetrieveResponse,
   PalaceRoomDetail,
   PalaceRunSummary,
@@ -432,6 +438,69 @@ export const api = {
     req<SourceSubscriptionEntryListResponse>(`/source-subscriptions/entries?${new URLSearchParams({ limit: String(limit) })}`),
 
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
+
+  // --- Canon -------------------------------------------------------------
+  // Read is open to any authorized principal. Write is refused by the API unless
+  // the caller is a human browser session, so these functions are used only from
+  // the UI and a refusal surfaces as an ApiError with the canon reason string.
+
+  listCanonPages: (params: {
+    section?: string;
+    status?: string;
+    room_id?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.section) query.set("section", params.section);
+    if (params.status) query.set("status", params.status);
+    if (params.room_id) query.set("room_id", params.room_id);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    const suffix = query.size ? `?${query}` : "";
+    return req<CanonPageListResponse>(`/canon/pages${suffix}`);
+  },
+
+  getCanonPage: (slug: string) => req<CanonPage>(`/canon/pages/${encodeURIComponent(slug)}`),
+
+  createCanonPage: (body: Record<string, unknown>) =>
+    req<CanonWriteResponse>("/canon/pages", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    }),
+
+  updateCanonPage: (slug: string, body: Record<string, unknown>) =>
+    req<CanonWriteResponse>(`/canon/pages/${encodeURIComponent(slug)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    }),
+
+  publishCanonPage: (slug: string) =>
+    req<CanonWriteResponse>(`/canon/pages/${encodeURIComponent(slug)}/publish`, { method: "POST" }),
+
+  ratifyCanonPage: (slug: string) =>
+    req<CanonWriteResponse>(`/canon/pages/${encodeURIComponent(slug)}/ratify`, { method: "POST" }),
+
+  archiveCanonPage: (slug: string) =>
+    req<CanonWriteResponse>(`/canon/pages/${encodeURIComponent(slug)}/archive`, { method: "POST" }),
+
+  listCanonRevisions: (slug: string, limit = 50, offset = 0) =>
+    req<CanonRevisionListResponse>(
+      `/canon/pages/${encodeURIComponent(slug)}/revisions?${new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+      })}`,
+    ),
+
+  getCanonDigest: () => req<CanonDigest>("/canon/digest"),
+
+  searchCanon: (q: string, limit?: number) => {
+    const query = new URLSearchParams({ q });
+    if (limit !== undefined) query.set("limit", String(limit));
+    return req<CanonSearchResponse>(`/canon/search?${query}`);
+  },
 
   getPalaceControlTower: () => req<PalaceControlTower>("/palace/control-tower"),
 

@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   Compass,
   Inbox,
   LayoutDashboard,
@@ -31,6 +32,7 @@ export const CORE_NAV: NavItem[] = [
 
 export const CAPTURE_NAV: NavItem[] = [
   { to: "/ingest", label: "Capture", shortLabel: "Capture", icon: Upload },
+  { to: "/canon", label: "Canon", shortLabel: "Canon", icon: BookOpen },
   { to: "/saved-web", label: "Saved Web", shortLabel: "Saved Web", icon: Link2 },
   { to: "/sources", label: "Sources", shortLabel: "Sources", icon: Youtube },
   { to: "/feeds", label: "Feeds", shortLabel: "Feeds", icon: Rss },

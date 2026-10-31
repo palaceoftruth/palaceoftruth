@@ -1136,3 +1136,93 @@ export interface PalaceControlTower {
   build_elapsed_ms?: number | null;
   section_timings_ms: Record<string, number>;
 }
+
+// --- Canon ---------------------------------------------------------------
+//
+// Canon is human-authored and authoritative. It is not a snapshot: a snapshot is
+// derived from captured items and can be regenerated, a canon page is written and
+// can only be ratified or edited by a person. The two are never merged in the UI.
+
+export type CanonSection =
+  | "identity"
+  | "rules"
+  | "glossary"
+  | "runbook"
+  | "charter"
+  | "faq"
+  | "reference";
+
+export type CanonStatus = "draft" | "published" | "archived";
+
+export interface CanonPage {
+  slug: string;
+  title: string;
+  summary: string;
+  section: CanonSection;
+  status: CanonStatus;
+  room_id: string | null;
+  parent_slug: string | null;
+  priority: number;
+  pinned_in_digest: boolean;
+  char_count: number;
+  /** Present on a detail or write response; omitted from a list. */
+  body?: string | null;
+  revision_count: number;
+  created_by_subject: string | null;
+  updated_by_subject: string | null;
+  last_confirmed_generation: number;
+  last_confirmed_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CanonPageListResponse {
+  pages: CanonPage[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CanonRevision {
+  revision: number;
+  summary: string;
+  change_note: string | null;
+  created_by_subject: string | null;
+  created_at: string | null;
+  body_md: string;
+}
+
+export interface CanonRevisionListResponse {
+  slug: string;
+  revisions: CanonRevision[];
+  total: number;
+}
+
+export interface CanonWriteResponse {
+  page: CanonPage;
+  revision: number;
+  embedded: boolean;
+}
+
+export interface CanonDigest {
+  text: string;
+  char_count: number;
+  page_count: number;
+  truncated: boolean;
+  next: string | null;
+}
+
+export interface CanonSearchHit {
+  slug: string;
+  section: CanonSection;
+  summary: string;
+  snippet: string;
+  score: number;
+  truncated: boolean;
+}
+
+export interface CanonSearchResponse {
+  query: string;
+  hits: CanonSearchHit[];
+  total: number;
+}
