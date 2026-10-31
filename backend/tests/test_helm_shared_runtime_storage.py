@@ -450,7 +450,16 @@ def test_sentinel_rollout_resets_peer_state_without_recycling_valkey_data_pods()
         "app.kubernetes.io/name": "palaceoftruth",
         "app.kubernetes.io/instance": "palaceoftruth",
     }
-    assert set(sentinel_template["metadata"]["annotations"]) == {"checksum/valkey-sentinel-config"}
+    # Two annotations, both load-bearing:
+    #   checksum/valkey-sentinel-config  - rerolls on Sentinel runtime config change
+    #   checksum/valkey-data-fingerprint - rerolls when the DATA pods are replaced,
+    #     because Sentinel resolves the master to an IP only at container start and
+    #     never re-resolves. Without this, a chart upgrade that recreates the primary
+    #     leaves Sentinel monitoring a dead address and every app pod blocks.
+    assert set(sentinel_template["metadata"]["annotations"]) == {
+        "checksum/valkey-sentinel-config",
+        "checksum/valkey-data-fingerprint",
+    }
 
     readiness = sentinel_template["spec"]["containers"][0]["readinessProbe"]
     readiness_script = readiness["exec"]["command"][-1]
