@@ -47,6 +47,7 @@ from app.services.canon_authoring import (
     CanonConflictError,
     CanonNotFoundError,
     archive_canon_page,
+    canon_revision_counts,
     create_canon_page,
     get_canon_page_detail,
     get_canon_page_revision,
@@ -142,8 +143,14 @@ async def get_canon_pages(
         )
     except (CanonError, CanonAuthoringError) as exc:
         raise _raise_for(exc) from exc
+    revision_counts = await canon_revision_counts(
+        db, tenant_id=request.state.tenant_id, page_ids=[page.id for page, _item in rows]
+    )
     return CanonPageListResponse(
-        pages=[_page_out(page, item=item) for page, item in rows],
+        pages=[
+            _page_out(page, item=item, revision_count=revision_counts.get(page.id, 0))
+            for page, item in rows
+        ],
         total=total,
         limit=limit,
         offset=offset,
