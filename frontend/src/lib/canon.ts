@@ -137,3 +137,140 @@ export function formToPayload(form: {
     pinned_in_digest: form.pinnedInDigest,
   };
 }
+
+// --- Folder import --------------------------------------------------------
+//
+// These mirror the server's caps so the operator sees a problem before
+// uploading. They are a courtesy, not a gate: the API refuses what it must
+// refuse, and this file never decides that an import is allowed.
+
+export const IMPORT_MAX_FILES = 500;
+export const IMPORT_MAX_FILE_BYTES = 250_000;
+export const IMPORT_MAX_TOTAL_BYTES = 5_000_000;
+export const IMPORT_EXTENSIONS = [".md", ".mdx", ".txt"] as const;
+
+export interface ImportCandidate {
+  name: string;
+  size: number;
+}
+
+export interface ImportPreflight {
+  ok: boolean;
+  problems: string[];
+  fileCount: number;
+  totalBytes: number;
+}
+
+export function importPreflight(candidates: ImportCandidate[]): ImportPreflight {
+  const problems: string[] = [];
+  const totalBytes = candidates.reduce((sum, file) => sum + file.size, 0);
+
+  if (candidates.length === 0) {
+    problems.push("Choose a folder first. Nothing is uploaded until you preview it.");
+  }
+  if (candidates.length > IMPORT_MAX_FILES) {
+    problems.push(
+      `${candidates.length} files is over the ${IMPORT_MAX_FILES} file limit. Import a smaller folder.`,
+    );
+  }
+  const tooBig = candidates.filter((file) => file.size > IMPORT_MAX_FILE_BYTES);
+  if (tooBig.length > 0) {
+    problems.push(
+      `${tooBig.length} file${tooBig.length === 1 ? " is" : "s are"} over ${formatBytes(IMPORT_MAX_FILE_BYTES)}: ${tooBig
+        .slice(0, 3)
+        .map((file) => file.name)
+        .join(", ")}${tooBig.length > 3 ? ", and more" : ""}.`,
+    );
+  }
+  if (totalBytes > IMPORT_MAX_TOTAL_BYTES) {
+    problems.push(
+      `The folder is ${formatBytes(totalBytes)}, over the ${formatBytes(IMPORT_MAX_TOTAL_BYTES)} total limit.`,
+    );
+  }
+  const wrongKind = candidates.filter((file) => !isImportableName(file.name));
+  if (wrongKind.length > 0) {
+    problems.push(
+      `${wrongKind.length} file${wrongKind.length === 1 ? " is" : "s are"} not ${IMPORT_EXTENSIONS.join(", ")}: ${wrongKind
+        .slice(0, 3)
+        .map((file) => file.name)
+        .join(", ")}${wrongKind.length > 3 ? ", and more" : ""}.`,
+    );
+  }
+
+  return { ok: problems.length === 0, problems, fileCount: candidates.length, totalBytes };
+}
+
+export function isImportableName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return IMPORT_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function importActionLabel(action: string): string {
+  switch (action) {
+    case "create":
+      return "New page";
+    case "update":
+      return "Updates draft";
+    case "skip-unchanged":
+      return "Unchanged";
+    case "conflict":
+      return "Conflict";
+    default:
+      return action;
+  }
+}
+
+export interface ImportTally {
+  create: number;
+  update: number;
+  unchanged: number;
+  conflict: number;
+  writable: number;
+}
+
+/** What the preview header says before the operator commits anything. */
+export function tallyImportActions(
+  files: { action: string }[],
+  decisions: Record<string, string> = {},
+  slugs: string[] = [],
+): ImportTally {
+  const tally: ImportTally = { create: 0, update: 0, unchanged: 0, conflict: 0, writable: 0 };
+  files.forEach((file, index) => {
+    const slug = slugs[index] ?? "";
+    const decision = decisions[slug] ?? "skip";
+    switch (file.action) {
+      case "create":
+        tally.create += 1;
+        tally.writable += 1;
+        break;
+      case "update":
+        tally.update += 1;
+        tally.writable += 1;
+        break;
+      case "skip-unchanged":
+        tally.unchanged += 1;
+        break;
+      case "conflict":
+        tally.conflict += 1;
+        // A conflict only becomes a write when the operator says so. Silence is
+        // not consent: an unanswered conflict is skipped, never overwritten.
+        if (decision === "apply" || decision === "rename") {
+          tally.writable += 1;
+        }
+        break;
+      default:
+        break;
+    }
+  });
+  return tally;
+}

@@ -34,6 +34,8 @@ import type {
   CanonPageListResponse,
   CanonRevisionListResponse,
   CanonSearchResponse,
+  CanonImportPlan,
+  CanonImportCommitResponse,
   CanonWriteResponse,
   PalaceRetrieveResponse,
   PalaceRoomDetail,
@@ -438,6 +440,38 @@ export const api = {
     req<SourceSubscriptionEntryListResponse>(`/source-subscriptions/entries?${new URLSearchParams({ limit: String(limit) })}`),
 
   getPalaceOverview: () => req<PalaceOverview>("/palace"),
+
+  previewCanonImport: (files: File[]) => {
+    const form = new FormData();
+    for (const file of files) {
+      // webkitRelativePath keeps the folder shape, so the preview names the file
+      // the way the operator sees it, not just the basename.
+      form.append("files", file, file.webkitRelativePath || file.name);
+    }
+    return req<CanonImportPlan>("/canon/import/folder/preview", {
+      method: "POST",
+      body: form,
+    });
+  },
+
+  commitCanonImport: (
+    planId: string,
+    decisions: Record<string, string>,
+    files: File[],
+    publish = false,
+  ) => {
+    const form = new FormData();
+    form.append("plan_id", planId);
+    form.append("decisions", JSON.stringify(decisions));
+    form.append("publish", String(publish));
+    for (const file of files) {
+      form.append("files", file, file.webkitRelativePath || file.name);
+    }
+    return req<CanonImportCommitResponse>("/canon/import/folder/commit", {
+      method: "POST",
+      body: form,
+    });
+  },
 
   // --- Canon -------------------------------------------------------------
   // Read is open to any authorized principal. Write is refused by the API unless

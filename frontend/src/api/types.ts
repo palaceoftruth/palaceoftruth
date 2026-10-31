@@ -1226,3 +1226,39 @@ export interface CanonSearchResponse {
   hits: CanonSearchHit[];
   total: number;
 }
+
+// --- Canon folder import --------------------------------------------------
+// Phase A returns a plan and a content-addressed plan_id. Phase B re-uploads the
+// same folder with that id, so a commit can never apply a plan the operator did
+// not see.
+
+export type CanonImportAction = "create" | "update" | "skip-unchanged" | "conflict";
+
+export interface CanonImportFile {
+  path: string;
+  slug: string;
+  title: string;
+  section: CanonSection;
+  action: CanonImportAction;
+  content_hash: string;
+  existing_status: string | null;
+  reason: string;
+}
+
+export interface CanonImportPlan {
+  plan_id: string;
+  files: CanonImportFile[];
+  counts: Record<string, number>;
+}
+
+export interface CanonImportResult {
+  slug: string;
+  action: "created" | "updated" | "skipped" | "renamed";
+  new_slug: string | null;
+}
+
+export interface CanonImportCommitResponse {
+  results: CanonImportResult[];
+  applied: number;
+  skipped: number;
+}

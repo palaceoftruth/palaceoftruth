@@ -1,9 +1,11 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { Loader2, Plus, Search, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { FolderUp, Loader2, Plus, Search, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
   CanonDigest,
+  CanonImportCommitResponse,
+  CanonImportPlan,
   CanonPage,
   CanonRevision,
   CanonSearchResponse,
@@ -19,6 +21,11 @@ import {
   bodyLengthDelta,
   bodyLengthState,
   formToPayload,
+  formatBytes,
+  importActionLabel,
+  importPreflight,
+  isImportableName,
+  tallyImportActions,
   groupPagesBySection,
 } from "../lib/canon";
 
@@ -105,6 +112,26 @@ export default function Canon() {
   const [search, setSearch] = useState<CanonSearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Folder import. Preview is a read of the folder against the current pages;
+  // nothing is written until the operator commits the plan it returned.
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [importFiles, setImportFiles] = useState<File[]>([]);
+  const [importPlan, setImportPlan] = useState<CanonImportPlan | null>(null);
+  const [importDecisions, setImportDecisions] = useState<Record<string, string>>({});
+  const [importBusy, setImportBusy] = useState<"preview" | "commit" | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importDone, setImportDone] = useState<CanonImportCommitResponse | null>(null);
+  const importCheck = useMemo(() => importPreflight(importFiles), [importFiles]);
+  const importTally = useMemo(
+    () =>
+      tallyImportActions(
+        importPlan?.files ?? [],
+        importDecisions,
+        (importPlan?.files ?? []).map((file) => file.slug),
+      ),
+    [importPlan, importDecisions],
+  );
 
   const editorOpen = creating || selectedSlug !== null;
 
@@ -290,6 +317,77 @@ export default function Canon() {
   const bodyState = bodyLengthState(bodyChars);
   const bodyOverWarn = bodyState !== "ok";
 
+
+  async function reloadCanon() {
+    const [list, nextDigest] = await Promise.all([
+      api.listCanonPages({ limit: 100 }),
+      api.getCanonDigest().catch(() => null),
+    ]);
+    setPages(list.pages);
+    if (nextDigest) {
+      setDigest(nextDigest);
+    }
+  }
+
+  function chooseImportFiles(fileList: FileList | null) {
+    const files = Array.from(fileList ?? []).filter((file) => isImportableName(file.name));
+    setImportFiles(files);
+    setImportPlan(null);
+    setImportDecisions({});
+    setImportDone(null);
+    setImportError(null);
+  }
+
+  async function previewImport() {
+    if (importFiles.length === 0) {
+      return;
+    }
+    setImportBusy("preview");
+    setImportError(null);
+    setImportDone(null);
+    try {
+      const plan = await api.previewCanonImport(importFiles);
+      setImportPlan(plan);
+      // A conflict starts unanswered, so the operator has to choose. Everything
+      // else starts on its planned action.
+      const next: Record<string, string> = {};
+      for (const file of plan.files) {
+        if (file.action === "conflict") {
+          next[file.slug] = "skip";
+        }
+      }
+      setImportDecisions(next);
+    } catch (error) {
+      setImportError(error instanceof ApiError ? error.message : "Could not read that folder.");
+    } finally {
+      setImportBusy(null);
+    }
+  }
+
+  async function commitImport() {
+    if (!importPlan) {
+      return;
+    }
+    setImportBusy("commit");
+    setImportError(null);
+    try {
+      const result = await api.commitCanonImport(
+        importPlan.plan_id,
+        importDecisions,
+        importFiles,
+        false,
+      );
+      setImportDone(result);
+      setImportPlan(null);
+      setImportFiles([]);
+      await reloadCanon();
+    } catch (error) {
+      setImportError(error instanceof ApiError ? error.message : "The import did not complete.");
+    } finally {
+      setImportBusy(null);
+    }
+  }
+
   return (
     <div className="sb-page">
       <PageHeader
@@ -325,6 +423,155 @@ export default function Canon() {
           </form>
         }
       />
+
+
+      <section className="sb-panel sb-panel-padding space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="sb-kicker">Import a folder</p>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+              Markdown files become canon pages as drafts. Nothing is written until you commit
+              the plan, and re-importing an unchanged folder writes nothing at all.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={importInputRef}
+              type="file"
+              multiple
+              // Folder selection is a non-standard attribute React does not type.
+              {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+              className="hidden"
+              onChange={(event) => chooseImportFiles(event.target.files)}
+            />
+            <button
+              type="button"
+              className="sb-button-secondary"
+              onClick={() => importInputRef.current?.click()}
+              disabled={importBusy !== null}
+            >
+              <FolderUp className="h-4 w-4" />
+              Choose folder
+            </button>
+            <button
+              type="button"
+              className="sb-button-primary"
+              onClick={previewImport}
+              disabled={!importCheck.ok || importBusy !== null}
+            >
+              {importBusy === "preview" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Search className="h-4 w-4" />
+              )}
+              Preview
+            </button>
+          </div>
+        </div>
+
+        {importFiles.length > 0 ? (
+          <p className="text-sm text-zinc-400">
+            {importCheck.fileCount} {importCheck.fileCount === 1 ? "file" : "files"},{" "}
+            {formatBytes(importCheck.totalBytes)} selected.
+          </p>
+        ) : null}
+
+        {importCheck.problems.length > 0 && importFiles.length > 0 ? (
+          <ul className="space-y-1 text-sm text-amber-300">
+            {importCheck.problems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        ) : null}
+
+        {importError ? <p className="text-sm text-rose-300">{importError}</p> : null}
+
+        {importDone ? (
+          <p className="text-sm text-emerald-300">
+            Imported {importDone.applied} {importDone.applied === 1 ? "page" : "pages"} as drafts.{" "}
+            {importDone.skipped > 0 ? `${importDone.skipped} skipped. ` : ""}
+            Review and publish when they read right.
+          </p>
+        ) : null}
+
+        {importPlan ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="sb-chip sb-chip-inactive">{importTally.create} new</span>
+              <span className="sb-chip sb-chip-inactive">{importTally.update} updated</span>
+              <span className="sb-chip sb-chip-inactive">{importTally.unchanged} unchanged</span>
+              <span className="sb-chip sb-chip-inactive">{importTally.conflict} conflicted</span>
+              <span className="sb-chip sb-chip-inactive">
+                {importTally.writable} will be written
+              </span>
+            </div>
+
+            <ul className="max-h-96 divide-y divide-zinc-800 overflow-auto rounded-lg border border-zinc-800">
+              {importPlan.files.map((file) => (
+                <li
+                  key={file.path}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-zinc-200">{file.title}</p>
+                    <p className="truncate text-xs text-zinc-500">
+                      {file.path} to {file.slug}: {file.reason}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="sb-chip sb-chip-inactive">{importActionLabel(file.action)}</span>
+                    {file.action === "conflict" ? (
+                      <select
+                        aria-label={`Decision for ${file.slug}`}
+                        className={INPUT_CLASS}
+                        value={importDecisions[file.slug] ?? "skip"}
+                        onChange={(event) =>
+                          setImportDecisions((current) => ({
+                            ...current,
+                            [file.slug]: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="skip">Skip</option>
+                        <option value="apply">Overwrite</option>
+                        <option value="rename">Import as a new page</option>
+                      </select>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="sb-button-primary"
+                onClick={commitImport}
+                disabled={importBusy !== null || importTally.writable === 0}
+              >
+                {importBusy === "commit" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FolderUp className="h-4 w-4" />
+                )}
+                Import {importTally.writable} {importTally.writable === 1 ? "page" : "pages"}
+              </button>
+              <button
+                type="button"
+                className="sb-button-secondary"
+                onClick={() => {
+                  setImportPlan(null);
+                  setImportFiles([]);
+                  setImportDecisions({});
+                }}
+                disabled={importBusy !== null}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </section>
 
       <section className="sb-panel sb-panel-padding space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">

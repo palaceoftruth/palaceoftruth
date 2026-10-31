@@ -3,6 +3,13 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 import {
+  IMPORT_MAX_FILES,
+  IMPORT_MAX_FILE_BYTES,
+  formatBytes,
+  importActionLabel,
+  importPreflight,
+  isImportableName,
+  tallyImportActions,
   BODY_MAX_CHARS,
   BODY_WARN_CHARS,
   SECTION_ORDER,
@@ -216,4 +223,112 @@ test("the empty state uses the mandated contrast sentence", () => {
       "This room has a derived snapshot. Write a charter to state what this room is for.",
     ),
   );
+});
+
+// --- folder import ---------------------------------------------------------
+
+const kb = (n: number) => ({ name: `page-${n}.md`, size: 1024 });
+
+test("a folder inside every limit passes preflight", () => {
+  const result = importPreflight([kb(1), kb(2), { name: "notes.txt", size: 10 }]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.fileCount, 3);
+});
+
+test("an empty selection is not a silent no-op", () => {
+  const result = importPreflight([]);
+  assert.equal(result.ok, false);
+  assert.equal(result.problems.length, 1);
+});
+
+test("more files than the limit is refused, and the count is named", () => {
+  const files = Array.from({ length: IMPORT_MAX_FILES + 1 }, (_, index) => kb(index));
+  const result = importPreflight(files);
+  assert.equal(result.ok, false);
+  assert.match(result.problems.join(" "), new RegExp(String(IMPORT_MAX_FILES)));
+});
+
+test("one oversize file is refused even when the total is small", () => {
+  const result = importPreflight([
+    kb(1),
+    { name: "huge.md", size: IMPORT_MAX_FILE_BYTES + 1 },
+  ]);
+  assert.equal(result.ok, false);
+  assert.match(result.problems.join(" "), /huge\.md/);
+});
+
+test("a total over the batch limit is refused", () => {
+  const big = { name: "big.md", size: IMPORT_MAX_FILE_BYTES };
+  const result = importPreflight(Array.from({ length: 25 }, () => big));
+  assert.equal(result.ok, false);
+  assert.match(result.problems.join(" "), /total limit/);
+});
+
+test("only markdown-ish extensions are importable", () => {
+  assert.equal(isImportableName("a.md"), true);
+  assert.equal(isImportableName("a.MDX"), true);
+  assert.equal(isImportableName("a.txt"), true);
+  assert.equal(isImportableName("a.pdf"), false);
+  assert.equal(isImportableName("a.md.bak"), false);
+});
+
+test("preflight names the files of the wrong kind", () => {
+  const result = importPreflight([kb(1), { name: "scan.pdf", size: 20 }]);
+  assert.equal(result.ok, false);
+  assert.match(result.problems.join(" "), /scan\.pdf/);
+});
+
+test("bytes are formatted for a human", () => {
+  assert.equal(formatBytes(512), "512 B");
+  assert.equal(formatBytes(250_000), "244 KB");
+  assert.equal(formatBytes(5_000_000), "4.8 MB");
+});
+
+test("actions read as what they do, not as api values", () => {
+  assert.equal(importActionLabel("create"), "New page");
+  assert.equal(importActionLabel("skip-unchanged"), "Unchanged");
+  assert.equal(importActionLabel("conflict"), "Conflict");
+});
+
+test("an unanswered conflict is never counted as a write", () => {
+  const tally = tallyImportActions([{ action: "conflict" }], {}, ["charter"]);
+  assert.equal(tally.conflict, 1);
+  assert.equal(tally.writable, 0, "silence must not become an overwrite");
+});
+
+test("an explicit conflict decision becomes a write", () => {
+  const applied = tallyImportActions([{ action: "conflict" }], { charter: "apply" }, ["charter"]);
+  const renamed = tallyImportActions([{ action: "conflict" }], { charter: "rename" }, ["charter"]);
+  const skipped = tallyImportActions([{ action: "conflict" }], { charter: "skip" }, ["charter"]);
+  assert.equal(applied.writable, 1);
+  assert.equal(renamed.writable, 1);
+  assert.equal(skipped.writable, 0);
+});
+
+test("the tally separates new, updated and unchanged", () => {
+  const tally = tallyImportActions(
+    [
+      { action: "create" },
+      { action: "update" },
+      { action: "skip-unchanged" },
+      { action: "conflict" },
+    ],
+    { d: "apply" },
+    ["a", "b", "c", "d"],
+  );
+  assert.equal(tally.create, 1);
+  assert.equal(tally.update, 1);
+  assert.equal(tally.unchanged, 1);
+  assert.equal(tally.conflict, 1);
+  assert.equal(tally.writable, 3);
+});
+
+test("an unchanged folder offers nothing to commit", () => {
+  const tally = tallyImportActions(
+    [{ action: "skip-unchanged" }, { action: "skip-unchanged" }],
+    {},
+    ["a", "b"],
+  );
+  assert.equal(tally.writable, 0, "a button that writes nothing should be disabled");
 });
