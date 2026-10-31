@@ -17,9 +17,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Only the pinned host is a blocking contract leg.
+        #
+        # An unpinned `main` leg was removed on 2026-10-31. It could not pass
+        # from this repository: upstream `NousResearch/hermes-agent` main
+        # pinned pillow==13.0.0 while browser-harness==0.1.13 requires
+        # pillow==12.3.0, so `uv pip install -e ./official-host` fails during
+        # dependency resolution before any contract test runs. Palace cannot
+        # fix an upstream pin conflict, and a leg that fails on someone else's
+        # dependency graph says nothing about this repository.
+        #
+        # Restore a forward-compatibility leg only when it is pinned to a host
+        # revision known to install, or when it runs non-blocking.
         host:
           - b65cd56cfcdc33cbf6657326b5711a7c23cd1485
-          - main
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - name: Checkout official Hermes only
