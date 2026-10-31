@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.item import Item
 from app.models.palace import PalaceTenantState, Room, RoomMembership, RoomSnapshot, TemporalFact, Wing
+from app.services.canon import CanonDigest, get_canon_digest
 from app.services.item_processing import process_prebuilt_item
 
 WAKEUP_BRIEF_SOURCE = "palace-wakeup-brief"
@@ -193,6 +194,7 @@ def _render_wakeup_body(
     rooms: list[WakeupRoomContext],
     diaries: list[WakeupDiaryContext],
     facts: list[WakeupFactContext],
+    canon: CanonDigest | None = None,
 ) -> str:
     lines = [
         f"# Wake-up Brief: {key.day.isoformat()}",
@@ -202,8 +204,15 @@ def _render_wakeup_body(
         "",
         "This bounded startup brief highlights the rooms, diary rollups, and facts most worth loading first.",
         "",
-        "## High-signal rooms",
     ]
+    # Canon is authored and authoritative, so it leads the body. Absent canon
+    # emits nothing at all: a "no canon" placeholder would teach agents to skip
+    # the section. services/canon.py owns every cap, so canon.text is verbatim.
+    if canon is not None and canon.text.strip():
+        lines.append("## Canon (authored, authoritative)")
+        lines.append(canon.text)
+        lines.append("")
+    lines.append("## High-signal rooms")
     if rooms:
         for room in rooms:
             lines.append(
@@ -237,6 +246,7 @@ def _brief_metadata(
     rooms: list[WakeupRoomContext],
     diaries: list[WakeupDiaryContext],
     facts: list[WakeupFactContext],
+    canon: CanonDigest | None = None,
 ) -> dict:
     return {
         "memory_entry": {
@@ -270,6 +280,15 @@ def _brief_metadata(
             "fact_count": len(facts),
         },
         "sync_relative_path": _brief_path(key),
+        "canon": (
+            {
+                "page_count": canon.page_count,
+                "chars": canon.char_count,
+                "truncated": canon.truncated,
+            }
+            if canon is not None
+            else None
+        ),
     }
 
 
@@ -506,6 +525,14 @@ async def generate_wakeup_briefs(
     deactivated = 0
     desired_keys = {key for key, _rooms in desired_scopes}
 
+    # The digest is tenant-wide and identical for every scope, so it is computed
+    # once per batch instead of once per scope.
+    try:
+        canon_digest = await get_canon_digest(db, tenant_id=tenant_id)
+    except Exception:  # canon must never break the wake-up brief
+        # Broad on purpose: a missing brief is worse than a brief without canon.
+        canon_digest = None
+
     for key, scoped_rooms in desired_scopes:
         scope_tokens = _build_scope_tokens(key=key, rooms=scoped_rooms)
         scoped_diaries = _select_diaries(diaries, scope_tokens=scope_tokens)
@@ -524,6 +551,7 @@ async def generate_wakeup_briefs(
             rooms=scoped_rooms,
             diaries=scoped_diaries,
             facts=scoped_facts,
+            canon=canon_digest,
         )
         metadata = _brief_metadata(
             key=key,
@@ -532,6 +560,7 @@ async def generate_wakeup_briefs(
             rooms=scoped_rooms,
             diaries=scoped_diaries,
             facts=scoped_facts,
+            canon=canon_digest,
         )
         tags = _brief_tags(key)
 

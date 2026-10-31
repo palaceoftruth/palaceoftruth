@@ -123,3 +123,45 @@ class CanonWriteResponse(BaseModel):
     page: CanonPageOut
     revision: int
     embedded: bool
+
+
+class CanonDigestOut(BaseModel):
+    """The tenant digest, with the caps it was built under made visible.
+
+    `next` is the cursor to resume from when `truncated` is true. A truncated
+    digest without a working cursor would strand the caller, so the two travel
+    together.
+    """
+
+    text: str
+    char_count: int
+    page_count: int
+    truncated: bool
+    next: str | None = None
+
+
+class CanonPageSliceOut(BaseModel):
+    """A window of one page body, capped by the canon service, never by a route."""
+
+    slug: str
+    section: str
+    summary: str
+    body: str
+    total_char_count: int
+    truncated: bool
+    next: str | None = None
+
+
+class CanonSearchHitOut(BaseModel):
+    slug: str
+    section: str
+    summary: str
+    snippet: str
+    score: float
+    truncated: bool
+
+
+class CanonSearchResponse(BaseModel):
+    query: str
+    hits: list[CanonSearchHitOut]
+    total: int
