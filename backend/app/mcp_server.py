@@ -1240,6 +1240,37 @@ class SecondBrainApiClient:
     async def get_memory_job(self, job_id: str) -> dict[str, Any]:
         return await self._request_json("GET", f"/api/v1/memory/jobs/{job_id}", required_scope="read")
 
+    async def get_canon_digest(self) -> dict[str, Any]:
+        return await self._request_json("GET", "/api/v1/canon/digest", required_scope="read")
+
+    async def get_canon_page_slice(
+        self,
+        *,
+        slug: str,
+        max_chars: int | None,
+        offset: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"offset": offset}
+        if max_chars is not None:
+            params["max_chars"] = max_chars
+        return await self._request_json(
+            "GET",
+            f"/api/v1/canon/pages/{slug}/slice",
+            params=params,
+            required_scope="read",
+        )
+
+    async def search_canon(self, *, query: str, limit: int | None) -> dict[str, Any]:
+        params: dict[str, Any] = {"q": query}
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request_json(
+            "GET",
+            "/api/v1/canon/search",
+            params=params,
+            required_scope="read",
+        )
+
     async def list_memory_entries(
         self,
         *,
@@ -2323,6 +2354,11 @@ mcp = FastMCP(
     "Palace of Truth",
     instructions=(
         "Palace of Truth MCP adapter over the canonical REST memory and search API. "
+        "PRECEDENCE: tenant canon outranks derived memory. Call palace_canon(action='digest') "
+        "before answering questions about this tenant's identity, rules, naming, or procedures. "
+        "Cite the page slug and revision. If canon is silent, say so before using derived recall. "
+        "Order: canon > tenant_shared memory entries > derived room snapshots and temporal facts. "
+        "Canon is read-only here; propose changes as candidate_canon_edit artifacts. "
         "Use palace_search, palace_remember, palace_checkpoint, and palace_context "
         "as Codex-friendly aliases for common agent memory workflows. "
         "Use create_memory_entry for durable memory writes, retrieve_memory for scoped recall, "
@@ -2664,6 +2700,72 @@ async def palace_checkpoint(
         dry_run=dry_run,
         read_after_write=read_after_write,
         enable_ai_enrichment=enable_ai_enrichment,
+    )
+
+
+@mcp.tool()
+async def palace_canon(
+    ctx: Context[ServerSession, SecondBrainMcpRuntime],
+    action: Literal["digest", "get", "search"] = "digest",
+    slug: str | None = None,
+    query: str | None = None,
+    max_chars: int | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Read the tenant's authored canon. Canon is the top memory tier.
+
+    Precedence: tenant canon outranks derived memory. Read the digest before
+    answering questions about this tenant's identity, rules, naming, or
+    procedures. Cite the page slug and revision. If canon is silent, say so
+    before using derived recall.
+
+    Order: canon > tenant_shared memory entries > derived room snapshots and
+    temporal facts.
+
+    Actions:
+    - `digest` (default): the always-served tier. Identity, rules, and a capped
+      page index. Call this on connect. A truncated digest returns `next`.
+    - `get`: one page window. Requires `slug`. Defaults to a 6000 character
+      window and never exceeds 12000; pass `offset` to continue a cut window.
+      The whole page is never returned by default.
+    - `search`: at most 8 hits of slug, section, and a 300 character snippet.
+      Requires `query`. Bodies arrive as snippets only.
+
+    Canon is authored by a human and is read-only through MCP. To propose a
+    change, file a `candidate_canon_edit` artifact for human review.
+    """
+    if action == "digest":
+        return await _run_mcp_operation(
+            ctx,
+            operation="canon_digest",
+            params={"action": action},
+            call=lambda: _runtime(ctx).api.get_canon_digest(),
+        )
+    if action == "get":
+        if not slug:
+            raise ValueError("palace_canon(action='get') requires a slug")
+        return await _run_mcp_operation(
+            ctx,
+            operation="canon_get",
+            params={"action": action, "slug": slug, "max_chars": max_chars, "offset": offset},
+            call=lambda: _runtime(ctx).api.get_canon_page_slice(
+                slug=slug,
+                max_chars=max_chars,
+                offset=offset,
+            ),
+        )
+    if action == "search":
+        if not query:
+            raise ValueError("palace_canon(action='search') requires a query")
+        return await _run_mcp_operation(
+            ctx,
+            operation="canon_search",
+            params={"action": action, "query": query, "limit": limit},
+            call=lambda: _runtime(ctx).api.search_canon(query=query, limit=limit),
+        )
+    raise ValueError(
+        f"unknown palace_canon action: {action!r}. Use 'digest', 'get', or 'search'."
     )
 
 

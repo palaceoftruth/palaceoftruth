@@ -17,15 +17,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_auth_context, require_api_capability, require_human_author
 from app.database import get_db
 from app.schemas.canon import (
+    CanonDigestOut,
     CanonPageCreate,
     CanonPageListResponse,
     CanonPageOut,
+    CanonPageSliceOut,
     CanonPageUpdate,
     CanonRevisionListResponse,
     CanonRevisionOut,
+    CanonSearchHitOut,
+    CanonSearchResponse,
     CanonWriteResponse,
 )
-from app.services.canon import CanonCapExceeded, CanonError, CanonValidationError
+from app.services.canon import (
+    CanonCapExceeded,
+    CanonError,
+    CanonValidationError,
+    clamp_page_max_chars,
+    get_canon_digest,
+    # Aliased: this module already has a route handler named `get_canon_page`,
+    # and a route handler shadowing a service function is a silent trap.
+    get_canon_page as read_canon_page_slice,
+    load_canon_pages,
+    search_canon_pages,
+)
 from app.services.canon_authoring import (
     UNSET,
     CanonAuthoringError,
@@ -340,3 +355,95 @@ async def get_canon_revision(
     except (CanonError, CanonAuthoringError) as exc:
         raise _raise_for(exc) from exc
     return CanonRevisionOut.model_validate(row)
+
+
+# --- Tier 0 and tier 2 read surfaces ---------------------------------------
+#
+# The MCP read tool is a thin client over these three routes, so every cap stays
+# in `services/canon.py`. A route that re-implemented a limit would be a second
+# owner of the same number, which is the drift the design forbids.
+
+
+@router.get("/digest", response_model=CanonDigestOut, dependencies=_READ)
+async def get_digest(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> CanonDigestOut:
+    """Return the tenant digest: identity, rules, and a capped page index.
+
+    This is the always-served tier. It is bounded by the canon service, and a
+    truncated digest carries the cursor to resume from.
+    """
+    try:
+        digest = await get_canon_digest(db, tenant_id=request.state.tenant_id)
+    except CanonError as exc:
+        raise _raise_for(exc) from exc
+    return CanonDigestOut(
+        text=digest.text,
+        char_count=digest.char_count,
+        page_count=digest.page_count,
+        truncated=digest.truncated,
+        next=digest.next,
+    )
+
+
+@router.get("/search", response_model=CanonSearchResponse, dependencies=_READ)
+async def search_canon(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=500),
+    limit: int | None = Query(None, ge=1, le=8),
+    db: AsyncSession = Depends(get_db),
+) -> CanonSearchResponse:
+    """Search published canon pages and return capped snippets, never bodies."""
+    pages = await load_canon_pages(db, tenant_id=request.state.tenant_id, status="published")
+    hits = search_canon_pages(q, pages, limit=limit)
+    return CanonSearchResponse(
+        query=q,
+        hits=[
+            CanonSearchHitOut(
+                slug=hit.slug,
+                section=hit.section,
+                summary=hit.summary,
+                snippet=hit.snippet,
+                score=hit.score,
+                truncated=hit.truncated,
+            )
+            for hit in hits
+        ],
+        total=len(hits),
+    )
+
+
+@router.get("/pages/{slug}/slice", response_model=CanonPageSliceOut, dependencies=_READ)
+async def get_canon_page_slice(
+    request: Request,
+    slug: str,
+    max_chars: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> CanonPageSliceOut:
+    """Return one capped window of a page body.
+
+    This exists so an agent never receives a whole page by default: the caller
+    asks for a window, the service clamps it, and a cut window reports the
+    cursor for the next one.
+    """
+    try:
+        sliced = await read_canon_page_slice(
+            db,
+            tenant_id=request.state.tenant_id,
+            slug=slug,
+            max_chars=clamp_page_max_chars(max_chars),
+            offset=offset,
+        )
+    except (CanonError, CanonValidationError) as exc:
+        raise _raise_for(exc) from exc
+    return CanonPageSliceOut(
+        slug=sliced.slug,
+        section=sliced.section,
+        summary=sliced.summary,
+        body=sliced.body,
+        total_char_count=sliced.total_char_count,
+        truncated=sliced.truncated,
+        next=sliced.next,
+    )

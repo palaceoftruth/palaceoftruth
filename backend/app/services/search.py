@@ -76,6 +76,12 @@ _NIST_SOURCE_ROLE_DECOY_PENALTY = 0.14
 _LOW_SIGNAL_SOURCE_PENALTY = 0.08
 _LOW_SIGNAL_TAG_PENALTY = 0.05
 _CURATED_SOURCE_BONUS = {
+    # Authored canon outranks every curated capture type. A canon page is
+    # human-ratified text about this tenant, so when it ties a raw capture on
+    # semantic score the page must win. It sits above the highest existing
+    # curated bonus (0.06) with room to spare, and the body still reaches the
+    # caller only as a snippet.
+    "canon": 0.12,
     "media": 0.06,
     "feed_article": 0.05,
     "pdf": 0.05,

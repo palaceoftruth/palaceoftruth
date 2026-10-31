@@ -127,6 +127,11 @@ MCP_OPERATION_SCOPES: dict[str, McpOperationScope] = {
     "search_items": "read",
     "list_tags": "read",
     "list_items": "read",
+    # canon read tier: the digest, one page window, and page search. Canon has no
+    # write tool by design, so nothing here maps to a write scope.
+    "canon_digest": "read",
+    "canon_get": "read",
+    "canon_search": "read",
     # write surfaces
     "palace_promote_to_shared": "memory:promote_shared",
     "create_memory_entry": "write",
