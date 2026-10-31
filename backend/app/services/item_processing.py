@@ -57,6 +57,21 @@ async def _set_job_progress(
     )
 
 
+def canon_content_hash(item_id, body: str) -> str:
+    """The dedup key for a canon page body.
+
+    Canon pages are distinct documents even when their text is identical: two
+    rooms may legitimately carry the same boilerplate charter, and a placeholder
+    page may repeat across sections. ``idx_items_content_hash_tenant_unique`` is
+    a real unique index, so a content-only key would reject the second page
+    outright. The key is namespaced by the page's own item id, exactly as an
+    authorized memory promotion namespaces its copy. Retries of one page keep
+    the same key, so re-publishing unchanged text still makes zero embedding
+    calls.
+    """
+    return compute_content_hash(f"palace:canon:{item_id}:{compute_content_hash(body)}")
+
+
 def _is_shared_memory_promotion(job: Job | None) -> bool:
     """Only the server-owned admission record authorizes an intentional copy."""
     if job is None or job.job_type != "memory_artifact":
@@ -105,6 +120,10 @@ async def process_prebuilt_item(
         # caller-supplied promotion metadata retain content-only deduplication.
         if _is_shared_memory_promotion(job):
             content_hash = compute_content_hash(f"palace:memory-promotion:{item.id}:{content_hash}")
+        elif getattr(item, "source_type", None) == "canon":
+            # Canon pages namespace their own key: identical boilerplate in two
+            # rooms is legal, and the tenant-wide unique index would reject it.
+            content_hash = canon_content_hash(item.id, raw_content)
         existing_id = await db.scalar(
             select(Item.id)
             .where(Item.content_hash == content_hash)

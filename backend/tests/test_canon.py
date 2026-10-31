@@ -456,15 +456,16 @@ def test_tenant_page_soft_ceiling_warns_only_past_500() -> None:
 def test_no_other_module_defines_a_canon_cap() -> None:
     """One module owns every cap, so caps cannot drift between callers.
 
-    Scoped to cap *definitions*, not to numeric literals that happen to appear
-    near the word "canon": a shared number in an unrelated module is not a
-    canon cap, and a substring scan cannot tell the difference.
+    Scoped to *numeric* cap definitions. A cap is a budget, and every budget in
+    design section 11 is a number; a `CANON_`-prefixed policy constant such as
+    the human-author auth-mode set is not a cap and must not trip this. A bare
+    prefix match was wrong once already in this file's history.
     """
     import re
     from pathlib import Path
 
     app_dir = Path(__file__).parents[1] / "app"
-    definition = re.compile(r"^CANON_[A-Z0-9_]+\s*=", re.MULTILINE)
+    definition = re.compile(r"^CANON_[A-Z0-9_]+\s*=\s*[0-9]", re.MULTILINE)
     offenders = [
         str(path.relative_to(app_dir))
         for path in app_dir.rglob("*.py")
