@@ -4712,6 +4712,21 @@ async def _ensure_room(db: AsyncSession, *, tenant_id: str, wing_name: str, room
     return room
 
 
+def is_canon_item(item: Any) -> bool:
+    """True for an authored canon page.
+
+    Canon pages are authored, not routed. The canon service writes the charter
+    membership itself with ``source='authored'``, so treating a canon page as a
+    routable item would delete that row, bump ``room.membership_generation`` and
+    make the drift detector fire against the page's own edit. Every caller that
+    routes or rebuilds rooms must skip canon items.
+    """
+    if getattr(item, "source_type", None) == "canon":
+        return True
+    metadata = getattr(item, "metadata_", None) or {}
+    return isinstance(metadata.get("canon"), dict)
+
+
 async def _apply_room_routing(
     db: AsyncSession,
     *,
@@ -4720,6 +4735,11 @@ async def _apply_room_routing(
     generation: int,
 ) -> set[uuid.UUID]:
     affected_rooms: set[uuid.UUID] = set()
+    # Hard skip for canon. Returning an empty affected set keeps this item out
+    # of the snapshot and retrieval-hint rebuild loop, so a canon publish can
+    # never bump a room generation and induce drift against itself.
+    if is_canon_item(item):
+        return affected_rooms
     existing_auto = (
         await db.execute(
             select(RoomMembership)

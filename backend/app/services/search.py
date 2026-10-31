@@ -134,6 +134,7 @@ _DERIVED_ARTIFACT_TAG_KEYS = {
     "conversation-fact": "conversation_fact",
 }
 _ARTIFACT_PROVENANCE_LABELS = {
+    "canon": "Authored canon",
     "canonical_memory": "Canonical memory",
     "legacy_memory_artifact": "Legacy memory artifact",
     "memory_dream": "Memory Dream",
@@ -839,7 +840,18 @@ def _derived_artifact_keys(candidate: _SearchCandidate) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _is_canon_candidate(candidate: _SearchCandidate) -> bool:
+    """A canon page is authored by a human, so it is never an unsourced capture."""
+    if candidate.source_type == "canon":
+        return True
+    metadata = candidate.item_metadata or {}
+    return isinstance(metadata.get("canon"), dict)
+
+
 def _artifact_provenance(candidate: _SearchCandidate) -> tuple[str, str]:
+    if _is_canon_candidate(candidate):
+        return "canon", _ARTIFACT_PROVENANCE_LABELS["canon"]
+
     derived_keys = _derived_artifact_keys(candidate)
     if derived_keys:
         key = derived_keys[0]
@@ -869,7 +881,12 @@ def _trace_counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
 
 def _source_support_level(candidate: _SearchCandidate) -> str | None:
     value = _metadata_value(candidate, "source_support_level")
-    return str(value) if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        return value
+    # Authored canon is a first-party source, never a partial or unsourced one.
+    if _is_canon_candidate(candidate):
+        return "direct_source"
+    return None
 
 
 def _tags_request_derived_artifacts(tags: list[str] | None) -> bool:

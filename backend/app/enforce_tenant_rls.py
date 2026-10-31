@@ -22,7 +22,8 @@ except ImportError:  # pragma: no cover - asyncpg is a hard dependency
 # drift fail in CI before a tenant-owned table can be omitted.
 TENANT_TABLES = (
     "api_key_audit_events", "api_keys", "browser_extension_pairing_keys", "browser_sessions",
-    "candidate_curation_artifact_events", "candidate_curation_artifacts", "claim_sources", "claims",
+    "candidate_curation_artifact_events", "candidate_curation_artifacts",
+    "canon_digest_cache", "canon_page_revisions", "canon_pages", "claim_sources", "claims",
     "conversation_messages", "conversations", "embedding_profile_vectors", "embeddings", "feeds",
     "item_relationships", "items", "job_attempts", "job_progress_events", "jobs", "mcp_clients",
     "mcp_oauth_access_tokens", "mcp_oauth_authorization_codes", "mcp_oauth_authorization_interactions",
@@ -40,7 +41,7 @@ TENANT_TABLES = (
 # hook and, with it, the whole Helm upgrade.
 # test_rls_inventory_matches_every_tenant_model pins this to the real head so
 # the mismatch is caught in CI rather than during a release.
-REQUIRED_ALEMBIC_REVISION = "071_source_drift_artifacts"
+REQUIRED_ALEMBIC_REVISION = "072_tenant_canon_pages"
 
 POLICY_SQL = """
     CREATE POLICY tenant_isolation ON {table}
