@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, ChevronRight, Compass, GitMerge, Loader2, Map, Milestone, Pencil, RefreshCw, Route, Search, SlidersHorizontal, X } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Compass, GitMerge, Loader2, Map, Milestone, Pencil, RefreshCw, Route, Search, SlidersHorizontal, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
@@ -15,6 +15,7 @@ import type {
   PalaceWingSummary,
 } from "../api/types";
 import PalaceFreshnessPill from "../components/PalaceFreshnessPill";
+import type { CanonPage } from "../api/types";
 import PageHeader from "../components/PageHeader";
 import PalaceChatDock from "../components/PalaceChatDock";
 import PalaceStateBanner from "../components/PalaceStateBanner";
@@ -151,6 +152,13 @@ export default function Palace() {
   const [selectedWingId, setSelectedWingId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [roomDetail, setRoomDetail] = useState<PalaceRoomDetail | null>(null);
+  // The charter is authored canon for the selected room. It is loaded separately
+  // from the room detail because it is a different kind of thing: the detail is a
+  // derived snapshot, the charter is written by a person. They are never merged.
+  const [charter, setCharter] = useState<CanonPage | null>(null);
+  const [charterLoading, setCharterLoading] = useState(false);
+  const [charterBusy, setCharterBusy] = useState(false);
+  const [charterError, setCharterError] = useState<string | null>(null);
   const [trace, setTrace] = useState<PalaceRetrieveResponse | null>(null);
   const [query, setQuery] = useState("");
   const [scopeType, setScopeType] = useState<MemoryScopeType>("tenant_shared");
@@ -302,6 +310,51 @@ export default function Palace() {
     setMembershipSearch("");
     setSelectedMembershipIds([]);
   }, [roomDetail?.room.id, roomDetail?.room.name]);
+
+  // A charter is authored, so it is fetched on its own and can be absent. Absence
+  // is a real answer here, not an error: a room can have a snapshot and no charter.
+  useEffect(() => {
+    const roomId = roomDetail?.room.id;
+    if (!roomId) {
+      setCharter(null);
+      setCharterError(null);
+      return;
+    }
+    let active = true;
+    setCharterLoading(true);
+    setCharterError(null);
+    void api
+      .listCanonPages({ room_id: roomId, section: "charter", status: "published" })
+      .then((result) => {
+        if (!active) return;
+        setCharter(result.pages[0] ?? null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setCharter(null);
+        setCharterError(errorMessage(err));
+      })
+      .finally(() => {
+        if (active) setCharterLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [roomDetail?.room.id]);
+
+  const handleRatifyCharter = async () => {
+    if (!charter) return;
+    setCharterBusy(true);
+    setCharterError(null);
+    try {
+      const result = await api.ratifyCanonPage(charter.slug);
+      setCharter(result.page);
+    } catch (err) {
+      setCharterError(errorMessage(err));
+    } finally {
+      setCharterBusy(false);
+    }
+  };
 
   useEffect(() => {
     const membershipIds = new Set((roomDetail?.memberships ?? []).map((membership) => membership.item_id));
@@ -954,6 +1007,82 @@ export default function Palace() {
                 </div>
 
                 {roomDetail.banner ? <PalaceStateBanner banner={roomDetail.banner} /> : null}
+
+                {/* Charter above snapshot, always. Authored canon is the authority
+                    the derived content below is measured against, so it cannot be
+                    folded into that content or shown after it. */}
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-zinc-500">
+                      <BookOpen className="h-4 w-4" />
+                      Charter
+                      <span className="text-[11px] normal-case tracking-normal text-zinc-600">
+                        authored, authoritative
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {charter ? (
+                        <PalaceFreshnessPill
+                          label="Charter"
+                          freshness={{
+                            status: charter.last_confirmed_generation > 0 ? "fresh" : "stale",
+                            generation: charter.last_confirmed_generation,
+                            target_generation: charter.last_confirmed_generation,
+                            message:
+                              charter.last_confirmed_generation > 0
+                                ? `Confirmed at generation ${charter.last_confirmed_generation}.`
+                                : "Never ratified.",
+                          }}
+                        />
+                      ) : null}
+                      {charter ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleRatifyCharter()}
+                            disabled={charterBusy}
+                            className="sb-button-secondary px-3 py-2"
+                          >
+                            {charterBusy ? "Ratifying" : "Ratify"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/canon?slug=${encodeURIComponent(charter.slug)}`)}
+                            className="sb-button-ghost px-3 py-2"
+                          >
+                            Edit charter
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {charterError ? (
+                    <p className="mt-3 text-sm text-amber-300">{charterError}</p>
+                  ) : null}
+
+                  {charterLoading ? (
+                    <p className="mt-3 text-sm text-zinc-500">Loading charter.</p>
+                  ) : charter ? (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm font-medium text-zinc-100">{charter.title}</p>
+                      <p className="text-xs text-zinc-500">
+                        <span className="font-mono text-zinc-400">{charter.slug}</span> • rev {charter.revision_count} •{" "}
+                        {charter.char_count} chars
+                      </p>
+                      <p className="max-w-3xl text-sm leading-6 text-zinc-300">{charter.summary}</p>
+                      {charter.body ? (
+                        <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-sm leading-6 text-zinc-300">
+                          {charter.body}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="mt-3 max-w-3xl text-sm text-zinc-500">
+                      This room has a derived snapshot. Write a charter to state what this room is for.
+                    </p>
+                  )}
+                </div>
 
                 <form onSubmit={handleSubmitQuery} className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
                   <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-zinc-500">
