@@ -1,4 +1,12 @@
 from app.models.item import Item
+from app.models.canon import (
+    CANON_SECTIONS,
+    CANON_SOURCE_TYPE,
+    CANON_STATUSES,
+    CanonDigestCache,
+    CanonPage,
+    CanonPageRevision,
+)
 from app.models.web_save import WebSave
 from app.models.embedding import Embedding, EmbeddingProfileVector
 from app.models.relationship import ItemRelationship
@@ -44,6 +52,12 @@ from app.models.palace import (
 
 __all__ = [
     "Item",
+    "CANON_SECTIONS",
+    "CANON_SOURCE_TYPE",
+    "CANON_STATUSES",
+    "CanonDigestCache",
+    "CanonPage",
+    "CanonPageRevision",
     "WebSave",
     "Embedding",
     "EmbeddingProfileVector",

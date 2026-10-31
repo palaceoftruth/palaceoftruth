@@ -73,8 +73,18 @@ def test_rls_inventory_matches_every_tenant_model() -> None:
     tenant_models = {
         table.name for table in Base.metadata.tables.values() if "tenant_id" in table.c
     }
+    # Tables that a LATER revision created. Revision 067 must not name them: it
+    # runs before they exist, so adding one there would break the upgrade. Each
+    # entry must still appear in enforce_tenant_rls.TENANT_TABLES below, which
+    # is what actually enforces RLS at rollout time.
+    added_after_067 = {
+        "tenant_llm_daily_usage",  # 068_curation_principals
+        "canon_pages",  # 072_tenant_canon_pages
+        "canon_page_revisions",  # 072_tenant_canon_pages
+        "canon_digest_cache",  # 072_tenant_canon_pages
+    }
 
-    assert set(migration.TENANT_TABLES) == tenant_models - {"tenant_llm_daily_usage"}
+    assert set(migration.TENANT_TABLES) == tenant_models - added_after_067
     assert set(enforce_tenant_rls.TENANT_TABLES) == tenant_models
     assert enforce_tenant_rls.REQUIRED_ALEMBIC_REVISION == _alembic_head()
 
