@@ -97,7 +97,14 @@ def test_publishing_uses_trusted_runner_with_main_ref_guards() -> None:
     assert jobs["build-frontend"]["runs-on"] == TRUSTED_RUNNER
     assert _normalize_expression(jobs["build-frontend"]["if"]) == classified_main_push_or_dispatch
     assert jobs["publish-chart"]["runs-on"] == TRUSTED_RUNNER
-    assert jobs["publish-chart"]["if"] == main_push_or_dispatch
+    # always() is load-bearing: on the chart_release_only path both build jobs are
+    # skipped, and a job listing only needs is itself skipped when its needs are
+    # skipped. Without always() the chart-only path could never publish.
+    assert jobs["publish-chart"]["if"] == (
+        f"always() && ({main_push_or_dispatch}) && "
+        "needs.build-backend.result != 'failure' && "
+        "needs.build-frontend.result != 'failure'"
+    )
     assert jobs["publish-agent-plugin"]["runs-on"] == TRUSTED_RUNNER
     assert _normalize_expression(jobs["publish-agent-plugin"]["if"]) == (
         "needs.classify.outputs.chart_release_only != 'true' && "
