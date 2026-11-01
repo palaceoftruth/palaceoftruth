@@ -274,3 +274,56 @@ export function tallyImportActions(
   });
   return tally;
 }
+
+// --- Drift ----------------------------------------------------------------
+//
+// The states come from the API. This file only decides how they read and how
+// strongly they should be shown; it never decides that drift exists.
+
+export const DRIFT_STATES = ["none", "drift-suspected", "stale"] as const;
+
+export function driftStateLabel(state: string): string {
+  switch (state) {
+    case "drift-suspected":
+      return "Drift suspected";
+    case "stale":
+      return "Stale";
+    case "none":
+      return "Current";
+    default:
+      return state;
+  }
+}
+
+/** Drift needs a human to look at it; none does not. */
+export function isDriftActionable(state: string): boolean {
+  return state === "drift-suspected" || state === "stale";
+}
+
+export interface CharterFreshness {
+  label: string;
+  actionable: boolean;
+}
+
+/** What the charter panel says about a page, given the room's live generation. */
+export function charterFreshness(
+  page: { last_confirmed_generation: number; status: string } | null,
+  confirmedGeneration: number | null,
+): CharterFreshness | null {
+  if (!page) {
+    return null;
+  }
+  const confirmed = page.last_confirmed_generation ?? 0;
+  if (confirmed === 0) {
+    return page.status === "published"
+      ? { label: "Stale: never ratified", actionable: true }
+      : { label: "Never ratified", actionable: false };
+  }
+  if (confirmedGeneration !== null && confirmedGeneration > confirmed) {
+    return {
+      label: `Drift suspected: room is at generation ${confirmedGeneration}, confirmed at ${confirmed}`,
+      actionable: true,
+    };
+  }
+  return { label: `Confirmed at generation ${confirmed}`, actionable: false };
+}

@@ -3,6 +3,9 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 import {
+  charterFreshness,
+  driftStateLabel,
+  isDriftActionable,
   IMPORT_MAX_FILES,
   IMPORT_MAX_FILE_BYTES,
   formatBytes,
@@ -331,4 +334,55 @@ test("an unchanged folder offers nothing to commit", () => {
     ["a", "b"],
   );
   assert.equal(tally.writable, 0, "a button that writes nothing should be disabled");
+});
+
+// --- drift ----------------------------------------------------------------
+
+test("drift states read as sentences, not as api values", () => {
+  assert.equal(driftStateLabel("drift-suspected"), "Drift suspected");
+  assert.equal(driftStateLabel("stale"), "Stale");
+  assert.equal(driftStateLabel("none"), "Current");
+});
+
+test("only drift and staleness need a human", () => {
+  assert.equal(isDriftActionable("drift-suspected"), true);
+  assert.equal(isDriftActionable("stale"), true);
+  assert.equal(isDriftActionable("none"), false);
+});
+
+test("a confirmed page at the room generation is not actionable", () => {
+  const freshness = charterFreshness(
+    { last_confirmed_generation: 7, status: "published" },
+    7,
+  );
+  assert.equal(freshness?.actionable, false);
+  assert.match(freshness?.label ?? "", /Confirmed at generation 7/);
+});
+
+test("a page behind the room generation names both numbers", () => {
+  const freshness = charterFreshness(
+    { last_confirmed_generation: 7, status: "published" },
+    9,
+  );
+  assert.equal(freshness?.actionable, true);
+  assert.match(freshness?.label ?? "", /generation 9/);
+  assert.match(freshness?.label ?? "", /confirmed at 7/);
+});
+
+test("a published page that was never ratified is stale, not merely drift", () => {
+  const freshness = charterFreshness(
+    { last_confirmed_generation: 0, status: "published" },
+    4,
+  );
+  assert.equal(freshness?.actionable, true);
+  assert.match(freshness?.label ?? "", /never ratified/i);
+});
+
+test("a draft that was never ratified is not a drift alarm", () => {
+  const freshness = charterFreshness({ last_confirmed_generation: 0, status: "draft" }, 3);
+  assert.equal(freshness?.actionable, false);
+});
+
+test("no charter means no freshness claim at all", () => {
+  assert.equal(charterFreshness(null, 3), null);
 });
