@@ -1262,3 +1262,35 @@ export interface CanonImportCommitResponse {
   applied: number;
   skipped: number;
 }
+
+// --- Canon drift ----------------------------------------------------------
+// Detection is the machine's half; ratification is the human's. A page can be
+// drift-suspected (the room moved past what was confirmed) or stale (published
+// and never ratified at all), and the two read differently on purpose.
+
+export type CanonDriftState = "none" | "drift-suspected" | "stale";
+
+export interface CanonDriftPage {
+  slug: string;
+  title: string;
+  room_id: string;
+  room_slug: string;
+  state: CanonDriftState;
+  confirmed_generation: number;
+  current_generation: number;
+  new_memberships: number;
+  artifact_id: string | null;
+  reason: string;
+}
+
+export interface CanonDriftList {
+  pages: CanonDriftPage[];
+  counts: Record<string, number>;
+}
+
+export interface CanonDriftDetectResponse {
+  evaluated: number;
+  created: number;
+  deduplicated: number;
+  counts: Record<string, number>;
+}

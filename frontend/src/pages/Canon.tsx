@@ -4,6 +4,7 @@ import { FolderUp, Loader2, Plus, Search, X } from "lucide-react";
 import { api, ApiError } from "../api/client";
 import type {
   CanonDigest,
+  CanonDriftList,
   CanonImportCommitResponse,
   CanonImportPlan,
   CanonPage,
@@ -21,7 +22,9 @@ import {
   bodyLengthDelta,
   bodyLengthState,
   formToPayload,
+  driftStateLabel,
   formatBytes,
+  isDriftActionable,
   importActionLabel,
   importPreflight,
   isImportableName,
@@ -122,6 +125,11 @@ export default function Canon() {
   const [importBusy, setImportBusy] = useState<"preview" | "commit" | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importDone, setImportDone] = useState<CanonImportCommitResponse | null>(null);
+  // Drift: the machine proposes, a person ratifies. Loaded separately from the
+  // page list so a drift read failure cannot blank the page.
+  const [drift, setDrift] = useState<CanonDriftList | null>(null);
+  const [driftBusy, setDriftBusy] = useState(false);
+  const [driftError, setDriftError] = useState<string | null>(null);
   const importCheck = useMemo(() => importPreflight(importFiles), [importFiles]);
   const importTally = useMemo(
     () =>
@@ -318,6 +326,38 @@ export default function Canon() {
   const bodyOverWarn = bodyState !== "ok";
 
 
+  useEffect(() => {
+    let alive = true;
+    api
+      .getCanonDrift()
+      .then((result) => {
+        if (alive) {
+          setDrift(result);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setDrift(null);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function runDriftDetection() {
+    setDriftBusy(true);
+    setDriftError(null);
+    try {
+      await api.detectCanonDrift();
+      setDrift(await api.getCanonDrift());
+    } catch (error) {
+      setDriftError(error instanceof ApiError ? error.message : "Detection did not run.");
+    } finally {
+      setDriftBusy(false);
+    }
+  }
+
   async function reloadCanon() {
     const [list, nextDigest] = await Promise.all([
       api.listCanonPages({ limit: 100 }),
@@ -424,6 +464,74 @@ export default function Canon() {
         }
       />
 
+
+      <section className="sb-panel sb-panel-padding space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="sb-kicker">Drift</p>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+              Canon never regenerates. When a room moves past what a page confirmed, Palace says so
+              and asks. Detection only proposes. A person ratifies.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="sb-button-secondary"
+            onClick={runDriftDetection}
+            disabled={driftBusy}
+          >
+            {driftBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            Check for drift
+          </button>
+        </div>
+
+        {driftError ? <p className="text-sm text-rose-300">{driftError}</p> : null}
+
+        {drift && Object.keys(drift.counts).length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {Object.entries(drift.counts).map(([state, count]) => (
+              <span key={state} className="sb-chip sb-chip-inactive">
+                {driftStateLabel(state)}: {count}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {drift && drift.pages.filter((page) => isDriftActionable(page.state)).length > 0 ? (
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800">
+            {drift.pages
+              .filter((page) => isDriftActionable(page.state))
+              .map((page) => (
+                <li
+                  key={page.slug}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-zinc-200">{page.title}</p>
+                    <p className="truncate text-xs text-zinc-500">
+                      canon:{page.slug} in {page.room_slug}: {page.reason}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="sb-chip sb-chip-inactive">{driftStateLabel(page.state)}</span>
+                    <button
+                      type="button"
+                      className="sb-button-secondary"
+                      onClick={() => {
+                        setCreating(false);
+                        setSelectedSlug(page.slug);
+                      }}
+                    >
+                      Open page
+                    </button>
+                  </div>
+                </li>
+              ))}
+          </ul>
+        ) : drift ? (
+          <p className="text-sm text-zinc-400">No page has drifted from its room.</p>
+        ) : null}
+      </section>
 
       <section className="sb-panel sb-panel-padding space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

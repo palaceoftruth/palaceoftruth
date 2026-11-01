@@ -15,6 +15,7 @@ import type {
   PalaceWingSummary,
 } from "../api/types";
 import PalaceFreshnessPill from "../components/PalaceFreshnessPill";
+import { charterFreshness } from "../lib/canon";
 import type { CanonPage } from "../api/types";
 import PageHeader from "../components/PageHeader";
 import PalaceChatDock from "../components/PalaceChatDock";
@@ -1022,18 +1023,30 @@ export default function Palace() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       {charter ? (
-                        <PalaceFreshnessPill
-                          label="Charter"
-                          freshness={{
-                            status: charter.last_confirmed_generation > 0 ? "fresh" : "stale",
-                            generation: charter.last_confirmed_generation,
-                            target_generation: charter.last_confirmed_generation,
-                            message:
-                              charter.last_confirmed_generation > 0
-                                ? `Confirmed at generation ${charter.last_confirmed_generation}.`
-                                : "Never ratified.",
-                          }}
-                        />
+                        <>
+                          <PalaceFreshnessPill
+                            label="Charter"
+                            freshness={{
+                              // The pill has four states and drift is not one of
+                              // them, so drift reads as "stale" here and the
+                              // sentence next to it says exactly what moved.
+                              status: charterFreshness(
+                                charter,
+                                (roomDetail.room.snapshot_status?.target_generation ?? roomDetail.room.snapshot_status?.generation ?? null),
+                              )?.actionable
+                                ? "stale"
+                                : "fresh",
+                              generation: charter.last_confirmed_generation,
+                              target_generation: (roomDetail.room.snapshot_status?.target_generation ?? roomDetail.room.snapshot_status?.generation ?? null),
+                              message:
+                                charterFreshness(charter, (roomDetail.room.snapshot_status?.target_generation ?? roomDetail.room.snapshot_status?.generation ?? null))
+                                  ?.label ?? "",
+                            }}
+                          />
+                          <span className="text-xs text-zinc-400">
+                            {charterFreshness(charter, (roomDetail.room.snapshot_status?.target_generation ?? roomDetail.room.snapshot_status?.generation ?? null))?.label}
+                          </span>
+                        </>
                       ) : null}
                       {charter ? (
                         <>

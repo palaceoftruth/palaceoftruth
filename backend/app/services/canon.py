@@ -45,6 +45,10 @@ CANON_PAGES_PER_TENANT_SOFT = 500
 CANON_IMPORT_MAX_FILES = 500
 CANON_IMPORT_MAX_FILE_BYTES = 250_000
 CANON_IMPORT_MAX_TOTAL_BYTES = 5_000_000
+# Design section 8: a room that gained more memberships than this since a page
+# was confirmed has changed enough that the page may no longer be true. The
+# number lives here with every other canon cap so it can be changed in one place.
+CANON_DRIFT_MEMBERSHIP_THRESHOLD = 10
 
 # Rough characters-per-token for the per-connect estimate. Deliberately
 # conservative: it over-counts tokens rather than under-counting them.

@@ -35,6 +35,8 @@ import type {
   CanonRevisionListResponse,
   CanonSearchResponse,
   CanonImportPlan,
+  CanonDriftList,
+  CanonDriftDetectResponse,
   CanonImportCommitResponse,
   CanonWriteResponse,
   PalaceRetrieveResponse,
@@ -472,6 +474,12 @@ export const api = {
       body: form,
     });
   },
+
+  getCanonDrift: (state?: string) =>
+    req<CanonDriftList>(`/canon/drift${state ? `?state=${encodeURIComponent(state)}` : ""}`),
+
+  detectCanonDrift: () =>
+    req<CanonDriftDetectResponse>("/canon/drift/detect", { method: "POST" }),
 
   // --- Canon -------------------------------------------------------------
   // Read is open to any authorized principal. Write is refused by the API unless
