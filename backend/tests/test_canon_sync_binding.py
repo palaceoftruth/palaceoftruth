@@ -19,7 +19,6 @@ from sqlalchemy import select
 from app.models.palace import Room, SyncRun, SyncSource
 from app.schemas.palace import SyncSourceCreate, SyncSourceUpdate
 from app.services.palace import (
-    CANON_RUNS_NOT_IMPLEMENTED,
     _sync_source_summary,
     create_or_get_sync_run,
     create_sync_source,
@@ -117,7 +116,9 @@ def test_the_schema_defaults_to_the_room_target() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_canon_binding_requires_a_repo_source(monkeypatch) -> None:
+async def test_a_canon_binding_refuses_object_storage(monkeypatch) -> None:
+    """A bucket has no commit history, so it cannot be a canon source in v1."""
+
     async def _probe(*_args, **_kwargs):  # pragma: no cover - must not run
         raise AssertionError("the probe must not run for a refused binding")
 
@@ -128,11 +129,42 @@ async def test_a_canon_binding_requires_a_repo_source(monkeypatch) -> None:
         await create_sync_source(
             session,
             tenant_id="tenant-a",
-            body=_binding_body(source_kind="folder", root_path="/srv/corpus"),
+            body=_binding_body(
+                source_kind="s3",
+                root_path=None,
+                bucket="corpus",
+                endpoint_url="https://s3.example.com",
+                region="us-east-1",
+            ),
         )
     assert excinfo.value.status_code == 422
     assert "requires a repo source" in excinfo.value.detail
     assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_a_local_checkout_can_be_a_canon_binding(monkeypatch, tmp_path) -> None:
+    """A checkout on this host is the same repository, and needs no clone."""
+    probed: list[str] = []
+
+    async def _probe(root_path, *, credential_ciphertext):
+        probed.append(root_path)
+
+    monkeypatch.setattr("app.services.palace.probe_canon_repo", _probe)
+    # Folder sources are confined to the configured sync roots; a test directory
+    # becomes one for the duration of this test.
+    monkeypatch.setattr(
+        "app.services.palace._allowed_sync_roots", lambda: [tmp_path.resolve()]
+    )
+    session = _FakeSession()
+
+    source = await create_sync_source(
+        session,
+        tenant_id="tenant-a",
+        body=_binding_body(source_kind="folder", root_path=str(tmp_path)),
+    )
+    assert probed == [str(tmp_path)]
+    assert source.target_kind == "canon"
 
 
 @pytest.mark.asyncio
@@ -239,7 +271,8 @@ async def test_retargeting_before_any_run_is_allowed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_canon_source_never_queues_a_room_run() -> None:
+async def test_a_canon_source_now_queues_a_run() -> None:
+    """P8 removed the pre-run refusal, so a canon source queues like any other."""
     source = _source(target_kind="canon")
     session = _FakeSession(sync_run_results=[None])
 
@@ -247,11 +280,9 @@ async def test_a_canon_source_never_queues_a_room_run() -> None:
         session, tenant_id="tenant-a", source=source, triggered_by="scheduled"
     )
 
-    assert created is False, "no caller may queue a canon run before P8"
-    assert run.status == "failed"
-    assert run.error_message == CANON_RUNS_NOT_IMPLEMENTED
-    assert source.last_error == CANON_RUNS_NOT_IMPLEMENTED
-    assert run in session.added, "the refusal must be visible in run history"
+    assert created is True
+    assert run.status == "queued"
+    assert run.error_message is None
 
 
 @pytest.mark.asyncio

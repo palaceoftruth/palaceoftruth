@@ -106,6 +106,11 @@ class ImportFile:
     extra: dict
     content_hash: str
     size_bytes: int
+    # ``parse_import_file`` derives ``reference`` when the front matter names no
+    # section, so ``section`` alone cannot tell an author's ``section: reference``
+    # from an absent one. A repo binding needs that difference: its default
+    # section comes from the source, not from the parser.
+    section_from_front_matter: bool = False
 
 
 @dataclass(frozen=True)
@@ -328,11 +333,13 @@ def parse_import_file(path: str, raw: bytes) -> ImportFile:
     raw_section = _front_matter_text(front.get("section"))
     if raw_section is None:
         section = "reference"
+        section_from_front_matter = False
     else:
         try:
             section = validate_section(raw_section)
         except CanonValidationError as exc:
             raise CanonValidationError(f"{path}: {exc}") from exc
+        section_from_front_matter = True
 
     raw_summary = _front_matter_text(front.get("summary"))
     try:
@@ -361,7 +368,19 @@ def parse_import_file(path: str, raw: bytes) -> ImportFile:
         extra=extra,
         content_hash=_content_hash(body),
         size_bytes=len(raw),
+        section_from_front_matter=section_from_front_matter,
     )
+
+
+def binding_section(file: ImportFile, *, default: str) -> str:
+    """The section a repo binding should write: the file's own, else the binding's.
+
+    Front matter wins, then the binding decides — the same precedence a folder
+    import uses, except that a folder import has no binding default and falls
+    back to ``reference``. Kept here rather than in the sync module so the one
+    parser stays the only thing that knows how a section is derived.
+    """
+    return file.section if file.section_from_front_matter else default
 
 
 # --- Caps ------------------------------------------------------------------
@@ -468,6 +487,19 @@ async def _existing_pages(
         )
     ).all()
     return {slug: (status, _content_hash(raw_content or "")) for slug, status, raw_content in rows}
+
+
+async def stored_body_hash(db: AsyncSession, *, tenant_id: str, slug: str) -> str | None:
+    """sha256 of the body canon currently stores for one slug, or None.
+
+    The body is not on the page row; it is the governing item's ``raw_content``.
+    A repo run needs it to say *what* differs in a conflict artifact, and it goes
+    through the same helper ``plan_import`` uses so the two can never disagree
+    about what "the stored body" means.
+    """
+    existing = await _existing_pages(db, tenant_id=tenant_id, slugs=[slug])
+    found = existing.get(slug)
+    return None if found is None else found[1]
 
 
 def _action_for(file: ImportFile, status: str | None, stored_hash: str | None) -> tuple[str, str]:
