@@ -56,6 +56,7 @@ from app.services.canon import (
     validate_section,
     validate_status,
 )
+from app.services.canon_drift import resolve_canon_drift_artifacts
 from app.services.item_processing import canon_content_hash, process_prebuilt_item
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the import graph light
@@ -232,15 +233,23 @@ async def _reload_for_response(
 
 
 async def _room_generation(db: AsyncSession, *, room_id: uuid.UUID | None) -> int:
-    """The room's ``membership_generation``; 0 when unbound or gone.
+    """The room's ``snapshot_generation``; 0 when unbound or gone.
 
-    The recorded generation is what a later drift check compares against, and a
-    page with no room has nothing to be stale relative to.
+    This is the watermark a page confirms when a human ratifies it, and what the
+    drift check compares against. It is deliberately the snapshot generation and
+    not ``membership_generation``: canon falls behind when the room's *content*
+    is rebuilt, and membership churn is measured separately against the
+    confirmation time, because a room can admit a crowd without its snapshot
+    moving.
+
+    Getting this wrong is silent. Ratify would record a counter the drift check
+    never reads, so ratification would report success and the pill would never
+    clear.
     """
     if room_id is None:
         return 0
     room = await db.get(Room, room_id)
-    return int(room.membership_generation or 0) if room is not None else 0
+    return int(room.snapshot_generation or 0) if room is not None else 0
 
 
 async def _delete_authored_membership(
@@ -537,6 +546,12 @@ async def publish_canon_page(
             await db.rollback()
             raise CanonConflictError(conflict) from exc
 
+    # A human publishing the page is a human saying it is true, so the open drift
+    # questions about it are answered. Inside this transaction, before the commit.
+    await resolve_canon_drift_artifacts(
+        db, tenant_id=tenant_id, slug=page.slug, resolved_by=author_subject
+    )
+
     await db.commit()
     # Re-read after the commit: a rollback inside the write path expires the
     # instances, and projecting an expired attribute would raise MissingGreenlet
@@ -568,6 +583,11 @@ async def ratify_canon_page(
     item.governance_verified_by_subject = author_subject
 
     revision = await _latest_revision(db, page_id=page.id)
+    # The human looked and said the page is still true: close the drift question
+    # this page left open. Inside this transaction, before the commit.
+    await resolve_canon_drift_artifacts(
+        db, tenant_id=tenant_id, slug=page.slug, resolved_by=author_subject
+    )
     await db.commit()
     # Re-read after the commit: a rollback inside the write path expires the
     # instances, and projecting an expired attribute would raise MissingGreenlet

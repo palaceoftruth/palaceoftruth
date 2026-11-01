@@ -29,6 +29,9 @@ from app.auth import get_auth_context, require_api_capability, require_human_aut
 from app.database import get_db
 from app.schemas.canon import (
     CanonDigestOut,
+    CanonDriftDetectOut,
+    CanonDriftListOut,
+    CanonDriftPageOut,
     CanonImportCommitOut,
     CanonImportFileOut,
     CanonImportPlanOut,
@@ -80,6 +83,11 @@ from app.services.canon_import import (
     parse_import_file,
     plan_import,
     validate_import_batch,
+)
+from app.services.canon_drift import (
+    DRIFT_STATES,
+    detect_canon_drift,
+    list_canon_drift,
 )
 
 router = APIRouter(prefix="/canon", tags=["canon"])
@@ -598,4 +606,80 @@ async def post_canon_import_commit(
         ],
         applied=sum(1 for result in results if result.action in _IMPORT_APPLIED),
         skipped=sum(1 for result in results if result.action == "skipped"),
+    )
+
+
+# --- Drift -----------------------------------------------------------------
+#
+# The read is open like every other canon read: an operator screen and an agent
+# both need to see that a page may have fallen behind its room. Detection writes
+# artifacts, so it sits behind the same human-author wall as every other canon
+# write. Detection never edits a page; it asks a question a human answers by
+# ratifying or publishing.
+
+
+def _drift_out(drift) -> CanonDriftPageOut:
+    return CanonDriftPageOut(
+        slug=drift.slug,
+        title=drift.title,
+        room_id=drift.room_id,
+        room_slug=drift.room_slug,
+        state=drift.state,
+        confirmed_generation=drift.confirmed_generation,
+        current_generation=drift.current_generation,
+        new_memberships=drift.new_memberships,
+        artifact_id=drift.artifact_id,
+        reason=drift.reason,
+    )
+
+
+def _drift_counts(pages) -> dict[str, int]:
+    """Every state present, including the ones at zero."""
+    counts = {name: 0 for name in DRIFT_STATES}
+    for page in pages:
+        counts[page.state] = counts.get(page.state, 0) + 1
+    return counts
+
+
+@router.get("/drift", response_model=CanonDriftListOut, dependencies=_READ)
+async def get_canon_drift(
+    request: Request,
+    state: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> CanonDriftListOut:
+    """List every room-bound canon page with its drift verdict.
+
+    ``state`` filters to ``none``, ``drift-suspected`` or ``stale``; anything
+    else is a 422 naming the three, because a typo must not read as "no drift".
+    """
+    try:
+        drifts = await list_canon_drift(db, tenant_id=request.state.tenant_id, state=state)
+    except (CanonError, CanonAuthoringError) as exc:
+        raise _raise_for(exc) from exc
+    return CanonDriftListOut(
+        pages=[_drift_out(drift) for drift in drifts],
+        counts=_drift_counts(drifts),
+    )
+
+
+@router.post("/drift/detect", response_model=CanonDriftDetectOut, dependencies=_WRITE)
+async def post_canon_drift_detect(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> CanonDriftDetectOut:
+    """Evaluate every bound page and file a reviewable artifact where warranted.
+
+    The route owns the transaction: the service refuses to commit, so detection
+    lands here in one piece or not at all.
+    """
+    try:
+        summary = await detect_canon_drift(db, tenant_id=request.state.tenant_id)
+    except (CanonError, CanonAuthoringError) as exc:
+        raise _raise_for(exc) from exc
+    await db.commit()
+    return CanonDriftDetectOut(
+        evaluated=summary.evaluated,
+        created=summary.created,
+        deduplicated=summary.deduplicated,
+        counts=summary.counts,
     )

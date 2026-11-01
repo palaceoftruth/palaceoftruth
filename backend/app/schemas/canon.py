@@ -216,3 +216,40 @@ class CanonImportCommitOut(BaseModel):
     results: list[CanonImportResultOut]
     applied: int
     skipped: int
+
+
+# --- Drift -----------------------------------------------------------------
+#
+# The wire shapes for the drift read and the detection run. `state` stays a plain
+# `str`, like every other canon output field: the vocabulary belongs to
+# `services/canon_drift.py`, and a schema that re-declared it would be a second
+# owner of the same list.
+
+
+class CanonDriftPageOut(BaseModel):
+    """One page's drift verdict as the drift screen shows it."""
+
+    slug: str
+    title: str
+    room_id: uuid.UUID | None = None
+    room_slug: str
+    state: str
+    confirmed_generation: int
+    current_generation: int
+    new_memberships: int
+    artifact_id: uuid.UUID | None = None
+    reason: str
+
+
+class CanonDriftListOut(BaseModel):
+    pages: list[CanonDriftPageOut]
+    counts: dict[str, int]
+
+
+class CanonDriftDetectOut(BaseModel):
+    """What one detection run did: how much it looked at and what it filed."""
+
+    evaluated: int
+    created: int
+    deduplicated: int
+    counts: dict[str, int]
