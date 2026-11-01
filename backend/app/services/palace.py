@@ -1077,7 +1077,9 @@ async def mark_item_dirty(
 async def create_sync_source(db: AsyncSession, *, tenant_id: str, body: SyncSourceCreate) -> SyncSource:
     # Bucket sources are out of scope for canon in v1: a binding reads markdown
     # through the repo transport, so anything else is a caller mistake.
-    if body.target_kind == "canon" and body.source_kind != "repo":
+    if body.target_kind == "canon" and body.source_kind not in ("repo", "folder"):
+        # Remote repos and local checkouts are both git trees this engine can
+        # read. Object storage has no commit history and is out of scope in v1.
         raise HTTPException(status_code=422, detail="a canon binding requires a repo source")
     await _ensure_canon_room_exists(db, tenant_id=tenant_id, room_id=body.canon_room_id)
 
@@ -1173,7 +1175,7 @@ async def update_sync_source(
         # Every run and per-file row describes work done under the old target;
         # retargeting after the first run would rewrite history's meaning.
         raise HTTPException(status_code=409, detail="target_kind cannot change after a run")
-    if target_target_kind == "canon" and target_source_kind != "repo":
+    if target_target_kind == "canon" and target_source_kind not in ("repo", "folder"):
         raise HTTPException(status_code=422, detail="a canon binding requires a repo source")
 
     target_canon_section_default = (
@@ -1374,12 +1376,6 @@ async def restore_sync_source(
     return source
 
 
-# P8 routes a canon binding through plan_import/commit_import. Until it lands a
-# canon source must fail loudly rather than fall through to the room path,
-# which would write room items for pages a run is never allowed to publish.
-CANON_RUNS_NOT_IMPLEMENTED = "canon runs are not implemented yet"
-
-
 async def create_or_get_sync_run(
     db: AsyncSession,
     *,
@@ -1398,24 +1394,6 @@ async def create_or_get_sync_run(
     )
     if active:
         return active, False
-
-    if (source.target_kind or "rooms") == "canon":
-        # Record the refusal as a failed run so it is visible in run history
-        # instead of vanishing into a worker log, and return created=False so
-        # no caller queues it.
-        run = SyncRun(
-            sync_source_id=source.id,
-            tenant_id=tenant_id,
-            status="failed",
-            triggered_by=triggered_by,
-            error_message=CANON_RUNS_NOT_IMPLEMENTED,
-            completed_at=datetime.now(timezone.utc),
-        )
-        db.add(run)
-        source.last_error = CANON_RUNS_NOT_IMPLEMENTED
-        await db.commit()
-        await db.refresh(run)
-        return run, False
 
     run = SyncRun(
         sync_source_id=source.id,
@@ -4594,7 +4572,14 @@ def _iter_repo_sync_files(
         files.append(
             SyncCandidate(
                 relative_path=relative_path,
-                source_url=_github_blob_url(source.root_path, branch, relative_path),
+                source_url=(
+                    _github_blob_url(source.root_path, branch, relative_path)
+                    if branch and _is_remote_github_repo(source.root_path)
+                    # A local checkout has no blob page; the file's own URI is the
+                    # honest citation, and the room path never reaches here because
+                    # a local folder source carries no branch.
+                    else path.resolve().as_uri()
+                ),
                 source_fingerprint=f"{stat_result.st_mtime_ns}:{stat_result.st_size}",
                 file_size=stat_result.st_size,
                 modified_ns=stat_result.st_mtime_ns,
@@ -4706,6 +4691,19 @@ async def run_sync_run(
     run.error_message = None
     source.last_error = None
     await db.commit()
+
+    if (source.target_kind or "rooms") == "canon":
+        # A canon binding writes drafts through the importer, never room items,
+        # so it takes its own path instead of falling through the room sync.
+        from app.services.canon_sync import run_canon_sync
+
+        return await run_canon_sync(
+            db,
+            run=run,
+            source=source,
+            embedder=embedder,
+            llm=llm,
+        )
 
     file_rows = (
         await db.execute(
