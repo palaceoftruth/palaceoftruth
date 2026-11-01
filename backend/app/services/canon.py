@@ -39,6 +39,10 @@ CANON_SEARCH_HITS = 8
 CANON_SEARCH_SNIPPET_CHARS = 300
 CANON_PER_CONNECT_TOKEN_BUDGET = 2500
 CANON_PAGE_BODY_MAX_CHARS = 20000
+# A canon binding is probed once when it is created or retargeted. The probe is a
+# git round trip inside a request, so it needs a ceiling; it is a canon cap and
+# lives here with the rest of them.
+CANON_SYNC_PROBE_TIMEOUT_SECONDS = 20
 CANON_PAGE_EDITOR_WARN_CHARS = 8000
 CANON_SUMMARY_MAX_CHARS = 200
 CANON_PAGES_PER_TENANT_SOFT = 500

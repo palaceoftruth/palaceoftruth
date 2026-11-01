@@ -199,7 +199,18 @@ class TemporalFact(Base):
 
 class SyncSource(Base):
     __tablename__ = "sync_sources"
-    __table_args__ = (UniqueConstraint("tenant_id", "root_path", name="uq_sync_sources_tenant_root"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "root_path", name="uq_sync_sources_tenant_root"),
+        CheckConstraint(
+            "target_kind IN ('rooms', 'canon')",
+            name="ck_sync_sources_target_kind",
+        ),
+        CheckConstraint(
+            "canon_section_default IN "
+            "('identity', 'rules', 'glossary', 'runbook', 'charter', 'faq', 'reference')",
+            name="ck_sync_sources_canon_section",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -217,6 +228,14 @@ class SyncSource(Base):
     endpoint_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     region: Mapped[str | None] = mapped_column(String(120), nullable=True)
     force_path_style: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    target_kind: Mapped[str] = mapped_column(Text, server_default="rooms")
+    canon_section_default: Mapped[str] = mapped_column(Text, server_default="reference")
+    canon_room_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("rooms.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    canon_owns_pages: Mapped[bool] = mapped_column(Boolean, server_default="true")
     status: Mapped[str] = mapped_column(String(20), server_default="active")
     disabled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     disabled_by: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -238,6 +257,13 @@ class SyncSource(Base):
 
 class SyncRun(Base):
     __tablename__ = "sync_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "pages_created >= 0 AND pages_updated >= 0 "
+            "AND pages_archived >= 0 AND pages_conflicted >= 0",
+            name="ck_sync_runs_page_counts",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -258,6 +284,11 @@ class SyncRun(Base):
     items_created: Mapped[int] = mapped_column(Integer, server_default="0")
     items_updated: Mapped[int] = mapped_column(Integer, server_default="0")
     items_failed: Mapped[int] = mapped_column(Integer, server_default="0")
+    pages_created: Mapped[int] = mapped_column(Integer, server_default="0")
+    pages_updated: Mapped[int] = mapped_column(Integer, server_default="0")
+    pages_archived: Mapped[int] = mapped_column(Integer, server_default="0")
+    pages_conflicted: Mapped[int] = mapped_column(Integer, server_default="0")
+    commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     generation: Mapped[int] = mapped_column(Integer, server_default="0")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
@@ -290,6 +321,7 @@ class SyncSourceFile(Base):
     )
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    page_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
