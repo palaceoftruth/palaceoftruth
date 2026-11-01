@@ -8,16 +8,31 @@ an insufficient-scope error. Agents contribute through
 `candidate_canon_edit` artifacts instead.
 """
 
+import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_auth_context, require_api_capability, require_human_author
 from app.database import get_db
 from app.schemas.canon import (
     CanonDigestOut,
+    CanonImportCommitOut,
+    CanonImportFileOut,
+    CanonImportPlanOut,
+    CanonImportResultOut,
     CanonPageCreate,
     CanonPageListResponse,
     CanonPageOut,
@@ -56,6 +71,15 @@ from app.services.canon_authoring import (
     publish_canon_page,
     ratify_canon_page,
     update_canon_page,
+)
+from app.services.canon_import import (
+    ImportFile,
+    check_import_batch_shape,
+    check_import_upload,
+    commit_import,
+    parse_import_file,
+    plan_import,
+    validate_import_batch,
 )
 
 router = APIRouter(prefix="/canon", tags=["canon"])
@@ -453,4 +477,125 @@ async def get_canon_page_slice(
         total_char_count=sliced.total_char_count,
         truncated=sliced.truncated,
         next=sliced.next,
+    )
+
+
+# --- Folder import ---------------------------------------------------------
+#
+# Preview and commit are one operator decision in two phases. Both sit behind
+# `_WRITE`: an import is authoring, so the human-author wall applies unchanged.
+# The parse layer is pure, so a preview costs no writes at all.
+
+_IMPORT_APPLIED = ("created", "updated", "renamed")
+
+
+async def _read_import_uploads(files: list[UploadFile]) -> list[ImportFile]:
+    """Read, cap-check, and parse the uploads; a bad file is refused by name.
+
+    The type and size checks run before the body is decoded, so one oversize or
+    unsupported file does not get parsed and does not cost the rest of the folder
+    its place in the response — the operator gets an error naming that file.
+    """
+    parsed: list[ImportFile] = []
+    total = 0
+    for upload in files:
+        data = await upload.read()
+        path = upload.filename or "upload"
+        check_import_upload(path, len(data))
+        total += len(data)
+        check_import_batch_shape(file_count=len(parsed) + 1, total_bytes=total)
+        parsed.append(parse_import_file(path, data))
+    validate_import_batch(parsed, extensions_checked=False)
+    return parsed
+
+
+def _parse_decisions(raw: str) -> dict[str, str]:
+    """Parse the operator's decisions: a JSON object of slug -> apply|skip|rename.
+
+    Malformed JSON is a client error, so it is raised as a canon validation error
+    and mapped to 422 rather than escaping as a 500 from ``json.loads``.
+    """
+    try:
+        loaded = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise CanonValidationError(f"decisions must be a JSON object: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise CanonValidationError("decisions must be a JSON object of slug -> decision")
+    decisions: dict[str, str] = {}
+    for slug, decision in loaded.items():
+        if not isinstance(decision, str):
+            raise CanonValidationError(f"decision for {slug!r} must be a string")
+        decisions[str(slug)] = decision
+    return decisions
+
+
+@router.post("/import/folder/preview", response_model=CanonImportPlanOut, dependencies=_WRITE)
+async def post_canon_import_preview(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> CanonImportPlanOut:
+    """Plan a folder import without writing anything.
+
+    Returns what each file would do and a content-addressed ``plan_id`` the
+    commit must quote, so a commit cannot apply a folder nobody previewed.
+    """
+    try:
+        parsed = await _read_import_uploads(files)
+        plan = await plan_import(db, tenant_id=request.state.tenant_id, files=parsed)
+    except (CanonError, CanonAuthoringError) as exc:
+        raise _raise_for(exc) from exc
+    return CanonImportPlanOut(
+        plan_id=plan.plan_id,
+        files=[
+            CanonImportFileOut(
+                path=entry.path,
+                slug=entry.slug,
+                title=entry.title,
+                section=entry.section,
+                action=entry.action,
+                content_hash=entry.content_hash,
+                existing_status=entry.existing_status,
+                reason=entry.reason,
+            )
+            for entry in plan.files
+        ],
+        counts=plan.counts,
+    )
+
+
+@router.post("/import/folder/commit", response_model=CanonImportCommitOut, dependencies=_WRITE)
+async def post_canon_import_commit(
+    request: Request,
+    plan_id: str = Form(...),
+    decisions: str = Form("{}"),
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> CanonImportCommitOut:
+    """Apply a previewed folder import as one transaction.
+
+    ``decisions`` is a JSON object of slug -> ``apply`` | ``skip`` | ``rename``,
+    the operator's answer to each conflict. The whole batch lands or none of it
+    does; a stale ``plan_id`` is refused rather than applied blind.
+    """
+    try:
+        chosen = _parse_decisions(decisions)
+        parsed = await _read_import_uploads(files)
+        results = await commit_import(
+            db,
+            tenant_id=request.state.tenant_id,
+            author_subject=_author_subject(request),
+            files=parsed,
+            plan_id=plan_id,
+            decisions=chosen,
+        )
+    except (CanonError, CanonAuthoringError) as exc:
+        raise _raise_for(exc) from exc
+    return CanonImportCommitOut(
+        results=[
+            CanonImportResultOut(slug=result.slug, action=result.action, new_slug=result.new_slug)
+            for result in results
+        ],
+        applied=sum(1 for result in results if result.action in _IMPORT_APPLIED),
+        skipped=sum(1 for result in results if result.action == "skipped"),
     )
