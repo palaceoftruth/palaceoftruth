@@ -380,15 +380,145 @@ Sequenced so each packet ships green on its own.
 5. **UI.** Charter tab in room detail, Canon route with editor and revision diff.
 6. **Drift and ratification.** Detector, curation artifacts, pills, ratify path.
 
-## 15. Phase 2, explicitly out of scope
+## 15. Phase 2: repo as a canon source
 
-- Repo or bucket as a canon source, with sync runs and drift detection at the
-  file level. The folder importer is the seam it will plug into.
-- Agent-proposed canon edits applied automatically. v1 files them for human
-  decision only.
+A corpus that lives in git also lives somewhere else. Without a binding, keeping
+both in step is a copy-and-paste job with no history, no review, and no proof that
+they agree. This section specifies the binding. It replaces the earlier note that
+put repo sync out of scope.
+
+### Locked decisions
+
+Andrew, 2026-11-01.
+
+- **One way.** Repo to canon. Palace never opens a pull request against the corpus.
+- **A sync run never publishes.** It writes drafts and revisions. A person
+  publishes, the same ratchet as section 9. A scheduled job is not a human.
+- **A file removed from the repo archives its page.** Nothing is deleted.
+- **Pilot binding:** `github.com/sarverenterprises/agent-corpus`, private,
+  default branch `master`.
+
+### What is reused, not rebuilt
+
+Palace already carries a sync engine and canon already carries an importer. The
+binding joins them.
+
+- `SyncSource` (`app/models/palace.py`) already holds folder, repo and object
+  storage sources, `scan_interval_seconds`, `allowed_extensions`, status, and an
+  encrypted per-source credential.
+- Git transport (`app/services/palace.py`, `_repo_git_environment` and
+  `run_sync_run`) already clones remote GitHub repositories over HTTPS or SSH,
+  manages checkouts, and resolves blob URLs.
+- `SyncRun` and `SyncSourceFile` already record per-run counters and a per-path
+  row with `content_hash` and `item_id`. That row is the file-level drift record.
+- `app/workers/palace_tasks.py` already schedules rescans, probes for changes, and
+  queues runs.
+- `services/canon_import.py` already parses front matter, derives missing values,
+  plans against existing pages, and commits a batch in one transaction under a
+  content-addressed plan id.
+
+Nothing in this phase adds a second sync stack, a second parser, or a second
+send path.
+
+### Data model
+
+Additive migration `073_repo_canon_bindings`.
+
+- `sync_sources.target_kind` text, `'rooms'` (server default) or `'canon'`.
+- `sync_sources.canon_section_default` text, server default `reference`.
+- `sync_sources.canon_room_id` nullable, for a binding that supplies charters.
+- `sync_sources.canon_owns_pages` boolean, default true. Records that the source
+  created these pages and may therefore update them.
+- `sync_source_files.page_slug` text nullable. `item_id` already exists and points
+  at the page's item.
+- `sync_runs.commit_sha` text nullable, plus `pages_created`, `pages_updated`,
+  `pages_archived`, `pages_conflicted` integers. The existing file counters stay.
+
+### Mapping
+
+Front matter wins, then the path decides.
+
+- `title`, `summary`, `section`, `room`, `tags`, `related` from front matter,
+  under the existing allowlist. Unknown keys stay in `metadata_.canon_extra`.
+- Slug is front matter `slug` when present, else `slug_from_path`.
+- Only `.md`, `.mdx` and `.txt` are read. A file outside the allowlist is skipped
+  and counted, never imported with a guessed type.
+- A binding owns the pages it created. A page a human wrote by hand with the same
+  slug is a conflict, not an update.
+
+### Run semantics
+
+One run, in this order.
+
+1. Resolve the branch head to a commit sha. An unreachable repo fails the run
+   before any write.
+2. List eligible files under the configured prefix. Enforce the import caps on the
+   whole batch. Over the cap means the run refuses, not that it imports a slice.
+3. Parse each file, then `plan_import` against the existing pages.
+4. Apply per file: create becomes a draft page; update becomes a new revision and
+   the page returns to draft; skip-unchanged performs no write; conflict files a
+   `candidate_canon_edit` artifact targeting `canon:<slug>` and writes nothing.
+5. A path that disappeared from the repo archives its page through
+   `archive_canon_page` and files an artifact saying the file is gone.
+6. Commit once per run. Record the commit sha, the per-file action, and the
+   counters on the run.
+
+A run must never call `publish_canon_page`, must never enqueue `palace_run_build`,
+and must never bump a room generation. The canon routing guard keeps pages out of
+rebuilds; the run must not reintroduce the bump by another path.
+
+### Drift
+
+A repo change is evidence, not ratification. If a page is already drift-suspected
+when the file changes, the run updates the draft and the page stays
+drift-suspected until a person ratifies it. Only ratify and publish clear drift.
+
+The existing detector already compares the room's snapshot generation with the
+generation a page confirmed. File-level change is reported from
+`sync_source_files.content_hash` and the last run, beside it.
+
+### Caps
+
+The import caps are the run caps: 500 files, 250 KB per file, 5 MB per run. One
+module owns them. A run reports `truncated` and the reason when it refuses a batch,
+and the UI shows it. No silent partial sync.
+
+### Test plan
+
+Named tests, each failing when its behaviour is removed.
+
+- `test_a_changed_file_creates_a_draft_and_publishes_nothing`
+- `test_a_sync_run_does_not_move_a_room_generation`
+- `test_a_deleted_file_archives_the_page`
+- `test_a_renamed_file_archives_the_old_slug_and_creates_the_new_one`
+- `test_a_hand_written_page_with_the_same_slug_conflicts`
+- `test_an_unreachable_repo_fails_the_run_and_leaves_pages_untouched`
+- `test_re_running_an_unchanged_repo_performs_zero_writes`
+- `test_a_run_over_the_caps_refuses_the_whole_batch`
+- `test_a_repo_change_leaves_a_drifting_page_drifting`
+- `test_a_canon_target_run_never_enqueues_a_palace_rebuild`
+
+### Build packets
+
+7. **Binding.** Migration 073, the columns, the API to create and inspect a canon
+   binding, and refusal when the repo cannot be reached.
+8. **Canon-aware run.** Route a `target_kind='canon'` run through
+   `plan_import`/`commit_import`. Drafts only, archive on delete, artifact on
+   conflict, no rebuild, no generation bump.
+9. **Run history.** Surface runs and per-file actions, and show file-level change
+   beside drift on the Canon route.
+10. **Triggers.** Scheduled rescans, a manual "Sync now" behind the human wall,
+    and refusal when a run is already in flight.
+11. **UI and vocabulary.** Binding list and editor, run results, conflict
+    resolution. `DESIGN.md` gains `binding`, `sync run`, `repo page`.
+
+### Still out of scope
+
+- Agent-proposed canon edits applied automatically. v1 files them for a human.
+- Two-way sync, and any automatic publish when the repo merges.
 - Multi-language pages.
-- Canon-aware room generation, where a charter constrains how the derived
-  snapshot is written. Worth doing later, not now.
+- Canon-aware room generation, where a charter constrains the derived snapshot.
+- Bucket as a canon source. The columns exist; the binding does not.
 
 ## 16. Risks
 
