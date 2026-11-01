@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -100,6 +101,7 @@ from app.services.queue_telemetry import build_worker_backpressure
 from app.schemas.search import SearchResult
 from app.services.diary_rollups import build_diary_rollup_summary
 from app.services.fact_registry import build_fact_registry_summary
+from app.services.canon import CANON_SYNC_PROBE_TIMEOUT_SECONDS
 from app.services.item_processing import process_prebuilt_item
 from app.services.retrieval_hints import (
     rebuild_room_retrieval_hints,
@@ -386,6 +388,10 @@ def _sync_source_summary(source: SyncSource) -> SyncSourceSummary:
         endpoint_url=source.endpoint_url,
         region=source.region,
         force_path_style=bool(source.force_path_style),
+        target_kind=source.target_kind or "rooms",
+        canon_section_default=source.canon_section_default or "reference",
+        canon_room_id=source.canon_room_id,
+        canon_owns_pages=bool(source.canon_owns_pages),
         last_synced_at=source.last_synced_at,
         last_error=source.last_error,
     )
@@ -555,12 +561,20 @@ def _resolve_sync_source_values(
     endpoint_url: str | None,
     region: str | None,
     force_path_style: bool,
+    target_kind: str = "rooms",
+    canon_section_default: str = "reference",
+    canon_room_id: uuid.UUID | None = None,
     existing_source: SyncSource | None = None,
     clear_stored_credential: bool = False,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     normalized_extensions = _normalized_allowed_extensions(allowed_extensions)
     resolved_credential_type = "none"
     credential_ciphertext = None
+    binding_values: dict[str, Any] = {
+        "target_kind": target_kind,
+        "canon_section_default": canon_section_default,
+        "canon_room_id": canon_room_id,
+    }
 
     if source_kind == "s3":
         if not bucket:
@@ -577,6 +591,7 @@ def _resolve_sync_source_values(
             prefix=normalized_prefix,
         )
         return {
+            **binding_values,
             "root_path": resolved_root_path,
             "source_kind": "s3",
             "credential_type": "none",
@@ -603,6 +618,7 @@ def _resolve_sync_source_values(
             clear_stored_credential=clear_stored_credential,
         )
         return {
+            **binding_values,
             "root_path": root_path,
             "source_kind": "repo",
             "credential_type": resolved_credential_type,
@@ -623,6 +639,7 @@ def _resolve_sync_source_values(
             detail="Repo credentials are only valid for remote github.com repo URLs",
         )
     return {
+        **binding_values,
         "root_path": resolved_root_path,
         "source_kind": source_kind,
         "credential_type": "none",
@@ -647,6 +664,40 @@ async def _ensure_sync_source_mutable(db: AsyncSession, *, tenant_id: str, sourc
     )
     if active is not None:
         raise HTTPException(status_code=409, detail="Sync source has an active sync run")
+
+
+async def _ensure_canon_room_exists(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    room_id: uuid.UUID | None,
+) -> None:
+    """A canon binding may only point at a room this tenant owns."""
+    if room_id is None:
+        return
+    room = await db.scalar(
+        select(Room.id)
+        .where(Room.tenant_id == tenant_id)
+        .where(Room.id == room_id)
+        .limit(1)
+    )
+    if room is None:
+        raise HTTPException(status_code=404, detail="room not found")
+
+
+async def _sync_source_has_any_run(db: AsyncSession, *, tenant_id: str, source_id: uuid.UUID) -> bool:
+    """True once the source has run at all, failed runs included.
+
+    Retargeting is only safe before the first run: after that, ``SyncRun`` and
+    ``SyncSourceFile`` rows describe work done under the old target.
+    """
+    run_id = await db.scalar(
+        select(SyncRun.id)
+        .where(SyncRun.tenant_id == tenant_id)
+        .where(SyncRun.sync_source_id == source_id)
+        .limit(1)
+    )
+    return run_id is not None
 
 
 def _ensure_sync_source_active(source: SyncSource) -> None:
@@ -1024,6 +1075,12 @@ async def mark_item_dirty(
 
 
 async def create_sync_source(db: AsyncSession, *, tenant_id: str, body: SyncSourceCreate) -> SyncSource:
+    # Bucket sources are out of scope for canon in v1: a binding reads markdown
+    # through the repo transport, so anything else is a caller mistake.
+    if body.target_kind == "canon" and body.source_kind != "repo":
+        raise HTTPException(status_code=422, detail="a canon binding requires a repo source")
+    await _ensure_canon_room_exists(db, tenant_id=tenant_id, room_id=body.canon_room_id)
+
     resolved = _resolve_sync_source_values(
         source_kind=body.source_kind,
         root_path=body.root_path,
@@ -1037,7 +1094,18 @@ async def create_sync_source(db: AsyncSession, *, tenant_id: str, body: SyncSour
         endpoint_url=body.endpoint_url,
         region=body.region,
         force_path_style=body.force_path_style,
+        target_kind=body.target_kind,
+        canon_section_default=body.canon_section_default,
+        canon_room_id=body.canon_room_id,
     )
+
+    if resolved["target_kind"] == "canon":
+        # Before the insert: a binding nobody can read is refused here, not
+        # discovered by the first scheduled run.
+        await probe_canon_repo(
+            str(resolved["root_path"]),
+            credential_ciphertext=resolved["credential_ciphertext"],
+        )
 
     source = SyncSource(
         tenant_id=tenant_id,
@@ -1053,6 +1121,10 @@ async def create_sync_source(db: AsyncSession, *, tenant_id: str, body: SyncSour
         force_path_style=resolved["force_path_style"],
         scan_interval_seconds=resolved["scan_interval_seconds"],
         allowed_extensions=resolved["allowed_extensions"],
+        target_kind=resolved["target_kind"],
+        canon_section_default=resolved["canon_section_default"],
+        canon_room_id=resolved["canon_room_id"],
+        canon_owns_pages=True,
         status="active",
     )
     db.add(source)
@@ -1088,6 +1160,32 @@ async def update_sync_source(
         if "allowed_extensions" in fields and body.allowed_extensions is not None
         else source.allowed_extensions
     )
+
+    current_target_kind = source.target_kind or "rooms"
+    target_target_kind = (
+        body.target_kind
+        if "target_kind" in fields and body.target_kind is not None
+        else current_target_kind
+    )
+    if target_target_kind != current_target_kind and await _sync_source_has_any_run(
+        db, tenant_id=tenant_id, source_id=source.id
+    ):
+        # Every run and per-file row describes work done under the old target;
+        # retargeting after the first run would rewrite history's meaning.
+        raise HTTPException(status_code=409, detail="target_kind cannot change after a run")
+    if target_target_kind == "canon" and target_source_kind != "repo":
+        raise HTTPException(status_code=422, detail="a canon binding requires a repo source")
+
+    target_canon_section_default = (
+        body.canon_section_default
+        if "canon_section_default" in fields and body.canon_section_default is not None
+        else (source.canon_section_default or "reference")
+    )
+    target_canon_room_id = (
+        body.canon_room_id if "canon_room_id" in fields else source.canon_room_id
+    )
+    if "canon_room_id" in fields:
+        await _ensure_canon_room_exists(db, tenant_id=tenant_id, room_id=target_canon_room_id)
 
     if target_source_kind == "s3":
         target_root_path = None
@@ -1137,9 +1235,22 @@ async def update_sync_source(
         endpoint_url=target_endpoint_url,
         region=target_region,
         force_path_style=target_force_path_style,
+        target_kind=target_target_kind,
+        canon_section_default=target_canon_section_default,
+        canon_room_id=target_canon_room_id,
         existing_source=source,
         clear_stored_credential=body.clear_stored_credential,
     )
+
+    if resolved["target_kind"] == "canon" and (
+        current_target_kind != "canon" or resolved["root_path"] != source.root_path
+    ):
+        # A new binding, or a binding pointed somewhere else, is only as good
+        # as its reachability; probe before the row is rewritten.
+        await probe_canon_repo(
+            str(resolved["root_path"]),
+            credential_ciphertext=resolved["credential_ciphertext"],
+        )
 
     source.name = target_name
     source.root_path = resolved["root_path"]
@@ -1153,6 +1264,9 @@ async def update_sync_source(
     source.force_path_style = resolved["force_path_style"]
     source.scan_interval_seconds = resolved["scan_interval_seconds"]
     source.allowed_extensions = resolved["allowed_extensions"]
+    source.target_kind = resolved["target_kind"]
+    source.canon_section_default = resolved["canon_section_default"]
+    source.canon_room_id = resolved["canon_room_id"]
     source.last_error = None
     await db.commit()
     await db.refresh(source)
@@ -1260,6 +1374,12 @@ async def restore_sync_source(
     return source
 
 
+# P8 routes a canon binding through plan_import/commit_import. Until it lands a
+# canon source must fail loudly rather than fall through to the room path,
+# which would write room items for pages a run is never allowed to publish.
+CANON_RUNS_NOT_IMPLEMENTED = "canon runs are not implemented yet"
+
+
 async def create_or_get_sync_run(
     db: AsyncSession,
     *,
@@ -1278,6 +1398,24 @@ async def create_or_get_sync_run(
     )
     if active:
         return active, False
+
+    if (source.target_kind or "rooms") == "canon":
+        # Record the refusal as a failed run so it is visible in run history
+        # instead of vanishing into a worker log, and return created=False so
+        # no caller queues it.
+        run = SyncRun(
+            sync_source_id=source.id,
+            tenant_id=tenant_id,
+            status="failed",
+            triggered_by=triggered_by,
+            error_message=CANON_RUNS_NOT_IMPLEMENTED,
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(run)
+        source.last_error = CANON_RUNS_NOT_IMPLEMENTED
+        await db.commit()
+        await db.refresh(run)
+        return run, False
 
     run = SyncRun(
         sync_source_id=source.id,
@@ -4199,10 +4337,7 @@ def _repo_credential_value(source: SyncSource) -> str:
     return _decrypt_repo_credential(source.credential_ciphertext)
 
 
-@contextmanager
-def _repo_git_environment(source: SyncSource):
-    repo_root = _repo_checkout_dir(source).parent
-    repo_root.mkdir(parents=True, exist_ok=True)
+def _git_base_environment() -> dict[str, str]:
     # L-12: os.environ.copy() used to hand the git subprocess (and anything
     # its GIT_ASKPASS/GIT_SSH_COMMAND scripts spawn) every variable the
     # backend process holds — API_KEY, CREDENTIAL_PEPPER, DATABASE_URL,
@@ -4234,6 +4369,14 @@ def _repo_git_environment(source: SyncSource):
         if name in os.environ
     }
     env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+@contextmanager
+def _repo_git_environment(source: SyncSource):
+    repo_root = _repo_checkout_dir(source).parent
+    repo_root.mkdir(parents=True, exist_ok=True)
+    env = _git_base_environment()
     clone_url = _github_https_repo_url(source.root_path)
 
     with tempfile.TemporaryDirectory(dir=str(repo_root)) as temp_dir:
@@ -4271,6 +4414,130 @@ def _repo_git_environment(source: SyncSource):
             clone_url = _github_ssh_repo_url(source.root_path)
 
         yield env, clone_url
+
+
+# A canon binding is probed when it is created or retargeted, so a repo nobody
+# can read is a 422 on the request rather than a failed run discovered hours
+# later. Well under the 30s ceiling a request may spend here.
+# The probe has no SyncSource of its own; _repo_checkout_dir needs a tenant
+# segment for its scratch directory, and a fixed one keeps probes out of any
+# real tenant's checkout space.
+_CANON_PROBE_TENANT = "_canon_probe"
+
+
+def _canon_probe_credential_type(credential_ciphertext: str | None) -> str:
+    """Infer how the probe authenticates from the stored ciphertext alone.
+
+    ``probe_canon_repo`` only receives the ciphertext, which does not record
+    the credential type, so the decrypted value decides: an SSH key is a PEM
+    block, anything else is a GitHub token. With no stored ciphertext the only
+    credential left is the deployment PAT, which is what the run would use.
+    """
+    if credential_ciphertext:
+        try:
+            secret = _decrypt_repo_credential(credential_ciphertext)
+        except Exception:  # noqa: BLE001 - an undecryptable blob is still a PAT attempt
+            return "github_pat"
+        return "ssh_key" if "PRIVATE KEY" in secret else "github_pat"
+    if settings.github_pat:
+        return "deployment_github_pat"
+    return "none"
+
+
+def _canon_probe_source(root_path: str, credential_ciphertext: str | None) -> SyncSource:
+    """Transient source object so the probe borrows the run's git environment."""
+    return SyncSource(
+        id=uuid.uuid4(),
+        tenant_id=_CANON_PROBE_TENANT,
+        name="canon binding probe",
+        root_path=root_path,
+        source_kind="repo",
+        credential_type=_canon_probe_credential_type(credential_ciphertext),
+        credential_ciphertext=credential_ciphertext,
+        status="active",
+        scan_interval_seconds=900,
+    )
+
+
+def _probe_reason(result_stderr: str, result_stdout: str, secret: str | None) -> str:
+    """Last stderr line, with any credential scrubbed out of it."""
+    detail = (result_stderr or result_stdout or "").strip()
+    if not detail:
+        return "git command failed"
+    detail = detail.splitlines()[-1]
+    if secret:
+        detail = detail.replace(secret, "***")
+    return detail
+
+
+def _run_probe_git(args: list[str], *, env: dict[str, str], secret: str | None) -> None:
+    try:
+        result = subprocess.run(
+            args,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=CANON_SYNC_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"repo unreachable: probe timed out after {CANON_SYNC_PROBE_TIMEOUT_SECONDS}s",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="repo unreachable: git is not installed in the backend runtime",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"repo unreachable: {exc.strerror or 'git could not be started'}",
+        ) from exc
+
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"repo unreachable: {_probe_reason(result.stderr, result.stdout, secret)}",
+        )
+
+
+def _probe_canon_repo_blocking(root_path: str, credential_ciphertext: str | None) -> None:
+    secret = None
+    if credential_ciphertext:
+        try:
+            secret = _decrypt_repo_credential(credential_ciphertext)
+        except Exception:  # noqa: BLE001 - the probe itself reports the failure
+            secret = None
+
+    if _is_remote_github_repo(root_path):
+        source = _canon_probe_source(root_path, credential_ciphertext)
+        with _repo_git_environment(source) as (env, clone_url):
+            _run_probe_git(
+                ["git", *_GIT_HARDENING_ARGS, "ls-remote", "--heads", clone_url],
+                env=env,
+                secret=secret,
+            )
+        return
+
+    # A local checkout needs no transport; the same inert environment still
+    # applies so the probe cannot read secrets the run would not see either.
+    _run_probe_git(
+        ["git", *_GIT_HARDENING_ARGS, "-C", root_path, "rev-parse", "--verify", "HEAD"],
+        env=_git_base_environment(),
+        secret=None,
+    )
+
+
+async def probe_canon_repo(root_path: str, *, credential_ciphertext: str | None) -> None:
+    """Raise 422 ``repo unreachable: ...`` when a canon binding cannot be read.
+
+    Module level on purpose: ``create_sync_source`` calls this by name so a
+    test can monkeypatch it instead of standing up git. The blocking work runs
+    in a worker thread, and nothing here logs or echoes the credential.
+    """
+    await asyncio.to_thread(_probe_canon_repo_blocking, root_path, credential_ciphertext)
 
 
 def _prepare_repo_checkout(source: SyncSource) -> tuple[Path, str]:

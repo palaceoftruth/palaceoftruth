@@ -41,7 +41,7 @@ TENANT_TABLES = (
 # hook and, with it, the whole Helm upgrade.
 # test_rls_inventory_matches_every_tenant_model pins this to the real head so
 # the mismatch is caught in CI rather than during a release.
-REQUIRED_ALEMBIC_REVISION = "072_tenant_canon_pages"
+REQUIRED_ALEMBIC_REVISION = "073_repo_canon_bindings"
 
 POLICY_SQL = """
     CREATE POLICY tenant_isolation ON {table}

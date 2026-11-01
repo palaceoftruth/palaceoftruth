@@ -25,7 +25,27 @@ PalaceRunStatus = Literal["queued", "routing", "snapshotting", "tunneling", "com
 SyncRunStatus = Literal["queued", "running", "completed", "failed"]
 SyncSourceStatus = Literal["active", "disabled"]
 SyncSourceKind = Literal["folder", "repo", "s3"]
+SyncSourceTargetKind = Literal["rooms", "canon"]
 RepoCredentialType = Literal["none", "github_pat", "deployment_github_pat", "ssh_key"]
+
+# Mirrors the ck_sync_sources_canon_section constraint in migration 073 and
+# CANON_SECTIONS in app/models/canon.py.
+CANON_SECTION_VALUES = (
+    "identity",
+    "rules",
+    "glossary",
+    "runbook",
+    "charter",
+    "faq",
+    "reference",
+)
+
+
+def _validate_canon_section_default(value: str) -> str:
+    allowed = ", ".join(CANON_SECTION_VALUES)
+    if value not in CANON_SECTION_VALUES:
+        raise ValueError(f"canon_section_default must be one of: {allowed}")
+    return value
 
 
 def _not_blank(value: str, field_name: str) -> str:
@@ -952,11 +972,19 @@ class SyncSourceCreate(BaseModel):
     endpoint_url: str | None = None
     region: str | None = None
     force_path_style: bool = False
+    target_kind: SyncSourceTargetKind = "rooms"
+    canon_section_default: str = "reference"
+    canon_room_id: uuid.UUID | None = None
 
     @field_validator("name")
     @classmethod
     def validate_required_strings(cls, value: str, info) -> str:
         return _not_blank(value, info.field_name)
+
+    @field_validator("canon_section_default")
+    @classmethod
+    def validate_canon_section_default(cls, value: str) -> str:
+        return _validate_canon_section_default(value)
 
     @field_validator("root_path", "bucket", "endpoint_url", "region")
     @classmethod
@@ -1025,6 +1053,16 @@ class SyncSourceUpdate(BaseModel):
     endpoint_url: str | None = None
     region: str | None = None
     force_path_style: bool | None = None
+    target_kind: SyncSourceTargetKind | None = None
+    canon_section_default: str | None = None
+    canon_room_id: uuid.UUID | None = None
+
+    @field_validator("canon_section_default")
+    @classmethod
+    def validate_canon_section_default(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_canon_section_default(value)
 
     @field_validator("name")
     @classmethod
@@ -1073,6 +1111,10 @@ class SyncSourceSummary(BaseModel):
     endpoint_url: str | None = None
     region: str | None = None
     force_path_style: bool = False
+    target_kind: SyncSourceTargetKind = "rooms"
+    canon_section_default: str = "reference"
+    canon_room_id: uuid.UUID | None = None
+    canon_owns_pages: bool = True
     last_synced_at: datetime | None = None
     last_error: str | None = None
 
