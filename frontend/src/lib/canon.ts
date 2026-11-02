@@ -327,3 +327,60 @@ export function charterFreshness(
   }
   return { label: `Confirmed at generation ${confirmed}`, actionable: false };
 }
+
+/** What a sync run did to one path, in words a person reads at a glance. */
+export function syncActionLabel(action: string | null): string {
+  switch (action) {
+    case "create":
+      return "Created a page";
+    case "update":
+      return "Updated the page";
+    case "skip-unchanged":
+      return "Unchanged";
+    case "archive":
+      return "Archived the page";
+    case "conflict":
+      return "Conflict: page left alone";
+    case "error":
+      return "Could not be read";
+    default:
+      return "No action recorded";
+  }
+}
+
+/**
+ * One line for the last run: what it wrote, or that it wrote nothing.
+ *
+ * A run that changed nothing is the common, healthy case and must read as such
+ * rather than as a failure.
+ */
+export function syncRunSummary(run: {
+  pages_created: number;
+  pages_updated: number;
+  pages_archived: number;
+  pages_conflicted: number;
+  files_skipped: number;
+}): string {
+  const written = run.pages_created + run.pages_updated + run.pages_archived;
+  if (run.pages_conflicted > 0) {
+    return run.pages_conflicted === 1
+      ? "1 conflict needs a person"
+      : `${run.pages_conflicted} conflicts need a person`;
+  }
+  if (written === 0) {
+    return run.files_skipped > 0 ? "Nothing changed" : "Nothing to do";
+  }
+  const parts: string[] = [];
+  if (run.pages_created) parts.push(`${run.pages_created} created`);
+  if (run.pages_updated) parts.push(`${run.pages_updated} updated`);
+  if (run.pages_archived) parts.push(`${run.pages_archived} archived`);
+  return parts.join(", ");
+}
+
+/**
+ * The sentence that keeps a repo change from reading as a confirmation.
+ *
+ * A page the repository rewrote is newer, not truer. Only a person ratifies.
+ */
+export const SYNC_IS_EVIDENCE_NOT_RATIFICATION =
+  "A repo change updates the page. It does not confirm it. A page that is drifting stays drifting until a person ratifies it.";

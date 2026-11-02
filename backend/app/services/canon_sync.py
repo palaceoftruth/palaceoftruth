@@ -321,6 +321,14 @@ async def run_canon_sync(
             allowed_extensions=source.allowed_extensions,
         )
         files, skipped = _parse_candidates(checkout, candidates)
+        # A candidate that produced no ImportFile failed to parse. Its path is
+        # recorded against its row below, if the binding already has one.
+        parsed_paths = {file.path for file in files}
+        failed_paths = [
+            candidate.relative_path
+            for candidate in candidates
+            if candidate.relative_path not in parsed_paths
+        ]
 
         run.files_seen = len(candidates)
         run.files_skipped = len(skipped)
@@ -347,6 +355,15 @@ async def run_canon_sync(
         rows = await _source_file_rows(db, tenant_id=tenant_id, source_id=source_id)
         rows_by_path = {row.relative_path: row for row in rows}
         owned_slugs = {row.page_slug for row in rows if row.page_slug}
+
+        # A file that failed to parse is not in the plan, so it is recorded here:
+        # the run saw the path and did nothing with it. A row that does not exist
+        # yet is not created, and an existing row keeps its last_error verbatim.
+        for failed_path in failed_paths:
+            failed_row = rows_by_path.get(failed_path)
+            if failed_row is not None:
+                failed_row.last_action = "error"
+                failed_row.last_seen_run_id = run_id
 
         created = updated = conflicted = archived = 0
         changed = 0
@@ -465,6 +482,9 @@ async def run_canon_sync(
             row.modified_ns = candidate.modified_ns
             row.status = "active"
             row.last_seen_run_id = run_id
+            # ``action`` is already one of create / update / conflict /
+            # skip-unchanged: the plan's four outcomes, in the same words.
+            row.last_action = action
             row.last_error = None
             if action in ("create", "update") or (action == "skip-unchanged" and owned):
                 row.page_slug = entry.slug
@@ -526,6 +546,8 @@ async def run_canon_sync(
                 row.page_slug = None
             row.status = "deleted"
             row.last_seen_run_id = run_id
+            # The path left the repo whether or not its page still existed.
+            row.last_action = "archive"
 
         now = datetime.now(timezone.utc)
         run.files_changed = changed

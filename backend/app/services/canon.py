@@ -53,6 +53,13 @@ CANON_IMPORT_MAX_TOTAL_BYTES = 5_000_000
 # was confirmed has changed enough that the page may no longer be true. The
 # number lives here with every other canon cap so it can be changed in one place.
 CANON_DRIFT_MEMBERSHIP_THRESHOLD = 10
+# Run history is read a page at a time: a tenant can have thousands of runs and
+# a run can touch hundreds of files, so both lists carry a default and a hard
+# ceiling like every other canon output.
+CANON_RUN_LIST_DEFAULT = 20
+CANON_RUN_LIST_MAX = 100
+CANON_RUN_FILE_DEFAULT = 200
+CANON_RUN_FILE_MAX = 1000
 
 # Rough characters-per-token for the per-connect estimate. Deliberately
 # conservative: it over-counts tokens rather than under-counting them.
@@ -193,6 +200,20 @@ def clamp_page_max_chars(requested: int | None) -> int:
     if requested is None:
         return CANON_PAGE_GET_DEFAULT_CHARS
     return max(1, min(int(requested), CANON_PAGE_GET_MAX_CHARS))
+
+
+def clamp_run_list_limit(value: int | None) -> int:
+    """The single place the 20 default / 100 hard-max run-list rule lives."""
+    if value is None:
+        return CANON_RUN_LIST_DEFAULT
+    return max(1, min(int(value), CANON_RUN_LIST_MAX))
+
+
+def clamp_run_file_limit(value: int | None) -> int:
+    """The single place the 200 default / 1000 hard-max run-file rule lives."""
+    if value is None:
+        return CANON_RUN_FILE_DEFAULT
+    return max(1, min(int(value), CANON_RUN_FILE_MAX))
 
 
 def per_connect_token_estimate(text: str) -> int:

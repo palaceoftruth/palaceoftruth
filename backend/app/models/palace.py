@@ -322,6 +322,9 @@ class SyncSourceFile(Base):
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     relative_path: Mapped[str] = mapped_column(Text, nullable=False)
     page_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What the last run did to this path (create, update, skip-unchanged,
+    # conflict, archive or error); null for rows written before it was recorded.
+    last_action: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
