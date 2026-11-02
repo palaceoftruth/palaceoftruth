@@ -26,6 +26,7 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_auth_context, require_api_capability, require_human_author
+from app.workers.queues import enqueue_palace_job
 from app.database import get_db
 from app.schemas.canon import (
     CanonDigestOut,
@@ -96,6 +97,11 @@ from app.services.canon_drift import (
     DRIFT_STATES,
     detect_canon_drift,
     list_canon_drift,
+)
+from app.services.canon_sync import (
+    CanonSyncInFlightError,
+    get_canon_binding,
+    start_canon_sync_run,
 )
 from app.services.canon_history import (
     get_canon_run,
@@ -778,3 +784,48 @@ async def get_canon_sync_run(
     if run is None:
         raise HTTPException(status_code=404, detail="sync run not found")
     return await _run_detail(db, tenant_id=request.state.tenant_id, run=run)
+
+@router.post(
+    "/sync/bindings/{source_id}/run",
+    response_model=CanonSyncRunOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=_WRITE,
+)
+async def post_canon_sync_run(
+    request: Request,
+    source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncRunOut:
+    """Start a sync run for one binding.
+
+    A manual run is a human act even though the run only writes drafts, so it
+    sits behind the human wall. A refused start leaves the database unchanged.
+    """
+    source = await get_canon_binding(
+        db, tenant_id=request.state.tenant_id, source_id=source_id
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="binding not found")
+    try:
+        run = await start_canon_sync_run(
+            db, tenant_id=request.state.tenant_id, source=source, triggered_by="manual"
+        )
+    except CanonSyncInFlightError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": f"a sync run is already {exc.run.status} for this binding",
+                "run_id": str(exc.run.id),
+                "status": exc.run.status,
+            },
+        ) from exc
+    except (CanonError, CanonValidationError) as exc:
+        raise _raise_for(exc) from exc
+
+    await enqueue_palace_job(
+        request.app.state.arq_pool,
+        "run_sync_source",
+        sync_run_id=str(run.id),
+        tenant_id=request.state.tenant_id,
+    )
+    return _run_out(run)

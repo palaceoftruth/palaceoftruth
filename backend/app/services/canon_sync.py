@@ -43,7 +43,7 @@ from app.models.palace import (
     SyncSource,
     SyncSourceFile,
 )
-from app.services.canon import validate_section
+from app.services.canon import CanonValidationError, validate_section
 from app.services.canon_authoring import (
     UNSET,
     CanonNotFoundError,
@@ -62,12 +62,14 @@ from app.services.canon_import import (
 )
 from app.services.curation_artifacts import _record_artifact_event
 from app.services.palace import (
+    SYNC_ACTIVE_STATUSES,
     _git_base_environment,
     _is_remote_repo_source,
     _iter_repo_sync_files,
     _prepare_repo_checkout,
     _repo_git_environment,
     _run_git_command,
+    probe_canon_repo,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,88 @@ _TARGET_RUNTIME = "palace"
 # characters, so a slug and a content hash always fit without truncation.
 _CONFLICT_DEDUPE_PREFIX = "canon-sync-conflict"
 _REMOVED_DEDUPE_PREFIX = "canon-sync-removed"
+
+
+class CanonSyncInFlightError(Exception):
+    """Raised when a run is already active for this binding."""
+
+    def __init__(self, run: SyncRun) -> None:
+        super().__init__(f"a sync run is already {run.status} for this binding")
+        self.run = run
+
+
+async def get_canon_binding(
+    db: AsyncSession, *, tenant_id: str, source_id: uuid.UUID
+) -> SyncSource | None:
+    """One sync source this tenant owns, or ``None``.
+
+    The tenant filter is the only thing that makes an id from a caller safe, so
+    it is part of the query rather than a check afterwards.
+    """
+    return await db.scalar(
+        select(SyncSource)
+        .where(SyncSource.tenant_id == tenant_id)
+        .where(SyncSource.id == source_id)
+        .limit(1)
+    )
+
+
+async def start_canon_sync_run(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    source: SyncSource,
+    triggered_by: str = "manual",
+) -> SyncRun:
+    """Start one manual canon sync run for a binding this tenant owns.
+
+    A manual sync is a human act, so every refusal has to be a sentence the
+    person can act on: the source must be this tenant's canon binding, it must
+    be active, no run may already be in flight, and the repository must be
+    readable. The checks are read-only and run in that order, so a refused start
+    leaves the database exactly as it was: no row is created until the last
+    check has passed.
+    """
+    # 1. Another tenant's binding is indistinguishable from a missing one.
+    if source.tenant_id != tenant_id:
+        raise CanonValidationError("sync source not found")
+    # 2. A non-canon binding has no canon to sync.
+    if source.target_kind != "canon":
+        raise CanonValidationError("this source is not a canon binding")
+    # 3. A paused binding does not run, however it was asked.
+    if source.status != "active":
+        raise CanonValidationError("this binding is not active")
+
+    # 4. One run at a time: an active run is reported, never reused or doubled.
+    active = await db.scalar(
+        select(SyncRun)
+        .where(SyncRun.tenant_id == tenant_id)
+        .where(SyncRun.sync_source_id == source.id)
+        .where(SyncRun.status.in_(SYNC_ACTIVE_STATUSES))
+        .order_by(SyncRun.started_at.desc())
+        .limit(1)
+    )
+    if active is not None:
+        raise CanonSyncInFlightError(active)
+
+    # 5. Prove the repository is readable before a row claims a run exists. The
+    # probe's 422 "repo unreachable: ..." propagates verbatim: it already names
+    # the reason and already scrubs the credential out of git output.
+    await probe_canon_repo(
+        source.root_path, credential_ciphertext=source.credential_ciphertext
+    )
+
+    # 6. Everything passed, so the run may exist.
+    run = SyncRun(
+        sync_source_id=source.id,
+        tenant_id=tenant_id,
+        status="queued",
+        triggered_by=triggered_by,
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    return run
 
 
 def _resolve_checkout(source: SyncSource) -> tuple[Path, str | None]:

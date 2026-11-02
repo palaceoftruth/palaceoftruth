@@ -37,6 +37,7 @@ import type {
   CanonImportPlan,
   CanonDriftList,
   CanonDriftDetectResponse,
+  CanonSyncRun,
   CanonSyncRunDetail,
   CanonSyncRunList,
   CanonImportCommitResponse,
@@ -107,6 +108,14 @@ function parseErrorMessage(status: number, text: string): string {
     const body = JSON.parse(text) as { detail?: unknown; error_description?: unknown };
     if (typeof body.detail === "string") {
       message = body.detail;
+    } else if (
+      body.detail !== null &&
+      typeof body.detail === "object" &&
+      typeof (body.detail as { message?: unknown }).message === "string"
+    ) {
+      // A structured refusal (a run already in flight, for one) carries its
+      // reason in `message`; showing raw JSON would bury the reason.
+      message = (body.detail as { message: string }).message;
     } else if (typeof body.error_description === "string") {
       message = body.error_description;
     }
@@ -498,6 +507,11 @@ export const api = {
 
   getCanonSyncRun: (runId: string) =>
     req<CanonSyncRunDetail>(`/canon/sync/runs/${encodeURIComponent(runId)}`),
+
+  startCanonSyncRun: (sourceId: string) =>
+    req<CanonSyncRun>(`/canon/sync/bindings/${encodeURIComponent(sourceId)}/run`, {
+      method: "POST",
+    }),
 
   // --- Canon -------------------------------------------------------------
   // Read is open to any authorized principal. Write is refused by the API unless
