@@ -36,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canon import CanonPage
+from app.models.item import Item
 from app.models.palace import (
     CandidateCurationArtifact,
     Room,
@@ -43,7 +44,11 @@ from app.models.palace import (
     SyncSource,
     SyncSourceFile,
 )
-from app.services.canon import CanonValidationError, validate_section
+from app.services.canon import (
+    CANON_IMPORT_MAX_FILE_BYTES,
+    CanonValidationError,
+    validate_section,
+)
 from app.services.canon_authoring import (
     UNSET,
     CanonNotFoundError,
@@ -56,6 +61,7 @@ from app.services.canon_import import (
     binding_section,
     check_import_batch_shape,
     parse_import_file,
+    slug_from_path,
     plan_import,
     stored_body_hash,
     validate_import_batch,
@@ -659,3 +665,205 @@ async def run_canon_sync(
             source.last_error = reason
         await db.commit()
         return "failed", str(exc)
+
+
+# --- reading and settling one conflict -------------------------------------
+# A conflict is a question a person answers. Reading it shows both sides without
+# writing anything; accepting it is the answer "the repo's text wins". Neither
+# publishes: accepting a file is not vouching for what it says.
+
+_NO_PAGE_MESSAGE = "no page is bound to this file"
+_FILE_GONE_MESSAGE = "the file is gone from the repo"
+
+
+def _checkout_relative_file(checkout: Path, relative_path: str) -> Path:
+    """The file inside the checkout, or a refusal that names no host path.
+
+    ``relative_path`` arrives from a caller, so it may only address something
+    inside this binding's working tree. ``resolve`` is used on both sides so a
+    symlink cannot walk out of the checkout either.
+    """
+    root = checkout.resolve()
+    target = (root / relative_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise CanonValidationError(_NO_PAGE_MESSAGE) from None
+    return target
+
+
+def _read_repo_side(
+    target: Path, relative_path: str
+) -> tuple[ImportFile | None, str, str | None, bool]:
+    """``(parsed file, body text, content hash, truncated)``, never raising.
+
+    Bad bytes are replaced rather than refused: a preview that raises on a
+    mangled file shows the reviewer nothing, which is worse than showing the
+    file with its damage visible. The text is capped at the import cap, because
+    the same ceiling governs what a run would ever import from this file.
+    """
+    text = target.read_bytes().decode("utf-8", errors="replace")
+    truncated = len(text) > CANON_IMPORT_MAX_FILE_BYTES
+    if truncated:
+        text = text[:CANON_IMPORT_MAX_FILE_BYTES]
+    try:
+        # Re-encoded from the replaced text so the parser cannot fail on the same
+        # bytes the reader just tolerated.
+        parsed = parse_import_file(relative_path, text.encode("utf-8"))
+    except CanonValidationError:
+        return None, text, None, truncated
+    return parsed, parsed.body, parsed.content_hash, truncated
+
+
+async def _page_side(
+    db: AsyncSession, *, tenant_id: str, slug: str
+) -> tuple[str, str]:
+    """``(status, body)`` of one canon page, or a refusal.
+
+    The body lives on the governing item, which is what retrieval reads.
+    """
+    row = (
+        await db.execute(
+            select(CanonPage.status, Item.raw_content)
+            .join(Item, Item.id == CanonPage.item_id)
+            .where(CanonPage.tenant_id == tenant_id)
+            .where(CanonPage.slug == slug)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        raise CanonValidationError(_NO_PAGE_MESSAGE)
+    status, raw_content = row
+    return status, raw_content or ""
+
+
+async def read_conflict_pair(
+    db: AsyncSession, *, tenant_id: str, source: SyncSource, relative_path: str
+) -> dict:
+    """Both sides of one conflict, read live and stored nowhere.
+
+    The repo side is the file as it stands in the checkout; the page side is the
+    body canon currently holds. A file that is gone from the repo is a fact the
+    caller has to see, not an error, so it comes back as empty text with
+    ``missing`` set: the page still exists and still needs a decision.
+    """
+    checkout, _branch = _resolve_checkout(source)
+    # The path is checked against the checkout before anything else touches the
+    # repository: a refusal must not depend on the repo being readable.
+    target = _checkout_relative_file(checkout, relative_path)
+    commit_sha = _head_commit_sha(source, checkout)
+
+    # The path's own row is what knows the slug when the file is gone: the slug
+    # is derived from the filename, but there is no file left to derive it from.
+    row = await db.scalar(
+        select(SyncSourceFile)
+        .where(SyncSourceFile.tenant_id == tenant_id)
+        .where(SyncSourceFile.sync_source_id == source.id)
+        .where(SyncSourceFile.relative_path == relative_path)
+        .limit(1)
+    )
+
+    # ``parse_import_file`` always derives the slug from the filename, so a path
+    # with no file left still names its slug the same way a run would have.
+    path_slug = slug_from_path(relative_path) or None
+    row_slug = row.page_slug if row is not None else None
+
+    missing = not target.is_file()
+    if missing:
+        # A gone file has no text to show; the page still needs its decision.
+        repo_text, file_hash, truncated = "", None, False
+        slug = path_slug or row_slug
+    else:
+        parsed, repo_text, file_hash, truncated = _read_repo_side(target, relative_path)
+        # The slug comes from the file's own front matter and name, never from
+        # the row: a file that renamed its slug must not be shown under the old.
+        slug = parsed.slug if parsed is not None else (path_slug or row_slug)
+
+    if slug is None:
+        raise CanonValidationError(_NO_PAGE_MESSAGE)
+
+    page_status, page_text = await _page_side(db, tenant_id=tenant_id, slug=slug)
+    return {
+        "path": relative_path,
+        "slug": slug,
+        "repo_text": repo_text,
+        "page_text": page_text,
+        "page_status": page_status,
+        "commit_sha": commit_sha,
+        "file_hash": file_hash,
+        "missing": missing,
+        "truncated": truncated,
+    }
+
+
+async def accept_repo_version(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    source: SyncSource,
+    relative_path: str,
+    actor_subject: str,
+) -> CanonPage:
+    """The human decision that the repo's text wins for this page.
+
+    The page returns to ``draft``: the body now comes from the file, and nothing
+    about that is a publication. Ownership moves to this binding so the next run
+    treats the page as its own instead of asking again.
+    """
+    pair = await read_conflict_pair(
+        db, tenant_id=tenant_id, source=source, relative_path=relative_path
+    )
+    if pair["missing"]:
+        raise CanonValidationError(_FILE_GONE_MESSAGE)
+
+    slug = pair["slug"]
+    write = await update_canon_page(
+        db,
+        tenant_id=tenant_id,
+        author_subject=actor_subject,
+        slug=slug,
+        body=pair["repo_text"],
+        change_note=f"Accepted the repo version of {relative_path}",
+        commit=False,
+    )
+    # ``update_canon_page`` already returns the page to draft; the item is set
+    # here because an unchanged body would otherwise leave it ``ready`` and let a
+    # page that is no longer published be quoted.
+    write.item.status = "processing"
+    await db.commit()
+
+    # Ownership: the next run reads this row, sees the slug and the hash it just
+    # accepted, and plans a no-op instead of filing the same conflict again.
+    row = await db.scalar(
+        select(SyncSourceFile)
+        .where(SyncSourceFile.tenant_id == tenant_id)
+        .where(SyncSourceFile.sync_source_id == source.id)
+        .where(SyncSourceFile.relative_path == relative_path)
+        .limit(1)
+    )
+    if row is None:
+        row = SyncSourceFile(
+            sync_source_id=source.id,
+            tenant_id=tenant_id,
+            relative_path=relative_path,
+        )
+        db.add(row)
+    row.page_slug = slug
+    row.content_hash = pair["file_hash"]
+    await db.commit()
+
+    # ``ck_candidate_curation_artifact_status`` has no ``resolved`` value
+    # (draft, needs_source, reviewable, promoted, proposed, approved, rejected,
+    # stale, deprecated, superseded), so the open conflict artifact is left as it
+    # stands: the decision is recorded on the page and the binding's row, not by
+    # inventing a status the schema does not accept.
+
+    page = await db.scalar(
+        select(CanonPage)
+        .where(CanonPage.tenant_id == tenant_id)
+        .where(CanonPage.slug == slug)
+        .limit(1)
+    )
+    if page is None:  # pragma: no cover - the write above created or updated it
+        raise CanonValidationError(_NO_PAGE_MESSAGE)
+    return page
