@@ -45,9 +45,17 @@ from app.schemas.canon import (
     CanonRevisionOut,
     CanonSearchHitOut,
     CanonSearchResponse,
+    CanonSyncFileOut,
+    CanonSyncRunDetailOut,
+    CanonSyncRunListOut,
+    CanonSyncRunOut,
     CanonWriteResponse,
 )
 from app.services.canon import (
+    CANON_RUN_FILE_DEFAULT,
+    CANON_RUN_FILE_MAX,
+    CANON_RUN_LIST_DEFAULT,
+    CANON_RUN_LIST_MAX,
     CanonCapExceeded,
     CanonError,
     CanonValidationError,
@@ -88,6 +96,12 @@ from app.services.canon_drift import (
     DRIFT_STATES,
     detect_canon_drift,
     list_canon_drift,
+)
+from app.services.canon_history import (
+    get_canon_run,
+    latest_canon_run,
+    list_canon_run_files,
+    list_canon_runs,
 )
 
 router = APIRouter(prefix="/canon", tags=["canon"])
@@ -683,3 +697,84 @@ async def post_canon_drift_detect(
         deduplicated=summary.deduplicated,
         counts=summary.counts,
     )
+
+# --- sync runs -------------------------------------------------------------
+# Read-only views over the sync engine's own records. A run is evidence of what
+# the repository did; it is never a ratification, so nothing here writes.
+
+
+def _run_out(run) -> CanonSyncRunOut:
+    return CanonSyncRunOut(
+        id=run.id,
+        sync_source_id=run.sync_source_id,
+        status=run.status,
+        triggered_by=run.triggered_by,
+        commit_sha=run.commit_sha,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        files_seen=run.files_seen,
+        files_changed=run.files_changed,
+        files_skipped=run.files_skipped,
+        pages_created=run.pages_created,
+        pages_updated=run.pages_updated,
+        pages_archived=run.pages_archived,
+        pages_conflicted=run.pages_conflicted,
+        error_message=run.error_message,
+    )
+
+
+def _file_out(row) -> CanonSyncFileOut:
+    return CanonSyncFileOut(
+        relative_path=row.relative_path,
+        page_slug=row.page_slug,
+        action=row.last_action,
+        status=row.status,
+        last_error=row.last_error,
+    )
+
+
+async def _run_detail(db: AsyncSession, *, tenant_id: str, run) -> CanonSyncRunDetailOut:
+    files = await list_canon_run_files(
+        db, tenant_id=tenant_id, run_id=run.id, limit=CANON_RUN_FILE_MAX
+    )
+    detail = _run_out(run)
+    return CanonSyncRunDetailOut(
+        **detail.model_dump(), files=[_file_out(row) for row in files]
+    )
+
+
+@router.get("/sync/runs", response_model=CanonSyncRunListOut, dependencies=_READ)
+async def get_canon_sync_runs(
+    request: Request,
+    source_id: uuid.UUID | None = Query(None),
+    limit: int = Query(CANON_RUN_LIST_DEFAULT, ge=1, le=CANON_RUN_LIST_MAX),
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncRunListOut:
+    runs = await list_canon_runs(
+        db, tenant_id=request.state.tenant_id, source_id=source_id, limit=limit
+    )
+    return CanonSyncRunListOut(runs=[_run_out(run) for run in runs], limit=limit)
+
+
+@router.get("/sync/runs/latest", response_model=CanonSyncRunDetailOut, dependencies=_READ)
+async def get_canon_sync_latest_run(
+    request: Request,
+    source_id: uuid.UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncRunDetailOut:
+    run = await latest_canon_run(db, tenant_id=request.state.tenant_id, source_id=source_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no sync run for this source")
+    return await _run_detail(db, tenant_id=request.state.tenant_id, run=run)
+
+
+@router.get("/sync/runs/{run_id}", response_model=CanonSyncRunDetailOut, dependencies=_READ)
+async def get_canon_sync_run(
+    request: Request,
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncRunDetailOut:
+    run = await get_canon_run(db, tenant_id=request.state.tenant_id, run_id=run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="sync run not found")
+    return await _run_detail(db, tenant_id=request.state.tenant_id, run=run)

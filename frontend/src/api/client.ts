@@ -37,6 +37,8 @@ import type {
   CanonImportPlan,
   CanonDriftList,
   CanonDriftDetectResponse,
+  CanonSyncRunDetail,
+  CanonSyncRunList,
   CanonImportCommitResponse,
   CanonWriteResponse,
   PalaceRetrieveResponse,
@@ -480,6 +482,22 @@ export const api = {
 
   detectCanonDrift: () =>
     req<CanonDriftDetectResponse>("/canon/drift/detect", { method: "POST" }),
+
+  listCanonSyncRuns: (params: { sourceId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.sourceId) query.set("source_id", params.sourceId);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return req<CanonSyncRunList>(`/canon/sync/runs${suffix}`);
+  },
+
+  getLatestCanonSyncRun: (sourceId: string) =>
+    req<CanonSyncRunDetail>(
+      `/canon/sync/runs/latest?source_id=${encodeURIComponent(sourceId)}`,
+    ),
+
+  getCanonSyncRun: (runId: string) =>
+    req<CanonSyncRunDetail>(`/canon/sync/runs/${encodeURIComponent(runId)}`),
 
   // --- Canon -------------------------------------------------------------
   // Read is open to any authorized principal. Write is refused by the API unless

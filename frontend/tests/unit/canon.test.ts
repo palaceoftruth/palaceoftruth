@@ -20,6 +20,9 @@ import {
   bodyLengthState,
   formToPayload,
   groupPagesBySection,
+  SYNC_IS_EVIDENCE_NOT_RATIFICATION,
+  syncActionLabel,
+  syncRunSummary,
 } from "../../src/lib/canon.ts";
 import type { CanonPage, CanonRevision } from "../../src/api/types.ts";
 
@@ -385,4 +388,56 @@ test("a draft that was never ratified is not a drift alarm", () => {
 
 test("no charter means no freshness claim at all", () => {
   assert.equal(charterFreshness(null, 3), null);
+});
+
+
+test("every recorded sync action reads as a sentence, not a token", () => {
+  assert.equal(syncActionLabel("create"), "Created a page");
+  assert.equal(syncActionLabel("update"), "Updated the page");
+  assert.equal(syncActionLabel("skip-unchanged"), "Unchanged");
+  assert.equal(syncActionLabel("archive"), "Archived the page");
+  assert.equal(syncActionLabel("conflict"), "Conflict: page left alone");
+  assert.equal(syncActionLabel("error"), "Could not be read");
+  assert.equal(syncActionLabel(null), "No action recorded");
+  assert.equal(syncActionLabel("something-new"), "No action recorded");
+});
+
+test("a run that wrote nothing reads as healthy, not as a failure", () => {
+  const quiet = {
+    pages_created: 0,
+    pages_updated: 0,
+    pages_archived: 0,
+    pages_conflicted: 0,
+    files_skipped: 19,
+  };
+  assert.equal(syncRunSummary(quiet), "Nothing changed");
+  assert.equal(syncRunSummary({ ...quiet, files_skipped: 0 }), "Nothing to do");
+});
+
+test("a run with a conflict leads with the conflict, not with its writes", () => {
+  const summary = syncRunSummary({
+    pages_created: 4,
+    pages_updated: 2,
+    pages_archived: 1,
+    pages_conflicted: 1,
+    files_skipped: 0,
+  });
+  assert.equal(summary, "1 conflict needs a person");
+});
+
+test("a run reports each kind of write it made", () => {
+  const summary = syncRunSummary({
+    pages_created: 3,
+    pages_updated: 1,
+    pages_archived: 2,
+    pages_conflicted: 0,
+    files_skipped: 0,
+  });
+  assert.equal(summary, "3 created, 1 updated, 2 archived");
+});
+
+test("the panel says a repo change is evidence, not a ratification", () => {
+  assert.match(SYNC_IS_EVIDENCE_NOT_RATIFICATION, /does not confirm/);
+  assert.match(SYNC_IS_EVIDENCE_NOT_RATIFICATION, /ratifies/);
+  assert.doesNotMatch(SYNC_IS_EVIDENCE_NOT_RATIFICATION, /confirmed the page/);
 });

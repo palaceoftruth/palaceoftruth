@@ -5,6 +5,7 @@ import { api, ApiError } from "../api/client";
 import type {
   CanonDigest,
   CanonDriftList,
+  CanonSyncRunDetail,
   CanonImportCommitResponse,
   CanonImportPlan,
   CanonPage,
@@ -25,6 +26,9 @@ import {
   driftStateLabel,
   formatBytes,
   isDriftActionable,
+  SYNC_IS_EVIDENCE_NOT_RATIFICATION,
+  syncActionLabel,
+  syncRunSummary,
   importActionLabel,
   importPreflight,
   isImportableName,
@@ -129,6 +133,9 @@ export default function Canon() {
   // page list so a drift read failure cannot blank the page.
   const [drift, setDrift] = useState<CanonDriftList | null>(null);
   const [driftBusy, setDriftBusy] = useState(false);
+  // The last sync run: what the repository did, and to which pages. Loaded
+  // separately so a failed read cannot blank the page list either.
+  const [sync, setSync] = useState<CanonSyncRunDetail | null>(null);
   const [driftError, setDriftError] = useState<string | null>(null);
   const importCheck = useMemo(() => importPreflight(importFiles), [importFiles]);
   const importTally = useMemo(
@@ -340,6 +347,21 @@ export default function Canon() {
           setDrift(null);
         }
       });
+    api
+      .listCanonSyncRuns({ limit: 1 })
+      .then((result) =>
+        result.runs.length ? api.getCanonSyncRun(result.runs[0].id) : null,
+      )
+      .then((detail) => {
+        if (alive) {
+          setSync(detail);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setSync(null);
+        }
+      });
     return () => {
       alive = false;
     };
@@ -531,6 +553,57 @@ export default function Canon() {
         ) : drift ? (
           <p className="text-sm text-zinc-400">No page has drifted from its room.</p>
         ) : null}
+      </section>
+
+      <section className="sb-panel sb-panel-padding space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="sb-kicker">Last sync</p>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+              What the repository did on its last run, and to which files.
+            </p>
+          </div>
+          {sync ? (
+            <span className="sb-chip sb-chip-inactive">{syncRunSummary(sync)}</span>
+          ) : null}
+        </div>
+
+        {sync ? (
+          <div className="space-y-3">
+            <p className="text-sm text-zinc-300">
+              {new Date(sync.started_at).toLocaleString()} ·{" "}
+              {sync.commit_sha ? sync.commit_sha.slice(0, 7) : "no commit"} ·{" "}
+              {sync.files_seen} files read
+            </p>
+            <p className="max-w-2xl text-xs text-zinc-500">{SYNC_IS_EVIDENCE_NOT_RATIFICATION}</p>
+            {sync.files.length ? (
+              <ul className="space-y-1">
+                {sync.files.map((file) => (
+                  <li
+                    key={file.relative_path}
+                    className="flex flex-wrap items-baseline gap-2 text-sm"
+                  >
+                    <code className="text-xs text-zinc-400">{file.relative_path}</code>
+                    <span className="text-zinc-300">{syncActionLabel(file.action)}</span>
+                    {file.page_slug ? (
+                      <span className="text-xs text-zinc-500">canon:{file.page_slug}</span>
+                    ) : null}
+                    {file.last_error ? (
+                      <span className="text-xs text-rose-300">{file.last_error}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-zinc-500">This run touched no files.</p>
+            )}
+            {sync.error_message ? (
+              <p className="text-xs text-amber-300">{sync.error_message}</p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-500">No sync run has been recorded yet.</p>
+        )}
       </section>
 
       <section className="sb-panel sb-panel-padding space-y-4">

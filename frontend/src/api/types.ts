@@ -1294,3 +1294,44 @@ export interface CanonDriftDetectResponse {
   deduplicated: number;
   counts: Record<string, number>;
 }
+
+/** One sync run, as the Canon route reads it. Counts are what the run did. */
+export interface CanonSyncRun {
+  id: string;
+  sync_source_id: string;
+  status: string;
+  triggered_by: string;
+  commit_sha: string | null;
+  started_at: string;
+  completed_at: string | null;
+  files_seen: number;
+  files_changed: number;
+  files_skipped: number;
+  pages_created: number;
+  pages_updated: number;
+  pages_archived: number;
+  pages_conflicted: number;
+  error_message: string | null;
+}
+
+/**
+ * One path in a run. `action` is what the run took at the time, recorded then
+ * and never recomputed, so a page a person later edits does not retroactively
+ * read as "written by the repo".
+ */
+export interface CanonSyncFile {
+  relative_path: string;
+  page_slug: string | null;
+  action: string | null;
+  status: string;
+  last_error: string | null;
+}
+
+export interface CanonSyncRunDetail extends CanonSyncRun {
+  files: CanonSyncFile[];
+}
+
+export interface CanonSyncRunList {
+  runs: CanonSyncRun[];
+  limit: number;
+}

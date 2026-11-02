@@ -28,6 +28,10 @@ from app.services.canon import (
     CANON_PAGE_BODY_MAX_CHARS,
     CANON_PAGE_GET_DEFAULT_CHARS,
     CANON_PAGE_GET_MAX_CHARS,
+    CANON_RUN_FILE_DEFAULT,
+    CANON_RUN_FILE_MAX,
+    CANON_RUN_LIST_DEFAULT,
+    CANON_RUN_LIST_MAX,
     CANON_PAGES_PER_TENANT_SOFT,
     CANON_PER_CONNECT_TOKEN_BUDGET,
     CANON_SEARCH_HITS,
@@ -39,6 +43,8 @@ from app.services.canon import (
     build_canon_digest,
     canon_digest_fingerprint,
     clamp_page_max_chars,
+    clamp_run_file_limit,
+    clamp_run_list_limit,
     enforce_page_body,
     enforce_per_connect_budget,
     enforce_summary,
@@ -303,6 +309,16 @@ def test_digest_carries_the_fingerprint_of_its_pages() -> None:
 def test_page_get_defaults_to_6000_and_clamps_to_12000() -> None:
     assert clamp_page_max_chars(None) == CANON_PAGE_GET_DEFAULT_CHARS
     assert clamp_page_max_chars(99999) == CANON_PAGE_GET_MAX_CHARS
+
+
+def test_run_limits_are_clamped_at_the_cap_not_trusted() -> None:
+    """A caller asking for ten thousand runs gets the cap, not ten thousand."""
+    assert clamp_run_list_limit(None) == CANON_RUN_LIST_DEFAULT
+    assert clamp_run_list_limit(0) == 1
+    assert clamp_run_list_limit(10_000) == CANON_RUN_LIST_MAX
+    assert clamp_run_file_limit(None) == CANON_RUN_FILE_DEFAULT
+    assert clamp_run_file_limit(0) == 1
+    assert clamp_run_file_limit(10_000) == CANON_RUN_FILE_MAX
     assert clamp_page_max_chars(1) == 1
     assert clamp_page_max_chars(0) >= 1, "a zero-width window would never advance the cursor"
 

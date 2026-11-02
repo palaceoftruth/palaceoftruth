@@ -253,3 +253,47 @@ class CanonDriftDetectOut(BaseModel):
     created: int
     deduplicated: int
     counts: dict[str, int]
+
+
+class CanonSyncRunOut(BaseModel):
+    """One sync run, as a person reads it: when, what it read, what it wrote."""
+
+    id: uuid.UUID
+    sync_source_id: uuid.UUID
+    status: str
+    triggered_by: str
+    commit_sha: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+    files_seen: int
+    files_changed: int
+    files_skipped: int
+    pages_created: int
+    pages_updated: int
+    pages_archived: int
+    pages_conflicted: int
+    error_message: str | None = None
+
+
+class CanonSyncFileOut(BaseModel):
+    """One path in a run, and what the run did to it.
+
+    ``action`` is what the run took, recorded at the time. It is deliberately not
+    derived from the page's current state: a page edited by a person after a sync
+    must not retroactively read as "created by the repo".
+    """
+
+    relative_path: str
+    page_slug: str | None = None
+    action: str | None = None
+    status: str
+    last_error: str | None = None
+
+
+class CanonSyncRunDetailOut(CanonSyncRunOut):
+    files: list[CanonSyncFileOut]
+
+
+class CanonSyncRunListOut(BaseModel):
+    runs: list[CanonSyncRunOut]
+    limit: int
