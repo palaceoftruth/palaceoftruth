@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { FolderUp, Loader2, Plus, Search, X } from "lucide-react";
+import { FolderUp, Loader2, Plus, RefreshCw, Search, X } from "lucide-react";
 
 import { api, ApiError } from "../api/client";
 import type {
@@ -136,6 +136,8 @@ export default function Canon() {
   // The last sync run: what the repository did, and to which pages. Loaded
   // separately so a failed read cannot blank the page list either.
   const [sync, setSync] = useState<CanonSyncRunDetail | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [driftError, setDriftError] = useState<string | null>(null);
   const importCheck = useMemo(() => importPreflight(importFiles), [importFiles]);
   const importTally = useMemo(
@@ -367,6 +369,27 @@ export default function Canon() {
     };
   }, []);
 
+  async function runSyncNow() {
+    if (!sync) {
+      return;
+    }
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      await api.startCanonSyncRun(sync.sync_source_id);
+      const detail = await api.getCanonSyncRun(
+        (await api.listCanonSyncRuns({ limit: 1 })).runs[0].id,
+      );
+      setSync(detail);
+    } catch (error) {
+      setSyncError(
+        error instanceof ApiError ? error.message : "The sync did not start.",
+      );
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
   async function runDriftDetection() {
     setDriftBusy(true);
     setDriftError(null);
@@ -563,9 +586,26 @@ export default function Canon() {
               What the repository did on its last run, and to which files.
             </p>
           </div>
-          {sync ? (
-            <span className="sb-chip sb-chip-inactive">{syncRunSummary(sync)}</span>
-          ) : null}
+          <div className="flex items-center gap-2">
+            {sync ? (
+              <span className="sb-chip sb-chip-inactive">{syncRunSummary(sync)}</span>
+            ) : null}
+            {sync ? (
+              <button
+                type="button"
+                className="sb-button-secondary"
+                onClick={runSyncNow}
+                disabled={syncBusy}
+              >
+                {syncBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Sync now
+              </button>
+            ) : null}
+          </div>
         </div>
 
         {sync ? (
@@ -576,6 +616,7 @@ export default function Canon() {
               {sync.files_seen} files read
             </p>
             <p className="max-w-2xl text-xs text-zinc-500">{SYNC_IS_EVIDENCE_NOT_RATIFICATION}</p>
+            {syncError ? <p className="text-sm text-rose-300">{syncError}</p> : null}
             {sync.files.length ? (
               <ul className="space-y-1">
                 {sync.files.map((file) => (
