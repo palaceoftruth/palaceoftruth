@@ -393,6 +393,37 @@ export interface PalaceSyncSource {
   force_path_style?: boolean;
   last_synced_at?: string | null;
   last_error?: string | null;
+  target_kind?: "rooms" | "canon";
+  canon_section_default?: string;
+  canon_room_id?: string | null;
+  canon_owns_pages?: boolean;
+}
+
+export interface CanonSyncBinding {
+  id: string;
+  name: string;
+  root_path: string;
+  source_kind: "folder" | "repo" | "s3";
+  status: "active" | "disabled";
+  scan_interval_seconds: number;
+  canon_section_default: string;
+  canon_room_id?: string | null;
+  canon_owns_pages: boolean;
+  last_synced_at?: string | null;
+  last_error?: string | null;
+  latest_run?: CanonSyncRun | null;
+}
+
+export interface CanonConflictPair {
+  path: string;
+  slug: string;
+  commit_sha?: string | null;
+  file_hash?: string | null;
+  repo_text: string;
+  page_text: string;
+  page_status: string;
+  missing: boolean;
+  truncated: boolean;
 }
 
 export interface PalaceSyncRun {

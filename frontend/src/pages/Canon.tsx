@@ -12,6 +12,8 @@ import type {
   CanonRevision,
   CanonSearchResponse,
   CanonSection,
+  CanonConflictPair,
+  CanonSyncBinding,
 } from "../api/types";
 import PageHeader from "../components/PageHeader";
 import {
@@ -138,6 +140,11 @@ export default function Canon() {
   const [sync, setSync] = useState<CanonSyncRunDetail | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [bindings, setBindings] = useState<CanonSyncBinding[]>([]);
+  const [conflict, setConflict] = useState<CanonConflictPair | null>(null);
+  const [conflictSourceId, setConflictSourceId] = useState<string | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const [conflictError, setConflictError] = useState<string | null>(null);
   const [driftError, setDriftError] = useState<string | null>(null);
   const importCheck = useMemo(() => importPreflight(importFiles), [importFiles]);
   const importTally = useMemo(
@@ -350,6 +357,18 @@ export default function Canon() {
         }
       });
     api
+      .listCanonSyncBindings()
+      .then((result) => {
+        if (alive) {
+          setBindings(result);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setBindings([]);
+        }
+      });
+    api
       .listCanonSyncRuns({ limit: 1 })
       .then((result) =>
         result.runs.length ? api.getCanonSyncRun(result.runs[0].id) : null,
@@ -369,24 +388,65 @@ export default function Canon() {
     };
   }, []);
 
-  async function runSyncNow() {
-    if (!sync) {
-      return;
-    }
+  async function runSyncNow(sourceId: string) {
     setSyncBusy(true);
     setSyncError(null);
     try {
-      await api.startCanonSyncRun(sync.sync_source_id);
+      await api.startCanonSyncRun(sourceId);
       const detail = await api.getCanonSyncRun(
         (await api.listCanonSyncRuns({ limit: 1 })).runs[0].id,
       );
       setSync(detail);
+      setBindings(await api.listCanonSyncBindings());
     } catch (error) {
       setSyncError(
         error instanceof ApiError ? error.message : "The sync did not start.",
       );
     } finally {
       setSyncBusy(false);
+    }
+  }
+
+  async function openConflict(sourceId: string, path: string) {
+    setConflictBusy(true);
+    setConflictError(null);
+    try {
+      setConflict(await api.previewCanonConflict(sourceId, path));
+      setConflictSourceId(sourceId);
+    } catch (error) {
+      setConflictError(
+        error instanceof ApiError ? error.message : "The conflict could not be read.",
+      );
+    } finally {
+      setConflictBusy(false);
+    }
+  }
+
+  async function acceptRepoText() {
+    if (!conflict) {
+      return;
+    }
+    setConflictBusy(true);
+    setConflictError(null);
+    try {
+      await api.acceptCanonConflictVersion({
+        source_id: conflictSourceId ?? "",
+        path: conflict.path,
+      });
+      setConflict(null);
+      setConflictSourceId(null);
+      const refreshed = await api.listCanonSyncBindings();
+      setBindings(refreshed);
+      const latest = refreshed.find((row) => row.latest_run)?.latest_run;
+      if (latest) {
+        setSync(await api.getCanonSyncRun(latest.id));
+      }
+    } catch (error) {
+      setConflictError(
+        error instanceof ApiError ? error.message : "The page was not updated.",
+      );
+    } finally {
+      setConflictBusy(false);
     }
   }
 
@@ -579,6 +639,60 @@ export default function Canon() {
       </section>
 
       <section className="sb-panel sb-panel-padding space-y-4">
+        <div>
+          <p className="sb-kicker">Bindings</p>
+          <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+            Repositories that feed canon. A binding owns the pages it created, and a
+            file change arrives as a draft. Create and edit bindings on the Palace sync
+            page, where the repository credentials live.
+          </p>
+        </div>
+        {bindings.length ? (
+          <ul className="space-y-2">
+            {bindings.map((binding) => (
+              <li
+                key={binding.id}
+                className="flex flex-wrap items-baseline justify-between gap-3 text-sm"
+              >
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="text-zinc-200">{binding.name}</span>
+                  <code className="text-xs text-zinc-400">{binding.root_path}</code>
+                  <span className="text-xs text-zinc-500">
+                    {binding.canon_section_default} by default
+                  </span>
+                  {binding.latest_run ? (
+                    <span className="text-xs text-zinc-500">
+                      {binding.latest_run.status} · {binding.latest_run.files_seen} files
+                    </span>
+                  ) : (
+                    <span className="text-xs text-zinc-500">no run yet</span>
+                  )}
+                  {binding.status !== "active" ? (
+                    <span className="sb-chip sb-chip-inactive">{binding.status}</span>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className="sb-button-secondary"
+                  onClick={() => runSyncNow(binding.id)}
+                  disabled={syncBusy}
+                >
+                  {syncBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  Sync now
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-zinc-500">No repository is bound to canon yet.</p>
+        )}
+      </section>
+
+      <section className="sb-panel sb-panel-padding space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="sb-kicker">Last sync</p>
@@ -594,7 +708,7 @@ export default function Canon() {
               <button
                 type="button"
                 className="sb-button-secondary"
-                onClick={runSyncNow}
+                onClick={() => runSyncNow(sync.sync_source_id)}
                 disabled={syncBusy}
               >
                 {syncBusy ? (
@@ -617,6 +731,65 @@ export default function Canon() {
             </p>
             <p className="max-w-2xl text-xs text-zinc-500">{SYNC_IS_EVIDENCE_NOT_RATIFICATION}</p>
             {syncError ? <p className="text-sm text-rose-300">{syncError}</p> : null}
+            {conflict ? (
+              <div className="space-y-3 rounded-lg border border-zinc-800 p-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="text-sm text-zinc-200">
+                    Conflict on <code className="text-xs text-zinc-400">{conflict.path}</code>
+                  </p>
+                  <span className="text-xs text-zinc-500">
+                    {conflict.commit_sha ? conflict.commit_sha.slice(0, 7) : "no commit"}
+                  </span>
+                </div>
+                <p className="max-w-2xl text-xs text-zinc-500">
+                  The file changed and the page is yours, so nothing was written. Accepting
+                  the repo text replaces the page and returns it to draft. Keeping your page
+                  leaves the file unread until it changes again.
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <p className="sb-kicker">The file says</p>
+                    <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">
+                      {conflict.repo_text || "The file is gone from the repository."}
+                    </pre>
+                  </div>
+                  <div>
+                    <p className="sb-kicker">Your page says</p>
+                    <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">
+                      {conflict.page_text}
+                    </pre>
+                  </div>
+                </div>
+                {conflictError ? (
+                  <p className="text-sm text-rose-300">{conflictError}</p>
+                ) : null}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="sb-button-secondary"
+                    onClick={acceptRepoText}
+                    disabled={conflictBusy || conflict.missing}
+                  >
+                    {conflictBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    Accept the repo text
+                  </button>
+                  <button
+                    type="button"
+                    className="sb-button-secondary"
+                    onClick={() => {
+                      setConflict(null);
+                      setConflictSourceId(null);
+                      setConflictError(null);
+                    }}
+                    disabled={conflictBusy}
+                  >
+                    Keep my page
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {sync.files.length ? (
               <ul className="space-y-1">
                 {sync.files.map((file) => (
@@ -631,6 +804,15 @@ export default function Canon() {
                     ) : null}
                     {file.last_error ? (
                       <span className="text-xs text-rose-300">{file.last_error}</span>
+                    ) : null}
+                    {file.action === "conflict" && sync.sync_source_id ? (
+                      <button
+                        type="button"
+                        className="text-xs text-zinc-400 underline"
+                        onClick={() => openConflict(sync.sync_source_id, file.relative_path)}
+                      >
+                        Review conflict
+                      </button>
                     ) : null}
                   </li>
                 ))}

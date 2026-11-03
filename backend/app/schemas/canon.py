@@ -297,3 +297,41 @@ class CanonSyncRunDetailOut(CanonSyncRunOut):
 class CanonSyncRunListOut(BaseModel):
     runs: list[CanonSyncRunOut]
     limit: int
+
+class CanonSyncBindingOut(BaseModel):
+    """One canon binding, with the last run a person needs to judge it."""
+
+    id: uuid.UUID
+    name: str
+    root_path: str
+    source_kind: str
+    status: str
+    scan_interval_seconds: int
+    canon_section_default: str
+    canon_room_id: uuid.UUID | None = None
+    canon_owns_pages: bool = True
+    last_synced_at: datetime | None = None
+    last_error: str | None = None
+    latest_run: CanonSyncRunOut | None = None
+
+
+class CanonConflictPairOut(BaseModel):
+    """Both sides of a conflict, read live from the checkout and the page."""
+
+    path: str
+    slug: str
+    commit_sha: str | None = None
+    file_hash: str | None = None
+    repo_text: str
+    page_text: str
+    page_status: str
+    missing: bool = False
+    truncated: bool = False
+
+
+class CanonConflictAcceptIn(BaseModel):
+    """A person choosing the repo's text for one conflicted page."""
+
+    source_id: uuid.UUID
+    path: str = Field(min_length=1, max_length=1024)
+

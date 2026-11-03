@@ -46,6 +46,9 @@ from app.schemas.canon import (
     CanonRevisionOut,
     CanonSearchHitOut,
     CanonSearchResponse,
+    CanonConflictAcceptIn,
+    CanonConflictPairOut,
+    CanonSyncBindingOut,
     CanonSyncFileOut,
     CanonSyncRunDetailOut,
     CanonSyncRunListOut,
@@ -100,11 +103,14 @@ from app.services.canon_drift import (
 )
 from app.services.canon_sync import (
     CanonSyncInFlightError,
+    accept_repo_version,
     get_canon_binding,
+    read_conflict_pair,
     start_canon_sync_run,
 )
 from app.services.canon_history import (
     get_canon_run,
+    list_canon_bindings,
     latest_canon_run,
     list_canon_run_files,
     list_canon_runs,
@@ -829,3 +835,103 @@ async def post_canon_sync_run(
         tenant_id=request.state.tenant_id,
     )
     return _run_out(run)
+
+@router.get(
+    "/sync/bindings",
+    response_model=list[CanonSyncBindingOut],
+    dependencies=_READ,
+)
+async def get_canon_sync_bindings(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> list[CanonSyncBindingOut]:
+    """Every canon binding for this tenant, newest run included.
+
+    A binding with no run yet is listed too: an empty binding is a fact a person
+    needs to see, not an absence to hide.
+    """
+    rows = await list_canon_bindings(db, tenant_id=request.state.tenant_id)
+    return [
+        CanonSyncBindingOut(
+            id=source.id,
+            name=source.name,
+            root_path=source.root_path,
+            source_kind=source.source_kind,
+            status=source.status,
+            scan_interval_seconds=source.scan_interval_seconds,
+            canon_section_default=source.canon_section_default,
+            canon_room_id=source.canon_room_id,
+            canon_owns_pages=source.canon_owns_pages,
+            last_synced_at=source.last_synced_at,
+            last_error=source.last_error,
+            latest_run=_run_out(run) if run is not None else None,
+        )
+        for source, run in rows
+    ]
+
+
+@router.get(
+    "/sync/conflicts/preview",
+    response_model=CanonConflictPairOut,
+    dependencies=_READ,
+)
+async def get_canon_conflict_preview(
+    request: Request,
+    source_id: uuid.UUID,
+    path: str,
+    db: AsyncSession = Depends(get_db),
+) -> CanonConflictPairOut:
+    """Read both sides of a conflict now, from the checkout and the page.
+
+    The repo text is never stored: a copy in the database is a second corpus that
+    can drift from the file it came from.
+    """
+    source = await get_canon_binding(
+        db, tenant_id=request.state.tenant_id, source_id=source_id
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="binding not found")
+    try:
+        pair = await read_conflict_pair(
+            db, tenant_id=request.state.tenant_id, source=source, relative_path=path
+        )
+    except (CanonError, CanonValidationError) as exc:
+        raise _raise_for(exc) from exc
+    return CanonConflictPairOut(**pair)
+
+
+@router.post(
+    "/sync/conflicts/accept",
+    response_model=CanonPageOut,
+    dependencies=_WRITE,
+)
+async def post_canon_conflict_accept(
+    request: Request,
+    body: CanonConflictAcceptIn,
+    db: AsyncSession = Depends(get_db),
+) -> CanonPageOut:
+    """A person decides the repo's text wins for this page.
+
+    The page returns to draft. Nothing is published by this act, because accepting
+    a file is not the same as vouching for what it says.
+    """
+    source = await get_canon_binding(
+        db, tenant_id=request.state.tenant_id, source_id=body.source_id
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="binding not found")
+    try:
+        page = await accept_repo_version(
+            db,
+            tenant_id=request.state.tenant_id,
+            source=source,
+            relative_path=body.path,
+            actor_subject=_author_subject(request),
+        )
+    except (CanonError, CanonValidationError) as exc:
+        raise _raise_for(exc) from exc
+    page, item, revision_count = await get_canon_page_detail(
+        db, tenant_id=request.state.tenant_id, slug=page.slug
+    )
+    return _page_out(page, item=item, revision_count=revision_count, include_body=True)
+

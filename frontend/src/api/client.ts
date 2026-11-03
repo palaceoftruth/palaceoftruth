@@ -37,6 +37,8 @@ import type {
   CanonImportPlan,
   CanonDriftList,
   CanonDriftDetectResponse,
+  CanonConflictPair,
+  CanonSyncBinding,
   CanonSyncRun,
   CanonSyncRunDetail,
   CanonSyncRunList,
@@ -507,6 +509,19 @@ export const api = {
 
   getCanonSyncRun: (runId: string) =>
     req<CanonSyncRunDetail>(`/canon/sync/runs/${encodeURIComponent(runId)}`),
+
+  listCanonSyncBindings: () => req<CanonSyncBinding[]>("/canon/sync/bindings"),
+
+  previewCanonConflict: (sourceId: string, path: string) =>
+    req<CanonConflictPair>(
+      `/canon/sync/conflicts/preview?source_id=${encodeURIComponent(sourceId)}&path=${encodeURIComponent(path)}`,
+    ),
+
+  acceptCanonConflictVersion: (body: { source_id: string; path: string }) =>
+    req<CanonPage>(`/canon/sync/conflicts/accept`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   startCanonSyncRun: (sourceId: string) =>
     req<CanonSyncRun>(`/canon/sync/bindings/${encodeURIComponent(sourceId)}/run`, {

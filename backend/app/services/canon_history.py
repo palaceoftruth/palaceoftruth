@@ -16,7 +16,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.palace import SyncRun, SyncSourceFile
+from app.models.palace import SyncSource, SyncRun, SyncSourceFile
 from app.services.canon import (
     CANON_RUN_FILE_DEFAULT,
     CANON_RUN_LIST_DEFAULT,
@@ -99,3 +99,27 @@ async def list_canon_run_files(
         .limit(clamp_run_file_limit(limit))
     )
     return list(rows)
+
+async def list_canon_bindings(
+    db: AsyncSession, *, tenant_id: str
+) -> list[tuple[SyncSource, SyncRun | None]]:
+    """Every canon binding this tenant owns, each with its latest run.
+
+    One query for the bindings and one per binding for the run: a tenant has a
+    handful of bindings, not thousands, and the alternative is a lateral join for
+    a page that loads once.
+    """
+    sources = (
+        await db.scalars(
+            select(SyncSource)
+            .where(SyncSource.tenant_id == tenant_id)
+            .where(SyncSource.target_kind == "canon")
+            .order_by(SyncSource.name)
+        )
+    ).all()
+    out: list[tuple[SyncSource, SyncRun | None]] = []
+    for source in sources:
+        latest = await latest_canon_run(db, tenant_id=tenant_id, source_id=source.id)
+        out.append((source, latest))
+    return out
+

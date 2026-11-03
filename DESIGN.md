@@ -206,6 +206,24 @@ not generated from captures, and it outranks derived memory when an agent answer
 - **ratify**: a person confirming that a page still matches the room it describes,
   without editing it. Ratifying moves the confirmation generation forward and clears
   the drift pill.
+- **binding**: the link between a canon and a git repository. A binding names a repo,
+  a branch, and a default section, and it owns the pages it created. It is a sync
+  source whose `target_kind` is `canon`, so it reuses the existing credential
+  custody, polling, and run records rather than a second pipeline.
+- **sync run**: one pass of a binding over its repository. A run resolves the commit,
+  plans every file against the existing pages, applies the plan, and records what it
+  did to each path. A run never publishes. Its result is evidence of what the file
+  said, not a confirmation that the page is right.
+- **repo page**: a canon page that a binding created from a file. It is a canon page
+  with a file origin, not a new kind of document: same sections, same statuses, same
+  revision history, same digest. A page a person wrote by hand is never overwritten
+  by a run; the run reports a conflict and waits for a person.
+
+**A repo change is evidence, not ratification.** A file that changed updates the
+page and leaves it a draft. A page that was already drifting stays drifting after
+the run, until a person ratifies it. Accepting a repo's text returns the page to
+draft for the same reason: agreeing that a file changed is not agreeing that the
+page is still true.
 
 **A charter is not a snapshot, and the two are never interchangeable.** A snapshot
 is derived from captured items, regenerated when the corpus changes, and can be
