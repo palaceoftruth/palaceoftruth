@@ -464,6 +464,22 @@ def _decrypt_repo_credential(value: str) -> str:
     return decrypt_secret(value, key=_sync_source_secret_key())
 
 
+def repo_credential_secret(source: SyncSource) -> str | None:
+    """The token this binding clones with, or ``None`` when it needs none.
+
+    Public so a caller that talks to the provider's API uses the same credential
+    as the clone, rather than growing a second way to find one.
+    """
+    if source.credential_type == "deployment_github_pat":
+        return settings.github_pat or None
+    if source.credential_ciphertext:
+        try:
+            return _decrypt_repo_credential(source.credential_ciphertext)
+        except ValueError:
+            return None
+    return None
+
+
 def _is_remote_repo_source(source: SyncSource) -> bool:
     return source.source_kind == "repo" and _is_remote_github_repo(source.root_path)
 

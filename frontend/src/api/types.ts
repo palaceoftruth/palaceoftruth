@@ -418,6 +418,7 @@ export interface CanonSyncWebhook {
   token: string;
   secret: string;
   path: string;
+  registered: boolean;
   hint: string;
 }
 
