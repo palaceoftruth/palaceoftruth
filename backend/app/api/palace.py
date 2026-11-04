@@ -76,6 +76,7 @@ from app.services.palace import (
     create_or_get_palace_run,
     create_or_get_sync_run,
     create_sync_source,
+    sync_source_summary,
     delete_sync_source,
     get_room_detail,
     list_palace_runs,
@@ -949,26 +950,13 @@ async def post_restore_sync_source(
 
 
 def _sync_source_response(source: SyncSource) -> SyncSourceSummary:
-    return SyncSourceSummary(
-        id=source.id,
-        name=source.name,
-        root_path=source.root_path,
-        source_kind=source.source_kind,
-        credential_type=source.credential_type or "none",
-        has_stored_credential=bool(source.credential_ciphertext),
-        status="active" if source.status == "active" else "disabled",
-        disabled_at=source.disabled_at,
-        disabled_reason=source.disabled_reason,
-        scan_interval_seconds=source.scan_interval_seconds,
-        allowed_extensions=source.allowed_extensions or [],
-        bucket=source.bucket,
-        prefix=source.prefix,
-        endpoint_url=source.endpoint_url,
-        region=source.region,
-        force_path_style=bool(source.force_path_style),
-        last_synced_at=source.last_synced_at,
-        last_error=source.last_error,
-    )
+    """Project a sync source for a response.
+
+    This used to build the model inline and silently omitted the canon fields, so
+    a client that had just created a canon binding was told it had created a rooms
+    binding. Delegating to the service keeps one projection.
+    """
+    return sync_source_summary(source)
 
 
 @router.post("/sync-sources/{source_id}/sync", response_model=SyncRunSummary, status_code=202, dependencies=[Depends(require_api_capability("write"))])

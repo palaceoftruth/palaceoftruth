@@ -19,7 +19,7 @@ from sqlalchemy import select
 from app.models.palace import Room, SyncRun, SyncSource
 from app.schemas.palace import SyncSourceCreate, SyncSourceUpdate
 from app.services.palace import (
-    _sync_source_summary,
+    sync_source_summary,
     create_or_get_sync_run,
     create_sync_source,
     update_sync_source,
@@ -304,7 +304,7 @@ async def test_a_room_source_still_queues_normally() -> None:
 
 def test_the_summary_reports_the_binding_fields() -> None:
     room_id = uuid.uuid4()
-    summary = _sync_source_summary(
+    summary = sync_source_summary(
         _source(target_kind="canon", canon_section_default="charter", canon_room_id=room_id)
     )
     assert summary.target_kind == "canon"
@@ -313,10 +313,23 @@ def test_the_summary_reports_the_binding_fields() -> None:
     assert summary.canon_owns_pages is True
 
 
+def test_the_api_response_reports_the_binding_fields_too() -> None:
+    """The route used to build its own projection and dropped the canon fields.
+
+    A client that had just created a canon binding was told it had created a rooms
+    binding, which is the kind of wrong that a person acts on.
+    """
+    from app.api.palace import _sync_source_response
+
+    summary = _sync_source_response(_source(target_kind="canon", canon_section_default="charter"))
+    assert summary.target_kind == "canon"
+    assert summary.canon_section_default == "charter"
+
+
 def test_the_summary_treats_a_missing_target_as_rooms() -> None:
     source = _source()
     source.target_kind = None
-    summary = _sync_source_summary(source)
+    summary = sync_source_summary(source)
     assert summary.target_kind == "rooms"
 
 

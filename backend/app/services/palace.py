@@ -370,7 +370,8 @@ def _source_kind_label(source_kind: str) -> str:
     return source_kind.capitalize()
 
 
-def _sync_source_summary(source: SyncSource) -> SyncSourceSummary:
+def sync_source_summary(source: SyncSource) -> SyncSourceSummary:
+    """The one projection of a sync source. Two of these drift apart."""
     return SyncSourceSummary(
         id=source.id,
         name=source.name,
@@ -1530,7 +1531,7 @@ async def list_sync_sources(
             query.order_by(SyncSource.created_at.desc())
         )
     ).scalars().all()
-    return [_sync_source_summary(row) for row in rows]
+    return [sync_source_summary(row) for row in rows]
 
 
 async def list_sync_runs(db: AsyncSession, tenant_id: str, *, limit: int = 20) -> list[SyncRunSummary]:
