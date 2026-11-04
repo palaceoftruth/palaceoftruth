@@ -14,6 +14,7 @@ import type {
   CanonSection,
   CanonConflictPair,
   CanonSyncBinding,
+  CanonSyncWebhook,
 } from "../api/types";
 import PageHeader from "../components/PageHeader";
 import {
@@ -141,6 +142,8 @@ export default function Canon() {
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [bindings, setBindings] = useState<CanonSyncBinding[]>([]);
+  const [hook, setHook] = useState<CanonSyncWebhook | null>(null);
+  const [hookError, setHookError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<CanonConflictPair | null>(null);
   const [conflictSourceId, setConflictSourceId] = useState<string | null>(null);
   const [conflictBusy, setConflictBusy] = useState(false);
@@ -404,6 +407,17 @@ export default function Canon() {
       );
     } finally {
       setSyncBusy(false);
+    }
+  }
+
+  async function createHook(sourceId: string) {
+    setHookError(null);
+    try {
+      setHook(await api.createCanonSyncWebhook(sourceId));
+    } catch (error) {
+      setHookError(
+        error instanceof ApiError ? error.message : "The hook was not created.",
+      );
     }
   }
 
@@ -671,6 +685,14 @@ export default function Canon() {
                     <span className="sb-chip sb-chip-inactive">{binding.status}</span>
                   ) : null}
                 </div>
+                <span className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="sb-button-secondary"
+                  onClick={() => createHook(binding.id)}
+                >
+                  Push hook
+                </button>
                 <button
                   type="button"
                   className="sb-button-secondary"
@@ -684,12 +706,31 @@ export default function Canon() {
                   )}
                   Sync now
                 </button>
+                </span>
               </li>
             ))}
           </ul>
         ) : (
           <p className="text-sm text-zinc-500">No repository is bound to canon yet.</p>
         )}
+        {hookError ? <p className="text-sm text-amber-400">{hookError}</p> : null}
+        {hook ? (
+          <div className="space-y-2 rounded border border-zinc-700 p-3 text-sm">
+            <p className="text-zinc-300">
+              A push hook now starts a sync. Add it in the repository settings.
+            </p>
+            <p className="text-zinc-400">
+              Payload URL <code className="text-zinc-200">{hook.path}</code>
+            </p>
+            <p className="text-zinc-400">
+              Secret <code className="text-zinc-200">{hook.secret}</code>
+            </p>
+            <p className="text-xs text-zinc-500">
+              The secret is shown once and stored encrypted. Rotate by pressing Push hook
+              again. {hook.hint}
+            </p>
+          </div>
+        ) : null}
       </section>
 
       <section className="sb-panel sb-panel-padding space-y-4">

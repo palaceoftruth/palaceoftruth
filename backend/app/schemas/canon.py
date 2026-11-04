@@ -335,3 +335,20 @@ class CanonConflictAcceptIn(BaseModel):
     source_id: uuid.UUID
     path: str = Field(min_length=1, max_length=1024)
 
+
+
+class CanonSyncWebhookOut(BaseModel):
+    """A new push hook. The secret is returned here and nowhere else."""
+
+    token: str
+    secret: str
+    path: str
+    hint: str
+
+
+class CanonSyncWebhookHookOut(BaseModel):
+    """What a delivery did. Never a stack trace: a hook is a machine caller."""
+
+    status: Literal["queued", "coalesced", "ignored", "pong"]
+    run_id: uuid.UUID | None = None
+    reason: str | None = None

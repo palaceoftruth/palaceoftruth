@@ -60,6 +60,11 @@ CANON_RUN_LIST_DEFAULT = 20
 CANON_RUN_LIST_MAX = 100
 CANON_RUN_FILE_DEFAULT = 200
 CANON_RUN_FILE_MAX = 1000
+# A push hook's two random values. The token names the binding in the URL and the
+# secret signs the body; both are entropy, so their length is a canon cap and
+# lives here with the rest of them.
+CANON_WEBHOOK_TOKEN_BYTES = 24
+CANON_WEBHOOK_SECRET_BYTES = 32
 
 # Rough characters-per-token for the per-connect estimate. Deliberately
 # conservative: it over-counts tokens rather than under-counting them.

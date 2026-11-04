@@ -29,6 +29,8 @@ from app.auth import get_auth_context, require_api_capability, require_human_aut
 from app.workers.queues import enqueue_palace_job
 from app.database import get_db
 from app.schemas.canon import (
+    CanonSyncWebhookHookOut,
+    CanonSyncWebhookOut,
     CanonDigestOut,
     CanonDriftDetectOut,
     CanonDriftListOut,
@@ -104,9 +106,14 @@ from app.services.canon_drift import (
 from app.services.canon_sync import (
     CanonSyncInFlightError,
     accept_repo_version,
+    binding_for_webhook,
+    disable_push_webhook,
+    enable_push_webhook,
     get_canon_binding,
     read_conflict_pair,
     start_canon_sync_run,
+    verify_github_signature,
+    webhook_secret,
 )
 from app.services.canon_history import (
     get_canon_run,
@@ -935,3 +942,124 @@ async def post_canon_conflict_accept(
     )
     return _page_out(page, item=item, revision_count=revision_count, include_body=True)
 
+
+
+# --- push hooks -------------------------------------------------------------
+
+
+@router.post(
+    "/sync/bindings/{source_id}/webhook",
+    response_model=CanonSyncWebhookOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=_WRITE,
+)
+async def post_canon_sync_webhook(
+    request: Request,
+    source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncWebhookOut:
+    """Create or rotate the push hook for one binding.
+
+    The secret crosses the wire once, here. It is stored encrypted under the same
+    key as the repository credential, and it is never read back.
+    """
+    source = await get_canon_binding(
+        db, tenant_id=request.state.tenant_id, source_id=source_id
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="binding not found")
+    if source.target_kind != "canon":
+        raise HTTPException(status_code=422, detail="this source is not a canon binding")
+    try:
+        token, secret = await enable_push_webhook(db, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return CanonSyncWebhookOut(
+        token=token,
+        secret=secret,
+        path=f"/api/v1/canon/sync/hooks/{token}",
+        hint="GitHub: Settings, Webhooks, Add webhook. Content type application/json, secret as given, push events only.",
+    )
+
+
+@router.delete(
+    "/sync/bindings/{source_id}/webhook",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=_WRITE,
+)
+async def delete_canon_sync_webhook(
+    request: Request,
+    source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Remove the hook. The binding keeps syncing on its interval."""
+    source = await get_canon_binding(
+        db, tenant_id=request.state.tenant_id, source_id=source_id
+    )
+    if source is None:
+        raise HTTPException(status_code=404, detail="binding not found")
+    await disable_push_webhook(db, source=source)
+
+
+@router.post(
+    "/sync/hooks/{token}",
+    response_model=CanonSyncWebhookHookOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def post_canon_sync_hook(
+    request: Request,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> CanonSyncWebhookHookOut:
+    """A repository says its default branch moved.
+
+    This route takes no Palace credential. Its credential is the HMAC over the raw
+    body, checked before the payload is read. An unknown token and a bad signature
+    both answer the same way to an outsider: 404 and 401 respectively, with no
+    hint about which bindings exist.
+    """
+    source = await binding_for_webhook(db, token=token)
+    if source is None:
+        raise HTTPException(status_code=404, detail="unknown hook")
+    body = await request.body()
+    try:
+        secret = webhook_secret(source)
+    except Exception:
+        raise HTTPException(status_code=404, detail="unknown hook") from None
+    if not verify_github_signature(
+        secret=secret, body=body, header=request.headers.get("X-Hub-Signature-256")
+    ):
+        raise HTTPException(status_code=401, detail="bad signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    if event == "ping":
+        return CanonSyncWebhookHookOut(status="pong")
+    if event != "push":
+        return CanonSyncWebhookHookOut(status="ignored", reason=f"event {event!r} is not a push")
+
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body is not JSON") from None
+    ref = payload.get("ref") or ""
+    default_branch = (payload.get("repository") or {}).get("default_branch") or ""
+    if not default_branch:
+        return CanonSyncWebhookHookOut(status="ignored", reason="the payload names no default branch")
+    if ref != f"refs/heads/{default_branch}":
+        return CanonSyncWebhookHookOut(
+            status="ignored", reason=f"{ref} is not the default branch {default_branch}"
+        )
+
+    try:
+        run = await start_canon_sync_run(
+            db, tenant_id=source.tenant_id, source=source, triggered_by="push"
+        )
+    except CanonSyncInFlightError as exc:
+        # A push that lands during a run is not lost: clearing the sync stamp
+        # makes the next poll treat this binding as due.
+        source.last_synced_at = None
+        await db.commit()
+        return CanonSyncWebhookHookOut(status="coalesced", run_id=exc.run.id, reason="a run was in flight")
+    except CanonValidationError as exc:
+        return CanonSyncWebhookHookOut(status="ignored", reason=str(exc))
+    return CanonSyncWebhookHookOut(status="queued", run_id=run.id)

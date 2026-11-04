@@ -39,6 +39,7 @@ import type {
   CanonDriftDetectResponse,
   CanonConflictPair,
   CanonSyncBinding,
+  CanonSyncWebhook,
   CanonSyncRun,
   CanonSyncRunDetail,
   CanonSyncRunList,
@@ -521,6 +522,11 @@ export const api = {
     req<CanonPage>(`/canon/sync/conflicts/accept`, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  createCanonSyncWebhook: (sourceId: string) =>
+    req<CanonSyncWebhook>(`/canon/sync/bindings/${encodeURIComponent(sourceId)}/webhook`, {
+      method: "POST",
     }),
 
   startCanonSyncRun: (sourceId: string) =>
