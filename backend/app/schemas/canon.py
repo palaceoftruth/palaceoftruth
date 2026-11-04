@@ -343,6 +343,7 @@ class CanonSyncWebhookOut(BaseModel):
     token: str
     secret: str
     path: str
+    registered: bool
     hint: str
 
 

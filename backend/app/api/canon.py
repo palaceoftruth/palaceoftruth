@@ -111,7 +111,9 @@ from app.services.canon_sync import (
     enable_push_webhook,
     get_canon_binding,
     read_conflict_pair,
+    register_github_webhook,
     start_canon_sync_run,
+    unregister_github_webhook,
     verify_github_signature,
     webhook_secret,
 )
@@ -974,11 +976,23 @@ async def post_canon_sync_webhook(
         token, secret = await enable_push_webhook(db, source=source)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    path = f"/api/v1/canon/sync/hooks/{token}"
+    # Palace installs the hook itself when it holds a credential that can, so the
+    # secret never has to be copied by hand. A refusal is not an error: the
+    # person gets the manual instructions instead.
+    hook_url = f"{str(request.base_url).rstrip('/')}{path}"
+    registered = await register_github_webhook(source, hook_url=hook_url, secret=secret)
     return CanonSyncWebhookOut(
         token=token,
         secret=secret,
-        path=f"/api/v1/canon/sync/hooks/{token}",
-        hint="GitHub: Settings, Webhooks, Add webhook. Content type application/json, secret as given, push events only.",
+        path=path,
+        registered=registered,
+        hint=(
+            "Palace registered this hook on the repository."
+            if registered
+            else "GitHub: Settings, Webhooks, Add webhook. Content type application/json, secret as given, push events only."
+        ),
     )
 
 
@@ -998,6 +1012,10 @@ async def delete_canon_sync_webhook(
     )
     if source is None:
         raise HTTPException(status_code=404, detail="binding not found")
+    token = source.webhook_token
+    if token:
+        hook_url = f"{str(request.base_url).rstrip('/')}/api/v1/canon/sync/hooks/{token}"
+        await unregister_github_webhook(source, hook_url=hook_url)
     await disable_push_webhook(db, source=source)
 
 

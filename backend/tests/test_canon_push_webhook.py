@@ -312,3 +312,130 @@ async def test_a_push_during_a_run_is_coalesced_not_dropped(env) -> None:
     await db.refresh(source)
     assert source.last_synced_at is None, "the next poll must treat this binding as due"
     assert await _runs(db, tenant) == 1, "a coalesced push must not queue a second run"
+
+
+# --- installing the hook on the provider ------------------------------------
+
+
+class _Response:
+    def __init__(self, status_code: int, payload=None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """Stands in for httpx.AsyncClient. Records what Palace asked GitHub to do."""
+
+    calls: list[tuple[str, str, dict]] = []
+    responses: list[_Response] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        _FakeClient.calls.append(("POST", url, json or {}))
+        return _FakeClient.responses.pop(0)
+
+    async def get(self, url, headers=None):
+        _FakeClient.calls.append(("GET", url, {}))
+        return _FakeClient.responses.pop(0)
+
+    async def delete(self, url, headers=None):
+        _FakeClient.calls.append(("DELETE", url, {}))
+        return _FakeClient.responses.pop(0)
+
+
+@pytest.fixture
+def github(monkeypatch):
+    _FakeClient.calls = []
+    _FakeClient.responses = []
+    monkeypatch.setattr("httpx.AsyncClient", _FakeClient)
+    return _FakeClient
+
+
+@pytest.mark.asyncio
+async def test_a_github_binding_gets_its_hook_installed(env, github, monkeypatch) -> None:
+    from app.services.canon_sync import register_github_webhook
+
+    source = env["source"]
+    source.source_kind = "repo"
+    source.root_path = "https://github.com/o/r.git"
+    source.credential_type = "github_pat"
+    source.credential_ciphertext = "ciphertext"
+    github.responses = [_Response(201, {"id": 7})]
+
+    monkeypatch.setattr(
+        "app.services.palace.repo_credential_secret", lambda _source: "token"
+    )
+
+    assert await register_github_webhook(source, hook_url="https://p.example/h", secret="s")
+
+    method, url, body = github.calls[0]
+    assert (method, url) == ("POST", "https://api.github.com/repos/o/r/hooks")
+    assert body["config"]["url"] == "https://p.example/h"
+    assert body["config"]["secret"] == "s"
+    assert body["events"] == ["push"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_installation_is_reported_not_raised(env, github, monkeypatch) -> None:
+    from app.services.canon_sync import register_github_webhook
+
+    source = env["source"]
+    source.source_kind = "repo"
+    source.root_path = "https://github.com/o/r.git"
+    github.responses = [_Response(403, {}, text="Resource not accessible by integration")]
+
+    monkeypatch.setattr(
+        "app.services.palace.repo_credential_secret", lambda _source: "token"
+    )
+
+    assert not await register_github_webhook(source, hook_url="https://p.example/h", secret="s")
+
+
+@pytest.mark.asyncio
+async def test_a_binding_with_no_credential_installs_nothing(env, github) -> None:
+    from app.services.canon_sync import register_github_webhook
+
+    source = env["source"]
+    source.source_kind = "repo"
+    source.root_path = "https://github.com/o/r.git"
+    source.credential_ciphertext = None
+    source.credential_type = "none"
+
+    assert not await register_github_webhook(source, hook_url="https://p.example/h", secret="s")
+    assert github.calls == []
+
+
+@pytest.mark.asyncio
+async def test_uninstalling_removes_only_the_hook_it_created(env, github, monkeypatch) -> None:
+    from app.services.canon_sync import unregister_github_webhook
+
+    source = env["source"]
+    source.source_kind = "repo"
+    source.root_path = "https://github.com/o/r.git"
+    github.responses = [
+        _Response(200, [
+            {"id": 1, "config": {"url": "https://someone-else/h"}},
+            {"id": 2, "config": {"url": "https://p.example/h"}},
+        ]),
+        _Response(204, {}),
+    ]
+
+    monkeypatch.setattr(
+        "app.services.palace.repo_credential_secret", lambda _source: "token"
+    )
+
+    assert await unregister_github_webhook(source, hook_url="https://p.example/h")
+
+    assert github.calls[-1] == ("DELETE", "https://api.github.com/repos/o/r/hooks/2", {})

@@ -717,7 +717,9 @@ export default function Canon() {
         {hook ? (
           <div className="space-y-2 rounded border border-zinc-700 p-3 text-sm">
             <p className="text-zinc-300">
-              A push hook now starts a sync. Add it in the repository settings.
+              {hook.registered
+                ? "A push hook now starts a sync, and Palace installed it on the repository."
+                : "A push hook now starts a sync. Add it in the repository settings."}
             </p>
             <p className="text-zinc-400">
               Payload URL <code className="text-zinc-200">{hook.path}</code>
@@ -727,7 +729,7 @@ export default function Canon() {
             </p>
             <p className="text-xs text-zinc-500">
               The secret is shown once and stored encrypted. Rotate by pressing Push hook
-              again. {hook.hint}
+              again. {hook.registered ? "" : hook.hint}
             </p>
           </div>
         ) : null}

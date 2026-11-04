@@ -49,6 +49,7 @@ from app.models.palace import (
 )
 from app.services.canon import (
     CANON_IMPORT_MAX_FILE_BYTES,
+    CANON_WEBHOOK_HTTP_TIMEOUT_SECONDS,
     CANON_WEBHOOK_SECRET_BYTES,
     CANON_WEBHOOK_TOKEN_BYTES,
     CanonValidationError,
@@ -944,3 +945,112 @@ def webhook_secret(source: SyncSource) -> str:
     if not source.webhook_secret_ciphertext:
         raise CanonValidationError("this binding has no push hook")
     return _decrypt_repo_credential(source.webhook_secret_ciphertext)
+
+
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+async def register_github_webhook(
+    source: SyncSource, *, hook_url: str, secret: str
+) -> bool:
+    """Ask GitHub to deliver pushes for this repository to ``hook_url``.
+
+    A person pressed the button; this only saves them the copy and paste, and it
+    keeps the signing secret off their clipboard and out of their browser. Any
+    refusal (no credential, no admin right on the repo, a network error) returns
+    False and the caller falls back to showing the manual instructions. It never
+    raises: a hook that could not be installed is not a failed binding.
+    """
+    import httpx
+
+    from app.services.palace import _github_repo_parts, repo_credential_secret
+
+    if not _is_remote_repo_source(source):
+        return False
+    token = repo_credential_secret(source)
+    if not token:
+        return False
+    try:
+        owner, repo = _github_repo_parts(source.root_path)
+    except Exception:
+        return False
+
+    payload = {
+        "name": "web",
+        "active": True,
+        "events": ["push"],
+        "config": {
+            "url": hook_url,
+            "content_type": "json",
+            "secret": secret,
+            "insecure_ssl": "0",
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=CANON_WEBHOOK_HTTP_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/hooks",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+    except Exception as exc:  # pragma: no cover - network failure
+        logger.warning("canon push hook: could not reach GitHub: %s", exc)
+        return False
+    if response.status_code not in (200, 201):
+        logger.warning(
+            "canon push hook: GitHub refused the hook for %s/%s: %s %s",
+            owner,
+            repo,
+            response.status_code,
+            response.text[:200],
+        )
+        return False
+    return True
+
+
+async def unregister_github_webhook(source: SyncSource, *, hook_url: str) -> bool:
+    """Delete the hook this Palace created, matched by its URL.
+
+    Matched by URL rather than a stored id so no column is needed, and so a hook a
+    person added by hand is never removed by accident.
+    """
+    import httpx
+
+    from app.services.palace import _github_repo_parts, repo_credential_secret
+
+    if not _is_remote_repo_source(source):
+        return False
+    token = repo_credential_secret(source)
+    if not token:
+        return False
+    try:
+        owner, repo = _github_repo_parts(source.root_path)
+    except Exception:
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=CANON_WEBHOOK_HTTP_TIMEOUT_SECONDS) as client:
+            listing = await client.get(
+                f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/hooks", headers=headers
+            )
+            if listing.status_code != 200:
+                return False
+            for hook in listing.json():
+                if (hook.get("config") or {}).get("url") == hook_url:
+                    await client.delete(
+                        f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/hooks/{hook['id']}",
+                        headers=headers,
+                    )
+                    return True
+    except Exception as exc:  # pragma: no cover - network failure
+        logger.warning("canon push hook: could not reach GitHub: %s", exc)
+    return False

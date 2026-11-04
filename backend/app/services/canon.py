@@ -65,6 +65,9 @@ CANON_RUN_FILE_MAX = 1000
 # lives here with the rest of them.
 CANON_WEBHOOK_TOKEN_BYTES = 24
 CANON_WEBHOOK_SECRET_BYTES = 32
+# Registering a hook is a GitHub round trip inside a request, so it needs a
+# ceiling like the binding probe.
+CANON_WEBHOOK_HTTP_TIMEOUT_SECONDS = 15
 
 # Rough characters-per-token for the per-connect estimate. Deliberately
 # conservative: it over-counts tokens rather than under-counting them.
