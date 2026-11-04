@@ -26,7 +26,10 @@ The caller owns no transaction: this function commits once at the end, and marks
 the run failed with the reason on any error.
 """
 
+import hashlib
+import hmac
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +49,8 @@ from app.models.palace import (
 )
 from app.services.canon import (
     CANON_IMPORT_MAX_FILE_BYTES,
+    CANON_WEBHOOK_SECRET_BYTES,
+    CANON_WEBHOOK_TOKEN_BYTES,
     CanonValidationError,
     validate_section,
 )
@@ -867,3 +872,75 @@ async def accept_repo_version(
     if page is None:  # pragma: no cover - the write above created or updated it
         raise CanonValidationError(_NO_PAGE_MESSAGE)
     return page
+
+
+# --- push hooks -------------------------------------------------------------
+#
+# A binding can be told to sync by the repository instead of by the clock. The
+# hook is not an authoring path and not a second principal: it only says "the
+# default branch moved", and the run it starts is the same run the poller would
+# have started, with the same rules. Publication is still a person's decision.
+
+_GITHUB_SIGNATURE_PREFIX = "sha256="
+
+
+def verify_github_signature(*, secret: str, body: bytes, header: str | None) -> bool:
+    """True when ``header`` is the HMAC of ``body`` under ``secret``.
+
+    Compared in constant time. A missing or malformed header is a refusal, never
+    a pass: an unauthenticated push hook would let anyone start runs.
+    """
+    if not header or not header.startswith(_GITHUB_SIGNATURE_PREFIX):
+        return False
+    received = header[len(_GITHUB_SIGNATURE_PREFIX):].strip().lower()
+    if len(received) != 64:
+        return False
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, received)
+
+
+async def binding_for_webhook(db: AsyncSession, *, token: str) -> SyncSource | None:
+    """The binding that answers to ``token``, or ``None``.
+
+    No tenant is known before the signature is checked, so the lookup is by token
+    alone. The token is random and unique, and the caller still refuses the
+    request unless the body signs correctly.
+    """
+    if not token or len(token) > 128:
+        return None
+    return await db.scalar(select(SyncSource).where(SyncSource.webhook_token == token))
+
+
+async def enable_push_webhook(
+    db: AsyncSession, *, source: SyncSource
+) -> tuple[str, str]:
+    """Give a binding a hook token and signing secret. Returns both once.
+
+    Rotating is the same call: a new token and a new secret replace the old pair,
+    so an old URL stops answering.
+    """
+    from app.services.palace import _encrypt_repo_credential
+
+    token = secrets.token_urlsafe(CANON_WEBHOOK_TOKEN_BYTES)
+    secret = secrets.token_urlsafe(CANON_WEBHOOK_SECRET_BYTES)
+    source.webhook_token = token
+    source.webhook_secret_ciphertext = _encrypt_repo_credential(secret)
+    await db.commit()
+    await db.refresh(source)
+    return token, secret
+
+
+async def disable_push_webhook(db: AsyncSession, *, source: SyncSource) -> None:
+    """Remove the hook. The binding keeps syncing on its interval."""
+    source.webhook_token = None
+    source.webhook_secret_ciphertext = None
+    await db.commit()
+    await db.refresh(source)
+
+
+def webhook_secret(source: SyncSource) -> str:
+    from app.services.palace import _decrypt_repo_credential
+
+    if not source.webhook_secret_ciphertext:
+        raise CanonValidationError("this binding has no push hook")
+    return _decrypt_repo_credential(source.webhook_secret_ciphertext)

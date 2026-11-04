@@ -414,6 +414,13 @@ export interface CanonSyncBinding {
   latest_run?: CanonSyncRun | null;
 }
 
+export interface CanonSyncWebhook {
+  token: string;
+  secret: string;
+  path: string;
+  hint: string;
+}
+
 export interface CanonConflictPair {
   path: string;
   slug: string;

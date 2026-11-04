@@ -111,10 +111,29 @@ def test_every_mutating_canon_route_carries_the_human_author_gate() -> None:
         if route.methods & {"POST", "PUT", "PATCH", "DELETE"}
     ]
 
+    # One route on this surface is not a Palace write at all: a repository push
+    # hook. It takes no Palace credential, so a human gate has nothing to check.
+    # Its credential is the HMAC over the raw body, and its only effect is to
+    # start a sync run, which writes drafts and never publishes. The set is
+    # asserted exactly, so adding a second exemption means editing this line.
+    signature_authenticated = {"/canon/sync/hooks/{token}"}
+
     # Guard against the check passing because it found no routes at all.
     assert len(mutating) >= 5, f"expected the canon write surface, found {len(mutating)}"
-    missing = [route.path for route in mutating if not _gate_carried(route)]
+    missing = [
+        route.path
+        for route in mutating
+        if not _gate_carried(route) and route.path not in signature_authenticated
+    ]
     assert missing == [], f"canon write routes without the human-author gate: {missing}"
+    ungated = {
+        route.path
+        for route in mutating
+        if not _gate_carried(route)
+    }
+    assert ungated == signature_authenticated, (
+        f"an ungated canon route appeared that is not a signature-authenticated hook: {ungated}"
+    )
 
 
 def test_the_gate_is_not_attached_to_read_routes() -> None:

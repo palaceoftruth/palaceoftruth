@@ -242,6 +242,11 @@ class SyncSource(Base):
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     scan_interval_seconds: Mapped[int] = mapped_column(Integer, server_default="900")
     allowed_extensions: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    # A push hook lets the repository tell Palace when it changed, instead of
+    # Palace finding out on the next poll. The token identifies the binding in
+    # the URL; the secret is the credential and never leaves the server.
+    webhook_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
