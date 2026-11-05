@@ -182,6 +182,43 @@ def _effective_media_artifact_limit() -> int:
     )
 
 
+def build_media_download_options(*, outtmpl: str) -> dict[str, Any]:
+    """Return the yt-dlp options the media worker downloads with.
+
+    This is the single source of truth for the download options, so the
+    pre-upgrade check in `scripts/check_ytdlp_youtube.py` proves the options the
+    worker actually runs. A yt-dlp release can retire a player client the same
+    way it retires an extractor: the version alone proves nothing.
+    """
+
+    max_bytes = _effective_media_artifact_limit()
+    options: dict[str, Any] = {
+        "format": "bestaudio/best",
+        # The default android_vr client returns Google Video URLs that reject
+        # this worker's requests with HTTP 403. web_embedded successfully
+        # downloads from the same worker without a PO token.
+        "extractor_args": {"youtube": {"player_client": ["web_embedded"]}},
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": settings.media_download_timeout_seconds,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
+        # The destination is a shared volume. Without these, one very long or
+        # high-bitrate source consumes capacity for every tenant, and a live
+        # stream never stops on its own at all.
+        "max_filesize": max_bytes,
+        "noplaylist": True,
+        "progress_hooks": [_download_size_hook(max_bytes)],
+    }
+    if not settings.media_allow_live_streams:
+        options["live_from_start"] = False
+        options["match_filter"] = yt_dlp.utils.match_filter_func("!is_live & !live")
+    return options
+
+
 def _enforce_downloaded_size(audio_path: str, job_id: str) -> None:
     """Delete and reject a file that got past yt-dlp's own byte ceiling.
 
@@ -966,30 +1003,7 @@ class MediaPipeline(BasePipeline):
         os.makedirs(_TEMP_DIR, exist_ok=True)
         output_template = f"{_TEMP_DIR}/{job_id}.%(ext)s"
 
-        ydl_opts: dict[str, Any] = {
-            "format": "bestaudio/best",
-            # The default android_vr client returns Google Video URLs that
-            # reject this worker's requests with HTTP 403. web_embedded
-            # successfully downloads from the same worker without a PO token.
-            "extractor_args": {"youtube": {"player_client": ["web_embedded"]}},
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
-            "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": settings.media_download_timeout_seconds,
-            "retries": 3,
-            "fragment_retries": 3,
-            "extractor_retries": 3,
-            # The destination is a shared volume. Without these, one very long
-            # or high-bitrate source consumes capacity for every tenant, and a
-            # live stream never stops on its own at all.
-            "max_filesize": _effective_media_artifact_limit(),
-            "noplaylist": True,
-            "progress_hooks": [_download_size_hook(_effective_media_artifact_limit())],
-        }
-        if not settings.media_allow_live_streams:
-            ydl_opts["live_from_start"] = False
-            ydl_opts["match_filter"] = yt_dlp.utils.match_filter_func("!is_live & !live")
+        ydl_opts = build_media_download_options(outtmpl=output_template)
 
         meta: dict[str, Any] = {}
         try:
