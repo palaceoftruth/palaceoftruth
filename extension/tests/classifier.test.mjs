@@ -18,6 +18,47 @@ test("classifies YouTube URLs as media", () => {
   assert.equal(classifyCapture({ url: "https://youtube.com/shorts/abc" }).kind, "media");
 });
 
+test("classifies video platform pages as media", () => {
+  const cases = [
+    "https://www.facebook.com/reel/1234567890",
+    "https://m.facebook.com/reel/1234567890/",
+    "https://www.facebook.com/watch/?v=1234567890",
+    "https://www.facebook.com/somepage/videos/1234567890/",
+    "https://www.facebook.com/share/v/abcdef123/",
+    "https://fb.watch/aBcDeFgHiJ/",
+    "https://www.instagram.com/reel/CxYzAbCdEfG/",
+    "https://instagram.com/reels/CxYzAbCdEfG/",
+    "https://www.tiktok.com/@creator/video/7412345678901234567",
+    "https://vm.tiktok.com/ZMabcdefg/",
+    "https://vimeo.com/76979871",
+    "https://vimeo.com/channels/staffpicks/76979871",
+    "https://player.vimeo.com/video/76979871",
+  ];
+  for (const url of cases) {
+    assert.equal(classifyCapture({ url }).kind, "media", url);
+  }
+});
+
+test("keeps video hubs and profiles out of the media lane", () => {
+  const cases = [
+    "https://www.facebook.com/watch",
+    "https://www.facebook.com/somepage/videos",
+    "https://www.facebook.com/groups/1234567890",
+    "https://www.facebook.com/",
+    "https://fb.watch/",
+    "https://www.instagram.com/",
+    "https://www.instagram.com/creator/",
+    "https://www.instagram.com/p/CxYzAbCdEfG/",
+    "https://www.tiktok.com/@creator",
+    "https://www.tiktok.com/",
+    "https://vimeo.com/channels/staffpicks",
+    "https://vimeo.com/creator",
+  ];
+  for (const url of cases) {
+    assert.notEqual(classifyCapture({ url }).kind, "media", url);
+  }
+});
+
 test("classifies direct audio and video files as media", () => {
   assert.equal(classifyCapture({ url: "https://example.com/audio.mp3" }).kind, "media");
   assert.equal(classifyCapture({ url: "https://cdn.example.com/video.webm" }).kind, "media");

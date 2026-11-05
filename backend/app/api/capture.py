@@ -1,10 +1,11 @@
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 import httpx
@@ -82,6 +83,25 @@ _SOCIAL_HOST_SUFFIXES = (
     "reddit.com",
     "linkedin.com",
 )
+
+# Video platforms that publish a page, not a file. yt-dlp resolves these inside
+# the media pipeline, so the capture layer only has to recognise the page. Every
+# pattern matches a single video: a profile, channel, or video hub page is not
+# media and must keep the webpage or social route.
+_FACEBOOK_VIDEO_PATH_RES = (
+    re.compile(r"^/(?:reel|reels)/[^/]+", re.IGNORECASE),
+    re.compile(r"^/[^/]+/videos/[^/]+", re.IGNORECASE),
+    re.compile(r"^/share/(?:v|r)/[^/]+", re.IGNORECASE),
+)
+_FB_WATCH_PATH_RE = re.compile(r"^/[A-Za-z0-9_-]{1,64}/?$")
+_INSTAGRAM_VIDEO_PATH_RE = re.compile(r"^/(?:reel|reels|tv)/[^/]+", re.IGNORECASE)
+_TIKTOK_VIDEO_PATH_RE = re.compile(r"^/(?:@[^/]+/video/\d+|t/[^/]+|v/\d+)", re.IGNORECASE)
+_TIKTOK_SHORT_HOST_PATH_RE = re.compile(r"^/[A-Za-z0-9]{5,}/?$")
+_VIMEO_VIDEO_PATH_RE = re.compile(
+    r"^/(?:\d+|channels/[^/]+/\d+|groups/[^/]+/videos/\d+)(?:/[A-Za-z0-9]+)?/?$",
+    re.IGNORECASE,
+)
+_VIMEO_PLAYER_PATH_RE = re.compile(r"^/video/\d+", re.IGNORECASE)
 
 _DownloadedImageCandidate = DownloadedImageCandidate
 
@@ -207,6 +227,33 @@ async def _validate_and_download_image_candidates(
         ]
 
 
+def _is_video_platform_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    query = parse_qs(parsed.query or "")
+
+    if hostname == "fb.watch":
+        return bool(_FB_WATCH_PATH_RE.match(path))
+    if _host_matches(hostname, "facebook.com"):
+        if path in {"/watch", "/watch/"}:
+            return "v" in query
+        if path in {"/video.php", "/video.php/"}:
+            return "v" in query or "id" in query
+        return any(pattern.match(path) for pattern in _FACEBOOK_VIDEO_PATH_RES)
+    if _host_matches(hostname, "instagram.com"):
+        return bool(_INSTAGRAM_VIDEO_PATH_RE.match(path))
+    if hostname in {"vm.tiktok.com", "vt.tiktok.com"}:
+        return bool(_TIKTOK_SHORT_HOST_PATH_RE.match(path))
+    if _host_matches(hostname, "tiktok.com"):
+        return bool(_TIKTOK_VIDEO_PATH_RE.match(path))
+    if hostname == "player.vimeo.com":
+        return bool(_VIMEO_PLAYER_PATH_RE.match(path))
+    if _host_matches(hostname, "vimeo.com"):
+        return bool(_VIMEO_VIDEO_PATH_RE.match(path))
+    return False
+
+
 def _is_media_url(url: str) -> bool:
     parsed = urlparse(url)
     path = parsed.path.lower()
@@ -216,7 +263,7 @@ def _is_media_url(url: str) -> bool:
         return True
     if parsed.hostname and _host_matches(parsed.hostname, "youtube.com"):
         return parsed.path.startswith("/watch") or parsed.path.startswith("/shorts/")
-    return False
+    return _is_video_platform_url(url)
 
 
 def _is_social_url(url: str) -> bool:
