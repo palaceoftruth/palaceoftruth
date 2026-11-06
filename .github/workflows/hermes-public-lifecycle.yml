@@ -39,7 +39,7 @@ jobs:
           repository: NousResearch/hermes-agent
           ref: ${{ matrix.host }}
           path: official-host
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
       - name: Prepare isolated official-host environment
         run: |
           uv venv --python 3.14 .contract-venv
