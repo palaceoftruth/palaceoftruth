@@ -16,7 +16,6 @@ from app.models.item import Item
 from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.pipelines.base import (
     MAX_ITEM_TITLE_CHARS,
-    MAX_TRANSCRIPT_TITLE_CHARS,
     BasePipeline,
     promote_metadata_title,
     stable_merge_tags,
@@ -2216,11 +2215,11 @@ def _media_item(title: str, url: str) -> Item:
     )
 
 
-def test_promote_metadata_title_replaces_a_url_placeholder() -> None:
+def test_promote_metadata_title_replaces_a_url_placeholder_with_a_real_title() -> None:
     url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
     item = _media_item(url, url)
 
-    assert promote_metadata_title(item, {"title": "Big Buck Bunny 60fps 4K"}) is True
+    assert promote_metadata_title(item, {"title": "Big Buck Bunny 60fps 4K", "channel": "Blender"}) is True
     assert item.title == "Big Buck Bunny 60fps 4K"
 
 
@@ -2255,20 +2254,7 @@ def test_promote_metadata_title_collapses_whitespace_and_caps_length() -> None:
     assert len(long_item.title) == MAX_ITEM_TITLE_CHARS
 
 
-def test_promote_metadata_title_rejects_a_page_level_title_and_uses_the_caption() -> None:
-    url = "https://www.facebook.com/reel/1234567890"
-    item = _media_item(url, url)
-    metadata = {
-        "title": "Some Page on Reels",
-        "channel": "Some Page",
-        "description": "Sunday service highlights\nSecond line that must not be used",
-    }
-
-    assert promote_metadata_title(item, metadata) is True
-    assert item.title == "Sunday service highlights"
-
-
-def test_promote_metadata_title_rejects_a_page_level_title_without_a_caption() -> None:
+def test_promote_metadata_title_labels_a_page_reel_with_page_and_date() -> None:
     url = "https://www.facebook.com/reel/1234567890"
     item = _media_item(url, url)
     metadata = {
@@ -2281,6 +2267,35 @@ def test_promote_metadata_title_rejects_a_page_level_title_without_a_caption() -
 
     assert promote_metadata_title(item, metadata) is True
     assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
+
+
+def test_promote_metadata_title_appends_the_reel_title_when_one_exists() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Some Page on Reels",
+        "channel": "Some Page",
+        "description": "The Prodigal Son, part 2",
+        "upload_date": "20261101",
+    }
+
+    assert promote_metadata_title(item, metadata) is True
+    assert item.title == "Some Page \u00b7 2026-11-01 \u00b7 The Prodigal Son, part 2"
+
+
+def test_promote_metadata_title_never_uses_the_transcript_as_a_title() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Christ's Church of the Roanoke Valley on Reels",
+        "channel": "Christ's Church of the Roanoke Valley",
+        "description": "",
+        "upload_date": "20261101",
+    }
+
+    assert promote_metadata_title(item, metadata) is True
+    assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
+    assert "good morning" not in item.title.casefold()
 
 
 def test_promote_metadata_title_rejects_a_bare_page_name_used_as_the_title() -> None:
@@ -2304,6 +2319,14 @@ def test_promote_metadata_title_recovers_the_page_name_from_the_suffix() -> None
     assert item.title == "Some Page \u00b7 2026-11-01"
 
 
+def test_promote_metadata_title_uses_the_page_name_when_there_is_no_date() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {"title": "Some Page on Reels"}) is True
+    assert item.title == "Some Page"
+
+
 def test_promote_metadata_title_keeps_a_real_title_that_ends_like_a_page_title() -> None:
     url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
     item = _media_item(url, url)
@@ -2313,7 +2336,7 @@ def test_promote_metadata_title_keeps_a_real_title_that_ends_like_a_page_title()
 
 
 @pytest.mark.asyncio
-async def test_media_pipeline_promotes_a_distinguishing_title_over_the_url_placeholder(
+async def test_media_pipeline_labels_a_page_reel_with_page_date_and_no_transcript_text(
     monkeypatch,
 ) -> None:
     @asynccontextmanager
@@ -2343,75 +2366,6 @@ async def test_media_pipeline_promotes_a_distinguishing_title_over_the_url_place
     result = await pipeline.process(job_id, tenant_id="tenant-a")
 
     assert result == item_id
-    assert item.title == "All right, good morning, everybody."
+    assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
     assert item.status == "ready"
     assert item.metadata_["title"] == "Christ's Church of the Roanoke Valley on Reels"
-
-
-def test_promote_metadata_title_uses_the_opening_spoken_line_when_there_is_no_caption() -> None:
-    url = "https://www.facebook.com/reel/1234567890"
-    item = _media_item(url, url)
-    metadata = {
-        "title": "Christ's Church of the Roanoke Valley on Reels",
-        "channel": "Christ's Church of the Roanoke Valley",
-        "description": "",
-        "upload_date": "20261101",
-    }
-
-    assert promote_metadata_title(item, metadata, LIVE_REEL_TRANSCRIPT) is True
-    assert item.title == "All right, good morning, everybody."
-
-
-def test_promote_metadata_title_strips_timestamps_and_speaker_labels() -> None:
-    url = "https://example.com/reel/1"
-    item = _media_item(url, url)
-    transcript = "[00:01:05] SPEAKER 12: This is the line that should become the title."
-
-    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
-    assert item.title == "This is the line that should become the title."
-
-
-def test_promote_metadata_title_skips_filler_lines_before_the_first_real_sentence() -> None:
-    url = "https://example.com/reel/1"
-    item = _media_item(url, url)
-    transcript = (
-        "[00:00:01] SPEAKER 01: Okay.\n"
-        "[00:00:02] Speaker unknown: Yeah.\n"
-        "[00:00:03] SPEAKER 01: So here is what happened at the auction today.\n"
-    )
-
-    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
-    assert item.title == "So here is what happened at the auction today."
-
-
-def test_promote_metadata_title_falls_back_to_the_date_when_nothing_is_spoken() -> None:
-    url = "https://example.com/reel/1"
-    item = _media_item(url, url)
-    metadata = {"title": "Some Page on Reels", "upload_date": "20261101"}
-
-    assert promote_metadata_title(item, metadata, "") is True
-    assert item.title == "Some Page \u00b7 2026-11-01"
-
-
-def test_promote_metadata_title_prefers_a_caption_over_the_transcript() -> None:
-    url = "https://example.com/reel/1"
-    item = _media_item(url, url)
-    metadata = {
-        "title": "Some Page on Reels",
-        "channel": "Some Page",
-        "description": "Goal of the season from 30 yards",
-    }
-
-    assert promote_metadata_title(item, metadata, LIVE_REEL_TRANSCRIPT) is True
-    assert item.title == "Goal of the season from 30 yards"
-
-
-def test_promote_metadata_title_trims_a_long_spoken_line_at_a_word_boundary() -> None:
-    url = "https://example.com/reel/1"
-    item = _media_item(url, url)
-    spoken = "word " * 60
-    transcript = f"[00:00:02] SPEAKER 01: {spoken.strip()}"
-
-    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
-    assert len(item.title) <= MAX_TRANSCRIPT_TITLE_CHARS
-    assert item.title.endswith("word")
