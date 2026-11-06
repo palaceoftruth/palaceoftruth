@@ -2185,7 +2185,10 @@ class TitledPipeline(BasePipeline):
         return (
             "A recorded church service about community.",
             {
-                "title": "  Christ's Church of the   Roanoke Valley on Reels ",
+                "title": "Christ's Church of the Roanoke Valley on Reels",
+                "channel": "Christ's Church of the Roanoke Valley",
+                "author": "Christ's Church of the Roanoke Valley",
+                "upload_date": "20261101",
                 "duration_seconds": 3921.8,
             },
         )
@@ -2205,11 +2208,11 @@ def _media_item(title: str, url: str) -> Item:
 
 
 def test_promote_metadata_title_replaces_a_url_placeholder() -> None:
-    url = "https://www.facebook.com/share/v/1CgB8cu5HQ/"
+    url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
     item = _media_item(url, url)
 
-    assert promote_metadata_title(item, {"title": "Christ's Church on Reels"}) is True
-    assert item.title == "Christ's Church on Reels"
+    assert promote_metadata_title(item, {"title": "Big Buck Bunny 60fps 4K"}) is True
+    assert item.title == "Big Buck Bunny 60fps 4K"
 
 
 def test_promote_metadata_title_keeps_a_title_that_did_not_come_from_the_url() -> None:
@@ -2243,8 +2246,65 @@ def test_promote_metadata_title_collapses_whitespace_and_caps_length() -> None:
     assert len(long_item.title) == MAX_ITEM_TITLE_CHARS
 
 
+def test_promote_metadata_title_rejects_a_page_level_title_and_uses_the_caption() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Some Page on Reels",
+        "channel": "Some Page",
+        "description": "Sunday service highlights\nSecond line that must not be used",
+    }
+
+    assert promote_metadata_title(item, metadata) is True
+    assert item.title == "Sunday service highlights"
+
+
+def test_promote_metadata_title_rejects_a_page_level_title_without_a_caption() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Christ's Church of the Roanoke Valley on Reels",
+        "channel": "Christ's Church of the Roanoke Valley",
+        "author": "Christ's Church of the Roanoke Valley",
+        "description": "",
+        "upload_date": "20261101",
+    }
+
+    assert promote_metadata_title(item, metadata) is True
+    assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
+
+
+def test_promote_metadata_title_rejects_a_bare_page_name_used_as_the_title() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Some Page",
+        "channel": "Some Page",
+        "published_at": "2026-11-01T09:00:00Z",
+    }
+
+    assert promote_metadata_title(item, metadata) is True
+    assert item.title == "Some Page \u00b7 2026-11-01"
+
+
+def test_promote_metadata_title_recovers_the_page_name_from_the_suffix() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {"title": "Some Page on Reels", "upload_date": "20261101"}) is True
+    assert item.title == "Some Page \u00b7 2026-11-01"
+
+
+def test_promote_metadata_title_keeps_a_real_title_that_ends_like_a_page_title() -> None:
+    url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {"title": "Big Buck Bunny 60fps 4K", "channel": "Blender"}) is True
+    assert item.title == "Big Buck Bunny 60fps 4K"
+
+
 @pytest.mark.asyncio
-async def test_media_pipeline_promotes_the_source_title_over_the_url_placeholder(
+async def test_media_pipeline_promotes_a_distinguishing_title_over_the_url_placeholder(
     monkeypatch,
 ) -> None:
     @asynccontextmanager
@@ -2274,6 +2334,6 @@ async def test_media_pipeline_promotes_the_source_title_over_the_url_placeholder
     result = await pipeline.process(job_id, tenant_id="tenant-a")
 
     assert result == item_id
-    assert item.title == "Christ's Church of the Roanoke Valley on Reels"
+    assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
     assert item.status == "ready"
-    assert item.metadata_["title"] == "  Christ's Church of the   Roanoke Valley on Reels "
+    assert item.metadata_["title"] == "Christ's Church of the Roanoke Valley on Reels"
