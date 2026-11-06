@@ -80,6 +80,35 @@ def stable_merge_tags(*tag_groups: list[str] | tuple[str, ...] | None) -> list[s
     return merged
 
 
+MAX_ITEM_TITLE_CHARS = 500
+
+
+def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
+    """Replace a placeholder title with the source's own title.
+
+    Media and webpage ingests create the item before anything is fetched, so the
+    row starts life with the URL as its title. Once extraction returns the
+    source's title there is no reason to keep showing a URL in the list view.
+    Only a placeholder is replaced: a title that came from a human, a feed entry,
+    or a canon import is left alone.
+    """
+    candidate = metadata.get("title")
+    if not isinstance(candidate, str):
+        return False
+    candidate = " ".join(candidate.split())
+    if not candidate:
+        return False
+    current = (item.title or "").strip()
+    placeholder = (item.source_url or "").strip()
+    if current and current != placeholder:
+        return False
+    promoted = candidate[:MAX_ITEM_TITLE_CHARS]
+    if promoted == current:
+        return False
+    item.title = promoted
+    return True
+
+
 class BasePipeline:
     """Orchestrates: extract → chunk → embed → AI enrich → store."""
 
@@ -250,6 +279,7 @@ class BasePipeline:
             if entities_dict:
                 merged_metadata["entities"] = entities_dict
             item.metadata_ = merged_metadata
+            promote_metadata_title(item, merged_metadata)
             apply_effective_date(item, metadata=merged_metadata)
             item.content_hash = content_hash
             item.tenant_id = tenant_id

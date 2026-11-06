@@ -14,7 +14,12 @@ from app.embedding_profile import resolve_embedding_profile
 from app.models.embedding import Embedding
 from app.models.item import Item
 from app.models.job import Job, JobAttempt, JobProgressEvent
-from app.pipelines.base import BasePipeline, stable_merge_tags
+from app.pipelines.base import (
+    MAX_ITEM_TITLE_CHARS,
+    BasePipeline,
+    promote_metadata_title,
+    stable_merge_tags,
+)
 from app.pipelines.youtube import MediaPendingAvailabilityError, MediaPipeline, MediaTranscriptionLimitError, TranscriptionChunk
 from app.pipelines.youtube import (
     LocalWhisperXTranscriptionProvider,
@@ -2173,3 +2178,102 @@ async def test_local_whisperx_uses_split_connect_timeout(monkeypatch, tmp_path: 
     timeout = captured["timeout"]
     assert timeout.connect == 3.0
     assert timeout.read == 5400
+
+
+class TitledPipeline(BasePipeline):
+    async def extract(self, **_kwargs):
+        return (
+            "A recorded church service about community.",
+            {
+                "title": "  Christ's Church of the   Roanoke Valley on Reels ",
+                "duration_seconds": 3921.8,
+            },
+        )
+
+
+def _media_item(title: str, url: str) -> Item:
+    return Item(
+        id=uuid.uuid4(),
+        tenant_id="tenant-a",
+        title=title,
+        source_type="media",
+        source_url=url,
+        status="processing",
+        tags=[],
+        categories=[],
+    )
+
+
+def test_promote_metadata_title_replaces_a_url_placeholder() -> None:
+    url = "https://www.facebook.com/share/v/1CgB8cu5HQ/"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {"title": "Christ's Church on Reels"}) is True
+    assert item.title == "Christ's Church on Reels"
+
+
+def test_promote_metadata_title_keeps_a_title_that_did_not_come_from_the_url() -> None:
+    url = "https://example.com/watch?v=1"
+    item = _media_item("My own note about this talk", url)
+
+    assert promote_metadata_title(item, {"title": "Source supplied title"}) is False
+    assert item.title == "My own note about this talk"
+
+
+def test_promote_metadata_title_ignores_missing_blank_and_non_string_titles() -> None:
+    url = "https://example.com/watch?v=1"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {}) is False
+    assert promote_metadata_title(item, {"title": "   "}) is False
+    assert promote_metadata_title(item, {"title": None}) is False
+    assert promote_metadata_title(item, {"title": 42}) is False
+    assert item.title == url
+
+
+def test_promote_metadata_title_collapses_whitespace_and_caps_length() -> None:
+    url = "https://example.com/watch?v=1"
+    item = _media_item(url, url)
+
+    assert promote_metadata_title(item, {"title": "  A\n\n  B  "}) is True
+    assert item.title == "A B"
+
+    long_item = _media_item(url, url)
+    assert promote_metadata_title(long_item, {"title": "x" * 900}) is True
+    assert len(long_item.title) == MAX_ITEM_TITLE_CHARS
+
+
+@pytest.mark.asyncio
+async def test_media_pipeline_promotes_the_source_title_over_the_url_placeholder(
+    monkeypatch,
+) -> None:
+    @asynccontextmanager
+    async def distributed_slot(_tenant_id: str):
+        yield
+
+    monkeypatch.setattr(
+        "app.services.llm_admission._distributed_tenant_llm_slot",
+        distributed_slot,
+    )
+    url = "https://www.facebook.com/share/v/1CgB8cu5HQ/"
+    item_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    item = _media_item(url, url)
+    item.id = item_id
+    job = Job(
+        id=job_id,
+        item_id=item_id,
+        job_type="media",
+        tenant_id="tenant-a",
+        status="queued",
+        progress=0,
+    )
+    session = FakePipelineSession(job=job, item=item)
+    pipeline = TitledPipeline(session, FakeEmbedder(), TaxonomyFakeLlm())  # type: ignore[arg-type]
+
+    result = await pipeline.process(job_id, tenant_id="tenant-a")
+
+    assert result == item_id
+    assert item.title == "Christ's Church of the Roanoke Valley on Reels"
+    assert item.status == "ready"
+    assert item.metadata_["title"] == "  Christ's Church of the   Roanoke Valley on Reels "
