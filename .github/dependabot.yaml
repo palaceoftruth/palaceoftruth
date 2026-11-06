@@ -4,7 +4,16 @@ updates:
     directory: /backend
     schedule: { interval: weekly }
     groups:
-      python-dependencies: { patterns: ["*"] }
+      # A 26-update group PR cannot pass its own gates and blocks every package
+      # behind it: the 2026-10 group PR sat open with a failing Trivy scan while
+      # yt-dlp fell four months behind. yt-dlp also rots faster than anything
+      # else here, because provider sites change under it, so it gets its own
+      # small PR that `scripts/check_ytdlp_youtube.py` can clear on its merits.
+      yt-dlp:
+        patterns: ["yt-dlp*"]
+      python-dependencies:
+        patterns: ["*"]
+        exclude-patterns: ["yt-dlp*"]
   - package-ecosystem: npm
     directory: /frontend
     schedule: { interval: weekly }
