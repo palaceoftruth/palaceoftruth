@@ -16,6 +16,7 @@ from app.models.item import Item
 from app.models.job import Job, JobAttempt, JobProgressEvent
 from app.pipelines.base import (
     MAX_ITEM_TITLE_CHARS,
+    MAX_TRANSCRIPT_TITLE_CHARS,
     BasePipeline,
     promote_metadata_title,
     stable_merge_tags,
@@ -2180,10 +2181,18 @@ async def test_local_whisperx_uses_split_connect_timeout(monkeypatch, tmp_path: 
     assert timeout.read == 5400
 
 
+LIVE_REEL_TRANSCRIPT = (
+    "[00:00:01] SPEAKER 03: All I guess it's good.\n"
+    "[00:00:06] SPEAKER 03: All right, good morning, everybody.\n"
+    "[00:00:11] SPEAKER 02: Welcome to Christ's church.\n"
+    "[00:00:13] SPEAKER 02: Let's all stand together and we'll sing some songs.\n"
+)
+
+
 class TitledPipeline(BasePipeline):
     async def extract(self, **_kwargs):
         return (
-            "A recorded church service about community.",
+            LIVE_REEL_TRANSCRIPT,
             {
                 "title": "Christ's Church of the Roanoke Valley on Reels",
                 "channel": "Christ's Church of the Roanoke Valley",
@@ -2334,6 +2343,75 @@ async def test_media_pipeline_promotes_a_distinguishing_title_over_the_url_place
     result = await pipeline.process(job_id, tenant_id="tenant-a")
 
     assert result == item_id
-    assert item.title == "Christ's Church of the Roanoke Valley \u00b7 2026-11-01"
+    assert item.title == "All right, good morning, everybody."
     assert item.status == "ready"
     assert item.metadata_["title"] == "Christ's Church of the Roanoke Valley on Reels"
+
+
+def test_promote_metadata_title_uses_the_opening_spoken_line_when_there_is_no_caption() -> None:
+    url = "https://www.facebook.com/reel/1234567890"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Christ's Church of the Roanoke Valley on Reels",
+        "channel": "Christ's Church of the Roanoke Valley",
+        "description": "",
+        "upload_date": "20261101",
+    }
+
+    assert promote_metadata_title(item, metadata, LIVE_REEL_TRANSCRIPT) is True
+    assert item.title == "All right, good morning, everybody."
+
+
+def test_promote_metadata_title_strips_timestamps_and_speaker_labels() -> None:
+    url = "https://example.com/reel/1"
+    item = _media_item(url, url)
+    transcript = "[00:01:05] SPEAKER 12: This is the line that should become the title."
+
+    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
+    assert item.title == "This is the line that should become the title."
+
+
+def test_promote_metadata_title_skips_filler_lines_before_the_first_real_sentence() -> None:
+    url = "https://example.com/reel/1"
+    item = _media_item(url, url)
+    transcript = (
+        "[00:00:01] SPEAKER 01: Okay.\n"
+        "[00:00:02] Speaker unknown: Yeah.\n"
+        "[00:00:03] SPEAKER 01: So here is what happened at the auction today.\n"
+    )
+
+    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
+    assert item.title == "So here is what happened at the auction today."
+
+
+def test_promote_metadata_title_falls_back_to_the_date_when_nothing_is_spoken() -> None:
+    url = "https://example.com/reel/1"
+    item = _media_item(url, url)
+    metadata = {"title": "Some Page on Reels", "upload_date": "20261101"}
+
+    assert promote_metadata_title(item, metadata, "") is True
+    assert item.title == "Some Page \u00b7 2026-11-01"
+
+
+def test_promote_metadata_title_prefers_a_caption_over_the_transcript() -> None:
+    url = "https://example.com/reel/1"
+    item = _media_item(url, url)
+    metadata = {
+        "title": "Some Page on Reels",
+        "channel": "Some Page",
+        "description": "Goal of the season from 30 yards",
+    }
+
+    assert promote_metadata_title(item, metadata, LIVE_REEL_TRANSCRIPT) is True
+    assert item.title == "Goal of the season from 30 yards"
+
+
+def test_promote_metadata_title_trims_a_long_spoken_line_at_a_word_boundary() -> None:
+    url = "https://example.com/reel/1"
+    item = _media_item(url, url)
+    spoken = "word " * 60
+    transcript = f"[00:00:02] SPEAKER 01: {spoken.strip()}"
+
+    assert promote_metadata_title(item, {"title": "Some Page on Reels"}, transcript) is True
+    assert len(item.title) <= MAX_TRANSCRIPT_TITLE_CHARS
+    assert item.title.endswith("word")

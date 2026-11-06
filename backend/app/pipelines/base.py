@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -151,7 +152,47 @@ def _metadata_date(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def _distinguishing_title(metadata: dict[str, Any], source_title: str) -> str | None:
+_TRANSCRIPT_TIMESTAMP_RE = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*")
+_TRANSCRIPT_SPEAKER_RE = re.compile(r"^(?:SPEAKER\s+\d+|Speaker\s+\S+)\s*:\s*", re.IGNORECASE)
+MIN_TRANSCRIPT_TITLE_WORDS = 5
+MIN_TRANSCRIPT_TITLE_CHARS = 30
+MAX_TRANSCRIPT_TITLE_CHARS = 80
+
+
+def _strip_transcript_prefix(line: str) -> str:
+    """Remove the "[00:00:11] SPEAKER 02:" decoration the renderer adds."""
+    cleaned = _TRANSCRIPT_TIMESTAMP_RE.sub("", line.strip())
+    cleaned = _TRANSCRIPT_SPEAKER_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _title_from_transcript(raw_text: Any) -> str | None:
+    """Take the first substantial spoken line as a name for the item.
+
+    Reels often carry no title at all, or only the page name. The transcript is
+    the one thing every media item has, so the opening line is the best
+    available label. Short fragments and filler lines are skipped.
+    """
+    if not isinstance(raw_text, str):
+        return None
+    for line in raw_text.splitlines()[:40]:
+        candidate = _strip_transcript_prefix(line)
+        if len(candidate) < MIN_TRANSCRIPT_TITLE_CHARS:
+            continue
+        if len(candidate.split()) < MIN_TRANSCRIPT_TITLE_WORDS:
+            continue
+        if len(candidate) <= MAX_TRANSCRIPT_TITLE_CHARS:
+            return candidate
+        clipped = candidate[:MAX_TRANSCRIPT_TITLE_CHARS].rsplit(" ", 1)[0]
+        return clipped.rstrip(" ,.;:") or None
+    return None
+
+
+def _distinguishing_title(
+    metadata: dict[str, Any],
+    source_title: str,
+    raw_text: Any = None,
+) -> str | None:
     """Find a title that tells this item apart from its siblings.
 
     A page-level title is not a title. Prefer the caption, then fall back to
@@ -163,6 +204,9 @@ def _distinguishing_title(metadata: dict[str, Any], source_title: str) -> str | 
     caption = _first_meaningful_line(metadata.get("description"), owner_names)
     if caption:
         return caption
+    spoken = _title_from_transcript(raw_text)
+    if spoken:
+        return spoken
     owner = next(
         (
             " ".join(str(metadata[key]).split())
@@ -179,7 +223,7 @@ def _distinguishing_title(metadata: dict[str, Any], source_title: str) -> str | 
     return None
 
 
-def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
+def promote_metadata_title(item: Item, metadata: dict[str, Any], raw_text: Any = None) -> bool:
     """Replace a placeholder title with a title that identifies the item.
 
     Media and webpage ingests create the item before anything is fetched, so the
@@ -187,8 +231,9 @@ def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
     there is no reason to keep showing a URL in the list view.
 
     A page-level title is rejected, because promoting it would give every video
-    from that page the same name. Only a placeholder is replaced: a title that
-    came from a human, a feed entry, or a canon import is left alone.
+    from that page the same name. The caption comes first, then the opening
+    spoken line, then "<page> · <date>". Only a placeholder is replaced: a title
+    that came from a human, a feed entry, or a canon import is left alone.
     """
     candidate = metadata.get("title")
     if not isinstance(candidate, str):
@@ -200,7 +245,7 @@ def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
     placeholder = (item.source_url or "").strip()
     if current and current != placeholder:
         return False
-    resolved = _distinguishing_title(metadata, candidate)
+    resolved = _distinguishing_title(metadata, candidate, raw_text)
     if not resolved:
         return False
     promoted = resolved[:MAX_ITEM_TITLE_CHARS]
@@ -381,7 +426,7 @@ class BasePipeline:
             if entities_dict:
                 merged_metadata["entities"] = entities_dict
             item.metadata_ = merged_metadata
-            promote_metadata_title(item, merged_metadata)
+            promote_metadata_title(item, merged_metadata, raw_text)
             apply_effective_date(item, metadata=merged_metadata)
             item.content_hash = content_hash
             item.tenant_id = tenant_id
