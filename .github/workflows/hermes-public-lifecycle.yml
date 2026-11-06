@@ -61,7 +61,12 @@ jobs:
           HERMES_HOME: ${{ github.workspace }}/offline-home
         run: |
           .contract-venv/bin/python scripts/check_hermes_public_hooks.py --host official-host --receipt contract-evidence/hooks-receipt.json
-      - name: Strict real-host admission and drain gate
+      - name: Real-host admission and drain gate
+        # The pinned host drains only its own executor, so a provider-aware
+        # global drain is reported in the receipt as `unsupported_by_host`
+        # rather than failing the leg. The gate fails on the invariants this
+        # repository owns: host executor drain, bounded provider flush, and the
+        # delayed write staying on the old session scope.
         env:
           HOME: ${{ github.workspace }}/offline-home
           HERMES_HOME: ${{ github.workspace }}/offline-home
