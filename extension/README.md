@@ -7,9 +7,35 @@ browser capture contract to Palace at `/api/v1/capture/browser`:
 
 - selected text becomes a note with source URL provenance
 - YouTube, Shorts, youtu.be, and direct audio/video URLs route to media ingest
+- Facebook reels, Facebook watch, page videos, and fb.watch short links route to
+  media ingest
+- Instagram reels and IGTV, TikTok videos, and Vimeo videos route to media
+  ingest
+- video hubs, profiles, channels, and Instagram photo posts are not media: they
+  keep the webpage route, because they do not identify one video
 - social post URLs route through webpage ingest while preserving `capture_kind=social_post`
 - ordinary `http` and `https` URLs route to webpage ingest
 - direct image URLs upload the image file itself to `/api/v1/capture/browser/images`
+
+## Video sites
+
+The media lane resolves a page URL with yt-dlp, so these sites work the same way
+YouTube does: open the video page, open the popup, press *Save to Palace*.
+
+- YouTube, Shorts, and youtu.be
+- Facebook: `/reel/`, `/watch/?v=`, `/<page>/videos/`, `/share/v|r/`, and
+  `fb.watch` short links
+- Instagram: `/reel/`, `/reels/`, and `/tv/`
+- TikTok: `/@user/video/<id>`, `/t/`, `/v/`, and `vm.` or `vt.` short links
+- Vimeo: `vimeo.com/<id>`, channel and group videos, and the player URLs
+
+Pages that list many videos are not media and keep the webpage route. That
+covers a channel, a profile, a video hub, a Facebook group, and an Instagram
+photo post.
+
+Meta and Vimeo sometimes serve a login wall instead of the video. The media
+worker has no cookie support today, so when yt-dlp cannot read the page the job
+fails and the job record carries the yt-dlp reason.
 
 ## Image uploads
 

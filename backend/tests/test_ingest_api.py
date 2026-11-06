@@ -20,7 +20,12 @@ from app.database import get_db
 from app.models.item import Item
 from app.models.job import Job
 from app.models.web_save import WebSave
+from app.schemas.ingest import BrowserCaptureRequest
 from app.workers.queues import DEFAULT_WORKER_QUEUE, MEDIA_FAIR_DISPATCH_TASK_NAME, singleton_job_id
+
+
+def _capture_body(url: str) -> BrowserCaptureRequest:
+    return BrowserCaptureRequest(url=url)
 
 
 PNG_1X1_BYTES = (
@@ -50,7 +55,14 @@ def _public_fixture_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     # These API tests enqueue fixture URLs; they must not resolve real hosts.
     # Keep URL/IP validation active (including private-address rejection).
     def resolve(host, *_args, **_kwargs):
-        assert host in {"example.com", "x.com", "youtube.com", "pbs.twimg.com"}
+        assert host in {
+            "example.com",
+            "x.com",
+            "youtube.com",
+            "pbs.twimg.com",
+            "www.facebook.com",
+            "www.instagram.com",
+        }
         return [(None, None, None, None, ("93.184.216.34", 0))]
 
     monkeypatch.setattr(outbound_http.socket, "getaddrinfo", resolve)
@@ -417,6 +429,95 @@ def test_browser_capture_routes_media_to_media_queue_and_preserves_metadata() ->
             },
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/reel/1234567890",
+        "https://m.facebook.com/reel/1234567890/",
+        "https://www.facebook.com/watch/?v=1234567890",
+        "https://www.facebook.com/somepage/videos/1234567890/",
+        "https://www.facebook.com/share/v/abcdef123/",
+        "https://fb.watch/aBcDeFgHiJ/",
+        "https://www.instagram.com/reel/CxYzAbCdEfG/",
+        "https://instagram.com/reels/CxYzAbCdEfG/",
+        "https://www.tiktok.com/@creator/video/7412345678901234567",
+        "https://vm.tiktok.com/ZMabcdefg/",
+        "https://vimeo.com/76979871",
+        "https://vimeo.com/channels/staffpicks/76979871",
+        "https://player.vimeo.com/video/76979871",
+    ],
+)
+def test_video_platform_urls_route_to_media(url: str) -> None:
+    assert capture_api._is_media_url(url), url
+    assert capture_api._resolve_capture_kind(_capture_body(url), url) == "media"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Video hubs and profiles are pages, not a single video. They must keep
+        # their ordinary route instead of being handed to yt-dlp.
+        "https://www.facebook.com/watch",
+        "https://www.facebook.com/somepage/videos",
+        "https://www.facebook.com/groups/1234567890",
+        "https://www.facebook.com/",
+        "https://fb.watch/",
+        "https://www.instagram.com/",
+        "https://www.instagram.com/creator/",
+        "https://www.instagram.com/p/CxYzAbCdEfG/",
+        "https://www.tiktok.com/@creator",
+        "https://www.tiktok.com/",
+        "https://vimeo.com/channels/staffpicks",
+        "https://vimeo.com/creator",
+    ],
+)
+def test_video_platform_near_misses_keep_their_route(url: str) -> None:
+    assert not capture_api._is_media_url(url), url
+
+
+def test_browser_capture_routes_instagram_reel_to_media_ingest() -> None:
+    session = FakeSession()
+    arq_pool = FakeArqPool()
+    client = _client(session, arq_pool=arq_pool)
+
+    response = client.post(
+        "/api/v1/capture/browser",
+        json={
+            "url": "https://www.instagram.com/reel/CxYzAbCdEfG/",
+            "page_title": "Reel",
+            "detected_kind": "webpage",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["kind"] == "media"
+    assert payload["route"] == "media"
+    item = session.added_items[0]
+    assert item.source_type == "media"
+    assert item.source_url == "https://www.instagram.com/reel/CxYzAbCdEfG/"
+    assert item.metadata_["browser_capture"]["capture_kind"] == "media"
+    assert session.added_web_saves[0].capture_kind == "media"
+    assert arq_pool.enqueued[0][0] == MEDIA_FAIR_DISPATCH_TASK_NAME
+
+
+def test_browser_capture_keeps_facebook_video_hub_on_webpage_route() -> None:
+    session = FakeSession()
+    arq_pool = FakeArqPool()
+    client = _client(session, arq_pool=arq_pool)
+
+    response = client.post(
+        "/api/v1/capture/browser",
+        json={"url": "https://www.facebook.com/watch"},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["kind"] == "webpage"
+    assert payload["route"] == "webpage"
+    assert arq_pool.enqueued[0][0] == "process_webpage"
 
 
 def test_browser_capture_routes_webpage_to_process_webpage_and_preserves_metadata() -> None:

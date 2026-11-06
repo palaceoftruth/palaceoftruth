@@ -42,6 +42,24 @@ const SOCIAL_HOSTS = [
 
 const MASTODON_STATUS_PATH = /^\/@[^/]+\/\d+(?:\/)?$/;
 
+// Video platforms that publish a page, not a file. yt-dlp resolves these on the
+// server, so the extension sends the page URL and Palace downloads the media.
+// Only paths that identify one video match: a channel, profile, or video hub
+// page is not media.
+const FACEBOOK_VIDEO_PATHS = [
+  /^\/(?:reel|reels)\/[^/]+/i,
+  /^\/[^/]+\/videos\/[^/]+/i,
+  /^\/share\/(?:v|r)\/[^/]+/i,
+];
+const INSTAGRAM_VIDEO_PATH = /^\/(?:reel|reels|tv)\/[^/]+/i;
+const TIKTOK_VIDEO_PATH = /^\/(?:@[^/]+\/video\/\d+|t\/[^/]+|v\/\d+)/i;
+const TIKTOK_SHORT_HOST_PATH = /^\/[A-Za-z0-9]{5,}\/?$/;
+// fb.watch is Facebook's short link. Require a path shape so a bare domain or a
+// general-purpose redirect does not classify as media.
+const FB_WATCH_PATH = /^\/[A-Za-z0-9_-]{1,64}\/?$/;
+const VIMEO_VIDEO_PATH = /^\/(?:\d+|channels\/[^/]+\/\d+|groups\/[^/]+\/videos\/\d+)(?:\/[A-Za-z0-9]+)?\/?$/i;
+const VIMEO_PLAYER_PATH = /^\/video\/\d+/i;
+
 function normalizeUrl(rawUrl: string | null | undefined): URL | null {
   const value = rawUrl?.trim();
   if (!value) return null;
@@ -72,6 +90,48 @@ function isYouTubeUrl(url: URL): boolean {
   if (/^youtu\.be$/i.test(url.hostname)) return true;
   if (!/(^|\.)youtube\.com$/i.test(url.hostname)) return false;
   return url.pathname.startsWith("/watch") || url.pathname.startsWith("/shorts/");
+}
+
+function isFacebookVideoUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (host === "fb.watch") return FB_WATCH_PATH.test(url.pathname);
+  if (!/(^|\.)facebook\.com$/i.test(host)) return false;
+  const path = url.pathname;
+  if (path === "/watch" || path === "/watch/") return url.searchParams.has("v");
+  if (/^\/video\.php$/i.test(path)) {
+    return url.searchParams.has("v") || url.searchParams.has("id");
+  }
+  return FACEBOOK_VIDEO_PATHS.some((pattern) => pattern.test(path));
+}
+
+function isInstagramVideoUrl(url: URL): boolean {
+  if (!/(^|\.)instagram\.com$/i.test(url.hostname)) return false;
+  return INSTAGRAM_VIDEO_PATH.test(url.pathname);
+}
+
+function isTikTokVideoUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (host === "vm.tiktok.com" || host === "vt.tiktok.com") {
+    return TIKTOK_SHORT_HOST_PATH.test(url.pathname);
+  }
+  if (!/(^|\.)tiktok\.com$/i.test(host)) return false;
+  return TIKTOK_VIDEO_PATH.test(url.pathname);
+}
+
+function isVimeoVideoUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (host === "player.vimeo.com") return VIMEO_PLAYER_PATH.test(url.pathname);
+  if (!/(^|\.)vimeo\.com$/i.test(host)) return false;
+  return VIMEO_VIDEO_PATH.test(url.pathname);
+}
+
+function isVideoPlatformUrl(url: URL): boolean {
+  return (
+    isFacebookVideoUrl(url) ||
+    isInstagramVideoUrl(url) ||
+    isTikTokVideoUrl(url) ||
+    isVimeoVideoUrl(url)
+  );
 }
 
 function isSocialUrl(url: URL): boolean {
@@ -107,7 +167,7 @@ export function classifyCapture(input: CaptureInput): CaptureClassification {
     };
   }
 
-  if (isYouTubeUrl(parsedUrl) || isDirectMediaUrl(parsedUrl)) {
+  if (isYouTubeUrl(parsedUrl) || isDirectMediaUrl(parsedUrl) || isVideoPlatformUrl(parsedUrl)) {
     return {
       kind: "media",
       url: parsedUrl.href,
