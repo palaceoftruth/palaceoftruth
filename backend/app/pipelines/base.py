@@ -82,15 +82,113 @@ def stable_merge_tags(*tag_groups: list[str] | tuple[str, ...] | None) -> list[s
 
 MAX_ITEM_TITLE_CHARS = 500
 
+# Platforms that repeat the page name in the title instead of the video's own
+# title. Facebook reels are the clear case: every reel from a page comes back
+# as "<Page name> on Reels", so promoting it verbatim would give the whole page
+# one identical title.
+_GENERIC_TITLE_SUFFIXES = (
+    " on reels",
+    " on facebook",
+    " | facebook",
+    " - facebook",
+    " on watch",
+    " on tiktok",
+)
+
+
+def _title_owner_names(metadata: dict[str, Any]) -> set[str]:
+    """Collect the account or page names a title could be derived from."""
+    names: set[str] = set()
+    for key in ("channel", "channel_name", "author", "uploader", "uploader_id", "creator"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            names.add(" ".join(value.split()).casefold())
+    return names
+
+
+def _is_page_level_title(title: str, owner_names: set[str]) -> bool:
+    """True when the title says only which page published the video."""
+    normalized = " ".join(title.split()).casefold()
+    if normalized in owner_names:
+        return True
+    if any(normalized == f"{name}{suffix}" for name in owner_names for suffix in _GENERIC_TITLE_SUFFIXES):
+        return True
+    # The shape alone is a signal: "Anything on Reels" is a page name plus a
+    # platform suffix, and the page name is the only part worth keeping.
+    return any(normalized.endswith(suffix) and len(normalized) > len(suffix) for suffix in _GENERIC_TITLE_SUFFIXES)
+
+
+def _page_name_from_title(title: str) -> str | None:
+    """Recover the page name when a title is only "<page> on Reels"."""
+    normalized = " ".join(title.split())
+    for suffix in _GENERIC_TITLE_SUFFIXES:
+        if normalized.casefold().endswith(suffix) and len(normalized) > len(suffix):
+            return normalized[: len(normalized) - len(suffix)].strip()
+    return None
+
+
+def _first_meaningful_line(value: Any, owner_names: set[str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    for line in value.splitlines():
+        line = " ".join(line.split())
+        if len(line) < 8 or line.casefold() in owner_names:
+            continue
+        return line
+    return None
+
+
+def _metadata_date(metadata: dict[str, Any]) -> str | None:
+    """Return YYYY-MM-DD from the shapes yt-dlp and feed extractors use."""
+    raw = metadata.get("upload_date") or metadata.get("published_at") or metadata.get("published")
+    if not isinstance(raw, str):
+        return None
+    digits = raw.strip()
+    if len(digits) >= 8 and digits[:8].isdigit():
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    if len(digits) >= 10 and digits[4] == "-" and digits[7] == "-":
+        return digits[:10]
+    return None
+
+
+def _distinguishing_title(metadata: dict[str, Any], source_title: str) -> str | None:
+    """Find a title that tells this item apart from its siblings.
+
+    A page-level title is not a title. Prefer the caption, then fall back to
+    "<page> · <date>", which is unique per page per day.
+    """
+    owner_names = _title_owner_names(metadata)
+    if not _is_page_level_title(source_title, owner_names):
+        return source_title
+    caption = _first_meaningful_line(metadata.get("description"), owner_names)
+    if caption:
+        return caption
+    owner = next(
+        (
+            " ".join(str(metadata[key]).split())
+            for key in ("channel", "channel_name", "author", "uploader", "creator")
+            if isinstance(metadata.get(key), str) and metadata[key].strip()
+        ),
+        _page_name_from_title(source_title),
+    )
+    published = _metadata_date(metadata)
+    if owner and published:
+        return f"{owner} · {published}"
+    if owner:
+        return owner
+    return None
+
 
 def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
-    """Replace a placeholder title with the source's own title.
+    """Replace a placeholder title with a title that identifies the item.
 
     Media and webpage ingests create the item before anything is fetched, so the
-    row starts life with the URL as its title. Once extraction returns the
-    source's title there is no reason to keep showing a URL in the list view.
-    Only a placeholder is replaced: a title that came from a human, a feed entry,
-    or a canon import is left alone.
+    row starts life with the URL as its title. Once extraction returns a title
+    there is no reason to keep showing a URL in the list view.
+
+    A page-level title is rejected, because promoting it would give every video
+    from that page the same name. Only a placeholder is replaced: a title that
+    came from a human, a feed entry, or a canon import is left alone.
     """
     candidate = metadata.get("title")
     if not isinstance(candidate, str):
@@ -102,11 +200,15 @@ def promote_metadata_title(item: Item, metadata: dict[str, Any]) -> bool:
     placeholder = (item.source_url or "").strip()
     if current and current != placeholder:
         return False
-    promoted = candidate[:MAX_ITEM_TITLE_CHARS]
+    resolved = _distinguishing_title(metadata, candidate)
+    if not resolved:
+        return False
+    promoted = resolved[:MAX_ITEM_TITLE_CHARS]
     if promoted == current:
         return False
     item.title = promoted
     return True
+
 
 
 class BasePipeline:
