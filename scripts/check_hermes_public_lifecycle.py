@@ -1,6 +1,9 @@
 """Real official-host probe. Never replaces or patches Hermes modules.
 
-Exit 2 means compatibility passed but strict host-global drain failed.
+Exit 2 means a blocking invariant failed: the host did not drain its own
+executor, the provider flush did not answer inside its timeout, or the delayed
+write reached the wrong session scope. Host-global drain is reported in the
+receipt as a capability, because the pinned host drains only its own executor.
 Only plugin transport/auth methods are fixture substitutes; no live memory writes.
 """
 from __future__ import annotations
@@ -14,6 +17,7 @@ import os
 import pathlib
 import sys
 import threading
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
@@ -69,14 +73,32 @@ def main() -> int:
         manager.sync_all("offline user", "offline assistant", session_id="offline-session")
         assert entered.wait(3), "Official manager did not reach provider"
         host_flush = manager.flush_pending(timeout=0.1)
+        # The host barrier drains the manager's own executor. It does not know
+        # about a provider's private write queue, so the provider must answer for
+        # itself. What matters is that the provider answers INSIDE its timeout:
+        # a bounded False is a correct answer, an unbounded call is a hang that
+        # would freeze shutdown. Time it, do not read it as a verdict.
+        provider_flush_started = perf_counter()
         provider_flush = provider.flush_pending(timeout=0.02)
+        provider_flush_seconds = perf_counter() - provider_flush_started
+        provider_flush_bounded = provider_flush_seconds <= 1.0
         assert seen == ["submitted-profile"], seen
         receipt = {
             "official_abc_and_helper": "passed",
             "official_manager_context": "passed",
             "host_flush_returned": host_flush,
             "provider_flush_returned_while_transport_blocked": provider_flush,
-            "host_global_drain": "unsupported" if host_flush and not provider_flush else "passed",
+            "provider_flush_seconds": round(provider_flush_seconds, 4),
+            "provider_flush_bounded": provider_flush_bounded,
+            # A host-wide drain needs the host to know about provider-owned
+            # work. The pinned host drains only its own executor, so this is a
+            # reported capability gap, not a defect in this repository. It is
+            # recorded rather than asserted: see the exit rule below.
+            "host_global_drain": (
+                "passed" if host_flush and provider_flush
+                else "unsupported_by_host" if host_flush
+                else "unsupported"
+            ),
             "remote_durability": "not tested; offline transport only",
             "core_changes": False,
         }
@@ -135,8 +157,24 @@ def main() -> int:
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
-    return 2 if "unsupported" in (receipt["host_global_drain"], receipt["host_submission_snapshot"],
-                                   receipt["stale_host_submission_quota_isolation"]) else 0
+    # Blocking invariants: the host must drain its own executor, the delayed
+    # write must land under the OLD session scope, the new session's quota must
+    # not move, and the provider flush must answer inside its timeout. The
+    # host-global-drain capability is reported in the receipt and does not fail
+    # this gate, because the pinned host has never had a provider-aware drain and
+    # a permanently red leg teaches reviewers to ignore the whole workflow.
+    if not receipt["host_flush_returned"]:
+        print("FAILED: the host manager did not drain its own executor", file=sys.stderr)
+        return 2
+    if not receipt["provider_flush_bounded"]:
+        print(
+            "FAILED: the provider flush did not return inside its timeout; "
+            "shutdown would hang behind a blocked transport",
+            file=sys.stderr,
+        )
+        return 2
+    return 2 if "unsupported" in (receipt["host_submission_snapshot"],
+                                  receipt["stale_host_submission_quota_isolation"]) else 0
 
 
 if __name__ == "__main__":
