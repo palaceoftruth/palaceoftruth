@@ -74,7 +74,7 @@ jobs:
           .contract-venv/bin/python scripts/check_hermes_public_lifecycle.py --host official-host --receipt contract-evidence/strict-receipt.json
       - name: Keep exact contract evidence even on failure
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: hermes-contract-${{ matrix.host }}
           path: contract-evidence
