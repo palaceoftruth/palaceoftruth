@@ -5,28 +5,30 @@ control plane for people and AI agents. It stores sources, notes, documents,
 media transcripts, and curated facts in one tenant-scoped system, and it serves
 them back to both humans and agents through a stable API and an MCP adapter.
 
-Most agent memory is a set of per-tool stores with no shared source of truth.
-Palace gives every agent the same memory surface: durable writes with a
-delivery contract, hybrid retrieval, explicit scopes, and provenance labels
-that show whether an answer rests on a raw source or on a generated summary.
+Per-tool memory stores do not share a source of truth. Palace keeps one store
+behind one API, so each connected agent gets the same surface: durable writes
+with a delivery contract, hybrid retrieval, explicit scopes, and provenance
+labels that show whether an answer rests on a raw source or on a generated
+summary.
 
 ## What it provides
 
-- A canonical memory API under `/api/v1/memory/*` for durable agent memory
-- MCP adapters for Codex, Claude, [OI] Agents, and other MCP-capable clients,
-  over `stdio` and streamable HTTP
-- Ingestion for notes, web pages, browser captures, media transcripts,
-  documents, images, RSS feeds, source subscriptions, repository sync, and
+- Store agent memory through `/api/v1/memory/*`, with a delivery contract for
+  every accepted write
+- Connect Codex, Claude, or any other MCP client over `stdio` or streamable
+  HTTP
+- Ingest notes, web pages, browser captures, media transcripts, documents,
+  images, RSS feeds, source subscriptions, repository content, and
   S3-compatible object stores
-- Hybrid retrieval that combines vector search, full-text search, deterministic
-  lexical rescue, and relationship expansion
-- Tenant-scoped API keys, conversation history, memory jobs, retry paths, and
-  operator telemetry
-- A web interface for capture, library browsing, search, chat, graph
-  exploration, room curation, sources, feeds, and operations
-- Kubernetes deployment assets: a Helm chart, an optional MCP workload,
-  CloudNativePG, Valkey, External Secrets Operator support, media workers, and
-  an opt-in high-availability profile
+- Retrieve with vector search, full-text search, deterministic lexical rescue,
+  and relationship expansion in one ranked result
+- Scope every key to a tenant, and track conversation history, memory jobs,
+  retries, and operator telemetry
+- Work in a web interface for capture, search, chat, and sources, with library,
+  graph, and operations views behind it
+- Deploy with a Helm chart that covers CloudNativePG, Valkey, External Secrets
+  Operator, media workers, an optional MCP workload, and an opt-in
+  high-availability profile
 
 ## Architecture
 
@@ -56,7 +58,7 @@ that show whether an answer rests on a raw source or on a generated summary.
 The backend owns authorization, tenancy, and the memory contract. Workers run
 ingestion, media, feed, and memory maintenance jobs outside the request path.
 The MCP adapter is a thin wrapper over the REST API, so an agent and a browser
-see the same data and the same rules.
+reach the same data through the same authorization checks.
 
 ## Quickstart
 
@@ -88,8 +90,9 @@ Open <http://localhost:8080>. The same stack exposes:
 - API and OpenAPI documentation: <http://localhost:8000/docs>
 - MCP streamable HTTP endpoint: <http://localhost:8765/mcp>
 
-All published ports bind to `127.0.0.1`. Do not publish them on a shared
-network.
+The published ports in
+[docker-compose.localhost.yml](docker-compose.localhost.yml) bind to
+`127.0.0.1`. Do not publish them on a shared network.
 
 To stop the stack:
 
@@ -110,7 +113,7 @@ The settings most deployments change first:
   relationship classification
 - `WEBPAGE_SCRAPER_PROVIDER`: `local`, `firecrawl-cloud`, or
   `firecrawl-self-hosted`
-- `TRANSCRIPTION_PROVIDER`: [OI], AssemblyAI, or a local WhisperX runtime
+- `TRANSCRIPTION_PROVIDER`: hosted speech-to-text, or a local WhisperX runtime
 
 Optional integrations are documented in [INTEGRATIONS.md](INTEGRATIONS.md),
 including ArgoCD ownership, External Secrets, S3 and repository sync
@@ -128,7 +131,7 @@ rather than a static API key. The packaged adapter in
 documents client setup, scope conventions, transport configuration, and smoke
 checks.
 
-**REST.** The memory facade is the stable contract for non-MCP clients:
+**REST.** The `/api/v1/memory/*` contract serves non-MCP clients:
 
 - `GET /api/v1/memory/whoami`
 - `POST /api/v1/memory/entries`
@@ -150,14 +153,13 @@ grant and its scope headers. A header can drop a scope for one call. It can
 never add one the key does not hold.
 
 See [docs/agent-memory-contract.md](docs/agent-memory-contract.md) for the full
-write contract, batch behaviour, and scope header rules. The Hermes memory
-plugin lives in
+contract. The Hermes memory plugin lives in
 [third_party_plugins/hermes/memory/palaceoftruth](third_party_plugins/hermes/memory/palaceoftruth).
 
 ## Retrieval quality
 
-Every search hit can carry provenance and currentness labels, so a reader can
-judge the evidence instead of trusting a rank:
+A search hit carries provenance and currentness labels when Palace recorded
+them, so a reader can judge the evidence instead of trusting a rank:
 
 - `trust_class`: `raw_source`, `curated_memory`, `generated_synthesis`, or
   `low_support_generated`
@@ -256,18 +258,19 @@ argocd/                       Notes for external ArgoCD Application ownership
 k8s/                          Notes for external raw manifest ownership
 third_party_plugins/          Packaged agent clients and the Hermes memory plugin
 scripts/                      Local smoke, benchmark, packaging, and operator helpers
-docs/                         Product, API, and design documentation
+docs/                         Design notes and API reference
 ```
 
 ## Documentation
 
-- [PROJECT_STATUS.md](PROJECT_STATUS.md): shipped, in progress, and next
+- [PROJECT_STATUS.md](PROJECT_STATUS.md): what works today, what is partly
+  built, and what is queued
 - [INTEGRATIONS.md](INTEGRATIONS.md): deployment and integration runbook
 - [DESIGN.md](DESIGN.md): product and interface design guidance
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and conventions
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
-- [docs/agent-memory-contract.md](docs/agent-memory-contract.md): memory write
-  contract, batch behaviour, and scope headers
+- [docs/agent-memory-contract.md](docs/agent-memory-contract.md): the memory
+  contract in full
 - [docs/item-governance.md](docs/item-governance.md): item ownership,
   verification, currentness, and audit trail
 - [docs/palace-oauth-scope-catalog.md](docs/palace-oauth-scope-catalog.md):
