@@ -1311,6 +1311,16 @@ jobs:
               if gh pr close "$PR_NUMBER" \
                 --comment "Closing because chart release ${RELEASE_PR_VERSION} has been superseded by chart release ${SUPERSEDING_VERSION}."; then
                 echo "Closed superseded chart release PR ${PR_URL}."
+                # A closed PR does not trigger delete_branch_on_merge, so the
+                # branch would stay on the remote forever. Delete it here, after
+                # the close succeeded, or the remote fills with one dead
+                # ci/chart-release-* branch per main commit.
+                if gh api -X DELETE \
+                  "repos/${GITHUB_REPOSITORY}/git/refs/heads/${RELEASE_PR_BRANCH}" --silent; then
+                  echo "Deleted superseded chart release branch ${RELEASE_PR_BRANCH}."
+                else
+                  echo "::warning::Closed ${PR_URL} but could not delete branch ${RELEASE_PR_BRANCH}."
+                fi
               else
                 echo "::warning::Failed to close superseded chart release PR ${PR_URL}."
               fi
