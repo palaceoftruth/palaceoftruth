@@ -36,7 +36,9 @@ def test_codex_plugin_manifest_points_to_palace_mcp_package() -> None:
 def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
     codex_manifest = load_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
     codex_readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
-    root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    agent_memory_doc = (REPO_ROOT / "docs" / "agent-memory-contract.md").read_text(
+        encoding="utf-8"
+    )
     hermes_readme = (
         REPO_ROOT / "third_party_plugins" / "hermes" / "memory" / "palaceoftruth" / "README.md"
     ).read_text(encoding="utf-8")
@@ -53,7 +55,9 @@ def test_codex_client_version_is_separate_from_hermes_package_version() -> None:
         if line.startswith("version:")
     )
     assert plugin_version == "1.0.42"
-    assert "`palace_semantic_recall` is the 1.0.37 compatibility alias" in root_readme
+    # The Hermes tool mapping moved out of the root README into the memory
+    # contract doc, so the alias note is asserted where it now lives.
+    assert "`palace_semantic_recall` is the 1.0.37 compatibility alias" in agent_memory_doc
     assert "The Hermes package version comes from this directory's `plugin.yaml`" in hermes_readme
     assert "has its own manifest\n  version" in hermes_readme
     assert "tracks the Codex/Claude\nclient install surface only" in codex_readme

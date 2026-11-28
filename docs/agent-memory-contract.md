@@ -86,6 +86,25 @@ Use `palace_search` or `retrieve_agent_memory` for a specific question after
 wake-up. Use `capture_checkpoint` only when you write a reviewed handoff or a
 compaction checkpoint.
 
+## Hermes tool mapping
+
+The Hermes memory plugin exposes Palace through three retrieval tools. Choose
+by the request, not by habit:
+
+| Request | Tool |
+| --- | --- |
+| Captured URL, video, transcript, document, title, or source | `palace_search` |
+| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.37 compatibility alias) |
+| Exact-scope canary or containment check | `palace_exact_scope_recall` |
+
+`palace_promote_to_shared` copies an existing memory from the caller's canonical
+agent scope to `tenant_shared`. It preserves the source and creates an audited,
+idempotent copy. The call requires the explicit `memory:promote_shared` OAuth
+grant in addition to `write` and `write:agent`. Normal contained writes keep
+their existing scope restrictions. See the
+[Hermes promotion contract](../third_party_plugins/hermes/memory/palaceoftruth/README.md)
+for activation, job verification, and rollback.
+
 ## Health and readiness
 
 - `GET /api/v1/health`: simple Kubernetes-compatible probe, returns
