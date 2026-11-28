@@ -1,128 +1,201 @@
 # Palace of Truth
 
-## Generation routing (SAR-1484)
+Palace of Truth is an open source knowledge base, retrieval service, and memory
+control plane for people and AI agents. It stores sources, notes, documents,
+media transcripts, and curated facts in one tenant-scoped system, and it serves
+them back to both humans and agents through a stable API and an MCP adapter.
 
-All text generation uses OpenRouter MiniMax M3 (`minimax/minimax-m3`) by
-default, with MiniMax M2.7 (`minimax/minimax-m2.7`) as the only generic
-fallback. Client overrides must also be operator-allowlisted MiniMax IDs.
-Exhaustion, including streaming fallback exhaustion, fails closed: there is
-no direct OpenAI, GPT, or Nemotron generation fallback. Relationship
-classification defaults to M3 with `allow_model_fallbacks=False`; bounded
-same-model retries and one legacy JSON parsing retry remain, but it never
-borrows the generic M2.7 fallback. Schema, semantic abstention, confidence
-thresholds and the SAR-1068 contract remain unchanged. Offline tests verify
-routing and parsing, not actual M3 classification quality.
-M3/M2.7 requests disable reasoning (`reasoning.enabled=false`), including
-streaming and legacy JSON retries, to preserve bounded visible-output budgets.
-The text-only opt-in candidate `minimax/minimax-m3.1-flash` requires reasoning:
-all completion, streaming and retry paths omit the reasoning override and seed.
-M3 keeps strict `json_schema`; M2.7 and Flash use advertised `json_object`
-support with the same local typed validation and one legacy JSON retry.
-Flash is not a default or an automatic fallback and is not cloud vision.
-Custom vision transport receives no OpenRouter-specific reasoning controls.
+Most agent memory is a set of per-tool stores with no shared source of truth.
+Palace gives every agent the same memory surface: durable writes with a
+delivery contract, hybrid retrieval, explicit scopes, and provenance labels
+that show whether an answer rests on a raw source or on a generated summary.
 
-Cloud vision defaults to M3 ONLY; `OPENROUTER_VISION_FALLBACK_MODELS` must be
-empty. M2.7 is text-only. For a trusted operator-owned OpenAI-compatible
-vision endpoint set `VISION_PROVIDER=custom`, `VISION_BASE_URL` (including
-the serving prefix, e.g. `/v1`), and `VISION_MODEL` to its actual model ID.
-No actual Lux URL/model/key is supplied or assumed. `VISION_API_KEY` is an
-optional dedicated bearer secret; blank means no Authorization header, not
-inheritance from OpenRouter or OpenAI. `VISION_TIMEOUT_SECONDS` defaults to
-60 and must be finite, >0 and <=300. Private HTTP hosts are permitted;
-userinfo, query strings and fragments are rejected. Redirects and ambient
-proxy/netrc configuration are disabled. These are operator settings, not
-user-request overrides. Custom failures never use cloud or global text LLMs.
-Only explicit schema-unsupported HTTP 400/422 permits one same-endpoint
-retry without response_format; local structured validation remains mandatory.
-Existing image data-URI, artifact and bounded evidence policies remain.
+## What it provides
 
-Embeddings/index profiles and transcription are separate and unchanged:
-retain the existing OpenAI embedding implementation and the live local
-WhisperX primary settings. This change performs no model-profile migration.
-See INTEGRATIONS.md for required override updates and secret wiring.
+- A canonical memory API under `/api/v1/memory/*` for durable agent memory
+- MCP adapters for Codex, Claude, [OI] Agents, and other MCP-capable clients,
+  over `stdio` and streamable HTTP
+- Ingestion for notes, web pages, browser captures, media transcripts,
+  documents, images, RSS feeds, source subscriptions, repository sync, and
+  S3-compatible object stores
+- Hybrid retrieval that combines vector search, full-text search, deterministic
+  lexical rescue, and relationship expansion
+- Tenant-scoped API keys, conversation history, memory jobs, retry paths, and
+  operator telemetry
+- A web interface for capture, library browsing, search, chat, graph
+  exploration, room curation, sources, feeds, and operations
+- Kubernetes deployment assets: a Helm chart, an optional MCP workload,
+  CloudNativePG, Valkey, External Secrets Operator support, media workers, and
+  an opt-in high-availability profile
 
-Palace of Truth is a cloud-native knowledge base, retrieval service, and agent-memory control plane for humans and AI agents.
-
-It provides:
-
-- a canonical `/api/v1/memory/*` REST contract for durable agent memory
-- MCP adapters for Codex, Claude, OpenAI Agents, and other MCP-capable clients
-- ingestion for notes, web pages, browser captures, media transcripts, documents, images, RSS feeds, source subscriptions, repository sync, and S3-compatible object stores
-- hybrid retrieval with vector search, full-text search, deterministic lexical rescue, relationship expansion hooks, and replay gates
-- tenant-scoped API keys, conversation history, memory jobs, retry paths, and operator telemetry
-- Palace UI surfaces for capture, library browsing, search, chat, graph exploration, room curation, sources, feeds, and Control Tower operations
-- Kubernetes-ready deployment assets with a Helm chart, optional MCP workload, CloudNativePG, Valkey, External Secrets Operator support, media workers, and an opt-in high-availability profile
-
-For the live support-level snapshot, start with [PROJECT_STATUS.md](PROJECT_STATUS.md).
-
-## License
-
-Palace of Truth is open source under the GNU Affero General Public License, version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full license text.
-
-The Palace of Truth name, logo, and branding are reserved trademarks. See [TRADEMARKS.md](TRADEMARKS.md) for permitted descriptive uses.
-
-Third-party reference and benchmark notices live in [NOTICE](NOTICE).
-
-## Repository Layout
+## Architecture
 
 ```text
-backend/                      FastAPI service, workers, models, migrations, MCP server
-frontend/                     Vite, React, TypeScript web app
-extension/                    Chrome-compatible browser capture extension
-chart/                        Helm chart for Kubernetes deployments
-argocd/                       Notes for external ArgoCD Application ownership
-k8s/                          Notes for external raw manifest ownership
-third_party_plugins/           third-party plugin packages
-  agent_clients/palaceoftruth-memory/
-                                Codex/Claude plugin packaging for the Palace MCP adapter
-  hermes/                       canonical Hermes memory plugin source
-scripts/                      local smoke, benchmark, packaging, migration, and operator helpers
+                 +-------------------------------+
+  humans  ------> |  frontend (Vite + React)      |
+                 +---------------+---------------+
+                                 |
+                 +---------------v---------------+
+  agents  ------> |  backend (FastAPI)            |
+  (MCP, REST)    |  memory API, retrieval,       |
+                 |  ingestion, auth, jobs        |
+                 +------+----------------+-------+
+                        |                |
+              +---------v------+  +------v-----------+
+              | PostgreSQL     |  | Valkey / Redis   |
+              | + pgvector     |  | queues + cache   |
+              +----------------+  +------------------+
+                        ^
+              +---------+---------+
+              |  ARQ workers      |
+              |  ingest, media,   |
+              |  memory, feeds    |
+              +-------------------+
 ```
 
-## Local Development
+The backend owns authorization, tenancy, and the memory contract. Workers run
+ingestion, media, feed, and memory maintenance jobs outside the request path.
+The MCP adapter is a thin wrapper over the REST API, so an agent and a browser
+see the same data and the same rules.
 
-Standard local development uses Docker Compose. If your environment provides
-local HTTPS routing for `*.test` hostnames, bring that up after Compose:
+## Quickstart
+
+You need Docker with the Compose plugin.
 
 ```bash
+git clone https://github.com/palaceoftruth/palaceoftruth.git
+cd palaceoftruth
 cp .env.example .env
-# Fill in DB_PASSWORD, REDIS_PASSWORD, API_KEY, PALACEOFTRUTH_ADMIN_SECRET, OPENAI_API_KEY, and OPENROUTER_API_KEY as needed.
-docker compose up --build -d
-di up palaceoftruth
-open https://palaceoftruth.test
 ```
 
-For a public Docker-only fallback, use the Compose service ports directly and set
-`VITE_API_PROXY_TARGET=http://localhost:8000` when running the host-side frontend:
+Set these values in `.env` before the first start:
+
+- `DB_PASSWORD` and `REDIS_PASSWORD`: unique local secrets
+- `API_KEY` and `CREDENTIAL_PEPPER`: unique secrets, for example
+  `openssl rand -hex 32`
+- `OPENAI_API_KEY` and `OPENROUTER_API_KEY`: provider keys
+- `PALACEOFTRUTH_ADMIN_SECRET`: a unique admin secret
+
+The backend refuses to start while any of these still holds its example value.
+Then start the stack:
 
 ```bash
-docker network create traefik 2>/dev/null || true
 docker compose -f docker-compose.yml -f docker-compose.localhost.yml up --build -d
-open http://localhost:8080
 ```
 
-The `.test` hostnames remain the standard review target when devinfra is available.
+Open <http://localhost:8080>. The same stack exposes:
 
-Local URLs:
+- API and OpenAPI documentation: <http://localhost:8000/docs>
+- MCP streamable HTTP endpoint: <http://localhost:8765/mcp>
 
-- frontend: `https://palaceoftruth.test`
-- API: `https://api.palaceoftruth.test`
-- local streamable HTTP MCP host: `https://mcp.palaceoftruth.test/mcp`
+All published ports bind to `127.0.0.1`. Do not publish them on a shared
+network.
 
-Host-side frontend iteration:
+To stop the stack:
 
 ```bash
-cd frontend
-npm install
-npm run dev
-npm run build
+docker compose down
 ```
 
-Host-run Vite proxies `/api`, `/docs`, and `/redoc` to the backend without
-injecting the shared backend `API_KEY` into browser-originated requests. Use
-MCP OAuth or direct server-side credentials for authenticated API work.
+## Configuration
 
-Host-side backend iteration:
+Configuration is environment driven. `.env.example` lists every supported key
+with comments, and the Helm chart exposes the same settings under `config`.
+
+The settings most deployments change first:
+
+- `DATABASE_URL` and `DB_PASSWORD`: PostgreSQL connection
+- `REDIS_URL` and `REDIS_PASSWORD`: Valkey or Redis connection
+- `OPENROUTER_API_KEY`: model provider for generation, vision, and
+  relationship classification
+- `WEBPAGE_SCRAPER_PROVIDER`: `local`, `firecrawl-cloud`, or
+  `firecrawl-self-hosted`
+- `TRANSCRIPTION_PROVIDER`: [OI], AssemblyAI, or a local WhisperX runtime
+
+Optional integrations are documented in [INTEGRATIONS.md](INTEGRATIONS.md),
+including ArgoCD ownership, External Secrets, S3 and repository sync
+credentials, a local embedding service, admin ingress, media worker sizing, and
+the high-availability profile.
+
+## Agent memory
+
+Agents reach Palace in two ways.
+
+**MCP.** Point an MCP client at the streamable HTTP endpoint, or run the adapter
+over `stdio`. For shared and remote runtimes use OAuth client credentials
+rather than a static API key. The packaged adapter in
+[third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory)
+documents client setup, scope conventions, transport configuration, and smoke
+checks.
+
+**REST.** The memory facade is the stable contract for non-MCP clients:
+
+- `GET /api/v1/memory/whoami`
+- `POST /api/v1/memory/entries`
+- `POST /api/v1/memory/entries:batch`
+- `GET /api/v1/memory/scopes`
+- `POST /api/v1/memory/retrieve-agent`
+- `POST /api/v1/memory/retrieve`
+
+Writes return a durability contract. A `202` response means Palace accepted a
+durable item and job before it enqueued background work. Persist `job_id`, poll
+`poll_url` after `poll_after_seconds`, and read `contract_status`, `retryable`,
+and `queue.state` before you retry. A `503` with
+`contract_status=dependency_unavailable` still carries the accepted `job_id`
+and a `Retry-After` value, so the client can poll without rewriting the body.
+
+Scopes narrow access. They do not grant it. Every API key carries a stored
+scope grant, and each request is authorized against the intersection of that
+grant and its scope headers. A header can drop a scope for one call. It can
+never add one the key does not hold.
+
+See [docs/agent-memory-contract.md](docs/agent-memory-contract.md) for the full
+write contract, batch behaviour, and scope header rules. The Hermes memory
+plugin lives in
+[third_party_plugins/hermes/memory/palaceoftruth](third_party_plugins/hermes/memory/palaceoftruth).
+
+## Retrieval quality
+
+Every search hit can carry provenance and currentness labels, so a reader can
+judge the evidence instead of trusting a rank:
+
+- `trust_class`: `raw_source`, `curated_memory`, `generated_synthesis`, or
+  `low_support_generated`
+- `source_support_state`: whether an exact source still supports the claim
+- `freshness`: how old the supporting source is
+- `governance_currentness_state`: `unassigned`, `current`, `expired`, or
+  `superseded`
+
+Expired items stay visible in current mode with a ranking penalty, so the
+warning travels with the result. Superseded items appear only in historical
+mode. These labels are diagnostic. They are not a ranking approval.
+
+Item governance, the PATCH payload, the currentness rules, and the audit trail
+are documented in [docs/item-governance.md](docs/item-governance.md).
+
+## Deployment
+
+The primary deployment artifact is the Helm chart in [chart/](chart/). Build
+and publish the backend and frontend images to your own registry, then set
+`image.registry`, `image.backendRepository`, `image.frontendRepository`, and
+`image.tag`.
+
+```bash
+helm install palace ./chart \
+  --namespace palace \
+  --create-namespace \
+  --values my-values.yaml
+```
+
+The chart supports CloudNativePG or an external PostgreSQL, Valkey with
+optional Sentinel, External Secrets Operator, an optional MCP deployment, media
+workers, and an opt-in high-availability profile. Environment-specific
+manifests, DNS targets, secret identifiers, and values overlays belong in your
+own private deployment repository, not here.
+
+## Development
+
+Backend, Python 3.12 or newer:
 
 ```bash
 cd backend
@@ -131,7 +204,25 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-Start workers when testing ingestion, feed polling, Palace maintenance, media processing, or background memory jobs outside Compose:
+Frontend, Node 22 or newer:
+
+```bash
+cd frontend
+npm install
+npm run dev
+npm run build
+```
+
+Browser extension:
+
+```bash
+cd extension
+npm install
+npm test
+```
+
+Workers, for ingestion, media processing, feed polling, Palace maintenance, and
+background memory jobs:
 
 ```bash
 cd backend
@@ -140,387 +231,69 @@ arq app.workers.worker.MediaWorkerSettings
 arq app.workers.worker.PalaceWorkerSettings
 ```
 
-### Disposable pgvector migration harness
-
-Run Alembic `upgrade -> downgrade -> upgrade` only against a disposable, loopback
-database whose name begins with `palace_migration_`. The harness requires an
-explicit destructive acknowledgement, verifies that pgvector is available after
-each upgrade, and runs cross-tenant foreign-key probes.
+Run the migration round-trip harness only against a disposable loopback
+database whose name starts with `palace_migration_`:
 
 ```bash
 MIGRATION_TEST_ALLOW_DESTRUCTIVE=1 \
-MIGRATION_TEST_DATABASE_URL=postgresql://palace:palace@localhost:5432/palace_migration_local \
+MIGRATION_TEST_DATABASE_URL=postgresql://palace:***@localhost:5432/palace_migration_local \
   uv run --directory backend python ../scripts/verify_migration_roundtrip.py
 ```
 
 The harness downgrades to the first intentionally irreversible data-shape
-migration (`016_temporal_fact_registry`) and then upgrades back to head. The CI
-service database is named `palace_migration_gate`; the harness rejects any other
-database name and refuses non-loopback hosts or an omitted acknowledgement, so it
-cannot run its destructive downgrade against a normal deployed database.
+migration, then upgrades back to head. It rejects any other database name, any
+non-loopback host, and a missing acknowledgement, so it cannot run its
+destructive downgrade against a deployed database.
 
-Optional Firecrawl webpage scraping:
-
-- `WEBPAGE_SCRAPER_PROVIDER=local` keeps the built-in trafilatura/Playwright scraper.
-- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-cloud` uses Firecrawl Cloud at `https://api.firecrawl.dev/v2` and requires `FIRECRAWL_API_KEY`.
-- `WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted` uses `FIRECRAWL_BASE_URL`; `FIRECRAWL_API_KEY` is optional for private-network self-hosted deployments.
-
-Self-hosted deployments can set:
-
-```bash
-WEBPAGE_SCRAPER_PROVIDER=firecrawl-self-hosted
-FIRECRAWL_BASE_URL=https://firecrawl.example.internal/v2
-```
-
-For Helm-managed deployments, use:
-
-```yaml
-config:
-  webpageScraperProvider: firecrawl-self-hosted
-  firecrawlBaseUrl: https://firecrawl.example.internal/v2
-```
-
-After the worker is running inside that deployment environment, verify from an
-application pod or worker pod that the Firecrawl base URL reaches the self-hosted
-service, then run a focused webpage ingest and confirm the job metadata records
-`content_source=firecrawl`.
-
-## API And Product Surfaces
-
-The backend registers these API domains under `/api/v1`:
-
-- system health/stats
-- ingest and browser capture
-- web saves
-- search and chat
-- memory facade, memory jobs, relationship backfill, and retrieval diagnostics
-- MCP OAuth and metadata
-- items, tags, export, graph, conversations, feeds, source subscriptions, jobs, admin, curation artifacts, and Palace control-plane routes
-
-The frontend routes are:
-
-- Home, Library, Palace, Chat
-- Capture, Saved Web, Sources, Feeds
-- Search, Graph, API, Settings
-- Item detail and Palace Control Tower
-
-The browser extension submits captures through `/api/v1/capture/browser`; see [extension/README.md](extension/README.md).
-
-## MCP And Agent Memory
-
-The standalone MCP adapter lives at [backend/app/mcp_server.py](backend/app/mcp_server.py). It is a thin MCP wrapper over the existing Palace REST API and supports `stdio` and streamable HTTP transports.
-
-Retrieval diagnostics include report-only provenance labels for operators:
-`trust_class`, `source_support_state`, `freshness`, and
-`derived_raw_classification`. Treat `raw_source` and source-backed
-`curated_memory` as the strongest evidence, review `generated_synthesis` before
-copying it into durable memory, and avoid letting `low_support_generated`,
-`stale_context`, or `broad_fallback` results drive an answer without checking
-the underlying source. Aggregate trace counts compare the mix across direct
-retrieval, room routing, broad fallback, and generated artifacts; they are
-diagnostic labels, not ranking approvals.
-
-For session startup, use `get_wakeup_context` when an agent needs one compact
-package with wake-up status, selected agent/workspace/session memory summaries,
-checkpoint pointers, promoted source-backed decision claims, readiness warnings,
-and safe follow-up probes. Only active, operator-promoted claims with current
-exact source support appear as startup guidance; stale, conflicted, missing,
-policy-limited, draft, and rejected claims remain warning-only. The payload uses
-claim text and source pointers, never source bodies, chunks, previews, or spans. Use
-`palace_search` or `retrieve_agent_memory` after that for a specific question,
-and use `capture_checkpoint` only when writing a reviewed handoff or compaction
-checkpoint.
-
-For the first public operator story, see
-[Source-Backed Wakeup for Agent Teams](docs/source-backed-wakeup-demo.md). It
-shows the sanitized quickstart, expected trust-state output, privacy boundary,
-and MVP limits before a fresh agent acts. The follow-on research gate is
-[Post-Wakeup Claims, Promotion, And Invalidation Design](docs/post-wakeup-claims-promotion-invalidation-design.md).
-
-Before improvement planning or DOTODO task selection, generate a report-only
-startup evidence refresh:
-
-```bash
-uv run python scripts/smoke_agent_memory_compatibility.py startup-context-report \
-  --run-id "$(date -u +%Y%m%d-%H%M%S)"
-```
-
-The default report stays offline and non-mutating. It summarizes the Codex
-bridge dry run, `get_wakeup_context` readiness, the dry-run scorecard, offline
-compatibility fixtures, and opt-in command previews for task-pool and live
-deploy checks. Add `--include-task-pool` or `--include-live-deploy` only when
-read-only network checks are explicitly desired.
-
-After source-backed decision claims are enabled, the report also verifies the
-local `get_wakeup_context` decision-claim projection contract. To inspect the
-live aggregate claim-support and answer-audit state without writing memory,
-opt in explicitly with a read-capable API key:
-
-```bash
-uv run python scripts/smoke_agent_memory_compatibility.py \
-  --api-base-url https://api.palaceoftruth.test \
-  --api-key "$PALACEOFTRUTH_API_KEY" \
-  startup-context-report --include-live-claim-audit
-```
-
-The live report exposes only counts and state categories. A
-`claim_audit_id_drift` warning means the support and audit endpoints disagree;
-`non_authoritative_decision_claims` means one or more active claims are not
-safe startup guidance. It never includes claim text, source bodies, chunks, or
-credentials.
-
-The repo-packaged Codex/Claude plugin lives in [third_party_plugins/agent_clients/palaceoftruth-memory](third_party_plugins/agent_clients/palaceoftruth-memory). It documents Codex setup, scope conventions, smoke verification, OAuth options, and transport-specific configuration.
-
-### Agent MCP authentication and writes
-
-For shared or remote MCP and Hermes runtimes, use OAuth client credentials first:
-`PALACEOFTRUTH_MCP_OAUTH_CLIENT_SECRET` with the token URL, API resource, client
-key, scopes, and default scope shown by `scripts/setup_codex_palace_memory.py`.
-The legacy `PALACEOFTRUTH_API_KEY` remains an explicit staged compatibility
-fallback; do not add either secret to a checked-in MCP profile. MCP owns OAuth
-transport authentication—it does not bypass authorization.
-
-Normal agent memory writes use `palace_remember` with an explicit scope and
-deterministic idempotency key. Use raw REST only for operator/auth diagnostics
-or other explicitly low-level tooling, never as an automatic agent fallback.
-Run `uv run python scripts/setup_codex_palace_memory.py --check` to identify
-adapter, API-base, installed-skill, and restart-required drift without mutating
-local Codex configuration.
-
-For governed multi-agent memory positioning, use the
-[Agent Organization Memory demo](docs/agent-organization-memory-demo.md) and
-`scripts/demo_agent_organization_memory.py`. The demo shows specialist agents
-writing private `agent/<key>` memories while `agent/orchestrator` retrieves only
-server-authorized specialist scopes and writes only to its own agent scope.
-
-## Hermes Plugin
-
-The canonical Hermes memory plugin source lives at:
+## Repository layout
 
 ```text
-third_party_plugins/hermes/memory/palaceoftruth
+backend/                      FastAPI service, workers, models, migrations, MCP server
+frontend/                     Vite, React, TypeScript web app
+extension/                    Chrome-compatible browser capture extension
+chart/                        Helm chart for Kubernetes deployments
+argocd/                       Notes for external ArgoCD Application ownership
+k8s/                          Notes for external raw manifest ownership
+third_party_plugins/          Packaged agent clients and the Hermes memory plugin
+scripts/                      Local smoke, benchmark, packaging, and operator helpers
+docs/                         Product, API, and design documentation
 ```
 
-The plugin speaks the Palace memory facade:
+## Documentation
 
-- `GET /api/v1/memory/whoami`
-- `POST /api/v1/memory/entries`
-- `POST /api/v1/memory/entries:batch`
-- `GET /api/v1/memory/scopes`
-- `POST /api/v1/memory/retrieve-agent`
-- `POST /api/v1/memory/retrieve` as the fallback/single-scope path
-
-Raw API-key clients for these memory routes must send explicit MCP scope
-headers. Read routes send `X-MCP-Scope: read`; write routes send
-`X-MCP-Scope: write` plus the narrow scope grant, such as `write:agent`,
-`write:workspace`, or `write:session`, in `X-MCP-Scopes`. The repo smoke and
-import scripts add those headers automatically.
-
-The headers narrow, they do not grant. Every API key carries a scope grant
-stored on its `api_keys` row, and the request is authorized against the
-intersection of that grant and the headers. A header can therefore drop a scope
-for one call, but it can never add one the key does not hold — including
-`admin`. A key with an empty stored grant is refused at authentication. Set a
-key's grant with `scopes` on tenant registration or key rotation
-(`POST /api/v1/admin/tenants` and the key-rotation route); keys that existed
-before this change keep their previous privilege, so narrow them by rotating to
-a key with an explicit `scopes` list.
-
-Memory writes return a durability contract for clients. A `202` response means
-Palace accepted a durable item/job before enqueueing background work. Clients
-should persist `job_id`, poll `poll_url` after `poll_after_seconds`, and inspect
-`contract_status`, `retryable`, `retry_after_seconds`, and `queue.state` before
-retrying. `queue.state=backpressure` or `saturated` is a retry/defer hint, not a
-hard server-side rate limit; the matching `Retry-After`,
-`X-Palace-Memory-Queue-State`, `X-Palace-Memory-Poll-After`, and
-`X-Palace-Rate-Limit-State` headers carry the same guidance for HTTP clients.
-If enqueue dependencies are unavailable, Palace returns `503` with
-`contract_status=dependency_unavailable`, the accepted `job_id`, `poll_url`, and
-`Retry-After` so clients can poll or retry the accepted job without rewriting
-the memory body.
-
-Bulk clients can send up to 100 canonical memory entries to
-`POST /api/v1/memory/entries:batch`. The batch endpoint reuses the single-entry
-tenant, admission, idempotency, queue, and retry contract for each entry and
-returns ordered per-item results with `index`, `status`, `contract_status`,
-`job_id`, `poll_url`, `retryable`, and sanitized error details when an entry is
-rejected. For deterministic landing checks, write the batch, poll accepted jobs,
-then verify imported records with exact `source_url` filtering on
-`GET /api/v1/items?source_url=<encoded-url>`. Item listings continue to support
-`page`/`per_page`; created-at sorted audit scans may also follow the returned
-`next_cursor` with `GET /api/v1/items?cursor=<cursor>&sort=created_at`.
-
-For an explicit authenticated production smoke, set an operator-provided API key
-in the runtime environment and run:
-
-```bash
-PALACEOFTRUTH_API_KEY=... uv run python scripts/smoke_agent_memory_compatibility.py \
-  --api-base-url https://api.palace.example.com \
-  batch-production-smoke \
-  --run-id "$(date -u +%Y%m%d-%H%M%S)"
-```
-
-The smoke writes two bounded `memory://production-smoke/batch/<run-id>/...`
-entries, polls their accepted jobs, verifies each item through exact
-`source_url` filtering, and follows a returned item-listing cursor for the
-unique run tag. It does not read cluster secrets, use admin endpoints, or delete
-production data. Use `--dry-run` to inspect the exact payload and verification
-plan without writing.
-
-Operators and clients can use `GET /api/v1/version` for the deployed app version
-and `GET /api/v1/ready` for dependency-aware readiness. `GET /api/v1/health`
-remains the simple Kubernetes-compatible probe and intentionally returns only
-`{"status":"ok"}`.
-
-Worker health has three deliberately separate signals. Kubernetes process
-supervision is the liveness signal: if an ARQ process exits, its container is
-restarted. `wait_for_worker_dependencies.py` remains the startup gate for the
-database and Valkey/Sentinel dependencies. Once started, each worker deployment
-uses ARQ's read-only `--check` command as its readiness probe, backed by a
-15-second pod-specific queue heartbeat so a sibling replica cannot satisfy the
-probe. Prometheus aggregates those heartbeats by bounded queue group and exports
-`palace_arq_worker_available` and
-`palace_arq_worker_instances` plus
-`palace_arq_worker_heartbeat_age_seconds`; a missing heartbeat means worker
-availability is unknown/unavailable, while a zero queue depth can still be a
-healthy idle worker.
-
-Every plugin behavior change should bump `third_party_plugins/hermes/memory/palaceoftruth/plugin.yaml` so CI can publish a new release artifact.
-
-The Hermes plugin can suppress automatic completed-turn capture for selected
-cron job IDs without disabling Palace recall or explicit memory tools. Configure
-`PALACEOFTRUTH_CRON_AUTOMATIC_CAPTURE_DISABLED_JOB_IDS`; see the packaged
-[Hermes plugin README](third_party_plugins/hermes/memory/palaceoftruth/README.md)
-for JSON configuration, precedence, and cron provenance.
-
-Release assets are tagged as:
-
-```text
-hermes-memory-plugin-v<version>
-```
-
-Maintainers publish release containers to GHCR. External operators can use
-those public images or build and publish their own runtime images under their
-own registry coordinates.
-
-## Item Governance
-
-Palace carries a nullable governance surface on every item (and a matching subset on derived claims) so important knowledge keeps its accountable owner, reviewer, verification state, expiry deadline, risk class, and supersession chain with the row itself. Teams running shared knowledge systems consistently expect that knowledge keeps itself accurate; the four-state currentness signal below lets search ranking visibly demote unverified, expired, or superseded items instead of silently re-ranking them.
-
-### PATCH payload
-
-```bash
-PATCH /api/v1/items/{id}
-```
-
-```json
-{
-  "governance": {
-    "owner_subject": "apikey:01HXYZ...",
-    "reviewer_subject": "human:alice",
-    "verification_state": "verified",
-    "verified_at": "2026-08-29T12:00:00Z",
-    "verified_by_subject": "human:alice",
-    "verification_deadline": "2026-11-29T00:00:00Z",
-    "risk_class": "high",
-    "supersession_reason": "Replaced by Q4 handbook revision",
-    "superseded_by_item_id": "01HXYZ...",
-    "superseded_at": "2026-08-29T12:00:00Z"
-  }
-}
-```
-
-All fields are optional; existing items stay `unassigned` until an operator writes them. `owner_subject`, `reviewer_subject`, and `verified_by_subject` are bounded to 1–200 characters and should be stable identifiers (`api_keys.id`, MCP client ids, or human handles), not free-form prose. `supersession_reason` is bounded to 1–1000 characters. Validation failures return `422`.
-
-Closed enums (mirrored by Postgres check constraints so the schema and Pydantic model cannot drift):
-
-- `verification_state`: `unverified`, `verified`, `stale`, `rejected`
-- `risk_class`: `low`, `moderate`, `high`, `critical`
-
-### Currentness and search ranking
-
-Every search hit carries `governance_currentness_state`, derived from the stored columns:
-
-| State | Trigger | Effect on ranking |
-| --- | --- | --- |
-| `unassigned` | No owner or verification recorded | No adjustment (safe default for untriaged items) |
-| `current` | `verification_state` is `verified` or `stale` and the deadline has not passed | No adjustment |
-| `expired` | `verification_deadline` has passed (and the item is not superseded) | `-0.35` penalty when `risk_class` is `high` or `critical`; otherwise no adjustment |
-| `superseded` | `superseded_by_item_id` is set, or `verification_state = rejected` | Excluded from `current`-mode results; appears in `historical`-mode results |
-
-Expired items stay visible in current mode (ranked down) so the wire carries the explicit warning; superseded items only appear defensively via `currentness_mode = historical`. The search ranking trace surfaces `governance_state_counts` and `excluded_governance_counts` so operators can see the slice.
-
-### Audit trail and structured logs
-
-Each transition appends one entry to `metadata.governance_audit`. The list is capped at the 25 most recent entries (`MAX_AUDIT_ENTRIES`); older entries drop off in FIFO order. Every transition also emits:
-
-- `governance.item.update` at INFO with `extra={"item_id", "tenant_id", "actor_subject", "changed_fields", "verification_state", "risk_class", "verification_deadline"}`.
-- `governance.item.denied` at WARNING when a cross-tenant or scope-limited write is refused, with `extra={"tenant_id", "item_id", "actor_subject", "reason"}`.
-
-The audit trail, the structured log line, and the API wire format all share one field map, so an SRE can replay a log line against an audit entry without an ORM round-trip.
-
-## Deployment
-
-The primary deployment artifact is the Helm chart in [chart/](chart/). External
-operators should build and publish backend/frontend images to their own
-registry, then override `image.registry`, `image.backendRepository`,
-`image.frontendRepository`, and `image.tag` as needed.
-
-For install, ArgoCD, External Secrets, S3/repo sync credentials, local embedding service, admin ingress, media worker sizing, and high-availability options, use [INTEGRATIONS.md](INTEGRATIONS.md).
-
-Environment-specific ArgoCD Applications, raw manifests, DNS targets, secret-manager item IDs, and Helm values overlays belong in a private deployment repository.
-
-## Verification
-
-Useful local checks:
-
-```bash
-cd backend
-pytest
-uv run python ../scripts/check_database_health.py
-
-cd ../frontend
-npx playwright install --with-deps chromium
-npm run build
-# Default browser specs start a local Vite server automatically; no manual server is required.
-npm run test:e2e
-# Full-stack mode uses the devinfra stack after `docker compose up --build -d` and `di up palaceoftruth`.
-PLAYWRIGHT_BASE_URL=https://palaceoftruth.test PALACE_FRONTEND_BASE_URL=https://palaceoftruth.test npm run test:e2e
-
-cd ../extension
-npm test
-```
-
-CI currently runs a backend smoke subset, the static database health gate, retrieval replay gate, frontend build, and Helm rendering checks. Trusted same-repository pull requests and main-branch work use the repository-scoped `palace-trusted-amd64` ARC scale set; external-fork pull requests stay on GitHub-hosted `ubuntu-24.04`. Frontend Playwright and extension tests are available local checks but are not enforced in CI yet.
-
-## Documentation Map
-
-- [PROJECT_STATUS.md](PROJECT_STATUS.md): current shipped, in-progress, and next status
+- [PROJECT_STATUS.md](PROJECT_STATUS.md): shipped, in progress, and next
 - [INTEGRATIONS.md](INTEGRATIONS.md): deployment and integration runbook
-- [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and repo conventions
+- [DESIGN.md](DESIGN.md): product and interface design guidance
+- [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and conventions
 - [SECURITY.md](SECURITY.md): security posture and vulnerability reporting
-- [DESIGN.md](DESIGN.md): frontend and product design guidance
-- [docs/palace-oauth-mcp-runtime-rollout.md](docs/palace-oauth-mcp-runtime-rollout.md): OAuth-first MCP deployment, raw REST resource discovery, and credential lifecycle
-- [docs/palace-oauth-scope-catalog.md](docs/palace-oauth-scope-catalog.md): supported MCP OAuth scopes and token request examples
-- [docs/source-synthesis-compiler-design.md](docs/source-synthesis-compiler-design.md): typed source, chunk, claim, and synthesis compiler model proposal
-- [docs/source-drift-review.md](docs/source-drift-review.md): watched HTTP version diff proposals, Review Inbox actions, retry safety, and operations
-- [docs/post-wakeup-claims-promotion-invalidation-design.md](docs/post-wakeup-claims-promotion-invalidation-design.md): first post-wakeup decision-claim, promotion, and invalidation design
-- [third_party_plugins/agent_clients/palaceoftruth-memory/README.md](third_party_plugins/agent_clients/palaceoftruth-memory/README.md): packaged MCP adapter and agent-memory setup
+- [docs/agent-memory-contract.md](docs/agent-memory-contract.md): memory write
+  contract, batch behaviour, and scope headers
+- [docs/item-governance.md](docs/item-governance.md): item ownership,
+  verification, currentness, and audit trail
+- [docs/palace-oauth-scope-catalog.md](docs/palace-oauth-scope-catalog.md):
+  supported MCP OAuth scopes and token examples
+- [docs/palace-oauth-mcp-runtime-rollout.md](docs/palace-oauth-mcp-runtime-rollout.md):
+  OAuth-first MCP deployment and credential lifecycle
+- [docs/source-backed-wakeup-demo.md](docs/source-backed-wakeup-demo.md): a
+  source-backed wakeup walkthrough for agent teams
+- [docs/agent-organization-memory-demo.md](docs/agent-organization-memory-demo.md):
+  governed multi-agent memory with private and shared scopes
 
-Private deployment runbooks, staging benchmark records, and historical planning archives live outside this public application repository.
+## Contributing
 
-For Hermes retrieval, use this decision table:
+Issues and pull requests are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before you start, and follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
-| Request | Tool |
-|---|---|
-| Captured URL, video, transcript, document, title, or source | `palace_search` |
-| Current or historical curated fact | `palace_fact_recall` (`palace_semantic_recall` is the 1.0.37 compatibility alias) |
-| Exact-scope canary or containment check | `palace_exact_scope_recall` |
+For a security issue, do not open a public issue. Follow
+[SECURITY.md](SECURITY.md).
 
-Hermes plugin 1.0.39 adds `palace_promote_to_shared` for an existing memory in the
-caller's canonical agent scope. It preserves the source and creates an audited,
-idempotent tenant-shared copy. The operation requires the explicit
-`memory:promote_shared` OAuth grant in addition to `write` and `write:agent`;
-normal contained writes retain their existing scope restrictions. See the
-[Hermes promotion contract](third_party_plugins/hermes/memory/palaceoftruth/README.md#promote-an-existing-agent-memory-to-shared-scope-1039)
-for activation, job verification, and rollback.
+## License
+
+Palace of Truth is open source under the GNU Affero General Public License,
+version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full text.
+
+The Palace of Truth name, logo, and branding are reserved trademarks. See
+[TRADEMARKS.md](TRADEMARKS.md) for permitted descriptive uses.
+
+Third-party notices live in [NOTICE](NOTICE).
